@@ -1917,6 +1917,7 @@ fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
         &path,
         &tomcat::core::session::transcript::SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid_err".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),

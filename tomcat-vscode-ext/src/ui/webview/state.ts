@@ -208,6 +208,13 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   };
 }
 
+function hasPersistedAssistant(runtime: SessionRuntimeState, id: string): boolean {
+  return runtime.historyEntries.some((entry) =>
+    isRecord(entry) && entry.type === "message" && entry.id === id &&
+    isRecord(entry.message) && entry.message.role === "assistant",
+  );
+}
+
 function getAssistantDelta(
   event: ServeEvent,
 ): { delta: string; kind: string } | null {
@@ -2604,7 +2611,8 @@ function mapSessionToTab(session: SessionSummary): WebviewSessionTab {
   return {
     busy: effectiveBusy(session.busy, session.interrupted),
     isCurrent: session.isCurrent,
-    ownedByThisFrontend: true,
+    ownedByThisFrontend: session.access !== "observe",
+    origin: session.origin,
     sessionId: session.sessionId,
     title: session.title,
     updatedAt: session.updatedAt,
@@ -2790,6 +2798,15 @@ export class WebviewStateStore {
     }
   }
 
+  /** Only a successful open may change the displayed session's access. */
+  applySessionOpen(open: import("../../serveClient/sessionRouter").SessionOpenResult): void {
+    const session = this.ensureSession(open.sessionId);
+    session.access = open.access;
+    session.origin = open.origin;
+    session.ownedByThisFrontend = open.access === "control";
+    this.syncTabOwnedByFrontend(open.sessionId);
+  }
+
   applySessionState(
     payload: SessionStatePayload,
     options: {
@@ -2819,7 +2836,6 @@ export class WebviewStateStore {
         state: payload.activePlan.state,
       }
       : null;
-    session.ownedByThisFrontend = true;
     this.syncTabOwnedByFrontend(payload.sessionId);
   }
 
@@ -3305,10 +3321,6 @@ export class WebviewStateStore {
         }
         return sessionRenderMutation(session.sessionId);
       case "message_update": {
-        const delta = getAssistantDelta(frame);
-        if (!delta) {
-          return NO_SESSION_RENDER_MUTATION;
-        }
         const assistantMessageId =
           "assistantMessageId" in frame &&
           typeof frame.assistantMessageId === "string"
@@ -3317,7 +3329,36 @@ export class WebviewStateStore {
         if (!assistantMessageId) {
           return NO_SESSION_RENDER_MUTATION;
         }
+        if (frame.assistantMessageEvent === null && isRecord(frame.message) &&
+            frame.message.role === "assistant" && typeof frame.message.content === "string") {
+          // A late subscription replays one full message through the existing
+          // envelope. Replace the cached prefix even when this view was visited
+          // before; interpreting it as a delta would duplicate the old prefix.
+          clearStreaming(runtime);
+          runtime.activeAssistantId = assistantMessageId;
+          const text = frame.message.content;
+          const thinking = typeof frame.message.thinking_text === "string" ? frame.message.thinking_text : "";
+          runtime.turnHadAssistantText ||= text.trim().length > 0;
+          if (hasPersistedAssistant(runtime, assistantMessageId)) {
+            return NO_SESSION_RENDER_MUTATION;
+          }
+          runtime.streamingAssistantId = assistantMessageId;
+          const ops: WebviewSessionPatchOp[] = [];
+          for (const [kind, body] of [["thinking", thinking], ["assistant", text]] as const) {
+            if (!body) continue;
+            const next = appendStreamingMessage(session, runtime, kind, assistantMessageId, "");
+            next.item.text = body;
+            const op = buildUpsertPatchOpForItem(session, next.item);
+            if (op) ops.push(op);
+          }
+          return patchRenderMutation(session.sessionId, ops);
+        }
+        const delta = getAssistantDelta(frame);
+        if (!delta) return NO_SESSION_RENDER_MUTATION;
         if (!runtime.streamingAssistantId && !runtime.activeAssistantId) {
+          if (hasPersistedAssistant(runtime, assistantMessageId)) {
+            return NO_SESSION_RENDER_MUTATION;
+          }
           runtime.activeAssistantId = assistantMessageId;
           runtime.streamingAssistantId = assistantMessageId;
         }
@@ -3695,6 +3736,12 @@ export class WebviewStateStore {
     // inconsistent transcript must fail at the write site without replacing the
     // session's currently renderable timeline with a broken candidate.
     this.assertUniqueTimelineIds([historySession]);
+    // Assistant rows are persisted only after their stream ends. A history reply
+    // can overtake queued deltas at the consumer; its complete text wins, while
+    // activeAssistantId stays available for the following tool events.
+    if (runtime.streamingAssistantId && hasPersistedAssistant(runtime, runtime.streamingAssistantId)) {
+      clearStreaming(runtime);
+    }
     runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
     if (!session.activePlan && historySession.activePlan) {
@@ -3886,17 +3933,21 @@ export class WebviewStateStore {
   }
 
   private syncTabOwnedByFrontend(sessionId: string): void {
+    const view = this.state.sessionViews[sessionId];
+    const ownedByThisFrontend = view?.access !== "observe";
     const existing = this.state.sessions.find(
       (session) => session.sessionId === sessionId,
     );
     if (existing) {
-      existing.ownedByThisFrontend = true;
+      existing.ownedByThisFrontend = ownedByThisFrontend;
+      existing.origin = view?.origin;
       return;
     }
     this.state.sessions.push({
-      busy: false,
       isCurrent: false,
-      ownedByThisFrontend: true,
+      busy: false,
+      ownedByThisFrontend,
+      origin: view?.origin,
       sessionId,
       title: null,
       updatedAt: null,
@@ -3914,7 +3965,8 @@ export class WebviewStateStore {
     this.state.sessions.push({
       busy,
       isCurrent: false,
-      ownedByThisFrontend: true,
+      ownedByThisFrontend: this.state.sessionViews[sessionId]?.access !== "observe",
+      origin: this.state.sessionViews[sessionId]?.origin,
       sessionId,
       title: null,
       updatedAt: null,

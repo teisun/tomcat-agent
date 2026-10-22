@@ -43,7 +43,7 @@ describe("real tomcat serve disk session switching", () => {
       );
 
       const switched = await sessionRouter.switchSession(sessionA);
-      expect(switched).toBe(sessionA);
+      expect(switched).toMatchObject({ sessionId: sessionA, access: "control", origin: null });
 
       const agentEnd = waitForEvent(
         runtime.messenger,

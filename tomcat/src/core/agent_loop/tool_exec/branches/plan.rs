@@ -132,7 +132,9 @@ pub(in super::super) async fn dispatch_plan_tool(
         "ask_question" => {
             let Some(panel) = rt.ask_question_panel() else {
                 return ToolExecOutcome::err(
-                    "ask_question is unavailable: PlanRuntime has no AskQuestionPanel".to_string(),
+                    "ask_question is not available in this session; \
+                     write your question in the reply and end the turn."
+                        .to_string(),
                 );
             };
             let termination = crate::core::plan_runtime::AskQuestionTermination::default();

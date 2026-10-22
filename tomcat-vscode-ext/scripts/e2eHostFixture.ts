@@ -1,5 +1,9 @@
+import { once } from "node:events";
+import { randomUUID } from "node:crypto";
+import { createServer, type Socket } from "node:net";
+import { createInterface } from "node:readline";
 import * as os from "node:os";
-import { spawn, type SpawnOptions } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -67,6 +71,7 @@ function buildFakeServeSource(
   editFilePath: string,
   options: HostE2eFixtureOptions,
   setupMarkerPath: string,
+  endpoint: string,
 ): string {
   const reviewCopy = Object.fromEntries(["en", "zh-CN"].map(locale => {
     const catalog = JSON.parse(readFileSync(new URL(`../../tomcat/assets/i18n/${locale}.json`, import.meta.url), "utf8")) as Record<string, string>;
@@ -300,7 +305,7 @@ function restorePendingApproval() {
 }
 
 if (process.argv[2] === "--version") {
-  process.stdout.write("tomcat fake " + serverVersion + "\\n");
+  process.stdout.write("tomcat " + serverVersion + "\\n");
   process.exit(0);
 }
 
@@ -334,6 +339,16 @@ if (transientServeFailures > 0) {
     process.stderr.write("fake transient serve startup failure\\n");
     process.exit(1);
   }
+}
+
+// The fixture owner supplies IPC discovery/lifetime; keep the existing stdio scenarios.
+if (["start", "status", "stop", "restart"].includes(process.argv[3])) {
+  const socket = require("node:net").connect(${JSON.stringify(endpoint)});
+  socket.once("connect", () => socket.write(JSON.stringify({ action: process.argv[3] }) + "\\n"));
+  socket.on("data", chunk => process.stdout.write(chunk));
+  socket.once("error", error => { console.error(error.message); process.exit(1); });
+  socket.once("end", () => process.exit(0));
+  return;
 }
 
 function touchSession(session) {
@@ -3157,10 +3172,11 @@ export async function createHostE2eFixture(
   options: HostE2eFixtureOptions = {},
 ): Promise<HostE2eFixture> {
   const rootDir = await mkdtemp(
-    path.join(os.tmpdir(), "tomcat-vscode-ext-host-"),
+    path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tomcat-vscode-ext-host-"),
   );
   const workspaceDir = path.join(rootDir, "workspace");
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
+  const endpoint = process.platform === "win32" ? String.raw`\\.\pipe\tc-host-${randomUUID()}` : path.join(rootDir, "serve.sock");
   const editFilePath = path.join(rootDir, "edit-target.txt");
   const setupMarkerPath = path.join(rootDir, "setup", "ready");
   const transientFailureMarkerPath = path.join(rootDir, "setup", "transient-failures");
@@ -3174,49 +3190,110 @@ export async function createHostE2eFixture(
   await writeFile(editFilePath, "before\n", "utf8");
   await writeFile(
     fakeServePath,
-    buildFakeServeSource(editFilePath, options, setupMarkerPath),
+    buildFakeServeSource(editFilePath, options, setupMarkerPath, endpoint),
     "utf8",
   );
   await chmod(fakeServePath, 0o755);
 
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
+    TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES: String(options.bootstrapListModelsFailures ?? 0),
+    TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
+    TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
+    TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS: String(options.handshakeDelayMs ?? 0),
+    TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS: String(options.interruptDelayMs ?? 150),
+    TOMCAT_VSCODE_TEST_PATH: fakeServePath,
+    TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
+    TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,
+    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+    TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER: transientFailureMarkerPath,
+    TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES: String(options.transientServeFailures ?? 0),
+  };
+  const closeTransport = await listenForFakeServe({ fakeServePath, workspaceDir, env }, endpoint);
+  let cleanup: Promise<void> | undefined;
   return {
     attachmentRootDir,
-    async cleanup() {
-      await rm(rootDir, { force: true, recursive: true });
+    cleanup() {
+      return cleanup ??= (async () => {
+        await closeTransport();
+        await rm(rootDir, { force: true, recursive: true });
+      })();
     },
     editFilePath,
-    env: {
-      ...process.env,
-      TOMCAT_VSCODE_TEST_ATTACHMENT_ROOT: attachmentRootDir,
-      TOMCAT_VSCODE_TEST_BOOTSTRAP_LIST_MODELS_FAILURES: String(
-        options.bootstrapListModelsFailures ?? 0,
-      ),
-      TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
-      TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
-      TOMCAT_VSCODE_TEST_HANDSHAKE_DELAY_MS: String(
-        options.handshakeDelayMs ?? 0,
-      ),
-      TOMCAT_VSCODE_TEST_INTERRUPT_DELAY_MS: String(
-        options.interruptDelayMs ?? 150,
-      ),
-      TOMCAT_VSCODE_TEST_PATH: fakeServePath,
-      TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
-      TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,
-      TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
-      TOMCAT_VSCODE_TEST_TRANSIENT_FAILURE_MARKER: transientFailureMarkerPath,
-      TOMCAT_VSCODE_TEST_TRANSIENT_SERVE_FAILURES: String(
-        options.transientServeFailures ?? 0,
-      ),
-    },
+    env,
     fakeServePath,
     rootDir,
     workspaceDir,
   };
 }
 
-/** `spawnFactory` for the fake CLI: Windows ignores its shebang, so run it with this Node. */
-export const spawnFakeServe = ((script: string, args: readonly string[], options: SpawnOptions) =>
-  spawn(process.execPath, [script, ...args], options)) as typeof spawn;
+/** Native transport for GUI fixtures; scenario logic stays in the existing fake child.
+ * This is not evidence for Rust's shared-session or ownership semantics. */
+async function listenForFakeServe(
+  fixture: Pick<HostE2eFixture, "fakeServePath" | "workspaceDir" | "env">,
+  endpoint: string,
+): Promise<() => Promise<void>> {
+  const sockets = new Set<Socket>();
+  const children = new Set<ChildProcess>();
+  let running = true;
+  let instanceId = randomUUID();
+  const info = () => ({ service: "tomcat", running, protocolVersion: 1,
+    serverVersion: BUNDLED_CLI_VERSION, instanceId, pid: process.pid, agentId: "main", endpoint });
+  const stopChildren = async () => {
+    await Promise.all([...children].map(async child => {
+      const closed = once(child, "close");
+      child.kill();
+      await closed;
+    }));
+  };
+  const server = createServer(socket => {
+    sockets.add(socket);
+    socket.on("error", () => undefined);
+    socket.once("close", () => sockets.delete(socket));
+    const lines = createInterface({ input: socket });
+    lines.once("line", line => {
+      socket.pause();
+      lines.close();
+      void (async () => {
+        const hello = JSON.parse(line);
+        if (["start", "status", "stop", "restart"].includes(hello.action)) {
+          if (hello.action === "stop" || hello.action === "restart") {
+            running = false;
+            await stopChildren();
+          }
+          if (hello.action === "restart") instanceId = randomUUID();
+          if (hello.action !== "status") running = hello.action !== "stop";
+          socket.end(JSON.stringify(info()) + "\n").resume();
+          return;
+        }
+        if (!running || hello.service !== "tomcat" || hello.protocol !== "native") {
+          socket.end(JSON.stringify({ service: "tomcat", running: false }) + "\n").resume();
+          return;
+        }
+        const child = spawn(process.execPath, [fixture.fakeServePath, "serve", "--stdio"], {
+          cwd: fixture.workspaceDir, env: { ...fixture.env, ...hello.environment }, stdio: "pipe", windowsHide: true,
+        });
+        children.add(child);
+        child.once("close", () => { children.delete(child); socket.end(); });
+        child.once("error", () => socket.destroy());
+        socket.once("close", () => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+        child.stdin!.on("error", () => socket.destroy());
+        child.stderr!.on("data", chunk => process.stderr.write(chunk));
+        socket.write(JSON.stringify(info()) + "\n");
+        socket.pipe(child.stdin!);
+        child.stdout!.pipe(socket);
+      })().catch(error => socket.destroy(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(endpoint, resolve); });
+  return async () => {
+    const closed = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const socket of sockets) socket.destroy();
+    await stopChildren();
+    await closed;
+  };
+}
 
 export function resolveVsCodeCli(): string {
   return (

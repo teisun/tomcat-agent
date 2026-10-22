@@ -111,6 +111,9 @@ pub struct ChatContextOverrides {
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
+    pub child_environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    /// An explicit identity must not be resolved through the mutable project-level current row.
+    pub session_id_override: Option<String>,
 }
 
 impl ChatContext {
@@ -220,10 +223,10 @@ impl ChatContext {
     pub(crate) fn project_rules(&self, budget: usize) -> (String, Vec<String>, usize) {
         let root = crate::infra::platform::canonicalize(&self.scope_services.resource_root)
             .unwrap_or_else(|_| self.scope_services.resource_root.clone());
-        let rules = crate::core::project_instructions::discover(
+        let rules = crate::core::project_instructions::discover_rules(
             &root,
+            &self.scope_services.agent_workspace_dir,
             &self.config.workspace.project_resource_dir,
-            true,
             self.global_services.gate.as_ref(),
         );
         crate::core::project_instructions::render_rules(
@@ -321,6 +324,11 @@ impl ChatContextOverrides {
         self
     }
 
+    pub fn with_session_id_override(mut self, id: String) -> Self {
+        self.session_id_override = Some(id);
+        self
+    }
+
     pub fn with_session_cwd_override(mut self, cwd: std::path::PathBuf) -> Self {
         self.session_cwd_override = Some(cwd);
         self
@@ -365,11 +373,18 @@ fn build_model_prefs_store(config: &AppConfig) -> Result<Arc<ModelPrefsStore>, A
 fn connector_registry_for(
     config: &AppConfig,
     workspace_root: Option<&std::path::Path>,
+    environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
 ) -> Result<Option<Arc<ConnectorRegistry>>, AppError> {
     config
         .connector
         .enabled
-        .then(|| ConnectorRegistry::create_and_start(config, workspace_root))
+        .then(|| {
+            ConnectorRegistry::create_and_start_with_environment(
+                config,
+                workspace_root,
+                environment,
+            )
+        })
         .transpose()
 }
 
@@ -502,14 +517,17 @@ fn scope_runtime_for(
         bash_task_registry,
         session,
     };
-    let (connector_registry, connector_load_error) =
-        match connector_registry_for(config, session_project_root.as_deref()) {
-            Ok(registry) => (registry, None),
-            Err(error) => {
-                tracing::warn!(error = %error, "MCP connectors unavailable; chat continues");
-                (None, Some(error.to_string()))
-            }
-        };
+    let (connector_registry, connector_load_error) = match connector_registry_for(
+        config,
+        session_project_root.as_deref(),
+        overrides.child_environment.clone(),
+    ) {
+        Ok(registry) => (registry, None),
+        Err(error) => {
+            tracing::warn!(error = %error, "MCP connectors unavailable; chat continues");
+            (None, Some(error.to_string()))
+        }
+    };
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
         build_plugin_runtime(
             config,
@@ -607,13 +625,23 @@ impl ChatContext {
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
         // CLI startup owns its cwd; persist it as the explicit project root rather
         // than later treating the backend process cwd as an implicit fallback.
-        let current_session_entry = session
-            .ensure_current_session_with_project_root(session_cwd.clone(), session_cwd.clone())?;
+        let current_session_entry = if let Some(id) = overrides.session_id_override.as_deref() {
+            session
+                .get_session_by_id(id)?
+                .filter(|entry| entry.session_key == session.current_session_key())
+                .ok_or_else(|| AppError::Config("unknown_session".into()))?
+        } else {
+            session.ensure_current_session_with_project_root(
+                session_cwd.clone(),
+                session_cwd.clone(),
+            )?
+        };
         session.pin_session(&current_session_entry.session_id)?;
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
-        let agent_workspace_dir =
-            resolve_agent_workspace_dir(&current_session_entry, &agent_definition_dir);
+        let agent_workspace_dir = overrides.session_cwd_override.clone().unwrap_or_else(|| {
+            resolve_agent_workspace_dir(&current_session_entry, &agent_definition_dir)
+        });
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
@@ -691,7 +719,9 @@ impl ChatContext {
             confirmation.clone(),
             audit.clone(),
             bash_ast.clone(),
+            Some(agent_workspace_dir.clone()),
         );
+        bash_task_registry.set_environment(overrides.child_environment.clone());
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
             DefaultPrimitiveExecutor::new(
                 config.primitive.clone(),
@@ -700,6 +730,7 @@ impl ChatContext {
                 gate.clone(),
             )
             .with_bash_ast(bash_ast.clone())
+            .with_session_cwd(agent_workspace_dir.clone())
             .with_bash_foreground_wait_ms(bash_policy.foreground_wait_ms)
             .with_bash_max_output_chars(bash_policy.max_output_chars)
             .with_bash_persist_dir(bash_policy.persist_dir.clone())
@@ -752,6 +783,8 @@ impl ChatContext {
         shared_scope_runtime.dispatcher.bind_session(
             &current_session_entry.session_id,
             Arc::downgrade(&session_arc),
+            Some(Arc::downgrade(&primitive)),
+            Some(Arc::downgrade(&bash_task_registry)),
         );
         let event_bus = shared_scope_runtime.event_bus.clone();
         let tool_registry = shared_scope_runtime.tool_registry.clone();
@@ -844,13 +877,16 @@ impl ChatContext {
                     &[("detail", &e.to_string())],
                 ))
             })?;
-        let skill_set = shared_scope_runtime.skill_set.clone();
+        // Shared serve binds a controller-specific skill view to each session.
+        // The scope cache remains the project/agent/managed inventory only.
+        let skill_set = if overrides.child_environment.is_some() {
+            Arc::new(RwLock::new(shared_scope_runtime.skill_set.read().clone()))
+        } else {
+            shared_scope_runtime.skill_set.clone()
+        };
         let skill_discovery_handle = shared_scope_runtime.skill_discovery_handle.clone();
 
-        let reviewer_max_turns = std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(config.reviewer.max_turns);
+        let reviewer_max_turns = resolve_reviewer_max_turns(config.reviewer.max_turns);
         // 只捕获 override；为空时由 dispatcher 在每次派发时取当前会话模型。
         let reviewer_model_override = config.reviewer.model_override.clone();
         let read_file_state = Arc::new(
@@ -1054,6 +1090,8 @@ impl ChatContext {
             skill_discovery_handle: skill_discovery_handle.clone(),
         };
         let session_runtime = SessionRuntime {
+            session_mcp: RwLock::new(None),
+            connection_skill_dir: RwLock::new(None),
             session: session.clone(),
             message_append_sink: message_append_sink.clone(),
             cancel_token: cancel_token.clone(),
@@ -1175,12 +1213,33 @@ impl ChatContext {
         }
     }
 
+    pub(crate) fn has_session_skill_view(&self) -> bool {
+        !Arc::ptr_eq(
+            &self.scope_services.skill_set,
+            &self.scope_services.scope_container.skill_set,
+        )
+    }
+
+    /// Called only after control admission and after the old turn has stopped.
+    /// Clear the previous controller's overlay even if the following scan fails.
+    pub(crate) fn bind_connection_skill_dir(&self, directory: Option<std::path::PathBuf>) {
+        debug_assert!(self.has_session_skill_view());
+        *self.session_runtime.connection_skill_dir.write() = directory;
+        let base = self.scope_services.scope_container.skill_set.read().clone();
+        *self.scope_services.skill_set.write() = base;
+    }
+
     pub(crate) fn skill_set_snapshot(&self) -> crate::core::skill::SkillSet {
         self.scope_services.skill_set.read().clone()
     }
 
     pub(crate) async fn spawn_skill_discovery_if_needed(&self) {
-        if !self.config.skills.enabled || !self.scope_services.skill_set.read().is_empty() {
+        // Shared sessions reconcile under inventory_sync at new/load, not through
+        // the standalone startup task which only knows about the base inventory.
+        if self.has_session_skill_view()
+            || !self.config.skills.enabled
+            || !self.scope_services.skill_set.read().is_empty()
+        {
             return;
         }
         let mut handle = self.scope_services.skill_discovery_handle.lock().await;
@@ -1193,6 +1252,9 @@ impl ChatContext {
     }
 
     pub(crate) async fn await_skill_discovery(&self) -> crate::core::skill::SkillSet {
+        if self.has_session_skill_view() {
+            return self.skill_set_snapshot();
+        }
         let handle = self
             .scope_services
             .skill_discovery_handle
@@ -1220,6 +1282,12 @@ impl ChatContext {
     }
 
     pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
+        let _guard = self
+            .scope_services
+            .scope_container
+            .inventory_sync
+            .lock()
+            .await;
         if let Some(handle) = self
             .scope_services
             .skill_discovery_handle
@@ -1237,8 +1305,19 @@ impl ChatContext {
         if skill_set.discovery_failed() {
             return self.skill_set_snapshot();
         }
-        *self.scope_services.skill_set.write() = skill_set.clone();
-        skill_set
+        *self.scope_services.scope_container.skill_set.write() = skill_set.clone();
+        let effective = match self.session_runtime.connection_skill_dir.read().as_deref() {
+            Some(directory) => crate::core::skill::discovery::discover_with_connection(
+                &self.config,
+                &self.scope_services.resource_root,
+                Some(directory),
+            ),
+            None => skill_set,
+        };
+        if !effective.discovery_failed() {
+            *self.scope_services.skill_set.write() = effective;
+        }
+        self.skill_set_snapshot()
     }
 }
 
@@ -1703,7 +1782,20 @@ fn build_plugin_runtime(
     ))
 }
 
+fn resolve_reviewer_max_turns(configured: u32) -> u32 {
+    if crate::infra::config::saved_configuration_only() {
+        return configured;
+    }
+    std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(configured)
+}
+
 fn plugin_runtime_disabled_via_env() -> bool {
+    if crate::infra::config::saved_configuration_only() {
+        return false;
+    }
     match std::env::var("PI_PLUGIN_DISABLE") {
         Ok(raw) => matches!(
             raw.trim().to_ascii_lowercase().as_str(),
@@ -1735,6 +1827,9 @@ impl ToolExecutor for NoopToolExecutor {
 pub(crate) fn resolve_initial_thinking_display(
     thinking: &crate::infra::config::ThinkingConfig,
 ) -> ThinkingDisplay {
+    if crate::infra::config::saved_configuration_only() {
+        return thinking.show;
+    }
     match std::env::var("PI_CHAT_SHOW_THINKING") {
         Ok(v) => parse_thinking_display_override(&v).unwrap_or_else(|| {
             warn!(

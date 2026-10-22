@@ -41,6 +41,47 @@ pub fn posix_shell() -> Result<PathBuf, AppError> {
         .ok_or_else(|| AppError::Primitive(crate::infra::i18n::tr("bash.gitBashMissing", &[])))
 }
 
+/// A shared-service child uses its controller's environment. In particular,
+/// Windows Git discovery cannot use the service-wide cached PATH result.
+pub fn posix_shell_for(
+    environment: Option<&super::EnvironmentSnapshot>,
+    cwd: &Path,
+) -> Result<PathBuf, AppError> {
+    let Some(environment) = environment else {
+        return posix_shell();
+    };
+    #[cfg(unix)]
+    {
+        let _ = (environment, cwd);
+        Ok(PathBuf::from("/bin/sh"))
+    }
+    #[cfg(windows)]
+    {
+        let exec_path = environment
+            .resolve_program("git", cwd, &Default::default())
+            .ok()
+            .and_then(|git| {
+                let mut command = std::process::Command::new(git);
+                environment.apply(&mut command);
+                command
+                    .current_dir(cwd)
+                    .arg("--exec-path")
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            });
+        locate_git_bash(
+            exec_path.as_deref(),
+            |key| environment.get(key).map(Into::into),
+            |path| path.is_file(),
+        )
+        .ok_or_else(|| AppError::Primitive(crate::infra::i18n::tr("bash.gitBashMissing", &[])))
+    }
+}
+
 /// 把 POSIX shell 命令里的路径写法换成本机路径。
 ///
 /// Windows：Git Bash 把盘符挂在 `/c/`，映射回 `C:\...`；`/tmp`、`/usr` 等其它 MSYS 路径不猜测、

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { TomcatMessenger } from "../TomcatMessenger";
-import { createSpawnFactory, FakeChildProcess } from "./fakes";
+import { createReadyMessenger } from "./fakes";
+import { createConnectionFactory, FakeConnection } from "./fakes";
 
-function readSingleCommandLine(child: FakeChildProcess): Record<string, unknown> {
+function readSingleCommandLine(child: FakeConnection): Record<string, unknown> {
   const written = child.readStdin().trim();
   expect(written.length).toBeGreaterThan(0);
   return JSON.parse(written);
@@ -11,8 +11,8 @@ function readSingleCommandLine(child: FakeChildProcess): Record<string, unknown>
 
 describe("TomcatMessenger request/response routing", () => {
   it("returns a Reload receipt immediately and preserves context and generation", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({ executable: "tomcat", requestTimeoutMs: 50, spawnFactory: createSpawnFactory(child) });
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "tomcat", requestTimeoutMs: 50, connectFactory: createConnectionFactory(child) });
     const context = { workspaceRoot: "/workspace/A" };
     const pending = messenger.sendReloadConnector("key", context);
     const command = readSingleCommandLine(child);
@@ -24,8 +24,8 @@ describe("TomcatMessenger request/response routing", () => {
   });
 
   it("routes project trust by root and keeps Add-and-Trust as one command", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({ executable: "tomcat", spawnFactory: createSpawnFactory(child) });
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "tomcat", connectFactory: createConnectionFactory(child) });
     const lookup = messenger.sendGetProjectTrust("/workspace/project/subdir");
     const query = readSingleCommandLine(child);
     expect(query).toMatchObject({ type: "get_project_trust", path: "/workspace/project/subdir" });
@@ -48,10 +48,10 @@ describe("TomcatMessenger request/response routing", () => {
   });
 
   it("pairs response frames by id", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pending = messenger.request({
@@ -78,11 +78,11 @@ describe("TomcatMessenger request/response routing", () => {
   });
 
   it("ignores unknown response ids and times out pending requests", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
       requestTimeoutMs: 10,
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pending = messenger.request({

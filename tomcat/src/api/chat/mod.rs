@@ -7,6 +7,7 @@ mod context;
 mod prompt;
 mod resource_inventory;
 mod run_loop;
+mod session_mcp;
 mod session_runtime;
 
 #[cfg(test)]

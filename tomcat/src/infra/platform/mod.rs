@@ -5,8 +5,10 @@
 //! （`Path::is_absolute`、`std::env::consts::EXE_SUFFIX`、`std::path::is_separator`）直接用标准库。
 
 mod console;
+mod environment;
 mod executable;
 mod fs;
+pub(crate) mod local_socket;
 mod paths;
 #[cfg(windows)]
 mod private_acl;
@@ -20,6 +22,7 @@ mod user_install;
 
 pub(crate) use console::prepare_console;
 pub use console::ASYNC_PRINT_DURING_INPUT;
+pub use environment::EnvironmentSnapshot;
 pub use executable::{find_executable, resolve_program};
 pub(crate) use fs::is_lock_contended;
 pub use fs::{
@@ -32,9 +35,10 @@ pub use paths::{
     LEGACY_MAX_PATH, PATH_COMPARE_IGNORES_CASE,
 };
 pub use process::{
-    exit_code, kill_tree_on_drop, spawn_detached, ProcessTree, CHILD_STARTUP_ENV_VARS,
+    exit_code, kill_tree_on_drop, spawn_detached, spawn_service_process, ProcessTree,
+    CHILD_STARTUP_ENV_VARS,
 };
-pub use shell::{posix_shell, shell_path_to_native, POSIX_SHELL_NEEDS_INSTALL};
+pub use shell::{posix_shell, posix_shell_for, shell_path_to_native, POSIX_SHELL_NEEDS_INSTALL};
 pub use system::{
     open_url, system_package_manager, PackageManager, DEFAULT_EDITOR, FOLLOW_FILE_COMMAND,
     PATH_CHANGES_NEED_RESTART,

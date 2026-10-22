@@ -1,54 +1,46 @@
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { Duplex } from "node:stream";
+import { TomcatMessenger, type TomcatMessengerOptions } from "../TomcatMessenger";
+import type { SharedConnectionFactory, SharedServiceInfo } from "../sharedConnection";
 
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+export const FAKE_SERVICE: SharedServiceInfo = {
+  service: "tomcat", protocolVersion: 1, serverVersion: "0.1.80", instanceId: "test-service",
+  pid: 4242, agentId: "main", endpoint: "test-socket", running: true,
+};
 
-export class FakeChildProcess extends EventEmitter {
-  public readonly stdin = new PassThrough();
-  public readonly stdout = new PassThrough();
-  public readonly stderr = new PassThrough();
-  public exitCode: number | null = null;
-  public killed = false;
-  public pid = 4242;
-  public signalCode: NodeJS.Signals | null = null;
-  public autoClose = true;
-  public readonly signals: Array<NodeJS.Signals | undefined> = [];
+export class FakeConnection extends Duplex {
+  autoClose = true;
+  onStderr: (chunk: Buffer) => void = () => undefined;
+  private written = "";
 
-  kill(signal?: NodeJS.Signals): boolean {
-    this.signals.push(signal);
-    this.killed = true;
-    this.signalCode = signal ?? null;
-    this.exitCode = 0;
-    this.emit("exit", this.exitCode, this.signalCode);
-    if (this.autoClose) this.close();
-    return true;
+  _read(): void {}
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error) => void): void {
+    this.written += chunk.toString("utf8");
+    callback();
   }
-
-  close(): void {
-    this.stdin.end();
-    this.stdout.end();
-    this.stderr.end();
-    this.emit("close", this.exitCode, this.signalCode);
+  _final(callback: () => void): void {
+    callback();
+    if (this.autoClose) this.push(null);
   }
-
-  emitStdout(text: string): void {
-    this.stdout.write(text, "utf8");
-  }
-
-  emitStderr(text: string): void {
-    this.stderr.write(text, "utf8");
-  }
-
-  fail(error: Error): void {
-    this.emit("error", error);
-  }
-
+  close(): void { this.push(null); this.end(); }
+  emitStdout(text: string | Buffer): void { this.push(Buffer.isBuffer(text) ? text : Buffer.from(text)); }
+  emitStderr(text: string): void { this.onStderr(Buffer.from(text)); }
+  fail(error: Error): void { this.emit("error", error); }
   readStdin(): string {
-    return this.stdin.read()?.toString("utf8") ?? "";
+    const value = this.written;
+    this.written = "";
+    return value;
   }
 }
 
-export function createSpawnFactory(child: FakeChildProcess) {
-  return (() =>
-    child as unknown as ChildProcessWithoutNullStreams) as unknown as typeof import("node:child_process").spawn;
+export function createConnectionFactory(socket: FakeConnection): SharedConnectionFactory {
+  return async (options) => {
+    socket.onStderr = options.onStderr;
+    return { socket, info: FAKE_SERVICE };
+  };
+}
+
+export async function createReadyMessenger(options: TomcatMessengerOptions): Promise<TomcatMessenger> {
+  const messenger = new TomcatMessenger(options);
+  await messenger.start();
+  return messenger;
 }

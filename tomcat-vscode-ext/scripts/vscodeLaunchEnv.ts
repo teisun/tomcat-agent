@@ -16,6 +16,17 @@ export function cleanVsCodeGuiEnvironment(env: NodeJS.ProcessEnv): NodeJS.Proces
   return clean;
 }
 
+/** Opt-in input conversion for the VS Code test launcher, never the product or ACP. */
+export function windowTestProxy(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.TOMCAT_E2E_LLM_PROXY !== undefined) return env.TOMCAT_E2E_LLM_PROXY;
+  const name = env.TOMCAT_E2E_WINDOW_PROXY_ENV;
+  if (name === undefined) return undefined;
+  if (!/^(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy)$/.test(name)) {
+    throw new Error("TOMCAT_E2E_WINDOW_PROXY_ENV must select one HTTP_PROXY, HTTPS_PROXY or ALL_PROXY alias");
+  }
+  return env[name]; // No fallback or NO_PROXY emulation; an absent value keeps the default fixture.
+}
+
 let guiLaunchActive = false;
 
 export async function withVsCodeGuiEnvironment<T>(

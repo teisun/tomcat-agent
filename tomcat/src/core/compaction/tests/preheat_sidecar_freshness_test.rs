@@ -76,6 +76,7 @@ async fn sidecar_is_rebuilt_after_llm_await_before_machine_block_is_rendered() {
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "preheat-freshness".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),

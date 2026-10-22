@@ -83,6 +83,9 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   serve_robustness_tests
   data_dir_forward_compat_tests
   serve_stdio_e2e
+  serve_shared_e2e
+  acp_stdio_e2e
+  acp_observer_e2e
   serve_rewind_and_resend
 )
 

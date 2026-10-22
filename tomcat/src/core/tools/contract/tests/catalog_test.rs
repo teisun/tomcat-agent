@@ -541,3 +541,12 @@ fn bash_schema_exposes_only_a_single_command_string() {
                 && !description.contains("cmd /C")
         }));
 }
+
+#[test]
+fn bash_cwd_description_uses_session_scope() {
+    let schema = super::bash_parameters();
+    let description = schema["properties"]["cwd"]["description"].as_str().unwrap();
+    assert!(description.contains("Empty or omitted uses the session working directory"));
+    assert!(description.contains("relative paths are resolved from it"));
+    assert!(!description.contains("process cwd"));
+}

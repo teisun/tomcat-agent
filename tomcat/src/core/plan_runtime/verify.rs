@@ -342,6 +342,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let confirmation = Arc::clone(&deps.confirmation);
         let audit = Arc::clone(&deps.audit);
         let bash_ast = deps.bash_ast.clone();
+        let bash_cwd = deps.agent_workspace_dir.clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
@@ -425,7 +426,9 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                             confirmation.clone(),
                             audit.clone(),
                             bash_ast.clone(),
+                            Some(bash_cwd.clone()),
                         );
+                    bash_task_registry.set_environment(primitive.child_environment());
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,

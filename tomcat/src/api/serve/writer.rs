@@ -1,4 +1,4 @@
-//! `serve` 的唯一 stdout writer。
+//! One NDJSON writer per transport connection.
 //!
 //! 所有命令响应、控制帧和事件下行都必须先进入这里，再由单写者任务序列化成 NDJSON。
 
@@ -38,13 +38,26 @@ impl From<&crate::ServeConfig> for WriterConfig {
 #[derive(Clone)]
 pub struct WriterHandle {
     shared: Arc<WriterShared>,
+    _lifetime: Arc<tokio_util::sync::DropGuard>,
 }
 
 impl WriterHandle {
     /// 将一帧写入 writer 队列。
     pub fn send(&self, frame: OutFrame) -> Result<(), AppError> {
+        if self.shared.closing.is_cancelled() {
+            return Err(AppError::Config("connection_closed".into()));
+        }
         self.shared.enqueue(frame);
         Ok(())
+    }
+
+    /// Called only after disconnect cleanup, never in response to a slow consumer.
+    pub(crate) fn close(&self) {
+        self.shared.closing.cancel();
+    }
+
+    pub(crate) async fn closed(&self) {
+        self.shared.closing.cancelled().await;
     }
 }
 
@@ -55,14 +68,33 @@ pub fn spawn_stdout_writer(config: WriterConfig) -> WriterHandle {
 
 /// 以任意 `AsyncWrite` 创建 writer，便于测试和未来扩展传输层。
 pub fn spawn_writer(writer: BoxWriter, config: WriterConfig) -> WriterHandle {
+    spawn_writer_with_encoder(writer, config, |frame| {
+        ndjson_safe_stringify(&frame).map(Some)
+    })
+}
+
+/// Encode only after the existing queue has applied its ordering and backpressure.
+/// ACP uses this boundary so a slow socket cannot grow an unbounded SDK event queue.
+/// Returning None consumes an internal response/control frame without exposing it on the wire.
+pub(crate) fn spawn_writer_with_encoder(
+    writer: BoxWriter,
+    config: WriterConfig,
+    encoder: impl FnMut(OutFrame) -> Result<Option<String>, AppError> + Send + 'static,
+) -> WriterHandle {
     let shared = Arc::new(WriterShared::new(config));
+    let lifetime = Arc::new(shared.closing.clone().drop_guard());
     let shared_for_task = Arc::clone(&shared);
+    let closing = shared.closing.clone();
     tokio::spawn(async move {
-        if let Err(error) = writer_task(writer, shared_for_task).await {
+        if let Err(error) = writer_task(writer, shared_for_task, Box::new(encoder)).await {
+            closing.cancel();
             tracing::error!(error = %error, "serve writer task failed");
         }
     });
-    WriterHandle { shared }
+    WriterHandle {
+        shared,
+        _lifetime: lifetime,
+    }
 }
 
 pub(crate) struct BufferedFrame {
@@ -105,6 +137,7 @@ impl WriterQueues {
 struct WriterShared {
     queues: Mutex<WriterQueues>,
     notify: Notify,
+    closing: tokio_util::sync::CancellationToken,
     config: WriterConfig,
 }
 
@@ -113,6 +146,7 @@ impl WriterShared {
         Self {
             queues: Mutex::new(WriterQueues::new()),
             notify: Notify::new(),
+            closing: tokio_util::sync::CancellationToken::new(),
             config,
         }
     }
@@ -148,13 +182,38 @@ impl WriterShared {
     }
 }
 
-async fn writer_task(mut writer: BoxWriter, shared: Arc<WriterShared>) -> Result<(), AppError> {
-    loop {
-        if let Some(frame) = shared.dequeue() {
-            write_frame(&mut writer, &frame).await?;
-            continue;
+type FrameEncoder = Box<dyn FnMut(OutFrame) -> Result<Option<String>, AppError> + Send>;
+
+async fn writer_task(
+    mut writer: BoxWriter,
+    shared: Arc<WriterShared>,
+    mut encoder: FrameEncoder,
+) -> Result<(), AppError> {
+    let drain = async {
+        loop {
+            if let Some(frame) = shared.dequeue() {
+                if let Some(rendered) = encoder(frame)? {
+                    write_frame(&mut writer, &rendered).await?;
+                }
+            } else if shared.closing.is_cancelled() {
+                return Ok(());
+            } else {
+                tokio::select! {
+                    _ = shared.notify.notified() => {},
+                    _ = shared.closing.cancelled() => {},
+                }
+            }
         }
-        shared.notify.notified().await;
+    };
+    tokio::pin!(drain);
+    tokio::select! {
+        result = &mut drain => result,
+        _ = shared.closing.cancelled() => {
+            // Keep polling the SAME future: restarting a partial write would corrupt NDJSON.
+            // Only an already-closed connection has a deadline; active slow readers never do.
+            tokio::time::timeout(Duration::from_secs(1), &mut drain).await
+                .map_err(|_| AppError::Config("closed connection output drain timed out".into()))?
+        }
     }
 }
 
@@ -316,6 +375,9 @@ fn coalesce_message_update(target: &mut OutFrame, next: &OutFrame) -> bool {
     let OutFrame::Event(next_value) = next else {
         return false;
     };
+    if target_value.get("assistantMessageId") != next_value.get("assistantMessageId") {
+        return false;
+    }
     let Some(target_event) = target_value
         .get_mut("assistantMessageEvent")
         .and_then(serde_json::Value::as_object_mut)
@@ -351,8 +413,7 @@ fn coalesce_message_update(target: &mut OutFrame, next: &OutFrame) -> bool {
     true
 }
 
-async fn write_frame(writer: &mut BoxWriter, frame: &OutFrame) -> Result<(), AppError> {
-    let rendered = ndjson_safe_stringify(frame)?;
+async fn write_frame(writer: &mut BoxWriter, rendered: &str) -> Result<(), AppError> {
     writer
         .write_all(rendered.as_bytes())
         .await

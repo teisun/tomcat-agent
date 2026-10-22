@@ -25,7 +25,7 @@ fn configured_env_is_added_after_environment_is_cleared() {
             tool_filter: ToolFilter::default(),
         },
     };
-    let command = transport.command(&server);
+    let command = transport.command(&server).unwrap();
     assert_eq!(
         command.as_std().get_current_dir(),
         Some(Path::new("/workspace"))
@@ -61,7 +61,7 @@ fn windows_resolves_bare_npx_to_cmd_and_inherits_only_the_sdk_env_list() {
         },
     };
 
-    let command = transport.command(&server);
+    let command = transport.command(&server).unwrap();
     let std_command = command.as_std();
     assert_eq!(Path::new(std_command.get_program()), npx);
     let keys: Vec<String> = std_command
@@ -111,13 +111,113 @@ fn curated_playwright_passes_bootstrap_system_browser_fallback_to_mcp() {
         },
     };
 
-    let command = transport.command(&server);
+    let command = transport.command(&server).unwrap();
     assert!(
         command.as_std().get_envs().any(|(key, value)| {
             key == "PLAYWRIGHT_MCP_EXECUTABLE_PATH" && value == Some(executable.as_os_str())
         }),
         "curated MCP must receive Phase 1's fallback browser path"
     );
+}
+
+#[test]
+fn controller_environment_supplies_mcp_startup_values_without_relaxing_the_allowlist() {
+    use crate::infra::platform::EnvironmentSnapshot;
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let mut server = ConfiguredMcpServer {
+        config_key: "mcp:environment-fixture".into(),
+        name: "environment-fixture".into(),
+        source: McpConfigSource::Project,
+        config: McpServerConfig {
+            command: root
+                .path()
+                .join("not-executed")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![],
+            env: [("EXPLICIT".into(), "configured".into())].into(),
+            cwd: None,
+            url: None,
+            auth: None,
+            headers: Default::default(),
+            oauth: None,
+            tool_filter: ToolFilter::default(),
+        },
+    };
+    for marker in ["A", "B"] {
+        let environment = EnvironmentSnapshot::from_values(
+            [
+                ("PATH".into(), format!("path-{marker}")),
+                ("HOME".into(), format!("home-{marker}")),
+                (
+                    "UNRELATED_CONNECTION_SECRET".into(),
+                    "must-not-inherit".into(),
+                ),
+            ]
+            .into(),
+        )
+        .unwrap();
+        let transport =
+            StdioTransport::new(Some(root.path())).with_environment(Some(Arc::new(environment)));
+        let command = transport.command(&server).unwrap();
+        assert_eq!(command.as_std().get_current_dir(), Some(root.path()));
+        let values = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(values.get("PATH"), Some(&format!("path-{marker}")));
+        assert_eq!(values.get("HOME"), Some(&format!("home-{marker}")));
+        assert_eq!(
+            values.get("EXPLICIT").map(String::as_str),
+            Some("configured")
+        );
+        assert!(!values.contains_key("UNRELATED_CONNECTION_SECRET"));
+        server
+            .config
+            .env
+            .insert("HOME".into(), "explicit-home".into());
+        let overridden = transport.command(&server).unwrap();
+        assert!(overridden
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "HOME"
+                && value == Some(std::ffi::OsStr::new("explicit-home"))));
+        server.config.env.remove("HOME");
+    }
+}
+
+#[tokio::test]
+async fn http_clients_keep_loopback_direct() {
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let local = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("local-ok"))
+        .mount(&local)
+        .await;
+    let url = local.uri();
+    for client in [
+        super::http_client_for(&url).unwrap(),
+        super::mcp_http_client_for(&url).unwrap(),
+    ] {
+        let reply = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(reply, "local-ok");
+    }
+    assert_eq!(local.received_requests().await.unwrap().len(), 2);
 }
 
 #[test]

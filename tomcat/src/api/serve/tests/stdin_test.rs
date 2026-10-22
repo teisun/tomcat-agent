@@ -191,11 +191,14 @@ async fn interrupt_cancels_the_target_session_while_three_heavy_commands_are_que
 async fn normal_commands_keep_prompt_get_messages_get_state_fifo_order() {
     let _api_key = install_test_api_key();
     let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
-    let (normal_tx, mut normal_rx) = tokio::sync::mpsc::unbounded_channel::<ServeCommand>();
+    let (normal_tx, mut normal_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::api::serve::stdin::QueuedCommand>();
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let worker = tokio::spawn(async move {
         while let Some(command) = normal_rx.recv().await {
-            observed_tx.send(command.wire_type().to_string()).unwrap();
+            observed_tx
+                .send(command.command.wire_type().to_string())
+                .unwrap();
         }
     });
 

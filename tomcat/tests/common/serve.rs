@@ -84,7 +84,10 @@ pub fn setup_cold_serve_fixture(initialized: bool) -> ServeFixture {
 }
 
 pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
-    let home = tempfile::tempdir().expect("temp home");
+    setup_serve_fixture_with_home(base_url, tempfile::tempdir().expect("temp home"))
+}
+
+pub fn setup_serve_fixture_with_home(base_url: &str, home: tempfile::TempDir) -> ServeFixture {
     let home_path = home.path().to_path_buf();
     let workspace = home_path.join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");
@@ -232,6 +235,10 @@ impl ServeChild {
                 return out;
             }
         }
+    }
+
+    pub fn kill_process(&mut self) {
+        self.child.kill().expect("kill the owned fixture process");
     }
 
     pub fn close_stdin(&mut self) {
@@ -394,13 +401,28 @@ impl Drop for ScriptedOpenAiServer {
 pub fn spawn_scripted_openai_stream_server(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
-    spawn_scripted_openai_stream_server_internal(responses, false, false)
+    spawn_scripted_openai_stream_server_internal(responses, false, false, None)
 }
 
 pub fn spawn_scripted_openai_stream_server_with_auto_title(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
-    spawn_scripted_openai_stream_server_internal(responses, true, false)
+    spawn_scripted_openai_stream_server_internal(responses, true, false, None)
+}
+
+/// Pause before a body part until the test releases it. Unlike fixed sleeps,
+/// this proves the observer really attaches mid-stream; Drop also releases it.
+pub fn spawn_paused_openai_stream_server(
+    responses: Vec<ScriptedResponse>,
+    before_part: usize,
+    release: Arc<AtomicBool>,
+) -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(
+        responses,
+        true,
+        false,
+        Some((before_part, release)),
+    )
 }
 
 pub fn spawn_unauthorized_openai_server() -> ScriptedOpenAiServer {
@@ -411,6 +433,7 @@ pub fn spawn_unauthorized_openai_server() -> ScriptedOpenAiServer {
         }])],
         true,
         true,
+        None,
     )
 }
 
@@ -482,6 +505,7 @@ fn spawn_scripted_openai_stream_server_internal(
     responses: Vec<ScriptedResponse>,
     auto_title_response: bool,
     unauthorized: bool,
+    pause: Option<(usize, Arc<AtomicBool>)>,
 ) -> ScriptedOpenAiServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
     listener
@@ -534,15 +558,47 @@ fn spawn_scripted_openai_stream_server_internal(
             } else {
                 headers
             };
-            stream.write_all(headers.as_bytes()).expect("write headers");
-            for part in parts {
+            for (index, part) in std::iter::once(ScriptedPart {
+                delay_ms: 0,
+                body: headers.into(),
+            })
+            .chain(parts)
+            .enumerate()
+            {
+                if !handled_title {
+                    if let Some((before_part, release)) = &pause {
+                        // Index zero is the HTTP header, not a body part.
+                        if index == before_part + 1 {
+                            while !release.load(Ordering::Acquire)
+                                && !shutdown_thread.load(Ordering::Relaxed)
+                            {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            if shutdown_thread.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
+                    }
+                }
                 if part.delay_ms > 0 {
                     thread::sleep(Duration::from_millis(part.delay_ms));
                 }
-                stream
+                if let Err(error) = stream
                     .write_all(part.body.as_bytes())
-                    .expect("write response part");
-                stream.flush().expect("flush response part");
+                    .and_then(|_| stream.flush())
+                {
+                    // Cancellation legitimately closes this HTTP response. Keep the
+                    // fixture alive for the next turn instead of panicking its listener.
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ) {
+                        break;
+                    }
+                    panic!("write mock response: {error}");
+                }
             }
             if scripted.is_empty() && handled_title {
                 break;

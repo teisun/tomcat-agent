@@ -1,5 +1,5 @@
 use super::{run_code, truncate_code_result_text, MAX_CODE_RESULT_TEXT_BYTES};
-use crate::core::connector::mcp::manager::{McpCallContext, McpManager, ServerState};
+use crate::core::connector::mcp::manager::{McpCallContext, McpManager, McpToolView, ServerState};
 use crate::ext::PluginEngineConfig;
 use crate::infra::config::get_work_dir;
 use crate::AppConfig;
@@ -62,9 +62,11 @@ pub(in super::super) async fn seen(path: &std::path::Path, kind: &str, label: &s
     .expect("fixture event must arrive");
 }
 
-fn vm_limits() -> PluginEngineConfig {
+pub(in super::super) fn vm_limits() -> PluginEngineConfig {
+    // Allow debug-build JS/marshalling work while remaining below the 300ms MCP
+    // idle deadline and 900ms host wait. These tests check isolation, not JS speed.
     PluginEngineConfig {
-        call_timeout_ms: 20,
+        call_timeout_ms: 250,
         interrupt_budget: 0,
         ..Default::default()
     }
@@ -77,17 +79,26 @@ async fn code_vm_fanout_uses_independent_progress_windows_not_vm_wall_time() {
     let a = serde_json::json!({"label":"A", "gateFile":gate, "delayMs":900, "progressMs":40});
     let b = serde_json::json!({"label":"B", "gateFile":gate, "delayMs":900, "progressMs":40});
     let code = format!("return await Promise.all([callTool('mcp__fake__capture', {a}), callTool('mcp__fake__capture', {b})]);");
+    let limits = vm_limits();
+    let vm_budget = Duration::from_millis(limits.call_timeout_ms);
+    let started = std::time::Instant::now();
     let vm = tokio::spawn(run_code(
-        vm_limits(),
-        manager.clone(),
+        limits,
+        McpToolView::new(manager.clone(), None),
         code,
         McpCallContext::default(),
     ));
     seen(&log, "started", "A").await;
     seen(&log, "started", "B").await;
-    assert!(!vm.is_finished());
+    assert!(
+        !vm.is_finished(),
+        "VM ended before opening the gate: {:?}; fixture events: {:?}",
+        vm.await,
+        events(&log).await
+    );
     tokio::fs::write(gate, "release").await.unwrap();
     let value = vm.await.unwrap().unwrap();
+    assert!(started.elapsed() > vm_budget);
     assert_eq!(value[0]["content"][0]["text"], "fixture result: A");
     assert_eq!(value[1]["content"][0]["text"], "fixture result: B");
     assert_eq!(
@@ -117,7 +128,7 @@ return settled.map(r => r.status === 'fulfilled'
     .to_string();
     let vm = tokio::spawn(run_code(
         vm_limits(),
-        manager.clone(),
+        McpToolView::new(manager.clone(), None),
         code,
         McpCallContext::default(),
     ));
@@ -158,7 +169,7 @@ async fn equal_host_ids_in_two_vms_remain_isolated_on_stop_and_drop() {
             context_a.owner_tasks = Some(owner.clone());
             let a = tokio::spawn(run_code(
                 vm_limits(),
-                manager.clone(),
+                McpToolView::new(manager.clone(), None),
                 format!(
                     "Date.now = () => 0; return await callTool('mcp__fake__capture', {args_a});"
                 ),
@@ -166,7 +177,7 @@ async fn equal_host_ids_in_two_vms_remain_isolated_on_stop_and_drop() {
             ));
             let b = tokio::spawn(run_code(
                 vm_limits(),
-                manager.clone(),
+                McpToolView::new(manager.clone(), None),
                 format!(
                     "Date.now = () => 0; return await callTool('mcp__fake__capture', {args_b});"
                 ),
@@ -235,7 +246,7 @@ async fn returning_throwing_and_busy_vm_drop_reap_unawaited_children() {
             } else {
                 vm_limits()
             };
-            let vm = tokio::spawn(run_code(limits, manager.clone(),
+            let vm = tokio::spawn(run_code(limits, McpToolView::new(manager.clone(), None),
                     format!("callTool('mcp__fake__capture', {child}); await callTool('mcp__fake__status', {second}); {tail}"), context));
             seen(&log, "started", &label).await;
             seen(&log, "started", &barrier).await;
@@ -307,7 +318,7 @@ async fn code_vm_calls_deferred_mcp_without_tool_registry() {
 
     let result = run_code(
         PluginEngineConfig::default(),
-        manager.clone(),
+        McpToolView::new(manager.clone(), None),
         r#"return await callTool("mcp__fake__capture", {});"#.to_string(),
         McpCallContext::default(),
     )
@@ -354,7 +365,7 @@ async fn code_vm_cannot_bypass_untrusted_project_connector() {
 
     let error = run_code(
         PluginEngineConfig::default(),
-        manager,
+        McpToolView::new(manager, None),
         r#"return await callTool("mcp__project-fake__capture", {});"#.to_string(),
         McpCallContext::default(),
     )

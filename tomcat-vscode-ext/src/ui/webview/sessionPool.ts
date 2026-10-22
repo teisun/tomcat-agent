@@ -1,5 +1,6 @@
 import type {
   SessionListPayload,
+  SessionOpenResult,
   SessionRouter,
 } from "../../serveClient/sessionRouter";
 
@@ -27,7 +28,7 @@ export class TomcatSessionPool {
     return this.sessionRouter.closeSession(sessionId);
   }
 
-  async switchTo(sessionId: string): Promise<string> {
+  async switchTo(sessionId: string): Promise<SessionOpenResult> {
     return this.sessionRouter.switchSession(sessionId);
   }
 }

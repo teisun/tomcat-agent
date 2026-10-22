@@ -149,18 +149,51 @@ async fn project_rules_refresh_without_tool_grants() {
         "---\nalwaysApply: true\ndescription: team\n---\nRULE_ONE",
     )
     .unwrap();
+    let agents_path = slot
+        .ctx
+        .scope_services
+        .agent_workspace_dir
+        .join("AGENTS.md");
+    std::fs::write(
+        &agents_path,
+        "---\nraw markdown, not frontmatter\nAGENTS_ONE",
+    )
+    .unwrap();
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .unwrap();
+    let history_before = std::fs::read_to_string(&transcript).unwrap();
+    let roots_before = slot.ctx.global_services.gate.effective_roots();
     let mut snapshot = crate::api::chat::build_prompt_snapshot(&slot.ctx, 10000).await;
     assert!(snapshot.system_text().contains("RULE_ONE"));
+    assert!(snapshot.system_text().contains("AGENTS_ONE"));
+    std::fs::write(&agents_path, "AGENTS_TWO").unwrap();
     std::fs::write(&path, "---\nalwaysApply: true\n---\nRULE_TWO").unwrap();
     crate::api::chat::refresh_prompt_snapshot(&slot.ctx, 10000, &mut snapshot).await;
     assert!(snapshot.system_text().contains("RULE_TWO"));
     assert!(!snapshot.system_text().contains("RULE_ONE"));
+    assert!(snapshot.system_text().contains("AGENTS_TWO"));
+    assert!(!snapshot.system_text().contains("AGENTS_ONE"));
     slot.ctx.global_services.gate.grant_path_rule(PathRule {
         path: path.to_string_lossy().into(),
         mode: PathRuleMode::Deny,
     });
     crate::api::chat::refresh_prompt_snapshot(&slot.ctx, 10000, &mut snapshot).await;
     assert!(!snapshot.system_text().contains("RULE_TWO"));
+    slot.ctx.global_services.gate.grant_path_rule(PathRule {
+        path: agents_path.to_string_lossy().into(),
+        mode: PathRuleMode::Deny,
+    });
+    crate::api::chat::refresh_prompt_snapshot(&slot.ctx, 10000, &mut snapshot).await;
+    assert!(!snapshot.system_text().contains("AGENTS_TWO"));
+    let roots_after = slot.ctx.global_services.gate.effective_roots();
+    assert_eq!(roots_after.read_write, roots_before.read_write);
+    assert_eq!(roots_after.read_only, roots_before.read_only);
+    assert_eq!(std::fs::read_to_string(transcript).unwrap(), history_before);
     cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
         .await
         .unwrap();

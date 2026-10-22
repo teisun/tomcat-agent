@@ -77,6 +77,17 @@ export async function initializeServe(
   const payload = parseInitializePayload(frame.payload);
   assertRequiredCapabilities(payload.capabilities);
 
+  // Private serve used to create/load its initial session before replying. The
+  // shared service cannot infer a window directory from its process cwd, so the
+  // same current-or-new operation now receives the client's explicit directory.
+  if (!payload.sessionId && messenger.cwd) {
+    const session = await messenger.request({
+      type: "new_session", params: { cwd: messenger.cwd, resumeCurrent: true },
+    }, timeoutMs);
+    if (!session.success || !session.sessionId) throw new Error(session.error ?? "Tomcat session bootstrap did not return a session ID");
+    payload.sessionId = session.sessionId;
+  }
+
   return {
     attachmentRoot: payload.attachmentRoot ?? null,
     ...(payload.uiPreferences ? { uiPreferences: payload.uiPreferences } : {}),

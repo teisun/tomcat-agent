@@ -1,6 +1,6 @@
 {
   "extension.description": "Tomcat Agent Box，位于 VS Code 侧边栏的 AI 编程助手。",
-  "command.restartServe": "Tomcat: 重启 Serve",
+  "command.restartServe": "Tomcat: 重启共享服务（停止所有任务）",
   "command.newSession": "Tomcat: 新建会话",
   "command.listSessions": "Tomcat: 列出会话",
   "command.focus": "Tomcat: 聚焦 Agent Box",
@@ -12,8 +12,8 @@
   "command.preview": "预览",
   "command.markdown": "Markdown",
   "editor.planPreview": "Tomcat 计划预览",
-  "config.path": "用于启动 `tomcat serve --stdio` 的 tomcat 可执行文件路径。",
-  "config.extraArgs": "传给 `tomcat serve --stdio` 的其他 CLI 参数。",
+  "config.path": "用于连接和管理共享服务的 tomcat 可执行文件路径。",
+  "config.extraArgs": "放在共享服务管理子命令前的全局 CLI 参数。",
   "config.defaultCwd": "创建 Tomcat 会话时的默认工作目录；留空时使用第一个工作区文件夹。",
   "config.controlsInset": "会话栏和输入框距侧边栏边缘的像素距离；重新加载窗口后生效。",
   "config.contentInset": "回复、工具卡、待办和附件距侧边栏边缘的像素距离；设为大于控件边距可对齐输入与回复；重新加载窗口后生效。",

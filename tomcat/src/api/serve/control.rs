@@ -34,7 +34,7 @@ pub(crate) async fn handle_control_or_interrupt(
                 state.initialized.store(true, Ordering::SeqCst);
                 let response = ControlFrame::response(
                     request_id,
-                    session_id.or_else(|| state.registry.active_session_id()),
+                    session_id.or_else(|| state.active_session_id()),
                     serde_json::json!({
                         "protocolVersion": 2,
                         "uiPreferences": super::ui_preferences::snapshot(&state.config_path).ok(),
@@ -98,7 +98,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "confirmation"
                         ],
                         "slashCommands": crate::api::chat::commands::shared_slash_commands(),
-                        "sessionId": state.registry.active_session_id(),
+                        "sessionId": state.active_session_id(),
                         // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
                         "attachmentRoot": super::attachment_root(&state)
                             .map(|path| path.to_string_lossy().into_owned()),
@@ -113,7 +113,7 @@ pub(crate) async fn handle_control_or_interrupt(
                     })
                     .await;
                 });
-                if let Some(session_id) = state.registry.active_session_id() {
+                if let Some(session_id) = state.active_session_id() {
                     if let Some(slot) = state.registry.get(&session_id) {
                         super::resume_pending_ask_question(&state, &slot);
                     }
@@ -133,8 +133,13 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::response(request_id, session_id, payload);
-            if !state.confirmation.handle_control_response(&frame)? {
-                state.ask_question.handle_control_response(&frame)?;
+            if !state
+                .confirmation
+                .handle_control_response_from(&frame, state.connection_id)?
+            {
+                state
+                    .ask_question
+                    .handle_control_response_from(&frame, state.connection_id)?;
             }
             Ok(true)
         }
@@ -144,8 +149,13 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::cancel(request_id, session_id, payload);
-            if !state.confirmation.handle_control_cancel(&frame)? {
-                state.ask_question.handle_control_cancel(&frame)?;
+            if !state
+                .confirmation
+                .handle_control_cancel_from(&frame, state.connection_id)?
+            {
+                state
+                    .ask_question
+                    .handle_control_cancel_from(&frame, state.connection_id)?;
             }
             Ok(true)
         }
@@ -158,7 +168,7 @@ pub(crate) async fn handle_control_or_interrupt(
                 )))?;
                 return Ok(true);
             }
-            let resolved = match state.registry.resolve_session_id(session_id.as_deref()) {
+            let resolved = match state.resolve_session_id(session_id.as_deref()) {
                 Ok(resolved) => resolved,
                 Err(error) if is_config_error(&error, "unknown_session") => {
                     state.writer.send(OutFrame::Response(ResponseFrame::error(

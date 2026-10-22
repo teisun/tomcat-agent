@@ -233,7 +233,7 @@ impl LlmProvider for CapturingLlm {
     }
 }
 
-fn make_real_bash_dispatcher(
+pub(super) fn make_real_bash_dispatcher(
     root: &std::path::Path,
     with_registry: bool,
 ) -> (
@@ -267,11 +267,13 @@ fn make_real_bash_dispatcher(
             confirmation.clone(),
             audit.clone(),
             BashAstChecker::default(),
+            Some(root.to_path_buf()),
         )
     });
 
     let mut exec =
         DefaultPrimitiveExecutor::new(PrimitiveConfig::default(), confirmation, audit, gate)
+            .with_session_cwd(root.to_path_buf())
             .with_bash_foreground_wait_ms(8_000)
             .with_bash_persist_dir(persist_dir);
     if let Some(shared) = registry.clone() {
@@ -1071,8 +1073,8 @@ async fn dispatch_session_hostcalls_can_route_across_bound_session_managers() {
         .create_session(&key_b, Some("/workspace/beta".to_string()))
         .unwrap();
     let d = HostApiDispatcher::new(bus).with_session(Arc::clone(&mgr_a));
-    d.bind_session(&session_a.session_id, Arc::downgrade(&mgr_a));
-    d.bind_session(&session_b.session_id, Arc::downgrade(&mgr_b));
+    d.bind_session(&session_a.session_id, Arc::downgrade(&mgr_a), None, None);
+    d.bind_session(&session_b.session_id, Arc::downgrade(&mgr_b), None, None);
 
     let cwd = d
         .dispatch_async(

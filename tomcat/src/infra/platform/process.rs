@@ -195,6 +195,35 @@ fn nohup_shell_command(
     format!("{env_prefix}nohup {command} >> {log} 2>&1 &")
 }
 
+/// Launch a shared service outside the starter's process group / Windows Job.
+/// Keep its cwd out of project/worktree directories. Never silently retry inside a Job.
+pub fn spawn_service_process(
+    command: &mut std::process::Command,
+    service_dir: &std::path::Path,
+) -> io::Result<std::process::Child> {
+    command.current_dir(service_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe; the closure does not allocate or lock.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS};
+        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+    }
+    command.spawn()
+}
+
 /// 子进程的退出码；Unix 上被信号结束时按 shell 惯例返回 128 + 信号值，取不到时返回 -1。
 pub fn exit_code(status: &ExitStatus) -> i32 {
     #[cfg(unix)]

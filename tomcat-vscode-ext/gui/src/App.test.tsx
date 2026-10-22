@@ -49,6 +49,63 @@ function mount(initialState?: unknown, locale?: Locale) {
   };
 }
 
+describe("read-only session observation", () => {
+  it("locks write actions while busy and idle, keeps reading available, and restores a writable session", async () => {
+    const { postMessage } = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.messageQueueSupported = true;
+    snapshot.rewindSupported = true;
+    snapshot.sessionFilesSupported = true;
+    const host = snapshot.sessionViews.s1;
+    Object.assign(host, {
+      access: "observe", ownedByThisFrontend: false, busy: true,
+      origin: { kind: "acp", clientName: "paperclip" },
+      activePlan: { path: "/plan.md", planId: "plan-1", state: "pending" },
+      checkpoints: [{ id: "ck-1", kind: "turn_end", createdAt: "2026-10-20T00:00:00Z", changedFiles: ["/workspace/a.ts"], messageAnchor: "answer", label: null }],
+      timeline: [
+        { type: "message", id: "host-prompt", kind: "user", text: "host prompt", rewindEligible: true },
+        { type: "message", id: "answer", kind: "assistant", text: "already generated prefix" },
+        { type: "message", id: "host-followup", kind: "user", text: "host follow-up", rewindEligible: true },
+        { type: "tool", id: "plan-create", toolCallId: "call-plan", toolName: "create_plan", isError: false, status: "complete", summary: "created", planId: "plan-1", planPath: "/plan.md", planActivity: { kind: "create", stateAfter: "pending", title: "Host plan" } },
+      ],
+      sessionFiles: { sourceTurnId: "host-prompt", files: [{ path: "/workspace/a.ts", status: "modified", added: 1, removed: 1, restorable: true }] },
+    });
+    await emitState({ channel: "state", content: snapshot, messageId: "observing-busy" });
+    expect(screen.getByTestId("observer-notice").textContent).toBe(translate("en", "session.readOnlyFrom", { source: "paperclip" }));
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    expect(screen.getByTestId("composer-input").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("stop-button"));
+    host.busy = false;
+    host.composerDraft = { text: "saved draft", segments: [{ type: "text", text: "saved draft" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "observing-idle" });
+    expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    for (const id of ["send-button", "attachment-add", "mode-select", "model-select", "checkpoint-marker-button", "build-plan", "keep-all-files", "undo-all-files"]) {
+      expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
+      fireEvent.click(screen.getByTestId(id));
+    }
+    fireEvent.click(screen.getByText("host prompt"));
+    expect(screen.queryByTestId("edit-user-message")).toBeNull();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "must not edit" } }); });
+    expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    expect(postMessage.mock.calls.some(([m]) => ["prompt", "interrupt", "setModel", "setPlanMode", "restoreCheckpoint", "buildPlan", "keepSessionFiles", "restoreSessionFiles"].includes(m.type))).toBe(false);
+    fireEvent.click(screen.getByTestId("files-toggle"));
+    expect(screen.getByTestId("undo-file")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("session-file-diff"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openSessionFileDiff" }));
+    expect(screen.getByTestId("new-session-button")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "listSessions" }));
+    fireEvent.click(screen.getByTestId("session-select"));
+    snapshot.activeSessionId = "s2";
+    snapshot.sessionViews.s2.access = "control";
+    await emitState({ channel: "state", content: snapshot, messageId: "own-session" });
+    expect(screen.queryByTestId("observer-notice")).toBeNull();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", false);
+  });
+});
+
 describe("chat locale continuity", () => {
   it("switches chrome without changing the current session, draft or technical terms", async () => {
     const f = mount(undefined, "en");
@@ -309,6 +366,24 @@ describe("inline user-message editing in App", () => {
 });
 
 describe("inline model configuration", () => {
+  it("offers the shared-service restart with its consequence instead of retry on version mismatch", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const detail = translate("en", "bridge.serviceVersionMismatch", { running: "0.1.81", client: "0.1.82" });
+    await emitState({ channel: "state", content: {
+      ...snapshot, ready: false, connectionStatus: "failed",
+      connectionFailure: { kind: "version_mismatch", detail },
+    }, messageId: "version-mismatch" });
+    expect(screen.getByRole("alert").textContent).toBe(detail);
+    expect(screen.queryByTestId("retry-connection")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: translate("en", "host.action.restartSharedService") }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "restartSharedService" }));
+    fireEvent.click(screen.getByTestId("view-connection-logs"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "viewConnectionLogs" }));
+    await emitState({ channel: "state", content: snapshot, messageId: "restart-recovered" });
+    expect(screen.queryByTestId("restart-shared-service")).toBeNull();
+  });
+
   it("shows an actionable failure without a spinner or a misleading setup card", async () => {
     const { postMessage } = mount();
     const snapshot = approvalDraftSnapshot("s1");
@@ -428,6 +503,8 @@ type StateTestSession = Partial<WebviewSessionSnapshot> &
 
 function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
   return {
+    access: fixture.access,
+    origin: fixture.origin,
     activePlan: fixture.activePlan ?? null,
     agentMode: fixture.agentMode ?? "chat",
     busy: fixture.busy ?? false,

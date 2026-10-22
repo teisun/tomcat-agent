@@ -166,6 +166,7 @@ export interface TomcatWebviewProviderDeps {
   openExternal?(href: string): Promise<void> | void;
   openSettings?(route?: "general" | "models" | "connectors"): void;
   reconnectServe?(): Promise<void>;
+  restartServe?(): Promise<void>;
   showConnectionLogs?(): void;
   /** Surface a post-handshake bootstrap failure in the extension host's Output channel/UI. */
   reportBootstrapFailure?(error: Error): void;
@@ -763,12 +764,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return sessionId;
   }
 
-  /**
-   * A serve restart starts a new process whose session IDs may overlap the old
-   * process. Discard the old process's local projection before re-bootstrapping,
-   * so a recycled ID cannot point to stale transcript or model state.
-   */
-  async refreshAfterServeRestart(): Promise<void> {
+  /** Clear the old projection BEFORE reconnect: bootstrap may already replay a live message. */
+  prepareForServeReconnect(): void {
     this.messageQueue.reset(new Set(this.pendingDeletions.keys()));
     this.fileGeneration += 1;
     this.fileRefreshes.clear();
@@ -776,6 +773,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.initialized = undefined;
     this.stateStore.resetForReload();
     this.stateStore.setConnectionStatus(this.serveConnectionStatus);
+  }
+
+  async refreshAfterServeRestart(): Promise<void> {
     if (!this.isReady) {
       return;
     }
@@ -2567,6 +2567,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         // A rejected reconnect returns the supervisor to its fatal state, which this panel renders.
         else await this.deps.reconnectServe?.().catch(() => undefined);
         return;
+      case "restartSharedService":
+        // As with reconnect, the supervisor publishes a failed restart to this panel.
+        await this.deps.restartServe?.().catch(() => undefined);
+        return;
       case "viewConnectionLogs":
         this.deps.showConnectionLogs?.();
         return;
@@ -2944,13 +2948,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       this.stateStore.setActiveSession(created);
-      await this.sessionPool.switchTo(created);
+      this.stateStore.applySessionOpen(await this.sessionPool.switchTo(created));
       await this.refreshSessions();
       return created;
     }
 
     this.stateStore.setActiveSession(target);
-    await this.sessionPool.switchTo(target);
+    this.stateStore.applySessionOpen(await this.sessionPool.switchTo(target));
     return this.sessionBlocked(target) ? null : target;
   }
 
@@ -3624,7 +3628,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const draft = await this.draftStore.hydrate(sessionId, (candidate) =>
         this.sessionExists(candidate),
       );
-      await this.retainDraftAttachmentLeases(sessionId, draft);
+      if (this.peekState().sessionViews[sessionId]?.access !== "observe") {
+        await this.retainDraftAttachmentLeases(sessionId, draft);
+      }
       await this.applyDraftToState(sessionId, draft);
       await this.syncImagePreviewPanel(sessionId);
       await this.postState();
@@ -4230,7 +4236,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         ).values()];
         await this.deps.sessionRouter.retainAttachmentLeases(targetSessionId, leaseRefs);
         await this.draftStore.installIfEmpty(targetSessionId, sourceDraft);
-        await this.sessionPool.switchTo(targetSessionId);
+        this.stateStore.applySessionOpen(await this.sessionPool.switchTo(targetSessionId));
         committed = true;
         await this.adoptCommittedDraftFork(targetSessionId);
         return targetSessionId;
@@ -4281,7 +4287,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   ): Promise<void> {
     if (this.sessionBlocked(sessionId)) return;
     await this.ensureInitialized();
-    await this.sessionPool.switchTo(sessionId);
+    this.stateStore.applySessionOpen(await this.sessionPool.switchTo(sessionId));
     await this.refreshSessionState(sessionId, {
       strict: options.strict,
       trustBusy: true,
@@ -4305,7 +4311,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (previous && this.messageQueue.view(previous).editingId) this.messageQueue.pause(previous);
     this.closedFileSessions.delete(sessionId);
     await this.ensureInitialized();
-    await this.sessionPool.switchTo(sessionId);
+    this.stateStore.applySessionOpen(await this.sessionPool.switchTo(sessionId));
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);

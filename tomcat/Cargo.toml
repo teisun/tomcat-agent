@@ -45,10 +45,12 @@ dirs = "5.0"
 dunce = "1"
 sys-locale = "0.3.2"
 async-trait = "0.1"
+# ACP v1 framing and typed handlers; no subprocess/stdio or draft-v2 SDK stack.
+agent-client-protocol = "=3.4.0"
 axum = { version = "0.8", optional = true }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat", "io"] }
 tracing-appender = "0.2"
 # 直连 HTTP 调用与 rmcp 的远程 MCP/OAuth transport 统一 reqwest 版本；
 # 显式保留现有调用的 JSON、流式、表单、查询参数和 multipart 能力。

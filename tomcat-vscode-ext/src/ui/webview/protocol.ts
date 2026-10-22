@@ -381,6 +381,8 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  access?: import("../../serveClient/sessionRouter").SessionAccess;
+  origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
   messageQueue?: WebviewMessageQueue;
   sessionFiles?: SessionFilesView;
@@ -407,6 +409,7 @@ export interface WebviewSessionSnapshot {
 }
 
 export interface WebviewSessionTab {
+  origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;
   isPinned?: boolean;
   deleting?: boolean;
   busy: boolean;
@@ -842,6 +845,7 @@ export type WebviewIntent =
       };
     }
   | { messageId: string; type: "retryConnection" }
+  | { messageId: string; type: "restartSharedService" }
   | { messageId: string; type: "viewConnectionLogs" }
   | {
       messageId: string;
@@ -1321,6 +1325,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
     case "retryConnection":
+    case "restartSharedService":
     case "viewConnectionLogs":
       return true;
     case "openSettings":

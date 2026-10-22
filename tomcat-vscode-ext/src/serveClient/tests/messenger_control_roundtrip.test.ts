@@ -1,12 +1,12 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { SharedConnectionOptions } from "../sharedConnection";
 import { describe, expect, it, vi } from "vitest";
 
 import { initializeServe } from "../initialize";
 import type { AskQuestionResult } from "../protocol";
-import { TomcatMessenger } from "../TomcatMessenger";
-import { createSpawnFactory, FakeChildProcess } from "./fakes";
+import { createReadyMessenger } from "./fakes";
+import { createConnectionFactory, FakeConnection } from "./fakes";
 
-function readLatestCommand(child: FakeChildProcess): Record<string, unknown> {
+function readLatestCommand(child: FakeConnection): Record<string, unknown> {
   return JSON.parse(child.readStdin().trim());
 }
 
@@ -41,18 +41,18 @@ function askFrame(requestId: string, sessionId: string) {
 describe("TomcatMessenger control roundtrip", () => {
   it("settles an outbound initialize cancellation immediately without cancelling another ID", async () => {
     vi.useFakeTimers();
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({ executable: "tomcat", spawnFactory: createSpawnFactory(child) });
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "tomcat", connectFactory: createConnectionFactory(child) });
     const rejected = vi.fn();
     const observed = initializeServe(messenger, 1_000).catch(rejected);
     const command = readLatestCommand(child);
     try {
       child.emitStdout(`${JSON.stringify({ type: "control_cancel", requestId: "unrelated" })}\n`);
-      await Promise.resolve();
+      await new Promise<void>(resolve => process.nextTick(resolve));
       expect(rejected).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
       child.emitStdout(`${JSON.stringify({ type: "control_cancel", requestId: command.requestId })}\n`);
-      await Promise.resolve();
-      await Promise.resolve();
+      await observed;
       expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("initialize was cancelled") }));
       expect(vi.getTimerCount()).toBe(0);
       await observed;
@@ -64,10 +64,10 @@ describe("TomcatMessenger control roundtrip", () => {
   });
 
   it("completes initialize handshake via control_response", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pending = initializeServe(messenger);
@@ -97,11 +97,28 @@ describe("TomcatMessenger control roundtrip", () => {
     });
   });
 
+  it("initializes a shared connection with explicit cwd and current-or-new semantics", async () => {
+    const socket = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "unused", cwd: "/workspace/project", connectFactory: createConnectionFactory(socket) });
+    const initialized = initializeServe(messenger);
+    const init = readLatestCommand(socket);
+    socket.emitStdout(JSON.stringify({ type: "control_response", requestId: init.requestId, payload: {
+      capabilities: ["prompt", "ask_question"], protocolVersion: 2, serverVersion: "0.1.80", sessionId: null,
+    } }) + "\n");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const bootstrap = readLatestCommand(socket);
+    expect(bootstrap).toMatchObject({ type: "new_session", params: { cwd: "/workspace/project", resumeCurrent: true } });
+    socket.emitStdout(JSON.stringify({ type: "response", id: bootstrap.id, sessionId: "existing", success: true, payload: { access: "observe" } }) + "\n");
+    await expect(initialized).resolves.toMatchObject({ sessionId: "existing" });
+    expect(socket.readStdin()).toBe("");
+    await messenger.disposeAsync();
+  });
+
   it("auto-answers ask_question via registered handler", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     messenger.registerAskQuestionHandler(async () => ({
@@ -130,12 +147,11 @@ describe("TomcatMessenger control roundtrip", () => {
   });
 
   it("aborts stale deferred handlers across restart and child exit", async () => {
-    const firstChild = new FakeChildProcess();
-    const secondChild = new FakeChildProcess();
+    const firstChild = new FakeConnection();
+    const secondChild = new FakeConnection();
     const children = [firstChild, secondChild];
-    const spawnFactory = (() =>
-      children.shift() as unknown as ChildProcessWithoutNullStreams) as unknown as typeof import("node:child_process").spawn;
-    const messenger = new TomcatMessenger({ executable: "tomcat", spawnFactory });
+    const connectFactory = (options: SharedConnectionOptions) => createConnectionFactory(children.shift()!)(options);
+    const messenger = await createReadyMessenger({ executable: "tomcat", connectFactory });
     const deferredHandlers = [deferred<AskQuestionResult>(), deferred<AskQuestionResult>()];
     const contexts: Array<{ generation: number; signal: AbortSignal }> = [];
     messenger.registerAskQuestionHandler((_request, _frame, context) => {
@@ -146,7 +162,7 @@ describe("TomcatMessenger control roundtrip", () => {
     messenger.start();
     firstChild.emitStdout(askFrame("ask-old", "s1"));
     await vi.waitFor(() => expect(contexts).toHaveLength(1));
-    messenger.restart();
+    await messenger.restart();
     expect(contexts[0].signal.aborted).toBe(true);
 
     deferredHandlers[0].resolve({ answers: [], cancelled: true, outcome: "skipped" });
@@ -167,10 +183,10 @@ describe("TomcatMessenger control roundtrip", () => {
   });
 
   it("aborts the matching inbound control handler on control_cancel", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
     const wait = deferred<AskQuestionResult>();
     let signal: AbortSignal | undefined;

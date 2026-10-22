@@ -44,7 +44,7 @@ async fn new_session_registers_slot_in_registry() {
         .iter()
         .any(|session| session.session_id == new_slot.session_id));
     assert_eq!(
-        state.registry.active_session_id().as_deref(),
+        state.active_session_id().as_deref(),
         Some(initial_slot.session_id.as_str()),
         "insert alone should not implicitly steal active session"
     );

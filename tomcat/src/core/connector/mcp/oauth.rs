@@ -578,9 +578,20 @@ pub async fn authorize(
     oauth: &McpOAuthConfig,
     open_browser: bool,
 ) -> Result<StoredOAuthToken, AppError> {
-    let stored = authorize_token(client, server_name, mcp_url, oauth, open_browser).await?;
+    let stored = authorize_token(client, server_name, mcp_url, oauth, open_browser, None).await?;
     store.save(server_name, stored.clone())?;
     Ok(stored)
+}
+
+fn configured_client_secret(
+    oauth: &McpOAuthConfig,
+    environment: Option<&crate::infra::platform::EnvironmentSnapshot>,
+) -> Option<String> {
+    let name = oauth.client_secret_env.as_deref()?;
+    match environment {
+        Some(snapshot) => snapshot.get(name).map(str::to_owned),
+        None => std::env::var(name).ok(),
+    }
 }
 
 /// Obtain a credential without writing it. The source owner commits only after
@@ -591,6 +602,7 @@ pub(crate) async fn authorize_token(
     mcp_url: &str,
     oauth: &McpOAuthConfig,
     open_browser: bool,
+    environment: Option<&crate::infra::platform::EnvironmentSnapshot>,
 ) -> Result<StoredOAuthToken, AppError> {
     let discovery = OAuthDiscovery::discover(client, mcp_url).await?;
     let configured_redirect_uri = oauth.callback_url.clone();
@@ -629,13 +641,7 @@ pub(crate) async fn authorize_token(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let (client_id, client_secret) = if let Some(client_id) = oauth.client_id.clone() {
-        (
-            client_id,
-            oauth
-                .client_secret_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok()),
-        )
+        (client_id, configured_client_secret(oauth, environment))
     } else if let Some(metadata_url) = oauth.client_metadata_url.clone() {
         let parsed = Url::parse(&metadata_url).map_err(|error| {
             AppError::Tool(tr(

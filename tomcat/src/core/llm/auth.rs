@@ -221,6 +221,9 @@ pub(crate) fn read_env_value(env_name: &str) -> Option<String> {
 }
 
 fn process_env_value(env_name: &str) -> Option<String> {
+    if crate::infra::config::saved_configuration_only() {
+        return None;
+    }
     if managed_credential_state()
         .read()
         .preloaded

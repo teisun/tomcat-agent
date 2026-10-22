@@ -769,6 +769,7 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(4),
             id: "sid".to_string(),
             timestamp: "2026-09-10T00:00:00.000Z".to_string(),
@@ -866,6 +867,7 @@ fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),

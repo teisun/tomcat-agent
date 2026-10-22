@@ -13,7 +13,26 @@ import type {
   SessionFilesKeepResponse,
 } from "./wire";
 
+export type SessionAccess = "control" | "observe";
+export interface SessionOrigin { kind: "acp"; clientName: string | null }
+export interface SessionOpenResult { sessionId: string; access: SessionAccess; origin: SessionOrigin | null }
+
+function parseAccess(value: unknown): SessionAccess {
+  // Older private stdio responses omit access; a present but invalid value is not control.
+  if (value === undefined || value === "control") return "control";
+  if (value === "observe") return "observe";
+  throw new Error("Invalid session access");
+}
+
+function parseOrigin(value: unknown): SessionOrigin | null {
+  return isRecord(value) && value.kind === "acp"
+    ? { kind: "acp", clientName: typeof value.clientName === "string" ? value.clientName : null }
+    : null;
+}
+
 export interface SessionSummary {
+  access?: SessionAccess;
+  origin?: SessionOrigin | null;
   busy: boolean;
   interrupted?: boolean;
   isCurrent: boolean;
@@ -243,13 +262,18 @@ export class SessionRouter {
     return isRecord(response.payload) ? response.payload.discarded === true : false;
   }
 
-  async switchSession(sessionId: string): Promise<string> {
+  async switchSession(sessionId: string): Promise<SessionOpenResult> {
     const response = await this.messenger.request({
       sessionId,
       type: "switch_session",
     });
     requireSuccessfulResponse(response, "switch_session");
-    return requireSessionId(response);
+    const payload = isRecord(response.payload) ? response.payload : {};
+    return {
+      sessionId: requireSessionId(response),
+      access: parseAccess(payload.access),
+      origin: parseOrigin(payload.origin),
+    };
   }
 
   async closeSession(sessionId: string): Promise<boolean> {
@@ -281,6 +305,8 @@ export class SessionRouter {
         ? payload.sessions
             .filter(isRecord)
             .map((session) => ({
+              access: parseAccess(session.access),
+              origin: parseOrigin(session.origin),
               busy: session.busy === true,
               interrupted: session.interrupted === true,
               isCurrent: session.isCurrent === true,
@@ -302,6 +328,7 @@ export class SessionRouter {
       sessionId,
       type: "get_state",
     });
+    requireSuccessfulResponse(response, "get_state");
     const payload = response.payload;
 
     if (!isRecord(payload) || typeof payload.sessionId !== "string") {
@@ -340,6 +367,7 @@ export class SessionRouter {
     params: GetMessagesParams = {},
   ): Promise<SessionHistoryPayload> {
     const response = await this.messenger.sendGetMessages(sessionId, params);
+    requireSuccessfulResponse(response, "get_messages");
     const payload = response.payload;
 
     if (!isRecord(payload) || typeof payload.sessionId !== "string") {

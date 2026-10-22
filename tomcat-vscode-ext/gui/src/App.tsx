@@ -1540,7 +1540,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const commandPending = activeSession?.commandPending === true;
-  const queueEditingItem = state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
+  const readOnly = activeSession?.access === "observe";
+  const queueEditingItem = !readOnly && state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
   const previousQueueEditor = useRef<{ sessionId?: string; id?: string }>({});
   useEffect(() => {
     const previous = previousQueueEditor.current;
@@ -1552,10 +1553,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   // Undefined means a CLI that predates readiness reporting; only an explicit false blocks sending.
   const modelBlocked = activeSession?.modelReady === false;
   const openModelSettings = () => postIntent(vscodeApi, "openSettings", { route: "models" });
-  const canPromptWhenConfigured = state.ready && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
+  const canPromptWhenConfigured = state.ready && !readOnly && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
   const canPrompt = canPromptWhenConfigured && !modelBlocked;
-  const canInterrupt = state.ready;
-  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
+  const canInterrupt = state.ready && !readOnly;
+  const canBuildPlan = state.ready && !readOnly && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
   const modelAdminSupported = state.modelAdminSupported;
   const composerModelId = activeSession?.model;
   const activeModelCapabilities = composerModelId
@@ -2614,6 +2615,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     availableModels: state.availableModels,
     busy: !!activeSession?.busy,
     canChangeConfig: canPromptWhenConfigured && !activeSession?.busy,
+    configDisabledReason: readOnly ? t("session.readOnly") : undefined,
     canInterrupt,
     allowBusyInput: !!state.messageQueueSupported,
     attachmentsPending: !!activeSession && composerWorkRegistryRef.current.pendingCount(activeSession.sessionId) > 0,
@@ -2715,6 +2717,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         activeSessionId={activeSession?.sessionId ?? null}
         creating={draftForkFeedback.pending}
         creationDisabledReason={activeSession?.deleting ? t("session.delete.pending") : undefined}
+        onOpen={() => postIntent(vscodeApi, "listSessions")}
         onOpenSettings={() => postIntent(vscodeApi, "openSettings", { route: "general" })}
         onSetPinned={state.pinSupported ? (sessionId, pinned) => postIntent(vscodeApi, "setSessionPinned", { sessionId, pinned }) : undefined}
         onDeleteSession={(sessionId) => postIntent(vscodeApi, "deleteSession", { sessionId })}
@@ -2778,7 +2781,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               {state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? <>
                 {state.connectionFailure?.detail ? <p role="alert">{state.connectionFailure.detail}</p> : null}
                 <div className="tc-button-row">
-                  <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
+                  {state.connectionFailure?.kind === "version_mismatch" ? (
+                    <button type="button" className="tc-button tc-button--primary" data-testid="restart-shared-service" onClick={() => postIntent(vscodeApi, "restartSharedService")}>{t("host.action.restartSharedService")}</button>
+                  ) : (
+                    <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
+                  )}
                   <button type="button" className="tc-button tc-button--secondary" data-testid="view-connection-logs" onClick={() => postIntent(vscodeApi, "viewConnectionLogs")}>{t("host.action.logs")}</button>
                 </div>
               </> : null}
@@ -2786,9 +2793,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           ) : activeSession ? (
             hasTranscriptContent ? (
               <TranscriptView
+                readOnly={readOnly}
                 onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending && !queueEditingItem
                   ? handleEditUserMessage : undefined}
-                renderUserEditor={(message) => editingMessage?.id === message.id ? (
+                renderUserEditor={(message) => !readOnly && editingMessage?.id === message.id ? (
                   <InlineMessageEditor
                     key={`${activeSession.sessionId}:${message.id}`}
                     message={editingMessage}
@@ -2820,8 +2828,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onOpenImagePreview={handleOpenImagePreview}
                 onOpenPlanFile={handleOpenPlanFile}
                 resolvePaths={resolvePaths}
-                onRecoverErrorTurn={handleRecoverErrorTurn}
-                onRetryUserMessage={handleRetryUserMessage}
+                onRecoverErrorTurn={readOnly ? undefined : handleRecoverErrorTurn}
+                onRetryUserMessage={readOnly ? undefined : handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
                 planId={activeSession.activePlan?.planId}
@@ -2896,7 +2904,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       })() : null}
 
 
-      {pendingRestoreDialog ? (
+      {pendingRestoreDialog && !readOnly ? (
         <RestoreConfirmDialog
           changedFiles={pendingRestoreDialog.changedFiles}
           onCancel={handleCancelRestore}
@@ -2907,8 +2915,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <div className="tc-footer" data-testid="composer-footer">
+        {readOnly ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
+          {activeSession?.origin
+            ? t("session.readOnlyFrom", { source: activeSession.origin.clientName?.trim() || t("session.acpClient") })
+            : t("session.readOnly")}
+        </div> : null}
         {state.ready && modelBlocked && hasTranscriptContent ? <ModelSetupCard onConfigure={openModelSettings} /> : null}
         <SessionDock
+          readOnly={readOnly}
           key={activeSession?.sessionId ?? "empty"}
           sessionId={activeSession?.sessionId ?? ""}
           busy={!!activeSession?.busy}
@@ -2916,7 +2930,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           planState={activeSession?.activePlan?.state}
           planTodos={activeSession?.planTodos ?? []}
           sessionTodos={activeSession?.sessionTodos ?? []}
-          messages={state.messageQueueSupported && activeSession?.messageQueue?.items.length ? <MessageQueueDock sessionId={activeSession.sessionId} queue={activeSession.messageQueue} busy={activeSession.busy} composerProps={composerProps} vscodeApi={vscodeApi} /> : undefined}
+          messages={!readOnly && state.messageQueueSupported && activeSession?.messageQueue?.items.length ? <MessageQueueDock sessionId={activeSession.sessionId} queue={activeSession.messageQueue} busy={activeSession.busy} composerProps={composerProps} vscodeApi={vscodeApi} /> : undefined}
           files={state.sessionFilesSupported ? activeSession?.sessionFiles : undefined}
           onIntent={(intent) => vscodeApi.postMessage(intent)}
         />

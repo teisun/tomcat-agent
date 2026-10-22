@@ -15,6 +15,19 @@ pub mod ui;
 #[cfg(test)]
 mod tests;
 
+// This is a process bootstrap fact, not a preference or per-session switch.
+// Shared services must not use whichever host happened to start them as a
+// configuration source. Connection environments belong only to their children.
+static SAVED_CONFIGURATION_ONLY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+pub(crate) fn use_saved_configuration_only() {
+    let _ = SAVED_CONFIGURATION_ONLY.set(());
+}
+
+pub(crate) fn saved_configuration_only() -> bool {
+    SAVED_CONFIGURATION_ONLY.get().is_some()
+}
+
 #[allow(unused_imports)]
 pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};

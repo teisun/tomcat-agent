@@ -113,7 +113,12 @@ fn blocked_commands() -> Vec<Commands> {
         },
         Commands::Claw { resume: false },
         Commands::Code { resume: false },
+        Commands::Acp { skills_dir: None },
+        Commands::Acp {
+            skills_dir: Some("/host/skills".into()),
+        },
         Commands::Serve {
+            sub: None,
             stdio: true,
             ws: false,
             print_schema: false,
@@ -126,6 +131,7 @@ fn allowed_commands() -> Vec<Commands> {
     vec![
         Commands::Doctor,
         Commands::Serve {
+            sub: None,
             stdio: false,
             ws: false,
             print_schema: true,
@@ -241,10 +247,21 @@ fn nested_guard_allows_readonly_commands_when_active() {
 #[test]
 fn nested_guard_allows_serve_print_schema_when_active() {
     assert_allowed(Commands::Serve {
+        sub: None,
         stdio: false,
         ws: false,
         print_schema: true,
     });
+}
+
+#[test]
+fn nested_guard_separates_service_status_from_lifecycle_commands() {
+    for action in ["start", "stop", "restart"] {
+        let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", action]).unwrap();
+        assert_blocked(cli.command.unwrap());
+    }
+    let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", "status"]).unwrap();
+    assert_allowed(cli.command.unwrap());
 }
 
 #[test]

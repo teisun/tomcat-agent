@@ -40,7 +40,7 @@ async fn session_job_releases_fifo_blocks_mutation_and_is_idle_before_response()
     .await
     .unwrap();
     state.registry.insert(Arc::clone(&b)).unwrap();
-    let active = state.registry.active_session_id();
+    let active = state.active_session_id();
     let before = a
         .ctx
         .session_runtime
@@ -60,7 +60,7 @@ async fn session_job_releases_fifo_blocks_mutation_and_is_idle_before_response()
     )
     .unwrap();
     assert!(a.is_busy() && a.is_command_job_running());
-    assert_eq!(state.registry.active_session_id(), active);
+    assert_eq!(state.active_session_id(), active);
     tokio::time::timeout(
         Duration::from_millis(500),
         handle_command(

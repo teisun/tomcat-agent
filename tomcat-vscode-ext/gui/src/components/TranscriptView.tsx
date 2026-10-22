@@ -116,6 +116,7 @@ export function partitionAssistantResponseGroup(
 }
 
 export function TranscriptView({
+  readOnly = false,
   renderUserEditor,
   onEditUserMessage,
   approvalAnswers = {},
@@ -154,6 +155,7 @@ export function TranscriptView({
   mediaRoots,
   transcriptRef,
 }: {
+  readOnly?: boolean;
   renderUserEditor?(message: Extract<WebviewTimelineItem, {type:"message"}>): ReactNode;
   onEditUserMessage?(message: Extract<WebviewTimelineItem, {type:"message"}>): void;
   approvalAnswers?: Record<string, ApprovalAnswerState>;
@@ -216,7 +218,7 @@ export function TranscriptView({
     const activeAssistantMessageId = showProgress
       ? lastLiveAssistantMessageId(clusterTimeline)
       : null;
-    const planModelPicker = {
+    const planModelPicker = readOnly ? undefined : {
       availableModelDetails,
       availableModels,
       buildModel,
@@ -293,6 +295,7 @@ export function TranscriptView({
         case "checkpoint":
           return (
             <CheckpointMarker
+              disabled={readOnly}
               item={item}
               key={item.id}
               onRestore={(checkpoint) => onRestoreCheckpoint?.(checkpoint.checkpointId)}

@@ -140,7 +140,7 @@ turn2  refresh        → 工具集 = 内置 + MCP           → P1 ≠ P0  → 
 重连   Ready           → 再装回                        → P3       → MISS
 ```
 
-**判定**：不是「排序/内容每次不一样」（给定同一集合，工具面逐字节稳定：`list_tools` 按 `(plugin_id,name)` 排序、`from_plugin_tools` 按 name 排序、MCP 侧 `BTreeMap`、`serde_json` 未开 `preserve_order`，已有单测 `tool_surface_is_byte_stable_when_registry_observation_order_changes`）；**而是「完整目录进了前缀、且集合随异步连接漂移」** —— 一变则后面全废，同时埋下 token 爆炸（server 越多前缀越大）。
+**判定**：不是「排序/内容每次不一样」（给定同一集合，工具面逐字节稳定：`list_tools` 按 `(plugin_id,name)` 排序、`from_plugin_tools` 按 name 排序、MCP 侧 `BTreeMap`；ACP SDK 已全局打开 `serde_json/preserve_order`，工具 schema 进入 prompt 前由 `ToolSurface::from_plugin_tools_with_runtime_policies` 显式递归排序，单测 `tool_surface_is_byte_stable_when_registry_observation_order_changes` 与 `tool_surface_normalizes_nested_object_keys_without_invalidating_the_prompt` 守住字节稳定性）；**而是「完整目录进了前缀、且集合随异步连接漂移」** —— 一变则后面全废，同时埋下 token 爆炸（server 越多前缀越大）。
 
 ### 1.5 动工闸门：先复现、先定位（诊断先行）
 

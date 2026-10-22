@@ -93,13 +93,16 @@ fn op_summary(op: PrimitiveOperation) -> String {
 /// Validate an explicit bash cwd: it must exist and be a directory. Emitting this before the
 /// process is spawned turns an otherwise cryptic `ENOENT` from `Command::spawn` into an
 /// actionable message (and hints about un-expanded `$VAR`).
-fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
+fn validate_bash_cwd(path: &Path, raw_cwd: &str, base: Option<&Path>) -> Result<(), AppError> {
     if !path.try_exists().map_err(AppError::Io)? {
         let mut msg = format!(
             "bash.cwd does not exist: {} (input: {raw_cwd:?})",
             path.display()
         );
-        if let Ok(project_root) = std::env::current_dir() {
+        if let Some(project_root) = base
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+        {
             msg.push_str(&format!(
                 "; project root is {} — use \".\" or a relative path under it",
                 project_root.display()
@@ -136,27 +139,38 @@ impl ResolvedCwd {
     }
 
     pub fn from_raw(cwd: Option<&str>) -> Result<Self, AppError> {
-        Self::from_owned(cwd.map(str::to_string))
+        Self::from_raw_in(cwd, None)
     }
 
     pub fn from_path_buf(cwd: Option<PathBuf>) -> Result<Self, AppError> {
-        Self::from_owned(cwd.map(|path| path.to_string_lossy().into_owned()))
+        Self::from_raw(cwd.as_ref().map(|path| path.to_string_lossy()).as_deref())
     }
 
-    fn from_owned(cwd: Option<String>) -> Result<Self, AppError> {
+    pub fn from_raw_in(cwd: Option<&str>, base: Option<&Path>) -> Result<Self, AppError> {
+        Self::from_raw_in_environment(cwd, base, None)
+    }
+
+    pub(crate) fn from_raw_in_environment(
+        cwd: Option<&str>,
+        base: Option<&Path>,
+        environment: Option<&crate::infra::platform::EnvironmentSnapshot>,
+    ) -> Result<Self, AppError> {
         let raw_input = cwd.and_then(|value| {
             let trimmed = value.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         });
-        let Some(raw_input) = raw_input else {
+        if raw_input.is_none() && base.is_none() {
             return Ok(Self::inherited());
-        };
-        let path = normalize_path(&raw_input)?;
-        validate_bash_cwd(&path, &raw_input)?;
-        Ok(Self {
-            path,
-            raw_input: Some(raw_input),
-        })
+        }
+        let input = raw_input.as_deref().unwrap_or(".");
+        let expanded = environment.map(|env| env.expand_home(input)).transpose()?;
+        let input_path = expanded.as_ref().map(|path| path.to_string_lossy());
+        let path = normalize_path(
+            &super::types::path_in_session(input_path.as_deref().unwrap_or(input), base)
+                .to_string_lossy(),
+        )?;
+        validate_bash_cwd(&path, input, base)?;
+        Ok(Self { path, raw_input })
     }
 
     pub fn resolved_path(&self) -> &Path {
@@ -172,28 +186,21 @@ impl ResolvedCwd {
     }
 
     fn command_cwd(&self) -> Option<&Path> {
-        self.raw_input.as_ref().map(|_| self.path.as_path())
+        (self.path != Path::new(".") || self.raw_input.is_some()).then_some(self.path.as_path())
     }
 }
 
-fn resolve_preflight_path(raw: &str, cwd_path: &Path) -> PathBuf {
-    if raw == "~" {
-        return crate::infra::platform::home_dir().unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return crate::infra::platform::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if raw.starts_with("./") || raw.starts_with("../") {
-        let base = if cwd_path == Path::new(".") {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            cwd_path.to_path_buf()
-        };
-        return base.join(raw);
-    }
-    PathBuf::from(raw)
+pub(super) fn resolve_preflight_path(
+    raw: &str,
+    cwd: &Path,
+    environment: Option<&crate::infra::platform::EnvironmentSnapshot>,
+) -> Result<PathBuf, AppError> {
+    let expanded = environment.map(|env| env.expand_home(raw)).transpose()?;
+    let input = expanded.as_ref().map(|path| path.to_string_lossy());
+    normalize_path(
+        &super::types::path_in_session(input.as_deref().unwrap_or(raw), Some(cwd))
+            .to_string_lossy(),
+    )
 }
 
 #[derive(Clone)]
@@ -367,15 +374,13 @@ impl BackgroundBashGuard {
         &self,
         audit_cmd: &str,
         cwd: &ResolvedCwd,
+        environment: Option<&crate::infra::platform::EnvironmentSnapshot>,
     ) -> Result<(PermissionScope, GrantTrace), AppError> {
-        let cwd_path = if let Some(raw_cwd) = cwd.raw_input() {
-            let _ = self
-                .gate_check_path(PrimitiveOperation::Read, raw_cwd)
+        let cwd_path = cwd.resolved_path();
+        if cwd.raw_input().is_some() {
+            self.gate_check_path(PrimitiveOperation::Read, &cwd_path.to_string_lossy())
                 .await?;
-            cwd.resolved_path().to_path_buf()
-        } else {
-            PathBuf::from(".")
-        };
+        }
 
         if let Err(reject) = self.bash_ast.check(audit_cmd) {
             return Err(AppError::Primitive(reject.to_string()));
@@ -384,7 +389,7 @@ impl BackgroundBashGuard {
         // TODO: 与 `executor/bash.rs::preflight_command_paths` 同口径——勿扩展重定向 parser；
         // 重定向写盘等见 bash_parser 模块顶 TODO / T-151。
         for raw in crate::core::permission::bash_parser::extract_paths(audit_cmd) {
-            let candidate = resolve_preflight_path(&raw, &cwd_path);
+            let candidate = resolve_preflight_path(&raw, cwd_path, environment)?;
             let candidate_owned = candidate.to_string_lossy().into_owned();
             let _ = self
                 .gate_check_path(PrimitiveOperation::Bash, &candidate_owned)
@@ -573,6 +578,8 @@ pub struct BashRuntimePreview {
 /// `bash` 后台任务三件套的注册表。生产路径：`api/chat` 装配时 `Arc::new` 一份，
 /// 通过 `AgentLoop::with_bash_task_registry` 注入；测试路径可注入 `tempfile::tempdir()`。
 pub struct BashTaskRegistry {
+    environment: RwLock<Option<Arc<crate::infra::platform::EnvironmentSnapshot>>>,
+    session_cwd: Option<PathBuf>,
     tasks: RwLock<HashMap<BashTaskId, Arc<BashTask>>>,
     persist_dir: PathBuf,
     background_guard: Option<BackgroundBashGuard>,
@@ -593,6 +600,8 @@ impl BashTaskRegistry {
             tasks: RwLock::new(HashMap::new()),
             persist_dir,
             background_guard: None,
+            session_cwd: None,
+            environment: RwLock::new(None),
             lifecycle_tx,
             output_tx,
             foreground_wait_ms: crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
@@ -605,6 +614,26 @@ impl BashTaskRegistry {
             crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
         );
         self
+    }
+
+    pub fn with_session_cwd(mut self, cwd: Option<PathBuf>) -> Self {
+        self.session_cwd = cwd;
+        self
+    }
+
+    /// Rebound only during session admission, after the previous owner's work
+    /// has stopped. Already spawned processes retain their original environment.
+    pub(crate) fn set_environment(
+        &self,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    ) {
+        *self.environment.write() = environment;
+    }
+
+    pub(crate) fn environment_snapshot(
+        &self,
+    ) -> Option<Arc<crate::infra::platform::EnvironmentSnapshot>> {
+        self.environment.read().clone()
     }
 
     pub fn foreground_wait_ms(&self) -> u64 {
@@ -682,7 +711,11 @@ impl BashTaskRegistry {
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
-        let cwd = ResolvedCwd::from_path_buf(cwd)?;
+        let cwd = ResolvedCwd::from_raw_in_environment(
+            cwd.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+            self.session_cwd.as_deref(),
+            self.environment_snapshot().as_deref(),
+        )?;
         self.spawn_tracked_inner(
             command,
             cwd,
@@ -702,7 +735,11 @@ impl BashTaskRegistry {
         cwd: Option<PathBuf>,
         deliver_completion_on_finish: bool,
     ) -> Result<BashTaskTicket, AppError> {
-        let cwd = ResolvedCwd::from_path_buf(cwd)?;
+        let cwd = ResolvedCwd::from_raw_in_environment(
+            cwd.as_ref().map(|path| path.to_string_lossy()).as_deref(),
+            self.session_cwd.as_deref(),
+            self.environment_snapshot().as_deref(),
+        )?;
         self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true, None)
             .await
     }
@@ -716,7 +753,9 @@ impl BashTaskRegistry {
         preview_flush_required: bool,
         captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
     ) -> Result<BashTaskTicket, AppError> {
-        let shell = crate::infra::platform::posix_shell()?;
+        let environment = self.environment_snapshot();
+        let shell =
+            crate::infra::platform::posix_shell_for(environment.as_deref(), cwd.resolved_path())?;
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -727,7 +766,10 @@ impl BashTaskRegistry {
         let audit_cmd = command.clone();
         let bash_scope_grant = if apply_guard {
             if let Some(guard) = self.background_guard.as_ref() {
-                match guard.bash_preflight_and_gate(&audit_cmd, &cwd).await {
+                match guard
+                    .bash_preflight_and_gate(&audit_cmd, &cwd, environment.as_deref())
+                    .await
+                {
                     Ok(scope_grant) => Some(scope_grant),
                     Err(err) => {
                         guard.record_failure(&audit_cmd, &err);
@@ -765,6 +807,9 @@ impl BashTaskRegistry {
         };
 
         let mut cmd = Command::new(shell);
+        if let Some(environment) = environment {
+            environment.apply(cmd.as_std_mut());
+        }
         cmd.arg("-c").arg(&command);
         if let Some(c) = cwd.command_cwd() {
             cmd.current_dir(c);

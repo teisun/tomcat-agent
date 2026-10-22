@@ -240,6 +240,7 @@ async fn timing5_try_start_snapshots_working_set_and_appends_tail_marker() {
         &transcript_path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(4),
             id: "sess-timing5-marker".to_string(),
             timestamp: "2026-09-14T00:00:00Z".to_string(),

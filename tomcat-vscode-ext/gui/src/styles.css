@@ -4181,6 +4181,7 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-footer { display: flex; flex-direction: column; flex: 0 0 auto; gap: 4px; min-width: 0; }
+.tc-observer-notice { color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.4; padding: 4px 0; overflow-wrap: anywhere; }
 .tc-footer__composer { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .tc-session-dock { border: 1px solid var(--vscode-panel-border, rgba(127,127,127,.22)); border-radius: var(--tc-dock-radius); margin-inline: calc(var(--tc-controls-inset) - var(--tc-content-inset)); min-width: 0; overflow: hidden; }
 .tc-session-dock__header { display: flex; align-items: stretch; padding-inline: 4px; min-height: 24px; flex: 0 0 auto; }

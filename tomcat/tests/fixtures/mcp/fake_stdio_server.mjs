@@ -32,6 +32,11 @@ const lingerAfterEofMs = Number(option("--linger-after-eof-ms") ?? 0);
 const pidFile = option("--pid-file");
 // Synchronous: an await here would let readline emit lines before the handler below exists.
 if (pidFile) writeFileSync(pidFile, String(process.pid));
+const environmentRecord = option("--environment-record");
+if (environmentRecord) writeFileSync(environmentRecord, JSON.stringify({
+  pid: process.pid, cwd: process.cwd(), path: process.env.PATH,
+  task: process.env.TASK_VALUE ?? null, starter: process.env.STARTER_ONLY ?? null,
+}));
 const pending = new Map();
 let writes = Promise.resolve();
 

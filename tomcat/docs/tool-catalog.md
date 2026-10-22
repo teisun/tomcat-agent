@@ -26,62 +26,62 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "hashline": {
-      "description": "Render each line as `{line}#{2-char hash}:{content}` for use with hashline_edit. Display-only prefix — do not paste into edit.old_content. Mutually exclusive with line_numbers (hashline wins). Default false.",
-      "type": "boolean"
-    },
-    "limit": {
-      "description": "Optional max lines to return (default 2000). On overflow the result appends a resume hint with the next offset.",
-      "maximum": 10000,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "line_numbers": {
-      "description": "Render `cat -n` style line numbers (default true). Applies to every entry when using `paths`. These prefixes are display-only — do not paste `  N\\t...` into edit.old_content.",
-      "type": "boolean"
-    },
-    "offset": {
-      "description": "Optional 1-based line to start from. Defaults to 1.",
-      "minimum": 1,
-      "type": "integer"
-    },
     "path": {
-      "description": "Absolute or relative file path to read as UTF-8 text. Provide exactly one of `path` or `paths`.",
-      "type": "string"
+      "type": "string",
+      "description": "Absolute or relative file path to read as UTF-8 text. Provide exactly one of `path` or `paths`."
     },
     "paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
       "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Keep a batch to 3-5 files so the combined result stays small enough to remain inline.",
       "items": {
+        "type": "object",
         "properties": {
-          "limit": {
-            "description": "Optional max lines for this entry.",
-            "maximum": 10000,
-            "minimum": 1,
-            "type": "integer"
+          "path": {
+            "type": "string",
+            "description": "File to read."
           },
           "offset": {
-            "description": "Optional 1-based start line for this entry.",
+            "type": "integer",
             "minimum": 1,
-            "type": "integer"
+            "description": "Optional 1-based start line for this entry."
           },
-          "path": {
-            "description": "File to read.",
-            "type": "string"
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "Optional max lines for this entry."
           }
         },
         "required": [
           "path"
-        ],
-        "type": "object"
-      },
-      "maxItems": 10,
-      "minItems": 1,
-      "type": "array"
+        ]
+      }
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional 1-based line to start from. Defaults to 1."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "description": "Optional max lines to return (default 2000). On overflow the result appends a resume hint with the next offset."
+    },
+    "line_numbers": {
+      "type": "boolean",
+      "description": "Render `cat -n` style line numbers (default true). Applies to every entry when using `paths`. These prefixes are display-only — do not paste `  N\\t...` into edit.old_content."
+    },
+    "hashline": {
+      "type": "boolean",
+      "description": "Render each line as `{line}#{2-char hash}:{content}` for use with hashline_edit. Display-only prefix — do not paste into edit.old_content. Mutually exclusive with line_numbers (hashline wins). Default false."
     }
   },
-  "required": [],
-  "type": "object"
+  "required": []
 }
 ```
 
@@ -100,23 +100,23 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
+    "name": {
+      "type": "string",
+      "description": "Skill 名称（来自 <available_skills> 的 name 字段）。"
+    },
     "file": {
-      "description": "技能目录下的相对附件路径；省略或 null 表示读取主 SKILL.md 正文。",
       "type": [
         "string",
         "null"
-      ]
-    },
-    "name": {
-      "description": "Skill 名称（来自 <available_skills> 的 name 字段）。",
-      "type": "string"
+      ],
+      "description": "技能目录下的相对附件路径；省略或 null 表示读取主 SKILL.md 正文。"
     }
   },
   "required": [
     "name"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -140,25 +140,25 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute or relative file path to create or overwrite."
+    },
     "content": {
-      "description": "Full file content to write.",
-      "type": "string"
+      "type": "string",
+      "description": "Full file content to write."
     },
     "overwrite": {
-      "description": "Whether an existing file may be overwritten. Defaults to false.",
-      "type": "boolean"
-    },
-    "path": {
-      "description": "Absolute or relative file path to create or overwrite.",
-      "type": "string"
+      "type": "boolean",
+      "description": "Whether an existing file may be overwritten. Defaults to false."
     }
   },
   "required": [
     "path",
     "content"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -183,53 +183,53 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute or relative path to the one existing file to edit."
+    },
     "edits": {
+      "type": "array",
+      "minItems": 1,
       "description": "One or more independent segments applied to this file's ORIGINAL snapshot. Overlapping spans are rejected.",
       "items": {
-        "additionalProperties": false,
+        "type": "object",
         "properties": {
+          "old_content": {
+            "type": "string",
+            "description": "Exact existing text or insertion anchor (real file text; no read display prefixes)."
+          },
+          "new_content": {
+            "type": "string",
+            "description": "Replacement text, or text to insert for insert modes."
+          },
           "mode": {
-            "description": "Defaults to replace. Insert modes preserve old_content as the anchor.",
+            "type": "string",
             "enum": [
               "replace",
               "insert_before",
               "insert_after"
             ],
-            "type": "string"
-          },
-          "new_content": {
-            "description": "Replacement text, or text to insert for insert modes.",
-            "type": "string"
-          },
-          "old_content": {
-            "description": "Exact existing text or insertion anchor (real file text; no read display prefixes).",
-            "type": "string"
+            "description": "Defaults to replace. Insert modes preserve old_content as the anchor."
           },
           "replace_all": {
-            "description": "Change every occurrence intentionally; defaults to false. Valid only with mode=replace.",
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Change every occurrence intentionally; defaults to false. Valid only with mode=replace."
           }
         },
         "required": [
           "old_content",
           "new_content"
         ],
-        "type": "object"
-      },
-      "minItems": 1,
-      "type": "array"
-    },
-    "path": {
-      "description": "Absolute or relative path to the one existing file to edit.",
-      "type": "string"
+        "additionalProperties": false
+      }
     }
   },
   "required": [
     "path",
     "edits"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -248,54 +248,54 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; invalid anchors are all reported and no write occurs.",
   "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute or relative file path to edit."
+    },
     "edits": {
+      "type": "array",
+      "minItems": 1,
       "description": "Line-anchored operations applied against the CURRENT file content.",
       "items": {
-        "additionalProperties": false,
+        "type": "object",
         "properties": {
-          "end": {
-            "description": "Optional inclusive end-line anchor (replace/delete only). Defaults to `pos`.",
-            "type": "string"
-          },
-          "lines": {
-            "description": "Replacement / insertion text (end multi-line text with a newline). Ignored by `delete`.",
-            "type": "string"
-          },
           "op": {
-            "description": "Edit operation kind.",
+            "type": "string",
             "enum": [
               "replace",
               "insert",
               "delete"
             ],
-            "type": "string"
+            "description": "Edit operation kind."
           },
           "pos": {
-            "description": "Start-line anchor `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content goes BEFORE this line.",
-            "type": "string"
+            "type": "string",
+            "description": "Start-line anchor `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content goes BEFORE this line."
+          },
+          "end": {
+            "type": "string",
+            "description": "Optional inclusive end-line anchor (replace/delete only). Defaults to `pos`."
+          },
+          "lines": {
+            "type": "string",
+            "description": "Replacement / insertion text (end multi-line text with a newline). Ignored by `delete`."
           }
         },
         "required": [
           "op",
           "pos"
         ],
-        "type": "object"
-      },
-      "minItems": 1,
-      "type": "array"
-    },
-    "path": {
-      "description": "Absolute or relative file path to edit.",
-      "type": "string"
+        "additionalProperties": false
+      }
     }
   },
   "required": [
     "path",
     "edits"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -318,16 +318,16 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "path": {
-      "description": "Directory path to list without recursion.",
-      "type": "string"
+      "type": "string",
+      "description": "Directory path to list without recursion."
     }
   },
   "required": [
     "path"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -350,26 +350,52 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "case_insensitive": {
-      "description": "[content only] Ignore case, equivalent to ripgrep -i. Defaults to false.",
-      "type": "boolean"
+    "pattern": {
+      "type": "string",
+      "description": "[both] Search expression. target=content: ripgrep regex over file contents. target=files: file-path glob such as `*.rs` or `src/**/*.rs`."
     },
-    "context": {
-      "description": "[content only] Surrounding context lines when output_mode=content. Defaults to 3 so you can judge a hit without a follow-up read; pass 0 for matched lines only. Ignored otherwise.",
-      "minimum": 0,
-      "type": "integer"
+    "target": {
+      "type": "string",
+      "enum": [
+        "content",
+        "files"
+      ],
+      "description": "[both] `content` searches inside files; `files` searches file paths by glob. Defaults to `content`."
+    },
+    "path": {
+      "type": "string",
+      "description": "[both] Optional file or directory to search. Defaults to the workspace; must pass Read permission checks."
     },
     "glob": {
-      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`. Omit when unused; do not pass an empty string.",
-      "type": "string"
+      "type": "string",
+      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`. Omit when unused; do not pass an empty string."
+    },
+    "type": {
+      "type": "string",
+      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`. Omit when unused."
+    },
+    "output_mode": {
+      "type": "string",
+      "enum": [
+        "content",
+        "files_with_matches",
+        "count"
+      ],
+      "description": "[content only] Return matched lines, files with matches, or per-file counts. Defaults to `files_with_matches`."
+    },
+    "context": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "[content only] Surrounding context lines when output_mode=content. Defaults to 3 so you can judge a hit without a follow-up read; pass 0 for matched lines only. Ignored otherwise."
     },
     "head_limit": {
       "anyOf": [
         {
-          "maximum": 1024,
+          "type": "integer",
           "minimum": 1,
-          "type": "integer"
+          "maximum": 1024
         },
         {
           "type": "null"
@@ -377,49 +403,23 @@ Parameters:
       ],
       "description": "[both] Max returned items after offset. Defaults to 64 for content and 128 for files. null = unlimited; 0 is rejected."
     },
-    "include_hidden": {
-      "description": "[both] Include hidden files and directories. Defaults to false; .gitignore is still respected.",
-      "type": "boolean"
-    },
     "offset": {
-      "description": "[both] Skip this many items before head_limit. Use next_offset when truncated=true.",
+      "type": "integer",
       "minimum": 0,
-      "type": "integer"
+      "description": "[both] Skip this many items before head_limit. Use next_offset when truncated=true."
     },
-    "output_mode": {
-      "description": "[content only] Return matched lines, files with matches, or per-file counts. Defaults to `files_with_matches`.",
-      "enum": [
-        "content",
-        "files_with_matches",
-        "count"
-      ],
-      "type": "string"
+    "case_insensitive": {
+      "type": "boolean",
+      "description": "[content only] Ignore case, equivalent to ripgrep -i. Defaults to false."
     },
-    "path": {
-      "description": "[both] Optional file or directory to search. Defaults to the workspace; must pass Read permission checks.",
-      "type": "string"
-    },
-    "pattern": {
-      "description": "[both] Search expression. target=content: ripgrep regex over file contents. target=files: file-path glob such as `*.rs` or `src/**/*.rs`.",
-      "type": "string"
-    },
-    "target": {
-      "description": "[both] `content` searches inside files; `files` searches file paths by glob. Defaults to `content`.",
-      "enum": [
-        "content",
-        "files"
-      ],
-      "type": "string"
-    },
-    "type": {
-      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`. Omit when unused.",
-      "type": "string"
+    "include_hidden": {
+      "type": "boolean",
+      "description": "[both] Include hidden files and directories. Defaults to false; .gitignore is still respected."
     }
   },
   "required": [
     "pattern"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -438,63 +438,63 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id. For a coding plan, normally include one final `kind=acceptance` todo and describe its acceptance in plain language in the plan body; omitting it does not block creation.",
   "properties": {
-    "draft": {
-      "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself.",
-      "type": "string"
-    },
     "goal": {
-      "description": "Concise plan objective (1-3 sentences). Becomes frontmatter `goal` and seeds the derived `plan_id`.",
-      "type": "string"
+      "type": "string",
+      "description": "Concise plan objective (1-3 sentences). Becomes frontmatter `goal` and seeds the derived `plan_id`."
+    },
+    "draft": {
+      "type": "string",
+      "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself."
     },
     "todos": {
+      "type": "array",
       "description": "Initial flat todo list (>= 1 item). `status` defaults to `pending`.",
+      "minItems": 1,
       "items": {
+        "type": "object",
         "properties": {
-          "content": {
-            "description": "Single-sentence imperative todo description.",
-            "type": "string"
-          },
           "id": {
-            "description": "Stable kebab-case todo id, unique within the plan.",
-            "type": "string"
+            "type": "string",
+            "description": "Stable kebab-case todo id, unique within the plan."
           },
-          "kind": {
-            "description": "Optional todo semantic type, default `work`. `acceptance` is only for the final acceptance todo; a plan may have at most one.",
-            "enum": [
-              "work",
-              "acceptance"
-            ],
-            "type": "string"
+          "content": {
+            "type": "string",
+            "description": "Single-sentence imperative todo description."
           },
           "status": {
-            "description": "Initial status. Defaults to `pending`.",
+            "type": "string",
             "enum": [
               "pending",
               "in_progress",
               "completed",
               "cancelled"
             ],
-            "type": "string"
+            "description": "Initial status. Defaults to `pending`."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "work",
+              "acceptance"
+            ],
+            "description": "Optional todo semantic type, default `work`. `acceptance` is only for the final acceptance todo; a plan may have at most one."
           }
         },
         "required": [
           "id",
           "content"
-        ],
-        "type": "object"
-      },
-      "minItems": 1,
-      "type": "array"
+        ]
+      }
     }
   },
   "required": [
     "goal",
     "draft",
     "todos"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -513,14 +513,14 @@ Parameters:
 
 ```json
 {
-  "additionalProperties": false,
+  "type": "object",
   "properties": {
     "plan_id": {
-      "description": "Defaults to the current plan.",
-      "type": "string"
+      "type": "string",
+      "description": "Defaults to the current plan."
     }
   },
-  "type": "object"
+  "additionalProperties": false
 }
 ```
 
@@ -539,83 +539,97 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "description": "Apply todo ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
   "properties": {
+    "plan_id": {
+      "type": "string",
+      "description": "Target plan_id. Optional in EXEC (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed."
+    },
+    "path": {
+      "type": "string",
+      "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are given, `plan_id` wins."
+    },
+    "replace": {
+      "type": "boolean",
+      "description": "If true, replace the entire todos[] list with the upsert results in `ops`. Default false."
+    },
     "ops": {
+      "type": "array",
       "description": "Ordered todo mutations applied atomically.",
       "items": {
         "oneOf": [
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
             "properties": {
-              "content": {
-                "description": "Todo content. Required when creating a brand-new todo.",
-                "type": "string"
+              "kind": {
+                "type": "string",
+                "const": "upsert",
+                "description": "Operation kind."
               },
               "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               },
-              "kind": {
-                "const": "upsert",
-                "description": "Operation kind.",
-                "type": "string"
+              "content": {
+                "type": "string",
+                "description": "Todo content. Required when creating a brand-new todo."
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                "type": "string",
                 "enum": [
                   "pending",
                   "in_progress",
                   "completed",
                   "cancelled"
                 ],
-                "type": "string"
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
               },
               "todo_kind": {
-                "description": "Todo semantic type. Defaults to work. `kind` already identifies the operation, so todo type uses this separate key. `acceptance` is only for the one final acceptance todo in a plan.",
+                "type": "string",
                 "enum": [
                   "work",
                   "acceptance"
                 ],
-                "type": "string"
+                "description": "Todo semantic type. Defaults to work. `kind` already identifies the operation, so todo type uses this separate key. `acceptance` is only for the one final acceptance todo in a plan."
               }
             },
             "required": [
               "kind",
               "id"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`set_status` only changes status for an existing todo.",
             "properties": {
-              "evidence": {
-                "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome.",
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+              "kind": {
+                "type": "string",
+                "const": "set_status",
+                "description": "Operation kind."
               },
               "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
-              },
-              "kind": {
-                "const": "set_status",
-                "description": "Operation kind.",
-                "type": "string"
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                "type": "string",
                 "enum": [
                   "pending",
                   "in_progress",
                   "completed",
                   "cancelled"
                 ],
-                "type": "string"
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome."
               }
             },
             "required": [
@@ -623,46 +637,32 @@ Parameters:
               "id",
               "status"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`remove` deletes a todo by id.",
             "properties": {
-              "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
-              },
               "kind": {
+                "type": "string",
                 "const": "remove",
-                "description": "Operation kind.",
-                "type": "string"
+                "description": "Operation kind."
+              },
+              "id": {
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               }
             },
             "required": [
               "kind",
               "id"
             ],
-            "type": "object"
+            "additionalProperties": false
           }
         ]
-      },
-      "type": "array"
-    },
-    "path": {
-      "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are given, `plan_id` wins.",
-      "type": "string"
-    },
-    "plan_id": {
-      "description": "Target plan_id. Optional in EXEC (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed.",
-      "type": "string"
-    },
-    "replace": {
-      "description": "If true, replace the entire todos[] list with the upsert results in `ops`. Default false.",
-      "type": "boolean"
+      }
     }
-  },
-  "type": "object"
+  }
 }
 ```
 
@@ -681,72 +681,83 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "description": "Session-local todo scratchpad (visible in CHAT, PLAN, and EXEC). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
   "properties": {
     "new_todos": {
-      "description": "If true, clear the current scratchpad before applying ops (same session file is overwritten). Default false.",
-      "type": "boolean"
+      "type": "boolean",
+      "description": "If true, clear the current scratchpad before applying ops (same session file is overwritten). Default false."
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional title stored in the new .todo.md frontmatter when `new_todos=true`."
+    },
+    "replace": {
+      "type": "boolean",
+      "description": "If true, replace the entire todo list with the upsert results in `ops`. Default false."
     },
     "ops": {
+      "type": "array",
       "description": "Ordered list of mutations applied in order.",
+      "minItems": 1,
       "items": {
         "oneOf": [
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
             "properties": {
-              "content": {
-                "description": "Todo content. Required when creating a brand-new todo.",
-                "type": "string"
+              "kind": {
+                "type": "string",
+                "const": "upsert",
+                "description": "Operation kind."
               },
               "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               },
-              "kind": {
-                "const": "upsert",
-                "description": "Operation kind.",
-                "type": "string"
+              "content": {
+                "type": "string",
+                "description": "Todo content. Required when creating a brand-new todo."
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required).",
+                "type": "string",
                 "enum": [
                   "pending",
                   "in_progress",
                   "completed",
                   "cancelled"
                 ],
-                "type": "string"
+                "description": "For `upsert` (optional) and `set_status` (required)."
               }
             },
             "required": [
               "kind",
               "id"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`set_status` only changes status for an existing todo.",
             "properties": {
-              "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
-              },
               "kind": {
+                "type": "string",
                 "const": "set_status",
-                "description": "Operation kind.",
-                "type": "string"
+                "description": "Operation kind."
+              },
+              "id": {
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               },
               "status": {
-                "description": "For `upsert` (optional) and `set_status` (required).",
+                "type": "string",
                 "enum": [
                   "pending",
                   "in_progress",
                   "completed",
                   "cancelled"
                 ],
-                "type": "string"
+                "description": "For `upsert` (optional) and `set_status` (required)."
               }
             },
             "required": [
@@ -754,46 +765,35 @@ Parameters:
               "id",
               "status"
             ],
-            "type": "object"
+            "additionalProperties": false
           },
           {
-            "additionalProperties": false,
+            "type": "object",
             "description": "`remove` deletes a todo by id.",
             "properties": {
-              "id": {
-                "description": "Target todo id (kebab-case).",
-                "type": "string"
-              },
               "kind": {
+                "type": "string",
                 "const": "remove",
-                "description": "Operation kind.",
-                "type": "string"
+                "description": "Operation kind."
+              },
+              "id": {
+                "type": "string",
+                "description": "Target todo id (kebab-case)."
               }
             },
             "required": [
               "kind",
               "id"
             ],
-            "type": "object"
+            "additionalProperties": false
           }
         ]
-      },
-      "minItems": 1,
-      "type": "array"
-    },
-    "replace": {
-      "description": "If true, replace the entire todo list with the upsert results in `ops`. Default false.",
-      "type": "boolean"
-    },
-    "title": {
-      "description": "Optional title stored in the new .todo.md frontmatter when `new_todos=true`.",
-      "type": "string"
+      }
     }
   },
   "required": [
     "ops"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -812,64 +812,64 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "description": "Block-await structured single-choice answers from the user. Each question has 2-4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot and a `skip` action — do not declare `__custom__` yourself.",
   "properties": {
     "questions": {
+      "type": "array",
       "description": "1-4 questions presented in one panel turn.",
+      "minItems": 1,
+      "maxItems": 4,
       "items": {
+        "type": "object",
         "properties": {
           "id": {
-            "description": "Stable question id (kebab-case), unique within the panel turn.",
-            "type": "string"
+            "type": "string",
+            "description": "Stable question id (kebab-case), unique within the panel turn."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Question text shown to the user (max 500 chars)."
           },
           "options": {
+            "type": "array",
             "description": "2-4 options. Exactly one option must carry `recommended: true`.",
+            "minItems": 2,
+            "maxItems": 4,
             "items": {
+              "type": "object",
               "properties": {
                 "id": {
-                  "description": "Stable option id (kebab-case), unique within this question. Reserved id `__custom__` is forbidden — the UI appends it automatically.",
-                  "type": "string"
+                  "type": "string",
+                  "description": "Stable option id (kebab-case), unique within this question. Reserved id `__custom__` is forbidden — the UI appends it automatically."
                 },
                 "label": {
-                  "description": "Human-readable option label (max 200 chars).",
-                  "type": "string"
+                  "type": "string",
+                  "description": "Human-readable option label (max 200 chars)."
                 },
                 "recommended": {
-                  "description": "Mark exactly one option per question as recommended; the UI suffixes it with `— 推荐`.",
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "Mark exactly one option per question as recommended; the UI suffixes it with `— 推荐`."
                 }
               },
               "required": [
                 "id",
                 "label"
-              ],
-              "type": "object"
-            },
-            "maxItems": 4,
-            "minItems": 2,
-            "type": "array"
-          },
-          "prompt": {
-            "description": "Question text shown to the user (max 500 chars).",
-            "type": "string"
+              ]
+            }
           }
         },
         "required": [
           "id",
           "prompt",
           "options"
-        ],
-        "type": "object"
-      },
-      "maxItems": 4,
-      "minItems": 1,
-      "type": "array"
+        ]
+      }
     }
   },
   "required": [
     "questions"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -896,28 +896,28 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "command": {
-      "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / Git Bash `bash -c` (Windows; write Windows paths with forward slashes, e.g. C:/Users/...).",
-      "type": "string"
+      "type": "string",
+      "description": "Complete shell command line, including the executable and every argument. Supports pipes, &&, ||, ;, redirects, globbing, and quotes. Always runs via `sh -c` (Unix) / Git Bash `bash -c` (Windows; write Windows paths with forward slashes, e.g. C:/Users/...)."
     },
     "cwd": {
-      "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd.",
-      "type": "string"
+      "type": "string",
+      "description": "Optional working directory. Empty or omitted uses the session working directory; relative paths are resolved from it. Use an absolute path or `~/...` to override; shell vars like `$HOME` are NOT expanded here."
     },
     "foreground_wait_ms": {
-      "description": "How long this call waits in the foreground. Values clamp to 8000-16000ms; expiry keeps the same tracked process running. Ignored when run_in_background=true.",
-      "type": "integer"
+      "type": "integer",
+      "description": "How long this call waits in the foreground. Values clamp to 8000-16000ms; expiry keeps the same tracked process running. Ignored when run_in_background=true."
     },
     "run_in_background": {
-      "description": "When true, spawn as a background task and return { task_id, log_path } immediately; pair with task_output/task_stop/task_list. Defaults to false.",
-      "type": "boolean"
+      "type": "boolean",
+      "description": "When true, spawn as a background task and return { task_id, log_path } immediately; pair with task_output/task_stop/task_list. Defaults to false."
     }
   },
   "required": [
     "command"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -936,31 +936,31 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "block": {
-      "description": "If true, wait until the task finishes or `wait_ms` elapses, and return wakeReason `finished` or `wait_window_elapsed`. Mid-stream output does not interrupt the wait. Default false.",
-      "type": "boolean"
+    "task_id": {
+      "type": "string",
+      "description": "The task_id returned by a previous `bash` call with run_in_background=true."
     },
     "since": {
-      "description": "Byte offset to start from; pass the previous response's `next_offset` to tail. Defaults to 0.",
+      "type": "integer",
       "minimum": 0,
-      "type": "integer"
+      "description": "Byte offset to start from; pass the previous response's `next_offset` to tail. Defaults to 0."
     },
-    "task_id": {
-      "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
-      "type": "string"
+    "block": {
+      "type": "boolean",
+      "description": "If true, wait until the task finishes or `wait_ms` elapses, and return wakeReason `finished` or `wait_window_elapsed`. Mid-stream output does not interrupt the wait. Default false."
     },
     "wait_ms": {
-      "description": "Observation window for block=true (default 5000, clamped to 5000-600000ms). Ignored when block=false. It never stops the task.",
-      "maximum": 600000,
+      "type": "integer",
       "minimum": 0,
-      "type": "integer"
+      "maximum": 600000,
+      "description": "Observation window for block=true (default 5000, clamped to 5000-600000ms). Ignored when block=false. It never stops the task."
     }
   },
   "required": [
     "task_id"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -979,16 +979,16 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "task_id": {
-      "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
-      "type": "string"
+      "type": "string",
+      "description": "The task_id returned by a previous `bash` call with run_in_background=true."
     }
   },
   "required": [
     "task_id"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1007,9 +1007,9 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {},
-  "required": [],
-  "type": "object"
+  "required": []
 }
 ```
 
@@ -1028,30 +1028,23 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "count": {
-      "description": "Number of hits to request. Defaults to 5, capped at 20.",
-      "maximum": 20,
-      "minimum": 1,
-      "type": "integer"
+    "query": {
+      "type": "string",
+      "description": "Search query text (required); prefer natural-language keywords."
     },
-    "country": {
-      "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`.",
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Number of hits to request. Defaults to 5, capped at 20."
+    },
+    "freshness": {
       "type": [
         "string",
         "null"
-      ]
-    },
-    "domain_filter": {
-      "description": "Optional allowlist of bare-host domains such as `github.com`.",
-      "items": {
-        "description": "One allowed domain suffix.",
-        "type": "string"
-      },
-      "type": "array"
-    },
-    "freshness": {
-      "description": "Optional recency filter (`day`/`week`/`month`/`year`); omit or null for none.",
+      ],
       "enum": [
         "day",
         "week",
@@ -1059,27 +1052,34 @@ Parameters:
         "year",
         null
       ],
+      "description": "Optional recency filter (`day`/`week`/`month`/`year`); omit or null for none."
+    },
+    "country": {
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`."
     },
     "language": {
-      "description": "Optional ISO 639-1 language hint such as `en` or `zh`.",
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "Optional ISO 639-1 language hint such as `en` or `zh`."
     },
-    "query": {
-      "description": "Search query text (required); prefer natural-language keywords.",
-      "type": "string"
+    "domain_filter": {
+      "type": "array",
+      "description": "Optional allowlist of bare-host domains such as `github.com`.",
+      "items": {
+        "type": "string",
+        "description": "One allowed domain suffix."
+      }
     }
   },
   "required": [
     "query"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1098,31 +1098,31 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
+    "url": {
+      "type": "string",
+      "description": "Target URL (required). Must be an http(s) URL without embedded credentials or private/IP-literal hosts."
+    },
+    "prompt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Optional extraction intent (MVP: recorded as a warning only, does not change fetched content)."
+    },
     "format": {
-      "description": "Output format for textual pages. Defaults to `markdown`; use `text` for plain text.",
+      "type": "string",
       "enum": [
         "markdown",
         "text"
       ],
-      "type": "string"
-    },
-    "prompt": {
-      "description": "Optional extraction intent (MVP: recorded as a warning only, does not change fetched content).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "url": {
-      "description": "Target URL (required). Must be an http(s) URL without embedded credentials or private/IP-literal hosts.",
-      "type": "string"
+      "description": "Output format for textual pages. Defaults to `markdown`; use `text` for plain text."
     }
   },
   "required": [
     "url"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1141,41 +1141,41 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "limit": {
-      "description": "Maximum returned entries. Defaults to 20.",
-      "maximum": 100,
-      "minimum": 1,
-      "type": [
-        "integer",
-        "null"
-      ]
-    },
-    "offset": {
-      "description": "Number of entries to skip. Defaults to 0.",
-      "minimum": 0,
-      "type": [
-        "integer",
-        "null"
-      ]
-    },
     "query": {
-      "description": "Optional keywords for cross-source search. Omit together with source to list sources.",
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "Optional keywords for cross-source search. Omit together with source to list sources."
     },
     "source": {
-      "description": "Optional connector source name. Without query, lists this source's tool cards; with query, scopes search.",
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "Optional connector source name. Without query, lists this source's tool cards; with query, scopes search."
+    },
+    "limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "maximum": 100,
+      "description": "Maximum returned entries. Defaults to 20."
+    },
+    "offset": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Number of entries to skip. Defaults to 0."
     }
   },
-  "required": [],
-  "type": "object"
+  "required": []
 }
 ```
 
@@ -1194,21 +1194,21 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "names": {
+      "type": "array",
+      "minItems": 1,
       "description": "One or more canonical names returned by tool_search. Batch related tools to fetch schemas together.",
       "items": {
-        "minLength": 1,
-        "type": "string"
-      },
-      "minItems": 1,
-      "type": "array"
+        "type": "string",
+        "minLength": 1
+      }
     }
   },
   "required": [
     "names"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1227,22 +1227,22 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "arguments": {
-      "description": "Arguments matching the inputSchema returned by tool_describe.",
-      "type": "object"
-    },
     "name": {
-      "description": "Canonical deferred tool name returned by tool_search.",
+      "type": "string",
       "minLength": 1,
-      "type": "string"
+      "description": "Canonical deferred tool name returned by tool_search."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Arguments matching the inputSchema returned by tool_describe."
     }
   },
   "required": [
     "name",
     "arguments"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1261,17 +1261,17 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "code": {
-      "description": "JavaScript function body. Use await callTool(name, arguments) and return one JSON-compatible final value.",
+      "type": "string",
       "minLength": 1,
-      "type": "string"
+      "description": "JavaScript function body. Use await callTool(name, arguments) and return one JSON-compatible final value."
     }
   },
   "required": [
     "code"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1290,34 +1290,34 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
       "description": "Investigation tasks to run in parallel. Keep each one scoped to a single area; split unrelated questions into separate tasks instead of writing one broad prompt.",
       "items": {
+        "type": "object",
         "properties": {
           "id": {
-            "description": "Short unique label such as `webview-paste`. Used to match the returned report back to this task. Defaults to `task-<n>` when omitted.",
-            "type": "string"
+            "type": "string",
+            "description": "Short unique label such as `webview-paste`. Used to match the returned report back to this task. Defaults to `task-<n>` when omitted."
           },
           "prompt": {
-            "description": "Self-contained question. The subagent cannot see this conversation, so state the goal, the area to look at, and what a useful answer contains.",
-            "type": "string"
+            "type": "string",
+            "description": "Self-contained question. The subagent cannot see this conversation, so state the goal, the area to look at, and what a useful answer contains."
           }
         },
         "required": [
           "prompt"
-        ],
-        "type": "object"
-      },
-      "maxItems": 6,
-      "minItems": 1,
-      "type": "array"
+        ]
+      }
     }
   },
   "required": [
     "tasks"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1338,16 +1338,16 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "key": {
-      "description": "Configuration dot-path, e.g. workspace.workspace_roots, primitive.path_rules, or agent.id.",
-      "type": "string"
+      "type": "string",
+      "description": "Configuration dot-path, e.g. workspace.workspace_roots, primitive.path_rules, or agent.id."
     }
   },
   "required": [
     "key"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1366,21 +1366,21 @@ Parameters:
 
 ```json
 {
+  "type": "object",
   "properties": {
     "key": {
-      "description": "Allowed configuration dot-path to update.",
-      "type": "string"
+      "type": "string",
+      "description": "Allowed configuration dot-path to update."
     },
     "value": {
-      "description": "Scalar replacement value, or one JSON element string for append-only array fields such as workspace roots and path rules.",
-      "type": "string"
+      "type": "string",
+      "description": "Scalar replacement value, or one JSON element string for append-only array fields such as workspace roots and path rules."
     }
   },
   "required": [
     "key",
     "value"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -1399,26 +1399,26 @@ Parameters:
 
 ```json
 {
-  "additionalProperties": false,
+  "type": "object",
   "properties": {
+    "source": {
+      "type": "string",
+      "description": "Absolute local directory or package.json/plugin.json/SKILL.md to install."
+    },
     "scope": {
-      "description": "Installation scope. Defaults to scope. Scope requires this session to have an explicit project root.",
+      "type": "string",
       "enum": [
         "scope",
         "agent",
         "global"
       ],
-      "type": "string"
-    },
-    "source": {
-      "description": "Absolute local directory or package.json/plugin.json/SKILL.md to install.",
-      "type": "string"
+      "description": "Installation scope. Defaults to scope. Scope requires this session to have an explicit project root."
     }
   },
   "required": [
     "source"
   ],
-  "type": "object"
+  "additionalProperties": false
 }
 ```
 

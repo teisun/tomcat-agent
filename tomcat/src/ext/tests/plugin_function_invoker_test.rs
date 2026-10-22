@@ -231,6 +231,75 @@ fn function_search_harness_with_net_fetch(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn net_fetch_uses_one_configured_client_across_session_bindings() {
+    use crate::infra::http_client::{
+        build_outbound_client, OutboundClientErrorKind, OutboundClientOptions,
+    };
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let proxy = MockServer::start().await;
+    // A rejected CONNECT proves routing without contacting an external TLS server.
+    Mock::given(method("CONNECT"))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&proxy)
+        .await;
+    let proxy_url = proxy.uri();
+    let mut options = OutboundClientOptions::new(Some(&proxy_url));
+    options.timeout = Some(Duration::from_secs(2));
+    let client = build_outbound_client(
+        options,
+        OutboundClientErrorKind::Tool,
+        "plugin proxy fixture",
+    )
+    .unwrap();
+    let fixture = plugin_function_fixture_with_manifest(
+        "shared-fetch",
+        json!({"requiredPermissions":["net:fetch"], "allowedHosts":["example.com"]}),
+        "pi.on('noop', function(){});",
+    );
+    let (_, _, manager, dispatcher) =
+        function_search_harness_with_net_fetch(Duration::from_secs(3));
+    let dispatcher = dispatcher.as_ref().clone().with_fetch_http_client(client);
+    let manifest = crate::ext::parse_manifest(
+        &fs::read_to_string(fixture.path().join("plugin.json")).unwrap(),
+    )
+    .unwrap();
+    manager
+        .register_catalog_plugin(fixture.path(), manifest)
+        .unwrap();
+    let sessions = Arc::new(crate::core::SessionManager::new(
+        fixture.path().join("sessions"),
+    ));
+    for session in ["a", "b"] {
+        dispatcher.bind_session(session, Arc::downgrade(&sessions), None, None);
+        let instance = manager
+            .start_session_vm(session, "shared-fetch")
+            .await
+            .unwrap();
+        let reply = dispatcher
+            .dispatch_async(
+                &instance.instance_id,
+                HostRequest {
+                    module: "net".into(),
+                    method: "fetch".into(),
+                    params: json!({"url":"https://example.com/proxy-fixture"}),
+                    call_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!reply.ok, "the fixture rejects CONNECT: {reply:?}");
+        manager.end_session(session).await.unwrap();
+    }
+    let requests = proxy.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "both session instances must use the configured proxy"
+    );
+    assert!(requests.iter().all(|request| request.method == "CONNECT"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
     let fixture = plugin_function_fixture_with_manifest(
         "birth-fetch",

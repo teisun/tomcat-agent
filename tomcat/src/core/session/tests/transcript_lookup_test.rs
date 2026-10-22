@@ -18,6 +18,7 @@ fn get_entry_finds_by_id() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid_003".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -56,6 +57,7 @@ fn get_leaf_entry_returns_last() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid_004".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -88,6 +90,7 @@ fn get_branch_single_entry() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -115,6 +118,7 @@ fn get_branch_unknown_leaf_returns_empty() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -135,6 +139,7 @@ fn get_children_empty_when_no_match() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),

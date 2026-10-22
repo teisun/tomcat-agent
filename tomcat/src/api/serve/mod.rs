@@ -11,13 +11,18 @@
 pub mod ask_question;
 pub mod commands;
 pub mod confirmation;
+mod connection;
 pub mod control;
+mod controller_route;
 pub mod event_pump;
 mod fanout_event_bus;
 pub mod ndjson;
+mod ownership;
 pub mod registry;
 mod rewind_and_resend;
+mod runtime;
 pub mod schema;
+pub(crate) mod service;
 mod session_delete;
 mod session_files;
 mod session_job;
@@ -34,7 +39,7 @@ mod test_support;
 mod tests;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +47,6 @@ use crate::api::chat::{
     drain_checkpoint_record_tasks, recover_context_state_after_failed_turn,
     spawn_completion_subscriber, ChatContext, ChatContextOverrides,
 };
-use crate::core::agent_registry::AgentRegistry;
 use crate::core::llm::{ChatMessage, LlmScene};
 use crate::core::tools::primitive::BashTaskStatus;
 use crate::infra::{wire, ScopedEventEmitter};
@@ -52,12 +56,11 @@ use crate::{
     ThinkingLevel,
 };
 
-use ask_question::ServeAskQuestionBridge;
-use confirmation::ServeConfirmationBridge;
-use fanout_event_bus::FanoutEventBus;
-use registry::{ChatContextRegistry, SessionSlot, SessionTurnState};
+pub(crate) use connection::ServeConnection as ServeState;
+use registry::{SessionSlot, SessionTurnState};
+pub(crate) use runtime::ServeRuntime;
 use types::{NewSessionParams, ServeSessionMode};
-use writer::{WriterConfig, WriterHandle};
+use writer::WriterConfig;
 
 const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -66,50 +69,6 @@ pub struct ServeCliArgs {
     pub stdio: bool,
     pub ws: bool,
     pub print_schema: bool,
-}
-
-pub(crate) struct ServeState {
-    pub cfg: AppConfig,
-    /// Keep the configuration source explicit; test instances must never read the caller's HOME.
-    pub config_path: std::path::PathBuf,
-    pub registry: Arc<ChatContextRegistry>,
-    pub writer: WriterHandle,
-    pub ask_question: ServeAskQuestionBridge,
-    pub confirmation: ServeConfirmationBridge,
-    pub shared_model_catalog: crate::core::llm::SharedModelCatalog,
-    pub shared_model_prefs: Arc<ModelPrefsStore>,
-    pub shared_agent_registry: Arc<AgentRegistry>,
-    pub shared_event_bus: Arc<FanoutEventBus>,
-    pub initialized: AtomicBool,
-}
-
-impl ServeState {
-    fn new(
-        cfg: AppConfig,
-        config_path: std::path::PathBuf,
-        writer: WriterHandle,
-        shared_model_prefs: Arc<ModelPrefsStore>,
-    ) -> Result<Arc<Self>, AppError> {
-        let registry = Arc::new(ChatContextRegistry::new(cfg.serve.max_sessions));
-        let ask_question = ServeAskQuestionBridge::new(writer.clone());
-        let confirmation = ServeConfirmationBridge::new(writer.clone());
-        let shared_event_bus = Arc::new(FanoutEventBus::new());
-        let shared_agent_registry = AgentRegistry::new().attach_event_bus(shared_event_bus.clone());
-        let shared_model_catalog = crate::core::llm::SharedModelCatalog::load(&cfg)?;
-        Ok(Arc::new(Self {
-            cfg,
-            config_path,
-            registry,
-            writer,
-            ask_question,
-            confirmation,
-            shared_model_catalog,
-            shared_model_prefs,
-            shared_agent_registry,
-            shared_event_bus,
-            initialized: AtomicBool::new(false),
-        }))
-    }
 }
 
 pub(crate) fn build_shared_model_prefs(cfg: &AppConfig) -> Result<Arc<ModelPrefsStore>, AppError> {
@@ -250,8 +209,9 @@ pub(crate) fn run_attachment_housekeeping(state: &ServeState) {
 /// 按当前配置构造会话管理器，用于「还没有任何会话」时也需要访问磁盘布局的场合。
 fn scoped_session_manager(state: &ServeState) -> Option<SessionManager> {
     let sessions_dir = resolve_sessions_dir(&state.cfg).ok()?;
-    let session_key = match state.registry.current_scope() {
+    let session_key = match state.current_scope() {
         Some(scope) => scope.key,
+        None if state.shared => return None,
         None => session_key_for_agent(
             &state.cfg.agent.id,
             default_mode(&state.cfg).ok()?,
@@ -287,8 +247,12 @@ pub(crate) fn normalize_session_mode(
 
 fn resolve_session_paths(
     params: &NewSessionParams,
+    shared: bool,
 ) -> Result<(PathBuf, Option<PathBuf>), AppError> {
     let Some(raw_cwd) = params.cwd.as_deref() else {
+        if shared {
+            return Err(AppError::Config("cwd_required".into()));
+        }
         return Ok((
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             None,
@@ -316,7 +280,7 @@ pub(crate) fn create_detached_session(
     params: NewSessionParams,
 ) -> Result<crate::SessionEntry, AppError> {
     let mode = normalize_session_mode(&state.cfg, params.mode)?;
-    let (cwd_path, project_root) = resolve_session_paths(&params)?;
+    let (cwd_path, project_root) = resolve_session_paths(&params, state.shared)?;
     let sessions_dir = resolve_sessions_dir(&state.cfg)?;
     std::fs::create_dir_all(&sessions_dir).map_err(AppError::Io)?;
     let session_key = session_key_for_agent(&state.cfg.agent.id, mode, &cwd_path);
@@ -333,17 +297,45 @@ pub(crate) async fn create_session_slot(
     params: NewSessionParams,
     force_new: bool,
 ) -> Result<Arc<SessionSlot>, AppError> {
+    create_or_load_session_slot(state, params, force_new, None, None).await
+}
+
+pub(super) async fn load_session_slot(
+    state: Arc<ServeState>,
+    params: NewSessionParams,
+    session_id: &str,
+) -> Result<Arc<SessionSlot>, AppError> {
+    create_or_load_session_slot(state, params, false, Some(session_id), None).await
+}
+
+async fn create_or_load_session_slot(
+    state: Arc<ServeState>,
+    params: NewSessionParams,
+    force_new: bool,
+    session_id: Option<&str>,
+    session_mcp: Option<&crate::core::connector::mcp::manager::SessionMcpConfig>,
+) -> Result<Arc<SessionSlot>, AppError> {
     let mode = normalize_session_mode(&state.cfg, params.mode)?;
-    let (cwd_path, project_root) = resolve_session_paths(&params)?;
+    let (cwd_path, project_root) = resolve_session_paths(&params, state.shared)?;
+    if let Some(directory) = state.skills_dir.as_deref() {
+        crate::core::skill::discovery::validate_connection_root(directory)?;
+    }
     let sessions_dir = resolve_sessions_dir(&state.cfg)?;
     std::fs::create_dir_all(&sessions_dir).map_err(AppError::Io)?;
     let session_key = session_key_for_agent(&state.cfg.agent.id, mode, &cwd_path);
     let session_manager = SessionManager::new_scoped(sessions_dir, session_key);
     let cwd_string = Some(cwd_path.to_string_lossy().to_string());
-    let current_entry = if force_new {
-        session_manager.new_current_session_with_project_root(
+    let current_entry = if let Some(id) = session_id {
+        session_manager
+            .get_session_by_id(id)?
+            .filter(|entry| entry.session_key == session_manager.current_session_key())
+            .ok_or_else(|| AppError::Config("unknown_session".into()))?
+    } else if force_new {
+        session_manager.create_session_with_origin(
+            session_manager.current_session_key(),
             cwd_string.clone(),
             project_root.map(|path| path.to_string_lossy().to_string()),
+            state.source(),
         )?
     } else {
         session_manager.ensure_current_session_with_project_root(
@@ -351,81 +343,137 @@ pub(crate) async fn create_session_slot(
             project_root.map(|path| path.to_string_lossy().to_string()),
         )?
     };
-    session_manager.pin_session(&current_entry.session_id)?;
+    let result = async {
+        session_manager.pin_session(&current_entry.session_id)?;
 
-    let overrides = ChatContextOverrides::default()
-        .suppress_cli_output()
-        .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
-        .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
-        .with_confirmation(
-            state
-                .confirmation
-                .provider_for_session(current_entry.session_id.clone()),
-        )
-        .with_session_cwd_override(cwd_path.clone());
-    let current_config =
-        crate::infra::config::load_model_selection_config(&state.config_path, &state.cfg)?;
-    let ctx = ChatContext::from_config_with_mode_and_overrides(current_config, mode, overrides)?;
-    state.shared_event_bus.register_session_bus(
-        current_entry.session_id.clone(),
-        ctx.global_services.event_bus.clone(),
-    );
-    let ask_panel = state.ask_question.panel_for_session(
-        ctx.global_services.event_bus.clone(),
-        &current_entry.session_id,
-    );
-    ctx.session_runtime
-        .plan_runtime
-        .attach_ask_question_panel(ask_panel);
-    if ctx.config.skills.enabled {
-        ctx.spawn_skill_discovery_if_needed().await;
-        let _ = ctx.await_skill_discovery().await;
+        let mut overrides = ChatContextOverrides::default()
+            .with_session_id_override(current_entry.session_id.clone())
+            .suppress_cli_output()
+            .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
+            .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
+            .with_confirmation(
+                state
+                    .confirmation
+                    .provider_for_session(current_entry.session_id.clone()),
+            )
+            .with_session_cwd_override(cwd_path.clone());
+        overrides.child_environment = state.child_environment();
+        let current_config =
+            crate::infra::config::load_model_selection_config(&state.config_path, &state.cfg)?;
+        let ctx =
+            ChatContext::from_config_with_mode_and_overrides(current_config, mode, overrides)?;
+        if let Some(config) = session_mcp {
+            let prepared = ctx.prepare_session_mcp(
+                config,
+                &current_entry.session_id,
+                state.child_environment(),
+            )?;
+            ctx.replace_session_mcp(prepared).await?;
+        }
+        state.shared_event_bus.register_session_bus(
+            current_entry.session_id.clone(),
+            ctx.global_services.event_bus.clone(),
+        );
+        ask_question::bind_panel_for_controller(&state, &ctx, &current_entry.session_id);
+        if state.shared {
+            ctx.bind_connection_skill_dir(state.skills_dir.clone());
+            ctx.sync_resource_inventory().await?;
+        } else if ctx.config.skills.enabled {
+            ctx.spawn_skill_discovery_if_needed().await;
+            let _ = ctx.await_skill_discovery().await;
+        }
+        let initial_model = match ctx.resolve_metadata(LlmScene::Main, Some(&current_entry)) {
+            Ok(model) => Some(model),
+            Err(AppError::ModelUnavailable { .. }) => None,
+            Err(error) => return Err(error),
+        };
+        let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
+            initial_model
+                .as_ref()
+                .map(|model| model.limits.input_budget_tokens)
+                .unwrap_or_else(|| {
+                    crate::infra::config::fallback_input_budget_tokens(&ctx.config.context)
+                }),
+        );
+        let prompt_snapshot =
+            crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
+        let mut context_state = crate::core::session::manager::init_context_state(
+            &ctx.session_runtime.session,
+            &ctx.config.context,
+            prompt_snapshot.system_text(),
+        )?;
+        if let Some(model) = initial_model {
+            context_state.apply_limits(&model.limits);
+        }
+        if let Err(err) = ctx
+            .session_runtime
+            .plan_runtime
+            .attach_from_resume_state(context_state.resume_control.clone())
+        {
+            tracing::warn!(error = %err, "serve session resume state attach failed");
+        }
+        let origin = ctx
+            .session_runtime
+            .session
+            .read_session_header_for_session(&current_entry.session_id)?
+            .and_then(|header| header.origin);
+        let ctx = Arc::new(ctx);
+        let mut slot = SessionSlot::new(
+            current_entry.session_id.clone(),
+            ctx,
+            mode,
+            cwd_string,
+            SessionTurnState {
+                context_state,
+                prompt_snapshot,
+                context_budget_chars,
+            },
+        );
+        slot.origin = origin;
+        Ok(Arc::new(slot))
     }
-    let initial_model = match ctx.resolve_metadata(LlmScene::Main, Some(&current_entry)) {
-        Ok(model) => Some(model),
-        Err(AppError::ModelUnavailable { .. }) => None,
-        Err(error) => return Err(error),
-    };
-    let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
-        initial_model
-            .as_ref()
-            .map(|model| model.limits.input_budget_tokens)
-            .unwrap_or_else(|| {
-                crate::infra::config::fallback_input_budget_tokens(&ctx.config.context)
-            }),
-    );
-    let prompt_snapshot = crate::api::chat::build_prompt_snapshot(&ctx, context_budget_chars).await;
-    let mut context_state = crate::core::session::manager::init_context_state(
-        &ctx.session_runtime.session,
-        &ctx.config.context,
-        prompt_snapshot.system_text(),
-    )?;
-    if let Some(model) = initial_model {
-        context_state.apply_limits(&model.limits);
+    .await;
+    if result.is_err() {
+        state
+            .shared_event_bus
+            .unregister_session_bus(&current_entry.session_id);
+        session_manager.release_session_usage();
+        if force_new {
+            match session_manager.delete_session(&current_entry.session_id) {
+                Ok(outcome) => {
+                    for warning in outcome.warnings {
+                        tracing::warn!(%warning, "created session cleanup incomplete");
+                    }
+                }
+                Err(cleanup) => {
+                    return Err(AppError::Config(format!(
+                        "{}; created session rollback failed: {cleanup}",
+                        result.as_ref().err().expect("failed initialization")
+                    )))
+                }
+            }
+        }
     }
-    if let Err(err) = ctx
-        .session_runtime
-        .plan_runtime
-        .attach_from_resume_state(context_state.resume_control.clone())
-    {
-        tracing::warn!(error = %err, "plan_runtime attach_from_resume_state failed during serve slot init");
-    }
-    let ctx = Arc::new(ctx);
-    Ok(Arc::new(SessionSlot::new(
-        current_entry.session_id.clone(),
-        ctx,
-        mode,
-        cwd_string,
-        SessionTurnState {
-            context_state,
-            prompt_snapshot,
-            context_budget_chars,
-        },
-    )))
+    result
 }
 
 pub(crate) fn register_slot_hooks(state: &Arc<ServeState>, slot: &Arc<SessionSlot>) {
-    let event_ids = event_pump::register_session_event_pump(slot, state.writer.clone());
+    if !state.shared {
+        *slot.controller.lock() = Some(state.connection_id);
+    }
+    if !state.shared && state.active_session_id().is_none() {
+        let _ = state.set_active_session(&slot.session_id);
+    }
+    let runtime = Arc::downgrade(&state.runtime);
+    let session_id = slot.session_id.clone();
+    let event_ids = event_pump::register_session_event_pump_with(
+        slot,
+        Arc::new(move |payload| {
+            if let Some(runtime) = runtime.upgrade() {
+                runtime.emit_event(&session_id, payload);
+            }
+        }),
+    );
     slot.listener_ids.lock().extend(event_ids);
     let ask_listener = state.ask_question.register_request_listener(
         slot.session_id.clone(),
@@ -464,9 +512,24 @@ pub(crate) fn register_slot_hooks(state: &Arc<ServeState>, slot: &Arc<SessionSlo
 /// completed its initialize handshake. Before that handshake, a control frame
 /// can be lost because no webview has installed its receiver yet.
 pub(crate) fn resume_pending_ask_question(state: &Arc<ServeState>, slot: &Arc<SessionSlot>) {
+    if state.shared && !state.controls(slot) {
+        return;
+    }
     if !slot
         .resume_pending_ask_question
         .swap(false, Ordering::SeqCst)
+    {
+        return;
+    }
+    // This controller is initialized but cannot re-arm an interactive panel.
+    // Consume the deferred-init flag so it cannot leave an idle slot undeletable;
+    // the unanswered question stays in history for the existing new-input path.
+    if slot
+        .ctx
+        .session_runtime
+        .plan_runtime
+        .ask_question_panel()
+        .is_none()
     {
         return;
     }
@@ -585,7 +648,7 @@ impl Drop for TurnStateLease {
 /// Cancel a foreground turn and wait for its actual exit. Unlike shutdown, a timeout
 /// retains the handle and must never abort a writer then report the session as stopped.
 pub(super) async fn cancel_and_wait(
-    state: &ServeState,
+    state: &runtime::ServeRuntime,
     slot: &Arc<SessionSlot>,
 ) -> Result<(), &'static str> {
     if slot.is_command_job_running() {
@@ -644,12 +707,14 @@ impl SlotCleanup {
 }
 
 pub(crate) async fn cleanup_session_slot(
-    state: &ServeState,
+    state: &runtime::ServeRuntime,
     slot: &Arc<SessionSlot>,
     cleanup: SlotCleanup,
 ) -> Result<(), AppError> {
     let reason = cleanup.as_str();
     slot.ctx.session_runtime.cancel_token.lock().cancel();
+    // Private transports must finish retiring before the slot can be forgotten.
+    slot.ctx.stop_session_mcp().await?;
     slot.ctx.agent_registry.cascade_abort(&slot.session_id);
     let background_task_listener = { slot.background_task_listener.lock().take() };
     if let Some(handle) = background_task_listener {
@@ -736,7 +801,7 @@ pub(crate) async fn cleanup_session_slot(
     slot.ctx.agent_registry.unregister(&slot.session_id);
     slot.ctx.session_runtime.session.release_session_usage();
     if cleanup != SlotCleanup::Shutdown {
-        state.registry.remove(&slot.session_id);
+        state.remove_slot(&slot.session_id);
     }
     Ok(())
 }
@@ -747,8 +812,9 @@ pub(crate) async fn run_slot_turn(
     turn_token: tokio_util::sync::CancellationToken,
 ) -> Result<crate::AgentRunOutcome, AppError> {
     let mut turn_state = TurnStateLease::acquire(Arc::clone(&slot))?;
-    let result = {
+    let result = async {
         let (prompt_snapshot, context_state) = turn_state.prompt_snapshot_and_context_state_mut();
+        slot.ctx.ready_session_mcp(&turn_token).await?;
         crate::api::chat::run_chat_turn_with_message_and_snapshot(
             &slot.ctx,
             input_message,
@@ -757,7 +823,8 @@ pub(crate) async fn run_slot_turn(
             turn_token,
         )
         .await
-    };
+    }
+    .await;
     if let Err(error) = &result {
         let system_text = turn_state.prompt_snapshot.system_text().to_string();
         let _ = recover_context_state_after_failed_turn(

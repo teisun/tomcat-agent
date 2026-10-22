@@ -73,6 +73,8 @@ pub(crate) fn build_outbound_client(
     error_kind: OutboundClientErrorKind,
     build_error_context: &str,
 ) -> Result<reqwest::Client, AppError> {
+    // Shared service startup removes launcher proxy variables. Keep system
+    // discovery enabled here; standalone CLI callers retain their environment.
     let mut builder = reqwest::Client::builder();
 
     if options.use_public_ip_dns_resolver {
@@ -95,7 +97,6 @@ pub(crate) fn build_outbound_client(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        // Explicit llm.proxy should still honor NO_PROXY/no_proxy from the ambient environment.
         let proxy = reqwest::Proxy::all(proxy_url)
             .map(|proxy| proxy.no_proxy(reqwest::NoProxy::from_env()))
             .map_err(|err| {
@@ -106,7 +107,6 @@ pub(crate) fn build_outbound_client(
             })?;
         builder = builder.proxy(proxy);
     }
-    // If no explicit proxy was configured, leave system proxy discovery enabled.
     builder.build().map_err(|err| match error_kind {
         OutboundClientErrorKind::Llm => AppError::Llm(format!("{build_error_context}: {err}")),
         OutboundClientErrorKind::Tool => AppError::Tool(format!("{build_error_context}: {err}")),

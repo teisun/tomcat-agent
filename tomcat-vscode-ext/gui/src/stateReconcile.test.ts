@@ -82,6 +82,21 @@ function review(id: string, summary = "Looks good") {
 }
 
 describe("stateReconcile", () => {
+  it("publishes access and provenance changes even without a timeline change", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.sessionViews.s1.access = "observe";
+    next.sessionViews.s1.origin = { kind: "acp", clientName: "paperclip" };
+    for (const result of [reconcileStateSnapshot(previous, next), mergeSessionViewSnapshot(previous, { sessionId: "s1", view: next.sessionViews.s1 })]) {
+      expect(result.sessionViews.s1.access).toBe("observe");
+      expect(result.sessionViews.s1.origin).toEqual(next.sessionViews.s1.origin);
+      expect(result.sessionViews.s1.timeline).toBe(previous.sessionViews.s1.timeline);
+    }
+    const changedOrigin = structuredClone(next);
+    changedOrigin.sessionViews.s1.origin = { kind: "acp", clientName: null };
+    expect(reconcileStateSnapshot(next, changedOrigin).sessionViews.s1.origin?.clientName).toBeNull();
+  });
+
   it("returns the previous state when the full snapshot is structurally unchanged", () => {
     const previous = snapshot();
     const reconciled = reconcileStateSnapshot(previous, snapshot());

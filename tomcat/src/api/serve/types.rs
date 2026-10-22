@@ -181,6 +181,9 @@ pub struct NewSessionParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub detached: bool,
+    /// Reuse the project's current session during connection bootstrap; otherwise create one.
+    #[serde(default)]
+    pub resume_current: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ServeSessionMode>,
 }
@@ -754,6 +757,15 @@ pub enum ServeCommand {
         #[serde(default)]
         params: NewSessionParams,
     },
+    /// Internal ACP load with an explicit cwd, through the same admission/cleanup queue.
+    /// Not a native wire command or an ACP extension.
+    #[serde(skip)]
+    #[schemars(skip)]
+    LoadExternalSession {
+        id: Option<String>,
+        session_id: String,
+        cwd: String,
+    },
     #[serde(rename_all = "camelCase")]
     SwitchSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -994,6 +1006,7 @@ impl ServeCommand {
             | Self::SetConnectorToolEnabled { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
+            | Self::LoadExternalSession { id, .. }
             | Self::GetMessages { id, .. }
             | Self::CloseSession { id, .. }
             | Self::DiscardDetachedSession { id, .. }
@@ -1035,6 +1048,7 @@ impl ServeCommand {
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
             Self::SwitchSession { session_id, .. }
+            | Self::LoadExternalSession { session_id, .. }
             | Self::DeleteSession { session_id, .. }
             | Self::RewindAndResend { session_id, .. }
             | Self::PreviewRewind { session_id, .. }
@@ -1140,6 +1154,7 @@ impl ServeCommand {
             Self::SetConnectorToolEnabled { .. } => "set_connector_tool_enabled",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
+            Self::LoadExternalSession { .. } => "internal_load_external_session",
             Self::GetMessages { .. } => "get_messages",
             Self::CloseSession { .. } => "close_session",
             Self::DiscardDetachedSession { .. } => "discard_detached_session",
@@ -1673,6 +1688,13 @@ impl ControlFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum OutFrame {
+    /// Already-framed SDK/control output for the ACP connection's encoder only.
+    #[serde(skip)]
+    #[schemars(skip)]
+    Acp {
+        session_id: Option<String>,
+        line: String,
+    },
     Response(ResponseFrame),
     Control(ControlFrame),
     Event(#[schemars(with = "ServeEvent")] Value),
@@ -1681,6 +1703,7 @@ pub enum OutFrame {
 impl OutFrame {
     pub fn session_id(&self) -> Option<&str> {
         match self {
+            Self::Acp { session_id, .. } => session_id.as_deref(),
             Self::Response(frame) => frame.session_id.as_deref(),
             Self::Control(frame) => frame.session_id(),
             Self::Event(value) => value.get("sessionId").and_then(Value::as_str),
@@ -1689,6 +1712,7 @@ impl OutFrame {
 
     pub fn wire_type(&self) -> Option<&str> {
         match self {
+            Self::Acp { .. } => None,
             Self::Response(frame) => Some(frame.frame_type.as_str()),
             Self::Control(frame) => Some(frame.wire_type()),
             Self::Event(value) => value.get("type").and_then(Value::as_str),
@@ -1697,11 +1721,12 @@ impl OutFrame {
 
     #[allow(dead_code)]
     pub fn is_lossless(&self) -> bool {
-        // TODO(next): either wire this into writer backpressure classification or delete it.
-        !matches!(self.wire_type(), Some("message_update"))
+        !self.is_message_delta()
     }
 
     pub fn is_message_delta(&self) -> bool {
+        // Keep the existing slow-consumer contract for all message updates,
+        // including a late subscriber's full prefix (not a lossless promise).
         matches!(self.wire_type(), Some("message_update"))
     }
 }

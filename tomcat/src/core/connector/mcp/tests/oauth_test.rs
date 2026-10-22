@@ -3,6 +3,35 @@ use crate::core::connector::mcp::config::McpOAuthConfig;
 use crate::AppConfig;
 
 #[test]
+fn oauth_client_secret_uses_controller_snapshot_without_ambient_fallback() {
+    use crate::infra::platform::EnvironmentSnapshot;
+    let config = McpOAuthConfig {
+        client_id: Some("client".into()),
+        client_secret_env: Some("PATH".into()),
+        ..Default::default()
+    };
+    let snapshot =
+        EnvironmentSnapshot::from_values([("PATH".into(), "controller-secret".into())].into())
+            .unwrap();
+    assert_eq!(
+        super::configured_client_secret(&config, Some(&snapshot)).as_deref(),
+        Some("controller-secret")
+    );
+    assert_eq!(
+        super::configured_client_secret(&config, Some(&EnvironmentSnapshot::default())),
+        None
+    );
+    assert_eq!(
+        super::configured_client_secret(&config, None),
+        std::env::var("PATH").ok()
+    );
+    assert_eq!(
+        super::configured_client_secret(&McpOAuthConfig::default(), Some(&snapshot)),
+        None
+    );
+}
+
+#[test]
 fn pkce_pair_has_distinct_verifier_and_challenge() {
     let (verifier, challenge) = pkce_pair().expect("pkce");
     assert!(!verifier.is_empty());

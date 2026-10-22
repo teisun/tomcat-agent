@@ -81,31 +81,46 @@ impl ChatContext {
         }
         let config = self.config.clone();
         let root = self.scope_services.resource_root.clone();
-        let (skills, plugins, skills_time, plugins_time) = tokio::task::spawn_blocking(move || {
-            let phase = Instant::now();
-            let skills = if config.skills.enabled {
-                crate::core::skill::discover(&config, &root)
-            } else {
-                crate::core::skill::SkillSet::default()
-            };
-            let skills_time = phase.elapsed();
-            let phase = Instant::now();
-            let plugins = PluginCatalog::discover(&config, &root);
-            (skills, plugins, skills_time, phase.elapsed())
-        })
-        .await
-        .map_err(|error| {
-            AppError::Plugin(crate::infra::i18n::tr(
-                "runtime.inventoryScan",
-                &[("detail", &error.to_string())],
-            ))
-        })?;
+        let connection_root = self.session_runtime.connection_skill_dir.read().clone();
+        let (skills, connection_skills, plugins, skills_time, plugins_time) =
+            tokio::task::spawn_blocking(move || {
+                let phase = Instant::now();
+                let skills = if config.skills.enabled {
+                    crate::core::skill::discover(&config, &root)
+                } else {
+                    crate::core::skill::SkillSet::default()
+                };
+                let connection_skills = connection_root.as_deref().map(|directory| {
+                    crate::core::skill::discovery::discover_with_connection(
+                        &config,
+                        &root,
+                        Some(directory),
+                    )
+                });
+                let skills_time = phase.elapsed();
+                let phase = Instant::now();
+                let plugins = PluginCatalog::discover(&config, &root);
+                (
+                    skills,
+                    connection_skills,
+                    plugins,
+                    skills_time,
+                    phase.elapsed(),
+                )
+            })
+            .await
+            .map_err(|error| {
+                AppError::Plugin(crate::infra::i18n::tr(
+                    "runtime.inventoryScan",
+                    &[("detail", &error.to_string())],
+                ))
+            })?;
         report.timings.discover_skills = skills_time;
         report.timings.discover_plugins = plugins_time;
         report.warnings.extend(skills.warnings.clone());
         let phase = Instant::now();
         if !skills.discovery_failed() {
-            let old = self.skill_set_snapshot();
+            let old = self.scope_services.scope_container.skill_set.read().clone();
             if skills != old {
                 for (name, skill) in &skills.by_name {
                     match old.by_name.get(name) {
@@ -122,7 +137,15 @@ impl ChatContext {
                     .filter(|name| !skills.by_name.contains_key(*name))
                     .cloned()
                     .collect();
-                *self.scope_services.skill_set.write() = skills;
+                *self.scope_services.scope_container.skill_set.write() = skills;
+            }
+        }
+        if self.has_session_skill_view() {
+            let effective = connection_skills
+                .unwrap_or_else(|| self.scope_services.scope_container.skill_set.read().clone());
+            report.warnings.extend(effective.warnings.clone());
+            if !effective.discovery_failed() {
+                *self.scope_services.skill_set.write() = effective;
             }
         }
         let catalog = match plugins {

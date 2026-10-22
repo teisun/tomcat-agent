@@ -360,8 +360,11 @@ fn matches_file_type(path: &Path, file_type: Option<&str>, warnings: &mut Vec<St
     }
 }
 
-/// 计算 Tier2 单查询墙钟；`PI_SEARCH_TIER2_DEADLINE_MS` 可覆盖默认 10s。
+/// 计算 Tier2 单查询墙钟；独立 CLI 可用 `PI_SEARCH_TIER2_DEADLINE_MS` 覆盖默认 10s。
 fn fallback_deadline() -> Duration {
+    if crate::infra::config::saved_configuration_only() {
+        return Duration::from_secs(SEARCH_FALLBACK_TIMEOUT_SECS);
+    }
     if let Some(ms) = std::env::var(SEARCH_FALLBACK_DEADLINE_ENV)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -377,6 +380,13 @@ fn fallback_deadline_hit(started: Instant, deadline: Duration) -> bool {
 }
 
 fn fallback_timeout_warning(warnings: &mut Vec<String>, deadline: Duration) {
+    if crate::infra::config::saved_configuration_only() {
+        warnings.push(format!(
+            "tier2 wall-clock budget {}ms exhausted; result truncated. Narrow path/glob/file_type before retrying.",
+            deadline.as_millis()
+        ));
+        return;
+    }
     warnings.push(format!(
         "tier2 wall-clock budget {}ms exhausted; result truncated. Override with {}=<ms>, or narrow path/glob/file_type before retrying.",
         deadline.as_millis(),

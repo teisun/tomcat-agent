@@ -15,6 +15,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -74,6 +75,7 @@ fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -169,6 +171,7 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -189,6 +192,7 @@ fn mark_tool_result_entries_by_tool_call_id_superseded_marks_only_matching_activ
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -286,6 +290,7 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -350,6 +355,7 @@ fn mark_user_message_entry_superseded_by_id_is_precise_and_idempotent() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -448,6 +454,7 @@ fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
         &path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -519,6 +526,7 @@ fn write_test_header(path: &std::path::Path) {
         path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),

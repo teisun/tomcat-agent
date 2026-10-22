@@ -10,7 +10,7 @@ use super::config::LogConfig;
 
 /// 使用 [`LogConfig`] 初始化 tracing：控制台 stderr + 可选文件（按天滚动，保留最多 5 个文件）。
 ///
-/// 优先使用环境变量 `RUST_LOG`，未设置时使用 `cfg.level`。禁止在日志中打印敏感信息（如 API 密钥）。
+/// 独立 CLI 优先使用 `RUST_LOG`；共享服务只使用 `cfg.level`，不继承启动者的覆盖。禁止记录敏感信息。
 ///
 /// # Arguments
 /// * `cfg` - 日志配置，见 [`LogConfig`]。
@@ -32,8 +32,11 @@ pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super
         )));
     }
     // 同一套过滤规则用于 stderr 与文件，避免两次解析 `RUST_LOG` 出现语义不一致。
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    let env_filter = if super::config::saved_configuration_only() {
+        EnvFilter::new(&cfg.level)
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level))
+    };
 
     if cfg.file_enabled {
         let fmt_layer = fmt::layer()

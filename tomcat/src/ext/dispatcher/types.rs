@@ -26,6 +26,13 @@ pub enum AsyncCallStatus {
     Error(String),
 }
 
+/// The session owns these resources; the shared plugin dispatcher only routes to them.
+pub(super) struct SessionBinding {
+    pub session: Weak<SessionManager>,
+    pub primitive: Option<Weak<dyn PrimitiveExecutor>>,
+    pub bash: Option<Weak<BashTaskRegistry>>,
+}
+
 /// 宿主 API 分发器：Send + Sync，支持多 Agent 并发。
 /// 各 Processor 以 Option 注入，未注入时返回明确错误。
 /// Clone 为浅拷贝（内部均为 Arc），可安全传入 spawn 的 Future。
@@ -37,7 +44,7 @@ pub struct HostApiDispatcher {
     pub(super) llm_resolver: Option<Arc<dyn LlmResolver>>,
     pub(super) session: Option<Arc<SessionManager>>,
     pub(super) bash_task_registry: Option<Arc<BashTaskRegistry>>,
-    pub(super) session_registry: Arc<DashMap<String, Weak<SessionManager>>>,
+    pub(super) session_registry: Arc<DashMap<String, SessionBinding>>,
     pub(super) audit: Option<Arc<dyn AuditRecorder>>,
     pub(super) async_results: Arc<DashMap<String, AsyncCallStatus>>,
     /// instance_id -> [callId, ...] 映射，用于实例销毁时清理 pending 任务。
@@ -230,9 +237,48 @@ impl HostApiDispatcher {
         self
     }
 
-    pub fn bind_session(&self, session_id: &str, session: Weak<SessionManager>) {
+    pub fn bind_session(
+        &self,
+        session_id: &str,
+        session: Weak<SessionManager>,
+        primitive: Option<Weak<dyn PrimitiveExecutor>>,
+        bash: Option<Weak<BashTaskRegistry>>,
+    ) {
+        self.session_registry.insert(
+            session_id.to_string(),
+            SessionBinding {
+                session,
+                primitive,
+                bash,
+            },
+        );
+    }
+
+    pub(super) fn primitive_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Option<Arc<dyn PrimitiveExecutor>> {
+        if self.session_registry.is_empty() {
+            return self.primitive.clone();
+        }
+        let (session_id, _) = instance_id.split_once('/')?;
         self.session_registry
-            .insert(session_id.to_string(), session);
+            .get(session_id)?
+            .primitive
+            .as_ref()?
+            .upgrade()
+    }
+
+    pub(super) fn bash_for_instance(&self, instance_id: &str) -> Option<Arc<BashTaskRegistry>> {
+        if self.session_registry.is_empty() {
+            return self.bash_task_registry.clone();
+        }
+        let (session_id, _) = instance_id.split_once('/')?;
+        self.session_registry
+            .get(session_id)?
+            .bash
+            .as_ref()?
+            .upgrade()
     }
 
     /// 注入审计记录器（每笔 Hostcall 记录）。

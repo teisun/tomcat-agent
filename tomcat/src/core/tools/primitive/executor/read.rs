@@ -37,12 +37,13 @@ const READ_DEFAULT_LIMIT_LINES: u64 = 2000;
 pub(crate) const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
 
 fn metadata_with_project_root_hint(
+    cwd: Option<&Path>,
     path: &Path,
     raw_path: &str,
 ) -> Result<std::fs::Metadata, AppError> {
     std::fs::metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound && Path::new(raw_path).is_absolute() {
-            if let Ok(project_root) = std::env::current_dir() {
+            if let Some(project_root) = cwd.map(Path::to_path_buf).or_else(|| std::env::current_dir().ok()) {
                 return AppError::Primitive(format!(
                     "read.path does not exist: {}; project root is {} — use a relative path under it",
                     path.display(),
@@ -429,7 +430,7 @@ pub(super) async fn read_file_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = metadata_with_project_root_hint(&path_buf, path)?;
+    let meta = metadata_with_project_root_hint(executor.session_cwd.as_deref(), &path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
             "The path is a directory and cannot be read as a file".to_string(),
@@ -481,7 +482,7 @@ pub(super) async fn read_impl(
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
-    let meta = metadata_with_project_root_hint(&path_buf, path)?;
+    let meta = metadata_with_project_root_hint(executor.session_cwd.as_deref(), &path_buf, path)?;
     if meta.is_dir() {
         return Err(AppError::Primitive(
             "The path is a directory and cannot be read as a file".to_string(),

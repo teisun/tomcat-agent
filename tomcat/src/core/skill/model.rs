@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Skill 来源优先级：`Project < Agent < Managed`，first-wins 时高优先级先扫描先入选。
+/// Skill 来源优先级：`Connection < Project < Agent < Managed`，first-wins 时高优先级先扫描先入选。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillSource {
+    Connection,
     Project,
     Agent,
     Managed,
@@ -12,6 +13,7 @@ pub enum SkillSource {
 impl SkillSource {
     pub fn as_str(&self) -> &'static str {
         match self {
+            SkillSource::Connection => "connection",
             SkillSource::Project => "project",
             SkillSource::Agent => "agent",
             SkillSource::Managed => "managed",

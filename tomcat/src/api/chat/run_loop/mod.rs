@@ -124,16 +124,20 @@ async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
         visible_skills = %skill_signature,
     );
     let allow_connector_tools = ctx
-        .global_services
-        .connector_registry
-        .as_ref()
-        .is_some_and(|connectors| connectors.has_configured_mcp_servers());
+        .connector_tools()
+        .is_some_and(|connectors| connectors.has_configured_servers());
     let allow_package_install =
         ctx.session_runtime.plan_runtime.mode() != crate::core::session::manager::AgentMode::Plan;
+    let allow_ask_question = ctx
+        .session_runtime
+        .plan_runtime
+        .ask_question_panel()
+        .is_some();
     ToolSurface::from_plugin_tools_with_runtime_policies(
         allow_load_skill,
         allow_connector_tools,
         allow_package_install,
+        allow_ask_question,
         &plugin_tools,
     )
 }
@@ -1033,8 +1037,8 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         turn_token,
     );
     agent_loop = agent_loop.with_tool_registry(ctx.global_services.tool_registry.clone());
-    if let Some(connectors) = ctx.global_services.connector_registry.clone() {
-        agent_loop = agent_loop.with_connector_registry(connectors);
+    if let Some(connectors) = ctx.connector_tools() {
+        agent_loop = agent_loop.with_connector_tools(connectors);
     }
     agent_loop = agent_loop.with_plugin_engine_config(crate::ext::PluginEngineConfig {
         quickjs_heap_mb: ctx.config.plugin.js_heap_mb,

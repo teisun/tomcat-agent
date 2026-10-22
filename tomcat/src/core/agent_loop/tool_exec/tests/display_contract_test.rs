@@ -221,7 +221,7 @@ async fn native_write_display_baseline_registration_matrix() {
                 todos_runtime: None,
                 plan_runtime: None,
                 skill_set: None,
-                connector_registry: None,
+                connector_tools: None,
                 plugin_engine_config: None,
                 subagent_type: SubagentType::User,
                 expose_skills_to_reviewer: false,

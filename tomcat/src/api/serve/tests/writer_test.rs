@@ -62,6 +62,122 @@ fn event(session: &str, ty: &str, delta: Option<&str>) -> OutFrame {
 }
 
 #[tokio::test]
+async fn alternate_encoder_runs_after_backpressure_and_can_consume_internal_frames() {
+    use tokio::io::AsyncReadExt;
+    let (mut input, output) = tokio::io::duplex(4096);
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let encoded = seen.clone();
+    let handle = super::super::writer::spawn_writer_with_encoder(
+        Box::pin(output),
+        WriterConfig {
+            delta_coalesce_ms: 0,
+            max_buffered_frames: 1,
+        },
+        move |frame| {
+            let kind = frame.wire_type().unwrap().to_owned();
+            encoded.lock().push(kind.clone());
+            if kind == "llm_notice" {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::json!({"converted":kind}).to_string()))
+        },
+    );
+    // Do not yield until pressure has been applied. Discarded deltas never enter the encoder.
+    for text in ["first", "discarded", "also discarded"] {
+        handle
+            .send(event("s", "message_update", Some(text)))
+            .unwrap();
+    }
+    handle.send(event("s", "agent_end", None)).unwrap();
+    drop(handle);
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(2), input.read_to_string(&mut text))
+        .await
+        .unwrap()
+        .unwrap();
+    let frames: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        frames,
+        vec![
+            serde_json::json!({"converted":"message_update"}),
+            serde_json::json!({"converted":"agent_end"})
+        ]
+    );
+    assert_eq!(
+        *seen.lock(),
+        vec!["message_update", "llm_notice", "agent_end"]
+    );
+}
+
+#[tokio::test]
+async fn writer_last_handle_drop_drains_frames_and_closes_the_stream() {
+    use tokio::io::AsyncReadExt;
+    let (mut input, output) = tokio::io::duplex(4096);
+    let handle = spawn_writer(
+        Box::pin(output),
+        WriterConfig {
+            delta_coalesce_ms: 0,
+            max_buffered_frames: 8,
+        },
+    );
+    let survivor = handle.clone();
+    drop(handle);
+    survivor.send(event("s", "agent_end", None)).unwrap();
+    drop(survivor);
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(2), input.read_to_string(&mut text))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(text.lines().count(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(text.trim()).unwrap()["type"],
+        "agent_end"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn writer_deadline_applies_only_after_explicit_close_not_to_a_slow_reader() {
+    use tokio::io::AsyncReadExt;
+    let (mut input, output) = tokio::io::duplex(1);
+    let handle = spawn_writer(
+        Box::pin(output),
+        WriterConfig {
+            delta_coalesce_ms: 0,
+            max_buffered_frames: 8,
+        },
+    );
+    handle
+        .send(event("s", "message_update", Some(&"x".repeat(1024))))
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let mut bytes = Vec::new();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), handle.closed())
+            .await
+            .is_err(),
+        "active slow connection must stay open"
+    );
+    handle.close();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(1), input.read_to_end(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        bytes.len() < 1024,
+        "closed, non-reading peer must not retain a writer task"
+    );
+    assert!(handle.send(event("s", "agent_end", None)).is_err());
+}
+
+#[tokio::test]
 async fn serve_writer_single_drain_orders_frames() {
     let shared = SharedBuffer::default();
     let writer = VecWriter {
@@ -95,6 +211,68 @@ async fn serve_writer_single_drain_orders_frames() {
     assert_eq!(lines.len(), 2);
     assert!(lines[0].contains("\"id\":\"1\""));
     assert!(lines[1].contains("\"id\":\"2\""));
+}
+
+#[test]
+fn writer_keeps_replay_separate_and_never_merges_different_assistant_ids() {
+    let replay = OutFrame::Event(serde_json::json!({
+        "type":"message_update", "sessionId":"s", "assistantMessageId":"a",
+        "message":{"role":"assistant","content":"prefix","thinking_text":"reason"},
+        "assistantMessageEvent":null
+    }));
+    assert!(!replay.is_lossless());
+    let mut buffers = HashMap::new();
+    let mut order = VecDeque::new();
+    let mut globals = VecDeque::new();
+    for frame in [event("s", "agent_start", None), replay.clone()] {
+        super::super::writer::enqueue_frame(
+            frame,
+            &mut buffers,
+            &mut order,
+            &mut globals,
+            WriterConfig {
+                delta_coalesce_ms: 100,
+                max_buffered_frames: 1,
+            },
+        );
+    }
+    assert_eq!(
+        buffers["s"].frames.len(),
+        2,
+        "prefix replay keeps the existing backpressure notice contract"
+    );
+    assert_eq!(buffers["s"].frames[1].frame.wire_type(), Some("llm_notice"));
+    buffers.clear();
+    order.clear();
+    let delta = |id: &str, text: &str| {
+        OutFrame::Event(serde_json::json!({
+            "type":"message_update", "sessionId":"s", "assistantMessageId":id, "message":{},
+            "assistantMessageEvent":{"kind":"content_delta","delta":text}
+        }))
+    };
+    for frame in [
+        replay,
+        delta("a", " tail"),
+        delta("b", "next"),
+        delta("b", " message"),
+    ] {
+        super::super::writer::enqueue_frame(
+            frame,
+            &mut buffers,
+            &mut order,
+            &mut globals,
+            WriterConfig {
+                delta_coalesce_ms: 100,
+                max_buffered_frames: 8,
+            },
+        );
+    }
+    assert_eq!(buffers["s"].frames.len(), 3);
+    let OutFrame::Event(last) = &buffers["s"].frames[2].frame else {
+        panic!("event");
+    };
+    assert_eq!(last["assistantMessageId"], "b");
+    assert_eq!(last["assistantMessageEvent"]["delta"], "next message");
 }
 
 #[tokio::test]

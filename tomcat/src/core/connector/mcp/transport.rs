@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
@@ -167,6 +168,7 @@ pub trait McpTransport: Send + Sync {
 /// configured environment variables are added explicitly, so an MCP configuration
 /// cannot silently inherit unrelated process secrets.
 pub struct StdioTransport {
+    environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
     workspace_root: Option<PathBuf>,
 }
 
@@ -174,32 +176,60 @@ impl StdioTransport {
     pub fn new(workspace_root: Option<&Path>) -> Self {
         Self {
             workspace_root: workspace_root.map(Path::to_path_buf),
+            environment: None,
         }
     }
 
-    fn command(&self, server: &ConfiguredMcpServer) -> tokio::process::Command {
-        tokio::process::Command::new(program(server)).configure(|command| {
-            command.args(&server.config.args);
-            command.kill_on_drop(true);
-            if let Some(cwd) = server.config.cwd.as_deref() {
-                let cwd = Path::new(cwd);
-                if cwd.is_absolute() {
-                    command.current_dir(cwd);
-                } else if let Some(workspace_root) = self.workspace_root.as_deref() {
-                    command.current_dir(workspace_root.join(cwd));
+    pub(crate) fn with_environment(
+        mut self,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    ) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    fn command(&self, server: &ConfiguredMcpServer) -> Result<tokio::process::Command, AppError> {
+        let executable = if let Some(environment) = &self.environment {
+            let cwd = server
+                .config
+                .normalized_cwd(self.workspace_root.as_deref().unwrap_or(Path::new(".")));
+            environment.resolve_program(&server.config.command, &cwd, &server.config.env)?
+        } else {
+            program(server)
+        };
+        Ok(
+            tokio::process::Command::new(executable).configure(|command| {
+                command.args(&server.config.args);
+                command.kill_on_drop(true);
+                if self.environment.is_some() && server.config.cwd.is_none() {
+                    if let Some(root) = &self.workspace_root {
+                        command.current_dir(root);
+                    }
                 }
-            }
-            command.env_clear();
-            for key in INHERITED_ENV_VARS.iter().chain(CHILD_STARTUP_ENV_VARS) {
-                if let Some(value) = std::env::var_os(key) {
-                    command.env(key, value);
+                if let Some(cwd) = server.config.cwd.as_deref() {
+                    let cwd = Path::new(cwd);
+                    if cwd.is_absolute() {
+                        command.current_dir(cwd);
+                    } else if let Some(workspace_root) = self.workspace_root.as_deref() {
+                        command.current_dir(workspace_root.join(cwd));
+                    }
                 }
-            }
-            command.envs(&server.config.env);
-            if let Some(executable_path) = managed_playwright_executable(server) {
-                command.env("PLAYWRIGHT_MCP_EXECUTABLE_PATH", executable_path);
-            }
-        })
+                command.env_clear();
+                for key in INHERITED_ENV_VARS.iter().chain(CHILD_STARTUP_ENV_VARS) {
+                    if let Some(environment) = &self.environment {
+                        if let Some(value) = environment.get(key) {
+                            command.env(key, value);
+                        }
+                    } else if let Some(value) = std::env::var_os(key) {
+                        command.env(key, value);
+                    }
+                }
+                command.envs(&server.config.env);
+                if let Some(executable_path) = managed_playwright_executable(server) {
+                    command.env("PLAYWRIGHT_MCP_EXECUTABLE_PATH", executable_path);
+                }
+            }),
+        )
     }
 }
 
@@ -249,7 +279,10 @@ impl McpTransport for StdioTransport {
         if cancel.is_cancelled() {
             return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
         }
-        let transport = TokioChildProcess::new(kill_tree_on_drop(self.command(server)))
+        let command = self.command(server).map_err(|_| {
+            McpFailure::new(FailureKind::Configuration, "child environment/program")
+        })?;
+        let transport = TokioChildProcess::new(kill_tree_on_drop(command))
             .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
         ().serve_with_ct(
             CancellationBoundedTransport::managed(transport, cleanup),

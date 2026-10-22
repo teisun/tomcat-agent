@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Connect VS Code windows and Paperclip/Multica to one local Tomcat background service instead of starting a private server for each window. Closing a window leaves the service running, but still cancels tasks controlled by that window.
+- Shared-service model API keys now come from Tomcat Settings, not environment-variable fallbacks. If your key exists only in shell exports or in a Paperclip/Multica agent's environment settings, save it once in Tomcat Settings after upgrading. Already-saved keys need no migration; terminal chat and legacy stdio keep their existing behavior.
+- Shared-service HTTP requests now use saved `llm.proxy` configuration or the operating system proxy, not proxy variables from VS Code windows or ACP hosts. If you relied only on shell exports, configure one of those shared sources. Remote MCP HTTP/OAuth keeps its existing system-proxy scope (not `llm.proxy`); localhost stays direct. Bash/MCP subprocess environments and standalone CLI/legacy stdio behavior are unchanged. Window proxy conversion is available only through the opt-in, isolated VS Code test launcher—not a product mode.
+- The folder-level permission approval now saves that folder in Tomcat's workspace permissions across sessions, matching the CLI, instead of granting access only for the current VS Code session.
+- Add an explicit shared-service restart command and a restart button when the extension's CLI version differs from the running service. Restarting stops every task on that service; a version mismatch now stops connection retries immediately rather than offering an ineffective retry.
+- Observe Paperclip/Multica sessions read-only through the existing session picker when the window is open on the same project. Other projects remain hidden; for a separate worktree, open that worktree. Closing an observer view does not stop the host's task.
+
 ## 0.1.96
 
 - Fix configuring relay endpoints that use IP addresses: automatically derived API key environment-variable names starting with a digit now receive a `PROVIDER_` prefix in both Settings and the CLI. Keep strict environment-variable validation, provider labels, model IDs, and key-slot collision numbering unchanged.

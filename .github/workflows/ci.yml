@@ -95,6 +95,14 @@ jobs:
             echo "::error title=gate-fast failures (${{ matrix.os }}) part ${part}::${chunk//$'\n'/%0A}"
           done
 
+      - name: Upload Rust gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-gate-${{ matrix.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/gate-fast.log
+          if-no-files-found: warn
+
   extension:
     name: extension gate:fast (windows)
     runs-on: windows-latest
@@ -124,3 +132,44 @@ jobs:
 
       - name: Run gate:fast
         run: npm run gate:fast
+
+  shared-service-windows:
+    name: shared service OS proxy and real VS Code (windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: ${{ github.workspace }}/.agents/shots/windows-system-proxy
+    defaults:
+      run:
+        working-directory: tomcat-vscode-ext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            tomcat-vscode-ext/package-lock.json
+            tomcat-vscode-ext/gui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tomcat -> target
+      - name: Install test dependencies
+        run: |
+          npm ci
+          npm --prefix gui ci
+      # A serial, opt-in wrapper snapshots/restores the actual user proxy registry.
+      # The ignored Rust controls must each execute one test, followed by a real
+      # VS Code task, GUI process exit, and non-starting probe of the same service.
+      - name: Verify system proxy and window lifecycle
+        run: npx --no-install tsx scripts/run-windows-system-proxy.ts
+      - name: Upload proxy requests, GUI and lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shared-service-${{ github.sha }}
+          path: .agents/shots/windows-system-proxy
+          if-no-files-found: error
+          include-hidden-files: true

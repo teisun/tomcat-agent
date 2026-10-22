@@ -134,7 +134,15 @@ impl ConnectorRegistry {
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Arc<Self>, AppError> {
-        let registry = Self::new(cfg, workspace_root)?;
+        Self::create_and_start_with_environment(cfg, workspace_root, None)
+    }
+
+    pub(crate) fn create_and_start_with_environment(
+        cfg: &AppConfig,
+        workspace_root: Option<&Path>,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    ) -> Result<Arc<Self>, AppError> {
+        let registry = Self::new_with_environment(cfg, workspace_root, environment)?;
         registry.spawn_connect_all_now();
         Ok(registry)
     }
@@ -147,6 +155,16 @@ impl ConnectorRegistry {
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Arc<Self>, AppError> {
+        Self::new_with_environment(cfg, workspace_root, None)
+    }
+
+    fn new_with_environment(
+        cfg: &AppConfig,
+        workspace_root: Option<&Path>,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    ) -> Result<Arc<Self>, AppError> {
+        // Configured MCP remains cwd-shared: the first creator supplies its
+        // environment. ACP's session-private servers must never use this cache.
         let key = connector_registry_cache_key(cfg, workspace_root)?;
         if let Some(existing) = connector_registry_cache().read().get(&key).cloned() {
             return Ok(existing);
@@ -156,7 +174,7 @@ impl ConnectorRegistry {
         let created = Arc::new(Self {
             enabled: cfg.connector.enabled,
             config: cfg.clone(),
-            mcp: McpManager::new(cfg, workspace_root)?,
+            mcp: McpManager::new_with_environment(cfg, workspace_root, environment)?,
             started: AtomicBool::new(false),
         });
         let mut cache = connector_registry_cache().write();
@@ -293,6 +311,11 @@ impl ConnectorRegistry {
         let changed_global_path = normalized_config_path(&global_mcp_path(cfg)?);
         let changed_project_path = match source {
             McpConfigSource::Global => None,
+            McpConfigSource::Session => {
+                return Err(AppError::Config(
+                    "session MCP configuration is not shared or persisted".into(),
+                ))
+            }
             McpConfigSource::Project => {
                 let workspace_root = workspace_root.ok_or_else(|| {
                     AppError::Config(

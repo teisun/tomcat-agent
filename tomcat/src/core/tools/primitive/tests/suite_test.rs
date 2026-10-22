@@ -96,6 +96,42 @@ impl Drop for HomeEnvGuard {
     }
 }
 
+#[test]
+fn bash_preflight_and_cwd_expand_the_controllers_home_without_granting_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let environment = crate::infra::platform::EnvironmentSnapshot::from_values(
+        [("HOME".into(), home.path().to_string_lossy().into_owned())].into(),
+    )
+    .unwrap();
+    let cwd =
+        ResolvedCwd::from_raw_in_environment(Some("~"), Some(workspace.path()), Some(&environment))
+            .unwrap();
+    assert_eq!(
+        cwd.resolved_path(),
+        crate::infra::platform::canonicalize(home.path()).unwrap()
+    );
+    let candidate = super::super::bash_task::resolve_preflight_path(
+        "~/marker",
+        workspace.path(),
+        Some(&environment),
+    )
+    .unwrap();
+    // A nonexistent target can retain macOS's lexical /var alias; compare its location.
+    assert_eq!(
+        crate::infra::platform::canonicalize(candidate.parent().unwrap()).unwrap(),
+        crate::infra::platform::canonicalize(home.path()).unwrap()
+    );
+    assert_eq!(candidate.file_name().unwrap(), "marker");
+    assert!(matches!(
+        make_gate(workspace.path())
+            .check(PrimitiveOperation::Bash, &candidate.to_string_lossy())
+            .unwrap(),
+        crate::core::permission::PermissionDecision::NeedConfirm { .. }
+    ));
+    assert!(!home.path().join("marker").exists());
+}
+
 #[tokio::test]
 async fn read_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_read");
@@ -1105,6 +1141,29 @@ async fn search_files_url_like_returns_non_permission_error() {
 }
 
 #[tokio::test]
+async fn session_cwd_is_not_a_permission_grant() {
+    let authorized = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("value.txt"), "not granted").unwrap();
+    let gate = make_gate(authorized.path());
+    let before = gate.effective_roots();
+    let exec = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        gate.clone(),
+    )
+    .with_session_cwd(workspace.path().to_owned());
+    assert!(matches!(
+        exec.read_file("value.txt", "p1").await,
+        Err(AppError::Permission(_))
+    ));
+    let after = gate.effective_roots();
+    assert_eq!(before.read_write, after.read_write);
+    assert_eq!(before.read_only, after.read_only);
+}
+
+#[tokio::test]
 async fn build_bash_task_registry_applies_wait_policy_and_guard() {
     let dir = tempfile::tempdir().unwrap();
     let bash_cfg = crate::infra::config::ToolsBashConfig {
@@ -1131,6 +1190,7 @@ async fn build_bash_task_registry_applies_wait_policy_and_guard() {
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
         crate::core::permission::BashAstChecker::default(),
+        None,
     );
     assert_eq!(registry.foreground_wait_ms(), 9_000);
 
@@ -1262,6 +1322,7 @@ async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
         crate::core::permission::BashAstChecker::default(),
+        None,
     );
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(dir.path()),

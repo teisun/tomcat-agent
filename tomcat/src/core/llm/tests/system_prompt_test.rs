@@ -59,8 +59,9 @@ fn planner_reminder_persists_plans_with_the_tool_for_each_changed_part() {
 
 #[test]
 fn planning_surface_omits_package_install_but_chat_surface_keeps_it() {
-    let planning = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, false, &[]);
-    let chat = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, true, &[]);
+    let planning =
+        ToolSurface::from_plugin_tools_with_runtime_policies(false, false, false, true, &[]);
+    let chat = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, true, true, &[]);
     let has = |surface: &ToolSurface, name: &str| {
         surface
             .function_definitions()
@@ -494,6 +495,54 @@ fn tool_surface_is_byte_stable_when_registry_observation_order_changes() {
 }
 
 #[test]
+fn tool_surface_normalizes_nested_object_keys_without_invalidating_the_prompt() {
+    let mut first = plugin_tool("plugin_schema", "same schema");
+    first.parameters = serde_json::from_str(
+        r#"{
+        "type":"object",
+        "properties":{"z":{"type":"array","items":{"anyOf":[
+            {"type":"string","description":"first"},{"type":"integer","minimum":0}
+        ]}},"a":{"type":"string","enum":["z","a"]}},
+        "required":["z","a"]
+    }"#,
+    )
+    .unwrap();
+    let mut reordered = first.clone();
+    reordered.parameters = serde_json::from_str(
+        r#"{
+        "required":["z","a"],
+        "properties":{"a":{"enum":["z","a"],"type":"string"},"z":{
+            "items":{"anyOf":[{"description":"first","type":"string"},
+                {"minimum":0,"type":"integer"}]},"type":"array"}},
+        "type":"object"
+    }"#,
+    )
+    .unwrap();
+    assert_eq!(first.parameters, reordered.parameters);
+    let first = ToolSurface::from_plugin_tools(false, &[first]);
+    let reordered = ToolSurface::from_plugin_tools(false, &[reordered]);
+    assert_eq!(first.signature(), reordered.signature());
+    // Normalize the actual provider-facing definitions too, not just their fingerprint.
+    assert_eq!(
+        serde_json::to_vec(first.function_definitions()).unwrap(),
+        serde_json::to_vec(reordered.function_definitions()).unwrap()
+    );
+    let context = fixture_context();
+    let mut snapshot = SystemPromptSnapshot::new(&context, &first, None, None, 400_000, "");
+    assert!(!snapshot.refresh(&context, &reordered, None, None, 400_000, ""));
+    let schema = &reordered
+        .function_definitions()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "plugin_schema")
+        .unwrap()["function"]["parameters"];
+    assert_eq!(schema["required"], serde_json::json!(["z", "a"]));
+    assert_eq!(
+        schema["properties"]["z"]["items"]["anyOf"][0]["type"],
+        "string"
+    );
+}
+
+#[test]
 fn deferred_connector_surface_is_static_and_does_not_contain_mcp_schemas() {
     let before_any_mcp_connects = ToolSurface::from_plugin_tools_with_policies(false, true, &[]);
     let after_many_mcp_catalog_changes =
@@ -721,6 +770,8 @@ fn workspace_state_priority_between_paged_reading_and_workspace_context() {
 #[test]
 fn workspace_context_section_describes_three_directories() {
     let prompt = build_system_prompt_with_state(fixture_context(), fixture_state());
+    assert!(prompt.contains("working directory of the current session"));
+    assert!(!prompt.contains("when tomcat chat was launched"));
     assert!(prompt.contains("Agent workspace directory (agent_workspace_dir): /Users/yan/proj"));
     assert!(prompt.contains("current directory"));
     assert!(prompt.contains("NOT automatically authorized"));

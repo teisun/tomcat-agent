@@ -45,7 +45,7 @@ impl McpManager {
         let result = tokio::select! {
             biased;
             _ = owner.cancel.cancelled() => return Err(superseded()),
-            result = oauth::authorize_token(&client, &key, url, &oauth, true) => result,
+            result = oauth::authorize_token(&client, &key, url, &oauth, true, self.environment.as_deref()) => result,
         };
         let token = match result {
             Ok(token) => token,

@@ -766,6 +766,7 @@ export async function activate(
       sessionRouter.clearBootstrapSessionId();
     }
     if (webviewProvider) {
+      if (state.phase === "starting") webviewProvider.prepareForServeReconnect();
       void webviewProvider.setServeConnectionState(state.status, state.failure ? {
         kind: state.failure.kind,
         detail: summarizeServeFailure(state.failure),
@@ -843,6 +844,7 @@ export async function activate(
     },
     openSettings: (route) => settingsPanel.reveal(route ?? "general"),
     reconnectServe: async () => { await supervisor.reconnect(); },
+    restartServe: async () => { await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND); },
     showConnectionLogs: () => output.show(true),
     refreshPlanPreview: (planId, path, state) =>
       planPreviewProvider.refreshFromServeEvent(planId, path, state),
@@ -1075,7 +1077,7 @@ export async function activate(
     async () => {
       await applyRuntimeConfiguration();
       sessionRouter.clearBootstrapSessionId();
-      const result = await supervisor.reconnect();
+      const result = await supervisor.restartService();
       await showInformationMessage(
         promptHistory,
         t("host.serveRestarted", { id: result.sessionId ?? "n/a" }),
@@ -1099,7 +1101,7 @@ export async function activate(
     TOMCAT_LIST_SESSIONS_COMMAND,
     async () => {
       await ensureInitialized();
-      const payload = await sessionRouter.listSessions();
+      const payload = await sessionRouter.listSessions("disk");
       const sessionLines = payload.sessions.map((session) => {
         const busy = t(session.busy ? "host.busy" : "host.idle");
         const active =

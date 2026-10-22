@@ -484,6 +484,7 @@ export interface ComposerProps {
   canPrompt: boolean;
   /** Real session configuration permission, independent of an editor's submit/Stop state. */
   canChangeConfig?: boolean;
+  configDisabledReason?: string;
   contextSearchLoading: boolean;
   contextSearchMatches: ContextSearchMatch[];
   contextSearchQuery: string;
@@ -527,6 +528,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   availableModels,
   busy = false,
   canChangeConfig: configAllowed,
+  configDisabledReason,
   allowBusyInput = false,
   submitAriaLabel,
   hideDragHint = false,
@@ -573,7 +575,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   tRef.current = t;
   const testId = (name: string) => instanceId ? `${instanceId}-${name}` : name;
   const canChangeConfig = configAllowed ?? (canPrompt && !busy);
-  const configHint = !(configAllowed ?? !busy) ? t("composer.configBusy") : undefined;
+  const configHint = configDisabledReason ?? (!(configAllowed ?? !busy) ? t("composer.configBusy") : undefined);
   const planStatus = formatPlanStatus(planState, t);
   const [capabilityHint, setCapabilityHint] = useState<MessageKey | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -887,6 +889,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     editor.setEditable(canPrompt);
+    editor.view.dom.setAttribute("aria-disabled", String(!canPrompt));
     if (!canPrompt) {
       mentionSuggestion.close();
       slashSuggestion.close();

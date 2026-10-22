@@ -9,11 +9,36 @@
 use super::super::transcript::*;
 
 #[test]
+fn origin_is_optional_for_legacy_headers_and_round_trips_for_acp() {
+    let old: SessionHeader =
+        serde_json::from_value(serde_json::json!({"type":"session","id":"old","timestamp":"t"}))
+            .unwrap();
+    assert!(old.origin.is_none());
+    assert!(serde_json::to_value(&old).unwrap().get("origin").is_none());
+    let origin = SessionOrigin::Acp {
+        client_name: Some("multica-agent-sdk".into()),
+    };
+    let header = SessionHeader {
+        origin: Some(origin.clone()),
+        ..old
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin.jsonl");
+    write_header(&path, &header).unwrap();
+    assert_eq!(read_header(&path).unwrap().origin, Some(origin));
+    assert_eq!(
+        serde_json::to_value(header).unwrap()["origin"],
+        serde_json::json!({"kind":"acp","clientName":"multica-agent-sdk"})
+    );
+}
+
+#[test]
 fn write_header_and_read_header() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s1.jsonl");
     let header = SessionHeader {
         r#type: "session".to_string(),
+        origin: None,
         version: Some(3),
         id: "sid_001".to_string(),
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),

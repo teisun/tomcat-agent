@@ -11,6 +11,20 @@
 use super::super::*;
 
 #[test]
+fn cli_parse_acp() {
+    let cli = Cli::try_parse_from(["tomcat", "acp"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Acp { skills_dir: None })
+    ));
+    let cli = Cli::try_parse_from(["tomcat", "acp", "--skills-dir", "/host/skills"]).unwrap();
+    assert!(
+        matches!(cli.command, Some(Commands::Acp { skills_dir: Some(path) }) if path == std::path::Path::new("/host/skills"))
+    );
+    assert!(Cli::try_parse_from(["tomcat", "acp", "--stdio"]).is_err());
+}
+
+#[test]
 fn cli_parse_init() {
     let cli = Cli::try_parse_from(["tomcat", "init"]).unwrap();
     let cmd = cli.command.expect("subcommand");
@@ -248,11 +262,29 @@ fn cli_parse_serve_stdio_and_print_schema() {
     assert!(matches!(
         cli.command,
         Some(Commands::Serve {
+            sub: None,
             stdio: true,
             ws: false,
             print_schema: true
         })
     ));
+}
+
+#[test]
+fn cli_parse_shared_service_actions_preserves_stdio_boundary() {
+    let cli = Cli::try_parse_from(["tomcat", "serve", "start", "--foreground"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            sub: Some(super::super::ServeSub::Start { foreground: true }),
+            ..
+        })
+    ));
+    for action in ["start", "status", "stop", "restart"] {
+        assert!(Cli::try_parse_from(["tomcat", "serve", action]).is_ok());
+        assert!(Cli::try_parse_from(["tomcat", "serve", "--stdio", action]).is_err());
+        assert!(Cli::try_parse_from(["tomcat", "serve", "--print-schema", action]).is_err());
+    }
 }
 
 #[test]

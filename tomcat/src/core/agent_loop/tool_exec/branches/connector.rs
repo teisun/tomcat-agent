@@ -135,12 +135,10 @@ pub(in crate::core::agent_loop) async fn handle_tool_call(
 
 fn connector_manager(
     ctx: &ToolExecCtx<'_>,
-) -> Result<std::sync::Arc<crate::core::connector::mcp::manager::McpManager>, String> {
-    ctx.connector_registry
-        .map(|registry| registry.mcp_manager())
-        .ok_or_else(|| {
-            "connector tools are unavailable: no enabled MCP connector is configured".to_string()
-        })
+) -> Result<std::sync::Arc<crate::core::connector::mcp::manager::McpToolView>, String> {
+    ctx.connector_tools.cloned().ok_or_else(|| {
+        "connector tools are unavailable: no enabled MCP connector is configured".to_string()
+    })
 }
 
 fn optional_nonempty_string(

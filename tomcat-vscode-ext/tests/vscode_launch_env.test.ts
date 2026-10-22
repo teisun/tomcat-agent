@@ -165,7 +165,7 @@ describe("VS Code GUI launch environment", () => {
       // Evaluate the real launch expression, not a duplicate of its options.
       const locals = {
         path, process: { env }, runVsCodeGuiTests, runTests, testEnv: env, workspacePath: root,
-        resolveVsCodeExecutable: () => "fake-vscode",
+        resolveVsCodeExecutable: () => "fake-vscode", vscodeExecutablePath: "fake-vscode", artifacts: undefined,
         options: { harnessRoot: root, harnessTestsPath: "fake-test", testEnv: env, workspacePath: root, artifactsDir: root },
         fixture: { env, workspaceDir: root }, extensionTestsEnv: env, harnessRoot: root,
         extensionDevelopmentPath: root, extensionTestsPath: "fake-test", harnessTestsPath: "fake-test",

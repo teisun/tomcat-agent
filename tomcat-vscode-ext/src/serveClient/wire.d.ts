@@ -108,6 +108,7 @@ export interface NewSessionParams {
   cwd?: null | string;
   detached?: boolean;
   mode?: ServeSessionMode | null;
+  resumeCurrent?: boolean;
 }
 export interface RemoteModelView {
   id: string;

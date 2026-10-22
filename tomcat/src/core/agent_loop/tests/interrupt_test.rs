@@ -32,14 +32,16 @@ use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
 
-struct CommitBarrierPrimitive {
+struct ToolBarrierPrimitive {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
-impl crate::core::tools::primitive::PrimitiveExecutor for CommitBarrierPrimitive {
+impl crate::core::tools::primitive::PrimitiveExecutor for ToolBarrierPrimitive {
     async fn read_file(&self, path: &str, p: &str) -> Result<String, AppError> {
+        self.entered.notify_one();
+        self.release.notified().await;
         MockPrimitiveExecutor.read_file(path, p).await
     }
     async fn list_dir(
@@ -120,7 +122,7 @@ async fn native_write_interrupt_waits_for_commit_and_registers_baseline() {
     let cancel = CancellationToken::new();
     let mut agent = AgentLoop::new(
         test_binding(Arc::new(MockLlmProvider::new(vec![stream])), "gpt-4"),
-        Arc::new(CommitBarrierPrimitive {
+        Arc::new(ToolBarrierPrimitive {
             entered: entered.clone(),
             release: release.clone(),
         }),
@@ -616,7 +618,11 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
         }),
     ];
     let llm = Arc::new(MockLlmProvider::new(vec![stream_tools]));
-    let primitive = Arc::new(SleepyMockPrimitive);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let primitive = Arc::new(ToolBarrierPrimitive {
+        entered: entered.clone(),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
         session_id: "s-int-active-tool".to_string(),
@@ -633,11 +639,17 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
 
     let cancel_bg = cancel.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        // Cancel a genuinely active read, not a race between two wall-clock sleeps.
+        entered.notified().await;
         cancel_bg.cancel();
     });
 
-    let outcome = agent.run(vec![ChatMessage::user("read one file")]).await;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        agent.run(vec![ChatMessage::user("read one file")]),
+    )
+    .await
+    .expect("active tool cancellation must terminate");
     let result = match outcome {
         AgentRunOutcome::Interrupted(r) => r,
         other => panic!("期望 Interrupted，实际 {:?}", other),

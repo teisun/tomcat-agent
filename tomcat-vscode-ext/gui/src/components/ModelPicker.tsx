@@ -311,6 +311,7 @@ export function ModelPicker({
           aria-hidden="true"
           className="tc-model-picker-legacy-thinking-trigger"
           data-testid={legacyThinkingTriggerTestId}
+          disabled={disabled}
           onClick={() => {
             setOpen(true);
             setConfigModelId(selectedModel.id);
@@ -327,7 +328,7 @@ export function ModelPicker({
           </span>
         </button>
       ) : null}
-      {open ? (
+      {open && !disabled ? (
         <div
           className={`tc-session-dropdown tc-model-picker-dropdown tc-model-picker-dropdown--${placement}`}
           data-testid={dropdownTestId}
@@ -453,7 +454,7 @@ export function ModelPicker({
           ) : null}
         </div>
       ) : null}
-      {configModel && typeof document !== "undefined"
+      {configModel && !disabled && typeof document !== "undefined"
         ? createPortal(
             <ModelConfigPopover
               onMouseEnter={clearCloseTimer}

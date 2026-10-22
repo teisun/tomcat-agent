@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use super::super::{media, ToolExecCtx, ToolExecOutcome};
-use crate::core::connector::mcp::manager::{McpCallContext, McpManager};
+use crate::core::connector::mcp::manager::{McpCallContext, McpToolView};
 use crate::core::connector::mcp::CLEANUP_GRACE;
 use crate::ext::{HostRequest, HostResponse, PluginVmInstance};
 use crate::infra::error::AppError;
@@ -45,8 +45,8 @@ pub(in crate::core::agent_loop) async fn handle_tool_run_code(
         Some(code) if !code.trim().is_empty() => code.to_string(),
         _ => return ToolExecOutcome::err("tool_run_code requires a non-empty string 'code'"),
     };
-    let manager = match ctx.connector_registry {
-        Some(connectors) => connectors.mcp_manager(),
+    let manager = match ctx.connector_tools {
+        Some(connectors) => connectors.clone(),
         None => {
             return ToolExecOutcome::err(
                 "tool_run_code is unavailable: no enabled MCP connector is configured",
@@ -75,7 +75,7 @@ pub(in crate::core::agent_loop) async fn handle_tool_run_code(
 
 async fn run_code(
     config: crate::ext::PluginEngineConfig,
-    manager: Arc<McpManager>,
+    manager: Arc<McpToolView>,
     code: String,
     context: McpCallContext,
 ) -> Result<serde_json::Value, AppError> {
@@ -126,7 +126,7 @@ async fn run_code(
 
 fn run_code_in_plugin_vm(
     config: crate::ext::PluginEngineConfig,
-    manager: Arc<McpManager>,
+    manager: Arc<McpToolView>,
     runtime: tokio::runtime::Handle,
     code: String,
     scope: Arc<CodeCallScope>,
@@ -165,7 +165,7 @@ fn run_code_in_plugin_vm(
 fn submit_connector_call(
     scope: &Arc<CodeCallScope>,
     runtime: &tokio::runtime::Handle,
-    manager: &Arc<McpManager>,
+    manager: &Arc<McpToolView>,
     request: HostRequest,
 ) -> HostResponse {
     let Some(call_id) = request.call_id else {

@@ -1,6 +1,21 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-20 09:48 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-10-22 10:05 +0800 | ACTIVE | feature/shared-serve-acp | — |
+
+### CURRENT INTEGRATION：共享后台与 Paperclip/Multica ACP 接入（2026-10-22）
+
+```text
+Paperclip / Multica → 标准 ACP → 共享 Tomcat 后台
+VS Code            → 原生连接 → 同项目实时只读旁观
+正式 HTTP          → llm.proxy / 系统代理（不读入口 shell 代理）
+```
+
+- **交付范围**：共享服务生命周期、标准 ACP、显式会话 cwd、原项目隔离、只读旁观、控制断开取消并等待真实子进程停止；ACP 问题放入普通回复，Native 保留提问面板。按复核计划修正慢读完整输出、协议/CLI 版本门槛、准入锁与迁移说明；未新增续跑/WebSocket 或按会话代理机制。
+- **本机自动化验收完成**：最新 Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
+- **实际操作**：本地真正启动 Paperclip、Multica，以受控模型完成任务、取消、原会话续接及工作树清理；真实 `0.1.80` / 测试构建 `0.1.81` CLI 均跑宿主任务，真实 VS Code 版本提示、重启、恢复以及关窗后同一后台存活已留 PNG/ARIA/console/实例证据。另在 Multica `TOMC-10` 实际完成两轮 DeepSeek 问答，同会话、同评论线程继续；首轮 4 次工具尝试均被隔离权限拒绝，不声称零工具调用。授权两轮已用完，临时真实密钥已清除，测试配置已恢复。
+- **代理边界**：正式共享后台统一保存的 `llm.proxy` 或系统代理；仅窗口测试入口可显式写入隔离 `llm.proxy`，ACP 环境不转换，子进程环境原样保留。macOS 系统代理按用户要求仅只读打印 IP/端口，未改全局设置，不将它算作请求链路实测。
+- **提交与后续**：本次准备提交并推送 `feature/shared-serve-acp`，不合并主干、不升版、不发布。三平台 GitHub CI 尚待取得；Windows 必须补实跑系统代理、Win32 Job、假 ACP 宿主及真实 VS Code 退出后存活证据，失败由 Agent 修复重跑。两宿主仅本地集成，不推宿主远端、不建 fork。无关宿主基线失败保留，不声称两宿主全仓全绿；Cov% 未测量。
+- **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
 

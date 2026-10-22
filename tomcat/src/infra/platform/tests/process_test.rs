@@ -86,6 +86,33 @@ fn exit_code_maps_signal_to_128_plus_signal() {
     assert_eq!(exit_code(&shell_status("kill -9 $$")), 137);
 }
 
+#[cfg(unix)]
+#[test]
+fn shared_service_process_has_its_own_session_group_and_fixed_cwd() {
+    use std::io::BufRead;
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = crate::infra::platform::canonicalize(dir.path()).unwrap();
+    let mut command = std::process::Command::new(posix_shell().unwrap());
+    command
+        .args(["-c", "pwd; exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = super::spawn_service_process(&mut command, &cwd).unwrap();
+    let mut reported_cwd = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut reported_cwd)
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: query-only POSIX calls on the just-created child, before reaping it.
+    let (session, group) = unsafe { (libc::getsid(pid), libc::getpgid(pid)) };
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(session, pid);
+    assert_eq!(group, pid);
+    assert_eq!(reported_cwd.trim(), cwd.to_str().unwrap());
+}
+
 #[test]
 fn spawn_detached_returns_at_once_and_appends_output_to_the_log() {
     let dir = tempfile::tempdir().unwrap();

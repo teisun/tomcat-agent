@@ -8,6 +8,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio_util::sync::CancellationToken;
 
+/// Join relative filesystem inputs to a session directory, without granting access or
+/// changing home/URL semantics. Canonicalization remains at the existing permission gate.
+pub(crate) fn path_in_session(path: &str, cwd: Option<&std::path::Path>) -> PathBuf {
+    match cwd {
+        Some(cwd)
+            if !path.is_empty()
+                && !path.starts_with('~')
+                && !crate::core::permission::is_url_like(path)
+                && !std::path::Path::new(path).is_absolute() =>
+        {
+            cwd.join(path)
+        }
+        _ => PathBuf::from(path),
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -420,6 +436,19 @@ impl ReadResult {
 /// 4 原语执行引擎 Trait（与 design CODE_BLOCK_P1_006 一致）。
 #[async_trait]
 pub trait PrimitiveExecutor: Send + Sync + 'static {
+    /// Bash-capable child agents inherit the session's controlling environment.
+    /// Standalone executors retain their historical process-environment behavior.
+    fn child_environment(
+        &self,
+    ) -> Option<std::sync::Arc<crate::infra::platform::EnvironmentSnapshot>> {
+        None
+    }
+
+    /// Resolve a file target against the executor's session, before stamps/policy/I/O.
+    fn resolve_path(&self, path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
     /// Authorize a native read-modify-write without reading or replacing the file.
     /// The caller must use the returned path and retain its own atomic transaction.
     /// Executors without a permission implementation fail closed.

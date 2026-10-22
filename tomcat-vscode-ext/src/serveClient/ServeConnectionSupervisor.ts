@@ -2,6 +2,7 @@ import type { InitializeResult } from "./initialize";
 import type { DisposableLike } from "./protocol";
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "./TomcatMessenger";
 import type { TomcatMessenger, TomcatMessengerExit } from "./TomcatMessenger";
+import { ServiceVersionMismatchError } from "./sharedConnection";
 
 // Cold startup is the slowest serve operation. Keep its budget at least as
 // large as a regular control request so a healthy, still-initializing process
@@ -31,6 +32,7 @@ export type ServeConnectionStatus =
   | "failed";
 
 export type ServeConnectionFailureKind =
+  | "version_mismatch"
   | "executable_missing"
   | "deterministic_startup"
   | "handshake_timeout"
@@ -57,6 +59,7 @@ type SupervisedMessenger = Pick<
   | "isRunning"
   | "onExit"
   | "recentStderr"
+  | "runServiceAction"
   | "restart"
   | "start"
   | "stop"
@@ -98,6 +101,9 @@ const FAILURE_SUMMARY_MAX_CHARS = 240;
 
 /** One line for the chat panel and notifications; the full stderr stays in the output log. */
 export function summarizeServeFailure(failure: Pick<ServeConnectionFailure, "error" | "stderr">): string {
+  if (failure.error instanceof ServiceVersionMismatchError) {
+    return t("bridge.serviceVersionMismatch", { running: failure.error.running, client: failure.error.client });
+  }
   const lines = failure.stderr.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
   const summary = lines[lines.length - 1] ?? failure.error.message.replace(/\s+/gu, " ").trim();
   return summary.length > FAILURE_SUMMARY_MAX_CHARS
@@ -123,7 +129,7 @@ function deferredWaiter(): {
 }
 
 /**
- * Owns the lifecycle of the extension-host child process:
+ * Owns this window's shared-service connection (not the service process):
  *
  *   start -> initialize -> ready
  *                  | failure
@@ -207,6 +213,27 @@ export class ServeConnectionSupervisor {
     return this.whenReady();
   }
 
+  /** An explicit global restart; automatic recovery never calls this. */
+  async restartService(): Promise<InitializeResult> {
+    if (this.disposed) throw new Error("Tomcat connection supervisor is disposed");
+    this.cancelRetry();
+    const cycle = ++this.cycle;
+    this.activeAttempt = undefined;
+    this.readyResult = undefined;
+    this.options.messenger.stop();
+    this.transition({ attempt: 0, phase: "backoff", status: "reconnecting" });
+    try {
+      await this.options.messenger.runServiceAction("restart");
+    } catch (error) {
+      if (!this.disposed && cycle === this.cycle) {
+        this.enterFatal({ attempt: 0, error: asError(error), kind: "deterministic_startup", stderr: this.options.messenger.recentStderr });
+      }
+      throw error;
+    }
+    if (this.disposed || cycle !== this.cycle) throw new Error("Tomcat service restart was superseded");
+    return this.reconnect();
+  }
+
   dispose(): void {
     if (this.disposed) {
       return;
@@ -242,10 +269,10 @@ export class ServeConnectionSupervisor {
       return;
     }
 
-    this.beginAttempt(restartRunningProcess);
+    this.beginAttempt(restartRunningProcess, true);
   }
 
-  private beginAttempt(restartRunningProcess: boolean): void {
+  private beginAttempt(restartRunningProcess: boolean, allowStart = false): void {
     if (this.disposed) {
       return;
     }
@@ -265,9 +292,9 @@ export class ServeConnectionSupervisor {
 
     try {
       if (restartRunningProcess && this.options.messenger.isRunning) {
-        this.options.messenger.restart();
+        void this.options.messenger.restart({ allowStart });
       } else {
-        this.options.messenger.start();
+        void this.options.messenger.start({ allowStart });
       }
     } catch (error) {
       this.handleAttemptFailure(attempt, asError(error));
@@ -418,6 +445,10 @@ export class ServeConnectionSupervisor {
     error: Error,
     stderr: string,
   ): ServeConnectionFailure | undefined {
+    if (error instanceof ServiceVersionMismatchError) {
+      return { attempt: attempt.number, error, kind: "version_mismatch", stderr };
+    }
+
     if (
       !this.options.isExecutableAvailable() ||
       /ENOENT/u.test(error.message)

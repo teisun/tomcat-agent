@@ -82,23 +82,25 @@ impl ToolSurface {
             allow_load_skill,
             allow_connector_tools,
             true,
+            true,
             plugin_tools,
         )
     }
 
-    /// `package_install` is intentionally absent while the session is in PLAN
-    /// mode. Unlike connector readiness, the mode is an explicit user action
-    /// and is allowed to invalidate the prompt surface.
+    /// Session mode and the controller's interaction support may invalidate the
+    /// prompt surface. Unlike connector readiness, these are explicit transitions.
     pub fn from_plugin_tools_with_runtime_policies(
         allow_load_skill: bool,
         allow_connector_tools: bool,
         allow_package_install: bool,
+        allow_ask_question: bool,
         plugin_tools: &[Tool],
     ) -> Self {
         let builtin = builtin_tool_surface_with_policies_and_install(
             allow_load_skill,
             allow_connector_tools,
             allow_package_install,
+            allow_ask_question,
         );
         let mut plugin_tools = plugin_tools.iter().collect::<Vec<_>>();
         plugin_tools.sort_by(|left, right| {
@@ -112,6 +114,11 @@ impl ToolSurface {
                 .iter()
                 .map(|tool| tool_to_function_definition(tool)),
         );
+        // ACP's SDK enables serde_json/preserve_order. Tool schemas are a cache-prefix
+        // input: equal objects must keep equal bytes regardless of discovery/key order.
+        for definition in &mut function_definitions {
+            definition.sort_all_objects();
+        }
         function_definitions.sort_by(|left, right| {
             left["function"]["name"]
                 .as_str()

@@ -14,6 +14,7 @@ import {
   readPlanMetadata,
 } from "../provider";
 import type { FileDiffLine, HostToWebviewFrame, WebviewToolDisplayFile } from "../protocol";
+import { isWebviewIntent } from "../protocol";
 import type { WebviewStateStore } from "../state";
 import { setLocale, translate } from "../../../shared/i18n";
 
@@ -2595,7 +2596,7 @@ describe("draft fork provider transaction", () => {
       switchSession: vi.fn(async () => {
         order.push("switch");
         if (failAt === "switch") throw new Error("switch failed");
-        return "target-1";
+        return { sessionId: "target-1", access: "control" as const, origin: null };
       }),
     };
     const provider = new TomcatWebviewViewProvider({
@@ -2724,6 +2725,24 @@ describe("serve connection readiness", () => {
     });
   }
 
+  it("validates the restart intent and invokes the existing restart owner without waiting for initialize", async () => {
+    const initialize = vi.fn(async () => ({}));
+    const provider = createProvider(initialize);
+    const restartServe = vi.fn().mockResolvedValue(undefined);
+    const reconnectServe = vi.fn();
+    Object.assign((provider as any).deps, { restartServe, reconnectServe });
+    const intent = { type: "restartSharedService", messageId: "restart-shared" } as const;
+    expect(isWebviewIntent(intent)).toBe(true);
+    await provider.dispatchTestIntent(intent);
+    expect(restartServe).toHaveBeenCalledOnce();
+    expect(reconnectServe).not.toHaveBeenCalled();
+    expect(initialize).not.toHaveBeenCalled();
+    // Failed restart state belongs to the supervisor, as with inline reconnect.
+    restartServe.mockRejectedValueOnce(new Error("restart failed"));
+    await expect(provider.dispatchTestIntent({ ...intent, messageId: "restart-failed" })).resolves.toBeUndefined();
+    provider.dispose();
+  });
+
   it("does not mark serve ready merely because the webview DOM announces ready", async () => {
     const provider = createProvider(async () => {
       throw new Error("serve handshake failed");
@@ -2764,10 +2783,27 @@ describe("serve connection readiness", () => {
     // though there was never an earlier successful handshake.
     (provider as any).deps.initialize = async () => ({ capabilities: [], sessionId: "s1", attachmentRoot: null });
     const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
+    provider.prepareForServeReconnect();
     await provider.setServeConnectionState("ready");
     await provider.refreshAfterServeRestart();
     expect(bootstrap).toHaveBeenCalledOnce();
     expect(provider.currentState().connectionFailure).toBeUndefined();
+    provider.dispose();
+  });
+
+  it("keeps the live prefix received during initialization when readiness arrives later", async () => {
+    const provider = createProvider(async () => ({ sessionId: "host" }));
+    const store = (provider as unknown as { stateStore: WebviewStateStore }).stateStore;
+    provider.prepareForServeReconnect();
+    store.applyEvent({
+      type: "message_update", sessionId: "host", assistantMessageId: "m-live",
+      assistantMessageEvent: null, message: { role: "assistant", content: "already generating" },
+    });
+    await provider.setServeConnectionState("ready");
+    await provider.refreshAfterServeRestart();
+    expect(provider.currentState().sessionViews.host.timeline).toContainEqual(expect.objectContaining({
+      type: "message", id: "m-live", text: "already generating",
+    }));
     provider.dispose();
   });
 

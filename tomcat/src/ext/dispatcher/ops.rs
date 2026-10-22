@@ -96,7 +96,7 @@ impl HostApiDispatcher {
         plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let p = match &self.primitive {
+        let p = match self.primitive_for_instance(plugin_id) {
             None => return Ok(HostResponse::err("PrimitiveExecutor not configured (005)")),
             Some(exec) => exec,
         };
@@ -113,7 +113,7 @@ impl HostApiDispatcher {
         plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let p = match &self.primitive {
+        let p = match self.primitive_for_instance(plugin_id) {
             None => return Ok(HostResponse::err("PrimitiveExecutor not configured (005)")),
             Some(exec) => exec,
         };
@@ -137,7 +137,7 @@ impl HostApiDispatcher {
         plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let p = match &self.primitive {
+        let p = match self.primitive_for_instance(plugin_id) {
             None => return Ok(HostResponse::err("PrimitiveExecutor not configured (005)")),
             Some(exec) => exec,
         };
@@ -160,7 +160,7 @@ impl HostApiDispatcher {
         plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let p = match &self.primitive {
+        let p = match self.primitive_for_instance(plugin_id) {
             None => return Ok(HostResponse::err("PrimitiveExecutor not configured (005)")),
             Some(exec) => exec,
         };
@@ -182,10 +182,10 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_task_output(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let Some(registry) = self.bash_task_registry.as_ref() else {
+        let Some(registry) = self.bash_for_instance(plugin_id) else {
             return Ok(HostResponse::err("BashTaskRegistry not configured (008)"));
         };
         let task_id = params
@@ -206,7 +206,7 @@ impl HostApiDispatcher {
                     .or_else(|| params.get("wait_ms"))
                     .and_then(|v| v.as_u64()),
             );
-            read_task_output_blocking(registry, task_id, since, wait_ms).await?
+            read_task_output_blocking(&registry, task_id, since, wait_ms).await?
         } else {
             serde_json::to_value(registry.read_output(task_id, since).await?)
                 .map_err(AppError::Serialize)?
@@ -216,10 +216,10 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_task_stop(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let Some(registry) = self.bash_task_registry.as_ref() else {
+        let Some(registry) = self.bash_for_instance(plugin_id) else {
             return Ok(HostResponse::err("BashTaskRegistry not configured (008)"));
         };
         let task_id = params
@@ -537,11 +537,12 @@ impl HostApiDispatcher {
         session_id: &str,
     ) -> Option<std::sync::Arc<crate::core::SessionManager>> {
         if let Some(entry) = self.session_registry.get(session_id) {
-            if let Some(session) = entry.value().upgrade() {
-                return Some(session);
-            }
+            return entry.session.upgrade();
         }
-        self.session.clone()
+        self.session_registry
+            .is_empty()
+            .then(|| self.session.clone())
+            .flatten()
     }
 
     pub(super) fn session_for_instance(

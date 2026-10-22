@@ -56,9 +56,7 @@ use super::types::{
     ServeContextReference, ServeMessageParams, ServeSessionMode, SetConnectorToolEnabledResponse,
     SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse, UpsertModelsResponse,
 };
-use super::{
-    cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
-};
+use super::{cleanup_session_slot, register_slot_hooks, run_slot_turn, ServeState};
 
 pub(crate) enum TurnAck {
     Accepted,
@@ -257,16 +255,82 @@ fn parse_serve_thinking_level(level: &str) -> Option<ThinkingLevel> {
     ThinkingLevel::parse(level)
 }
 
+/// Preserve private serve's find-current-or-create bootstrap without allocating a
+/// placeholder session. A live current session still uses the ordinary open path,
+/// including its project check, controller policy and message replay.
+fn resume_current_command(
+    state: &ServeState,
+    command: ServeCommand,
+) -> Result<ServeCommand, AppError> {
+    let ServeCommand::NewSession { id, params } = command else {
+        return Ok(command);
+    };
+    if !params.resume_current {
+        return Ok(ServeCommand::NewSession { id, params });
+    }
+    if params.detached {
+        return Err(AppError::Config(
+            "resume_current cannot create a detached session".into(),
+        ));
+    }
+    let mode = super::normalize_session_mode(&state.cfg, params.mode)?;
+    let (cwd, _) = super::resolve_session_paths(&params, state.shared)?;
+    let key = crate::core::session::scope::session_key_for_agent(&state.cfg.agent.id, mode, &cwd);
+    let manager = SessionManager::new_scoped(crate::resolve_sessions_dir(&state.cfg)?, key.clone());
+    let current = manager.current_session_entry()?;
+    state.set_session_scope(super::registry::SessionScope {
+        key,
+        mode,
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+    });
+    Ok(match current {
+        Some(entry) => ServeCommand::SwitchSession {
+            id,
+            session_id: entry.session_id,
+        },
+        None => ServeCommand::NewSession { id, params },
+    })
+}
+
 pub(crate) async fn handle_command(
     state: Arc<ServeState>,
-    command: ServeCommand,
+    command: impl Into<super::stdin::QueuedCommand>,
 ) -> Result<(), AppError> {
-    if control::handle_control_or_interrupt(Arc::clone(&state), command.clone()).await? {
-        return Ok(());
-    }
+    let super::stdin::QueuedCommand {
+        command,
+        turn_token,
+        session_mcp,
+    } = command.into();
+    let runtime = state.runtime.clone();
+    let _admission = if state.shared && super::ownership::needs_admission(&command) {
+        Some(runtime.admission.lock().await)
+    } else {
+        None
+    };
     if !control::ensure_initialized_or_error(&state, &command)? {
         return Ok(());
     }
+    let command = resume_current_command(&state, command)?;
+    if !super::ownership::authorize(&state, &command)? {
+        return Ok(());
+    }
+    if control::handle_control_or_interrupt(Arc::clone(&state), command.clone()).await? {
+        return Ok(());
+    }
+    let load_cwd = if let ServeCommand::LoadExternalSession { cwd, .. } = &command {
+        Some(
+            super::resolve_session_paths(
+                &super::types::NewSessionParams {
+                    cwd: Some(cwd.clone()),
+                    ..Default::default()
+                },
+                true,
+            )?
+            .0,
+        )
+    } else {
+        None
+    };
 
     match command {
         ServeCommand::DeleteSession { id, session_id } => {
@@ -321,7 +385,15 @@ pub(crate) async fn handle_command(
             }
             release_attachment_leases(&slot, &params);
 
-            start_turn(state, slot, id, Some(input_message), TurnAck::Accepted).await?;
+            start_turn_with_token(
+                state,
+                slot,
+                id,
+                Some(input_message),
+                TurnAck::Accepted,
+                turn_token,
+            )
+            .await?;
         }
         ServeCommand::Steer {
             id,
@@ -534,11 +606,23 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            if state.registry.len() >= state.registry.max_sessions() {
-                send_error(&state, id, None, "too_many_sessions")?;
-                return Ok(());
+            super::resolve_session_paths(&params, state.shared)?;
+            if let Err(error) = state.ensure_capacity().await {
+                if is_config_error(&error, "too_many_sessions") {
+                    send_error(&state, id, None, "too_many_sessions")?;
+                    return Ok(());
+                }
+                return Err(error);
             }
-            match create_session_slot(Arc::clone(&state), params, true).await {
+            match super::create_or_load_session_slot(
+                Arc::clone(&state),
+                params,
+                true,
+                None,
+                session_mcp.as_ref(),
+            )
+            .await
+            {
                 Ok(slot) => {
                     let session_id = slot.session_id.clone();
                     match state.registry.insert(Arc::clone(&slot)) {
@@ -553,8 +637,10 @@ pub(crate) async fn handle_command(
                             return Err(error);
                         }
                     }
+                    *slot.controller.lock() = Some(state.connection_id);
                     register_slot_hooks(&state, &slot);
-                    state.registry.set_active_session(&session_id)?;
+                    state.set_active_session(&session_id)?;
+                    slot.ctx.start_session_mcp();
                     state.writer.send(OutFrame::Response(ResponseFrame::ok(
                         id,
                         Some(session_id.clone()),
@@ -567,19 +653,40 @@ pub(crate) async fn handle_command(
                 Err(error) => return Err(error),
             }
         }
-        ServeCommand::SwitchSession { id, session_id } => {
+        ServeCommand::SwitchSession { id, session_id }
+        | ServeCommand::LoadExternalSession { id, session_id, .. } => {
+            let access;
             if let Some(slot) = state.registry.get(&session_id) {
-                // Persist the selection without rebinding either live session manager.
-                SessionManager::new_scoped(
-                    crate::resolve_sessions_dir(&state.cfg)?,
-                    slot.ctx.session_runtime.session.current_session_key(),
-                )
-                .switch_current_to_session_id(&session_id)?;
-                state.registry.set_active_session(&session_id)?;
+                if let Some(cwd) = load_cwd.as_deref() {
+                    require_matching_cwd(slot.cwd.as_deref(), cwd)?;
+                    if slot.mode != SessionMode::Code {
+                        return Err(AppError::Config("unknown_session".into()));
+                    }
+                }
+                access =
+                    super::ownership::open_session(&state, &slot, session_mcp.as_ref()).await?;
+                if access == "control" {
+                    // Observing must not change the other connection's durable selection.
+                    SessionManager::new_scoped(
+                        crate::resolve_sessions_dir(&state.cfg)?,
+                        slot.ctx.session_runtime.session.current_session_key(),
+                    )
+                    .switch_current_to_session_id(&session_id)?;
+                }
+                state.set_active_session(&session_id)?;
             } else {
-                match open_existing_session_slot(Arc::clone(&state), &session_id).await {
+                match open_existing_session_slot(
+                    Arc::clone(&state),
+                    &session_id,
+                    load_cwd.as_deref(),
+                )
+                .await
+                {
                     Ok(slot) => {
                         let inserted_session_id = slot.session_id.clone();
+                        access =
+                            super::ownership::open_session(&state, &slot, session_mcp.as_ref())
+                                .await?;
                         match state.registry.insert(Arc::clone(&slot)) {
                             Ok(()) => register_slot_hooks(&state, &slot),
                             Err(error) if is_config_error(&error, "too_many_sessions") => {
@@ -588,7 +695,14 @@ pub(crate) async fn handle_command(
                             }
                             Err(error) => return Err(error),
                         }
-                        state.registry.set_active_session(&inserted_session_id)?;
+                        state.set_active_session(&inserted_session_id)?;
+                        if access == "control" {
+                            SessionManager::new_scoped(
+                                crate::resolve_sessions_dir(&state.cfg)?,
+                                slot.ctx.session_runtime.session.current_session_key(),
+                            )
+                            .switch_current_to_session_id(&session_id)?;
+                        }
                     }
                     Err(error) if is_config_error(&error, "unknown_session") => {
                         send_error(&state, id, Some(session_id), "unknown_session")?;
@@ -604,7 +718,7 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(session_id.clone()),
-                Some(serde_json::json!({ "activeSessionId": session_id })),
+                Some(serde_json::json!({ "activeSessionId": session_id, "access": access, "origin": state.registry.get(&session_id).and_then(|slot| slot.origin.clone()) })),
             )))?;
         }
         ServeCommand::GetMessages {
@@ -847,9 +961,9 @@ pub(crate) async fn handle_command(
                 ListSessionsScope::Live => {
                     state.writer.send(OutFrame::Response(ResponseFrame::ok(
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         Some(serde_json::json!({
-                            "activeSessionId": state.registry.active_session_id(),
+                            "activeSessionId": state.active_session_id(),
                             "sessions": state.registry.list().into_iter().map(|session| {
                                 serde_json::json!({
                                     "sessionId": session.session_id,
@@ -861,29 +975,34 @@ pub(crate) async fn handle_command(
                     )))?;
                 }
                 ListSessionsScope::Disk => {
-                    let session_manager = match resolve_active_slot(&state) {
-                        Ok(slot) => SessionManager::new_scoped(
-                            crate::resolve_sessions_dir(&state.cfg)?,
-                            slot.ctx.session_runtime.session.current_session_key(),
-                        ),
-                        Err(_) => super::scoped_session_manager(&state)
-                            .ok_or_else(|| AppError::Config("unknown_session".into()))?,
-                    };
+                    let session_manager = super::scoped_session_manager(&state)
+                        .ok_or_else(|| AppError::Config("unknown_session".into()))?;
                     let current_session_id = session_manager.current_session_id()?;
                     let sessions = session_manager
                     .list_sessions()?
                     .into_iter()
                     .map(|(session_id, entry)| {
-                        let busy = state
-                            .registry
-                            .get(&session_id)
-                            .map(|live_slot| live_slot.is_turn_running())
-                            .unwrap_or(false);
-                        let interrupted = state
-                            .registry
-                            .get(&session_id)
-                            .map(|live_slot| live_slot.is_interrupted())
-                            .unwrap_or(false);
+                        let live_slot = state.registry.get(&session_id);
+                        let busy = live_slot.as_ref().is_some_and(|slot| slot.is_turn_running());
+                        let interrupted = live_slot.as_ref().is_some_and(|slot| slot.is_interrupted());
+                        // Same admission as ordinary disk writes; this is only a list
+                        // projection, never an acquisition of control. Open still decides access.
+                        let (origin, writable) = if let Some(slot) = live_slot {
+                            (slot.origin.clone(), state.controls(&slot))
+                        } else {
+                            match session_manager.read_session_header_for_session(&session_id) {
+                                Ok(Some(header)) => {
+                                    let writable = header.origin.is_none();
+                                    (header.origin, writable)
+                                }
+                                Ok(None) => (None, false),
+                                Err(error) => {
+                                    tracing::warn!(%session_id, %error, "session list could not read origin");
+                                    (None, false)
+                                }
+                            }
+                        };
+                        let access = if !state.shared || writable { "control" } else { "observe" };
                         let title = entry.title.clone().or_else(|| {
                             // 惰性回填：无持久化 title 时从 transcript 首条 user message 派生，不落盘。
                             let path = session_manager.transcript_path(&session_id);
@@ -892,6 +1011,8 @@ pub(crate) async fn handle_command(
                         }).or_else(|| Some("New session".to_string()));
                         serde_json::json!({
                             "sessionId": session_id,
+                            "origin": origin,
+                            "access": access,
                             "updatedAt": entry.updated_at,
                             "isCurrent": current_session_id.as_deref() == Some(entry.session_id.as_str()),
                             "busy": busy,
@@ -1415,7 +1536,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1433,7 +1554,7 @@ pub(crate) async fn handle_command(
                 .to_string();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(ListModelsPayload {
                         models,
@@ -1457,7 +1578,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1466,7 +1587,7 @@ pub(crate) async fn handle_command(
             refresh_all_model_catalogs(&state)?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(UpsertModelResponse {
                         model: result.model,
@@ -1488,7 +1609,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1500,7 +1621,7 @@ pub(crate) async fn handle_command(
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(UpsertModelsResponse {
                         models: result.models,
@@ -1525,7 +1646,7 @@ pub(crate) async fn handle_command(
             // Runs off the FIFO worker: an upstream that takes the full timeout must not
             // hold back prompts and other commands queued behind it.
             let runtime = state.cfg.llm.runtime();
-            let session_id = state.registry.active_session_id();
+            let session_id = state.active_session_id();
             tokio::spawn(async move {
                 let request = crate::core::llm::remote_models::RemoteModelsRequest {
                     base_url,
@@ -1562,7 +1683,7 @@ pub(crate) async fn handle_command(
                         send_error(
                             &state,
                             id,
-                            state.registry.active_session_id(),
+                            state.active_session_id(),
                             render_error_message(&error),
                         )?;
                         return Ok(());
@@ -1575,7 +1696,7 @@ pub(crate) async fn handle_command(
                 .collect();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(RemoveProviderResponse {
                         key_env: key_env.trim().to_string(),
@@ -1601,7 +1722,7 @@ pub(crate) async fn handle_command(
                 send_error(
                     &state,
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     render_error_message(&error),
                 )?;
                 return Ok(());
@@ -1615,7 +1736,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(RemoveModelResponse { model_id, warnings }).map_err(
                         |error| {
@@ -1648,7 +1769,7 @@ pub(crate) async fn handle_command(
                 .collect();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::json!({
                     "modelId": model_id,
                     "written": written,
@@ -1666,7 +1787,7 @@ pub(crate) async fn handle_command(
                 .collect();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::json!({
                     "modelId": model_id,
                     "envOverride": std::env::var_os("TOMCAT__LLM__TITLE_MODEL").is_some(),
@@ -1685,7 +1806,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1694,7 +1815,7 @@ pub(crate) async fn handle_command(
             refresh_all_model_catalogs(&state)?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(SetProviderKeyResponse::from(status)).map_err(
                         |error| {
@@ -1713,7 +1834,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1721,7 +1842,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(
                     serde_json::to_value(ListProviderKeysPayload { keys }).map_err(|error| {
                         AppError::Config(format!(
@@ -1738,7 +1859,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1753,7 +1874,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::to_value(payload)?),
             )))?;
         }
@@ -1770,7 +1891,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1778,7 +1899,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::to_value(super::types::ProjectTrustPayload {
                     project_root: root.to_string_lossy().into_owned(),
                     trusted: true,
@@ -1793,7 +1914,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1805,7 +1926,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1827,6 +1948,9 @@ pub(crate) async fn handle_command(
                     let config_path = match status.source {
                         McpConfigSource::Global => Some(global_config_path.clone()),
                         McpConfigSource::Project => project_config_path.clone(),
+                        McpConfigSource::Session => return Err(AppError::Config(
+                            "session connectors are not managed by project settings".into(),
+                        )),
                     };
                     let config_path = config_path.ok_or_else(|| {
                         AppError::Config(format!(
@@ -1883,7 +2007,7 @@ pub(crate) async fn handle_command(
             });
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({
                     "connectors": servers,
                     "configPaths": config_paths,
@@ -1905,7 +2029,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1917,7 +2041,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -1941,7 +2065,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::to_value(payload)?),
             )))?;
         }
@@ -1963,7 +2087,7 @@ pub(crate) async fn handle_command(
                 send_error(
                     &state,
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     "trustProject is only valid for Workspace connectors",
                 )?;
                 return Ok(());
@@ -1974,7 +2098,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2072,7 +2196,7 @@ pub(crate) async fn handle_command(
                 send_error(
                     &state,
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     render_error_message(&error),
                 )?;
                 return Ok(());
@@ -2103,7 +2227,7 @@ pub(crate) async fn handle_command(
             if let Some(error) = post_save_error {
                 state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     Some(json!({
                         "name": name,
                         "configKey": config_key,
@@ -2125,7 +2249,7 @@ pub(crate) async fn handle_command(
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({
                     "name": name,
                     "configKey": config_key,
@@ -2145,7 +2269,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2158,7 +2282,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2181,7 +2305,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2190,7 +2314,7 @@ pub(crate) async fn handle_command(
             synchronized?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({ "configKey": config_key, "removed": removed })),
             )))?;
         }
@@ -2205,13 +2329,13 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
                 }
             };
-            let session_id = state.registry.active_session_id();
+            let session_id = state.active_session_id();
             tokio::spawn(async move {
                 let response = match connector.mcp_manager().test_server(&config_key).await {
                     Ok(()) => ResponseFrame::ok(
@@ -2239,7 +2363,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2254,7 +2378,7 @@ pub(crate) async fn handle_command(
             });
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({ "configKey": config_key, "authorizing": true })),
             )))?;
         }
@@ -2269,7 +2393,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2278,7 +2402,7 @@ pub(crate) async fn handle_command(
             let cancelled = connector.mcp_manager().cancel_login(&config_key);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({ "configKey": config_key, "cancelled": cancelled })),
             )))?;
         }
@@ -2293,7 +2417,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2302,7 +2426,7 @@ pub(crate) async fn handle_command(
             let removed = connector.logout_server(&config_key)?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({ "configKey": config_key, "loggedOut": removed })),
             )))?;
         }
@@ -2317,7 +2441,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2329,7 +2453,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2337,7 +2461,7 @@ pub(crate) async fn handle_command(
             };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(serde_json::to_value(receipt)?),
             )))?;
         }
@@ -2354,7 +2478,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2367,7 +2491,7 @@ pub(crate) async fn handle_command(
                     send_error(
                         &state,
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                     )?;
                     return Ok(());
@@ -2379,7 +2503,7 @@ pub(crate) async fn handle_command(
                 send_error(
                     &state,
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     render_error_message(&error),
                 )?;
                 return Ok(());
@@ -2392,14 +2516,14 @@ pub(crate) async fn handle_command(
                 send_error(
                     &state,
                     id,
-                    state.registry.active_session_id(),
+                    state.active_session_id(),
                     render_error_message(&error),
                 )?;
                 return Ok(());
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(json!({ "configKey": config_key, "updated": true })),
             )))?;
         }
@@ -2417,7 +2541,7 @@ pub(crate) async fn handle_command(
                         .writer
                         .send(OutFrame::Response(ResponseFrame::error_with_payload(
                             id,
-                            state.registry.active_session_id(),
+                            state.active_session_id(),
                             render_error_message(&error),
                             set_connector_tool_enabled_payload(
                                 &config_key,
@@ -2438,7 +2562,7 @@ pub(crate) async fn handle_command(
                         .writer
                         .send(OutFrame::Response(ResponseFrame::error_with_payload(
                             id,
-                            state.registry.active_session_id(),
+                            state.active_session_id(),
                             render_error_message(&error),
                             set_connector_tool_enabled_payload(
                                 &config_key,
@@ -2459,7 +2583,7 @@ pub(crate) async fn handle_command(
                     .writer
                     .send(OutFrame::Response(ResponseFrame::error_with_payload(
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         message,
                         set_connector_tool_enabled_payload(
                             &config_key,
@@ -2480,7 +2604,7 @@ pub(crate) async fn handle_command(
                     .writer
                     .send(OutFrame::Response(ResponseFrame::error_with_payload(
                         id,
-                        state.registry.active_session_id(),
+                        state.active_session_id(),
                         render_error_message(&error),
                         set_connector_tool_enabled_payload(
                             &config_key,
@@ -2494,7 +2618,7 @@ pub(crate) async fn handle_command(
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
-                state.registry.active_session_id(),
+                state.active_session_id(),
                 Some(set_connector_tool_enabled_payload(
                     &config_key,
                     &raw_name,
@@ -2535,6 +2659,15 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
+            if state.shared && !state.controls(&slot) {
+                state.clear_displayed_session(&slot.session_id);
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    Some(slot.session_id.clone()),
+                    Some(serde_json::json!({"closed":true,"sessionId":slot.session_id})),
+                )))?;
+                return Ok(());
+            }
             state
                 .ask_question
                 .cancel_live_session(&slot.session_id, "close_session");
@@ -2618,7 +2751,7 @@ pub(super) async fn resolve_slot_or_error(
     id: Option<String>,
     session_id: Option<String>,
 ) -> Result<Option<Arc<super::registry::SessionSlot>>, AppError> {
-    let resolved = match state.registry.resolve_session_id(session_id.as_deref()) {
+    let resolved = match state.resolve_session_id(session_id.as_deref()) {
         Ok(resolved) => resolved,
         Err(error) if is_config_error(&error, "unknown_session") => {
             send_error(state, id, session_id, "unknown_session")?;
@@ -2631,20 +2764,6 @@ pub(super) async fn resolve_slot_or_error(
         return Ok(None);
     };
     Ok(Some(slot))
-}
-
-fn resolve_active_slot(state: &ServeState) -> Result<Arc<super::registry::SessionSlot>, AppError> {
-    if let Some(active_session_id) = state.registry.active_session_id() {
-        if let Some(slot) = state.registry.get(&active_session_id) {
-            return Ok(slot);
-        }
-    }
-    state
-        .registry
-        .list()
-        .into_iter()
-        .find_map(|summary| state.registry.get(&summary.session_id))
-        .ok_or_else(|| AppError::Config("unknown_session".to_string()))
 }
 
 fn connector_context_workspace_root(
@@ -2680,13 +2799,17 @@ fn resolve_connector_registry_for_context(
     let workspace_root = connector_context_workspace_root(context)?;
     // ConnectorRegistry owns the process-wide identity cache. Settings and chat
     // both resolve through it, keyed by the explicit workspace context.
-    ConnectorRegistry::create_and_start(&state.cfg, workspace_root.as_deref())
+    ConnectorRegistry::create_and_start_with_environment(
+        &state.cfg,
+        workspace_root.as_deref(),
+        state.child_environment(),
+    )
 }
 
 fn resolve_model_catalog_snapshot(
     state: &ServeState,
 ) -> Result<Arc<crate::core::llm::ModelCatalog>, AppError> {
-    if let Some(active_session_id) = state.registry.active_session_id() {
+    if let Some(active_session_id) = state.active_session_id() {
         if let Some(slot) = state.registry.get(&active_session_id) {
             return Ok(slot.ctx.global_services.model_catalog.snapshot());
         }
@@ -2726,36 +2849,64 @@ fn refresh_model_runtime(state: &ServeState, config: &AppConfig) -> Result<(), A
     Ok(())
 }
 
+fn require_matching_cwd(actual: Option<&str>, requested: &std::path::Path) -> Result<(), AppError> {
+    let actual = actual.map(crate::normalize_path).transpose()?;
+    if actual.as_deref() != Some(requested) {
+        return Err(AppError::Config("session_cwd_mismatch".into()));
+    }
+    Ok(())
+}
+
 async fn open_existing_session_slot(
     state: Arc<ServeState>,
     session_id: &str,
+    requested_cwd: Option<&std::path::Path>,
 ) -> Result<Arc<super::registry::SessionSlot>, AppError> {
-    if state.registry.len() >= state.registry.max_sessions() {
+    if !state.shared && state.registry.len() >= state.registry.max_sessions() {
         return Err(AppError::Config("too_many_sessions".to_string()));
     }
-    let scope = state
-        .registry
-        .current_scope()
-        .ok_or_else(|| AppError::Config("unknown_session".to_string()))?;
+    let scope = if let Some(cwd) = requested_cwd {
+        super::registry::SessionScope {
+            key: super::session_key_for_agent(&state.cfg.agent.id, SessionMode::Code, cwd),
+            mode: SessionMode::Code,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+        }
+    } else {
+        state
+            .current_scope()
+            .ok_or_else(|| AppError::Config("unknown_session".to_string()))?
+    };
     let session_manager =
         SessionManager::new_scoped(crate::resolve_sessions_dir(&state.cfg)?, scope.key);
-    let entry = match session_manager.switch_current_to_session_id(session_id) {
-        Ok(entry) => entry,
-        Err(AppError::Config(_)) => return Err(AppError::Config("unknown_session".to_string())),
-        Err(error) => return Err(error),
-    };
-    session_manager.pin_session(&entry.session_id)?;
-    create_session_slot(
+    let entry = session_manager
+        .get_session_by_id(session_id)?
+        .filter(|entry| entry.session_key == session_manager.current_session_key())
+        .ok_or_else(|| AppError::Config("unknown_session".into()))?;
+    if let Some(cwd) = requested_cwd {
+        require_matching_cwd(entry.cwd.as_deref(), cwd)?;
+    }
+    if state.shared {
+        super::resolve_session_paths(
+            &super::types::NewSessionParams {
+                cwd: entry.cwd.clone(),
+                ..Default::default()
+            },
+            true,
+        )?;
+        state.ensure_capacity().await?;
+    }
+    super::load_session_slot(
         state,
         super::types::NewSessionParams {
             cwd: entry.cwd.or(scope.cwd),
             detached: false,
+            resume_current: false,
             mode: Some(match scope.mode {
                 SessionMode::Code => ServeSessionMode::Code,
                 SessionMode::Claw => ServeSessionMode::Claw,
             }),
         },
-        false,
+        session_id,
     )
     .await
 }
@@ -2887,6 +3038,20 @@ pub(crate) async fn start_turn(
     input_message: Option<ChatMessage>,
     ack: TurnAck,
 ) -> Result<(), AppError> {
+    start_turn_with_token(state, slot, id, input_message, ack, None).await
+}
+
+async fn start_turn_with_token(
+    state: Arc<ServeState>,
+    slot: Arc<super::registry::SessionSlot>,
+    id: Option<String>,
+    input_message: Option<ChatMessage>,
+    ack: TurnAck,
+    requested_token: Option<tokio_util::sync::CancellationToken>,
+) -> Result<(), AppError> {
+    if state.shared && !state.controls(&slot) {
+        return Err(AppError::Config("read_only_session".into()));
+    }
     if !slot.mark_busy() {
         if id.is_some() {
             send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
@@ -2896,7 +3061,13 @@ pub(crate) async fn start_turn(
     slot.reset_terminal_emitted();
     slot.ctx.session_runtime.steering_queue.lock().open();
 
-    let turn_token = tokio_util::sync::CancellationToken::new();
+    let turn_token = requested_token.unwrap_or_else(|| {
+        if state.shared {
+            state.lifetime.child_token()
+        } else {
+            tokio_util::sync::CancellationToken::new()
+        }
+    });
     {
         let mut guard = slot.ctx.session_runtime.cancel_token.lock();
         *guard = turn_token.clone();
@@ -2913,7 +3084,7 @@ pub(crate) async fn start_turn(
         )));
     }
 
-    state.registry.set_active_session(&slot.session_id)?;
+    state.set_active_session(&slot.session_id)?;
     match ack {
         TurnAck::Accepted => {
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
@@ -3065,6 +3236,9 @@ fn emit_estimated_context_metrics_snapshot(slot: &Arc<super::registry::SessionSl
 pub(super) fn rehydrate_slot_context_state(
     slot: &Arc<super::registry::SessionSlot>,
 ) -> Result<(), AppError> {
+    // The durable history has changed; never resurrect a removed assistant in a
+    // newly attached window, including when subsequent rehydration fails.
+    *slot.message_replay.lock() = Default::default();
     let system_text = slot
         .turn_state
         .lock()
@@ -3123,7 +3297,9 @@ fn emit_agent_end_once(
         "messages": [],
         "error": error.into(),
     }));
-    let _ = state.writer.send(frame);
+    if let OutFrame::Event(payload) = frame {
+        state.emit_event(&slot.session_id, payload);
+    }
 }
 
 fn emit_agent_idle(
@@ -3138,7 +3314,9 @@ fn emit_agent_idle(
         })
         .expect("agent_idle wire event should serialize"),
     );
-    let _ = state.writer.send(frame);
+    if let OutFrame::Event(payload) = frame {
+        state.emit_event(&slot.session_id, payload);
+    }
 }
 
 fn render_error_message(error: &AppError) -> String {

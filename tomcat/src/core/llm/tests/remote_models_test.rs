@@ -109,6 +109,29 @@ async fn anthropic_listing_uses_x_api_key_version_and_page_limit() {
 }
 
 #[tokio::test]
+async fn remote_model_listing_uses_the_configured_proxy() {
+    let proxy = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        200,
+        r#"{"data":[{"id":"connection-model"}]}"#,
+    )])
+    .await;
+    let runtime = LlmRuntimeConfig {
+        proxy: Some(proxy.base_url.clone()),
+        ..Default::default()
+    };
+    let models = list_remote_models(
+        &runtime,
+        request("http://tomcat-listing-fixture.invalid", "openai"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(models[0].id, "connection-model");
+    assert!(request_line(&proxy.request_texts()[0])
+        .starts_with("GET http://tomcat-listing-fixture.invalid/"));
+    proxy.shutdown().await;
+}
+
+#[tokio::test]
 async fn path_aware_base_url_keeps_its_path() {
     let server =
         MockHttpServer::start(vec![ScriptedHttpResponse::json(200, r#"{"data":[]}"#)]).await;

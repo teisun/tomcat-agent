@@ -26,7 +26,7 @@ async function fixture(ids = ["a", "b"]) {
       return { scope, sessionKey: control.scope, activeSessionId: control.active,
         sessions: control.hideAll ? [] : [...records.values()].map(s => ({ ...s, isCurrent: s.sessionId === control.active })) };
     }),
-    switchSession: vi.fn(async (id: string) => { if (!records.has(id)) throw new Error("unknown_session"); control.active = id; return id; }),
+    switchSession: vi.fn(async (id: string) => { if (!records.has(id)) throw new Error("unknown_session"); control.active = id; return { sessionId: id, access: "control" as const, origin: null }; }),
     newSession: vi.fn(async () => {
       if (control.createFails) throw new Error("creation failed");
       const id = `new-${++control.next}`;
@@ -151,6 +151,7 @@ describe("Host session deletion", () => {
     expect(f.request).toHaveBeenCalledTimes(count);
     expect(f.provider.currentState().sessions.find(s => s.sessionId === "a")?.isPinned).toBe(true);
     f.control.failList = false; f.control.scope = "scope-A"; f.control.hideAll = false;
+    f.provider.prepareForServeReconnect();
     await f.provider.refreshAfterServeRestart();
     expect(f.provider.currentState().sessionViews.a.deleting).toBe(false);
     expect(f.drafts.peek("a").text).toBe("keep me");

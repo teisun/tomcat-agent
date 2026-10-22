@@ -916,7 +916,7 @@ fn install_checkpoint_store(
 async fn serve_command_routes_by_session_id() {
     let _api_key = install_test_api_key();
     let (state, _buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
-    let first = state.registry.active_session_id().unwrap();
+    let first = state.active_session_id().unwrap();
 
     handle_command(
         Arc::clone(&state),
@@ -946,10 +946,7 @@ async fn serve_command_routes_by_session_id() {
     .await
     .unwrap();
 
-    assert_eq!(
-        state.registry.active_session_id().as_deref(),
-        Some(second.as_str())
-    );
+    assert_eq!(state.active_session_id().as_deref(), Some(second.as_str()));
     let first_slot = state.registry.get(&first).expect("first session slot");
     let second_slot = state.registry.get(&second).expect("second session slot");
     assert!(Arc::ptr_eq(
@@ -978,7 +975,7 @@ async fn switch_to_live_session_persists_durable_current() {
     )
     .await
     .unwrap();
-    let second = state.registry.active_session_id().unwrap();
+    let second = state.active_session_id().unwrap();
     assert_ne!(first, second);
     let second_slot = state.registry.get(&second).expect("second session slot");
     assert_eq!(durable.current_session_id().unwrap(), Some(second.clone()));
@@ -993,7 +990,7 @@ async fn switch_to_live_session_persists_durable_current() {
     .await
     .unwrap();
 
-    assert_eq!(state.registry.active_session_id(), Some(first.clone()));
+    assert_eq!(state.active_session_id(), Some(first.clone()));
     // An unpinned manager reads sessions.json, not a slot's in-memory binding.
     assert_eq!(durable.current_session_id().unwrap(), Some(first.clone()));
     assert_eq!(
@@ -1021,7 +1018,7 @@ async fn switch_to_live_session_persists_durable_current() {
 async fn detached_new_session_does_not_change_live_or_durable_current() {
     let _api_key = install_test_api_key();
     let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
-    let active_before = state.registry.active_session_id().unwrap();
+    let active_before = state.active_session_id().unwrap();
     let durable_before = slot
         .ctx
         .session_runtime
@@ -1044,7 +1041,7 @@ async fn detached_new_session_does_not_change_live_or_durable_current() {
     .unwrap();
 
     assert_eq!(state.registry.len(), 1, "detached session is disk-only");
-    assert_eq!(state.registry.active_session_id(), Some(active_before));
+    assert_eq!(state.active_session_id(), Some(active_before));
     assert_eq!(
         slot.ctx
             .session_runtime
@@ -1063,7 +1060,7 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
     let source_id = slot.session_id.clone();
-    let active_before = state.registry.active_session_id();
+    let active_before = state.active_session_id();
     let current_before = slot
         .ctx
         .session_runtime
@@ -1112,7 +1109,7 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
     .unwrap();
     let retained = store.list_pending(&target_id).unwrap();
     assert_eq!(retained.len(), 2, "blob + provider rendition both retained");
-    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(state.active_session_id(), active_before);
     assert_eq!(
         slot.ctx
             .session_runtime
@@ -1139,7 +1136,7 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
         .unwrap()
         .is_none());
     assert!(store.list_pending(&target_id).unwrap().is_empty());
-    assert_eq!(state.registry.active_session_id(), active_before);
+    assert_eq!(state.active_session_id(), active_before);
     assert_eq!(store.list_pending(&source_id).unwrap().len(), 2);
     assert!(store.exists(&blob_sha) && store.exists(&provider_sha));
 
@@ -1159,7 +1156,7 @@ async fn detached_target_retain_and_discard_preserves_source_and_reclaims_target
 async fn serve_same_session_second_prompt_is_busy() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
-    let session_id = state.registry.active_session_id().unwrap();
+    let session_id = state.active_session_id().unwrap();
     let slot = state.registry.get(&session_id).unwrap();
     slot.busy.store(true, Ordering::SeqCst);
 
@@ -1374,7 +1371,7 @@ async fn serve_prompt_drives_agent_run() {
         }),
     ];
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
-    let session_id = state.registry.active_session_id().unwrap();
+    let session_id = state.active_session_id().unwrap();
 
     handle_command(
         Arc::clone(&state),
@@ -7571,6 +7568,14 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     let (state, buffer, _temp, slot) =
         crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
 
+    // This fixture owns two prompt responses, not the unrelated async title request.
+    let session = &slot.ctx.session_runtime.session;
+    session
+        .update_session(session.current_session_key(), |entry| {
+            entry.title = Some("Model format reload fixture".to_string());
+        })
+        .unwrap();
+
     handle_command(
         Arc::clone(&state),
         ServeCommand::Prompt {
@@ -7582,17 +7587,13 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     )
     .await
     .unwrap();
-    let _after_first = {
-        let mut lines = read_ndjson_lines(&buffer);
-        for _ in 0..50 {
-            lines = read_ndjson_lines(&buffer);
-            if count_event(&lines, "agent_end") >= 1 {
-                break;
-            }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count_event(&read_ndjson_lines(&buffer), "agent_idle") < 1 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        lines
-    };
+    })
+    .await
+    .expect("first turn must be idle before changing its model");
 
     handle_command(
         Arc::clone(&state),
@@ -7652,44 +7653,66 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     .await
     .unwrap();
 
-    let _after_second = {
-        let mut lines = read_ndjson_lines(&buffer);
-        for _ in 0..50 {
-            lines = read_ndjson_lines(&buffer);
-            if count_event(&lines, "agent_end") >= 2 {
-                break;
-            }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count_event(&read_ndjson_lines(&buffer), "agent_idle") < 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        lines
-    };
+    })
+    .await
+    .unwrap_or_else(|error| {
+        let requests: Vec<_> = server
+            .requests()
+            .iter()
+            .map(|raw| {
+                let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+                let request: serde_json::Value = serde_json::from_str(body).unwrap();
+                serde_json::json!({"stream": request["stream"], "cacheKey": request["prompt_cache_key"]})
+            })
+            .collect();
+        panic!("second turn must finish: {error}; request kinds: {requests:?}");
+    });
 
-    let requests = server.requests();
+    // JSON object order is not part of the Responses protocol (ACP's SDK enables
+    // serde_json/preserve_order). Assert the request structure rather than adjacency.
+    let requests: Vec<serde_json::Value> = server
+        .requests()
+        .iter()
+        .map(|raw| {
+            let (_, body) = raw.split_once("\r\n\r\n").expect("HTTP request body");
+            serde_json::from_str(body).expect("JSON request body")
+        })
+        .collect();
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the two prompt requests use this fixture"
+    );
+    let has_prompt = |request: &serde_json::Value, text: &str| {
+        request["stream"] == true
+            && request["input"].as_array().unwrap().iter().any(|message| {
+                message["role"] == "user"
+                    && message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|content| content["type"] == "input_text" && content["text"] == text)
+            })
+    };
     let before_request = requests
         .iter()
-        .find(|request| {
-            request.contains("\"stream\":true")
-                && request.contains("\"text\":\"before\"")
-                && !request.contains("\"text\":\"after\",\"type\":\"input_text\"")
-        })
+        .find(|request| has_prompt(request, "before") && !has_prompt(request, "after"))
         .expect("expected a streamed request for the first prompt");
     assert!(
-        !before_request.contains("\"effort\":\""),
-        "anthropic relay format on responses wire should omit reasoning effort: {}",
-        before_request
+        before_request["reasoning"].get("effort").is_none(),
+        "anthropic relay format on responses wire should omit reasoning effort"
     );
     let after_request = requests
         .iter()
-        .find(|request| {
-            request.contains("\"stream\":true")
-                && request.contains("\"text\":\"after\",\"type\":\"input_text\"")
-                && request.contains("\"effort\":\"xhigh\"")
-        })
-        .expect("expected a streamed request for the second prompt with xhigh effort");
-    assert!(
-        after_request.contains("\"effort\":\"xhigh\""),
-        "upserted openai format should hot-reload and send xhigh without restart: {}",
-        after_request
+        .find(|request| has_prompt(request, "after"))
+        .expect("expected a streamed request for the second prompt");
+    assert_eq!(
+        after_request["reasoning"]["effort"], "xhigh",
+        "upserted openai format should hot-reload without restart"
     );
 
     server.shutdown().await;

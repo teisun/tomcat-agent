@@ -1488,7 +1488,8 @@
           },
           "params": {
             "default": {
-              "detached": false
+              "detached": false,
+              "resumeCurrent": false
             },
             "allOf": [
               {
@@ -2046,10 +2047,10 @@
           },
           "capabilities": {
             "default": {
-              "files": false,
-              "reasoning": false,
-              "tools": true,
               "vision": false,
+              "files": false,
+              "tools": true,
+              "reasoning": false,
               "web_search": false
             },
             "allOf": [
@@ -2152,6 +2153,11 @@
                 "type": "null"
               }
             ]
+          },
+          "resumeCurrent": {
+            "description": "Reuse the project's current session during connection bootstrap; otherwise create one.",
+            "default": false,
+            "type": "boolean"
           }
         }
       },

@@ -11,14 +11,16 @@ describe("real Serve session deletion", () => {
     const server = await spawnScriptedOpenAiStreamServer([]);
     const runtime = await createRealServeMessenger(server.baseUrl);
     try {
-      const initial = await initializeServe(runtime.messenger);
+      await runtime.messenger.requestControl({
+        type: "control_request", subtype: "initialize", requestId: "non-default-scope-init", payload: null,
+      });
       const cwd = path.join(runtime.fixture.workspacePath, "different-project");
       await mkdir(cwd);
       const created = await runtime.messenger.request({ type: "new_session", params: { cwd, mode: "code" } });
+      expect(created.success, JSON.stringify(created)).toBe(true);
       const id = created.sessionId!;
       const before = await runtime.messenger.request({ type: "list_sessions", scope: "disk" });
-      await runtime.messenger.request({ type: "close_session", sessionId: initial.sessionId! });
-      await runtime.messenger.request({ type: "close_session", sessionId: id });
+      expect((await runtime.messenger.request({ type: "close_session", sessionId: id })).success).toBe(true);
       const after = await runtime.messenger.request({ type: "list_sessions", scope: "disk" });
       expect(after.payload).toEqual(before.payload);
       const reopened = await runtime.messenger.request({ type: "switch_session", sessionId: id });
@@ -33,7 +35,8 @@ describe("real Serve session deletion", () => {
       const init = await initializeServe(runtime.messenger);
       expect(init.capabilities).toContain("delete_session");
       const a = init.sessionId!;
-      const created = await send({ type: "new_session", params: {} });
+      const created = await send({ type: "new_session", params: { cwd: runtime.fixture.workspacePath } });
+      expect(created.success, JSON.stringify(created)).toBe(true);
       const b = created.sessionId!;
       expect((await send({ type: "close_session", sessionId: a })).success).toBe(true);
       expect((await send({ type: "switch_session", sessionId: a })).success).toBe(true);
@@ -46,7 +49,9 @@ describe("real Serve session deletion", () => {
       expect((await send({ type: "switch_session", sessionId: a })).success).toBe(false);
     } finally { await runtime.cleanup(); await server.close(); }
   }, 30_000);
-  it("refuses another Serve process's occupied session and allows deletion after it closes", async () => {
+  // Independent-process occupancy remains covered by Rust's
+  // independent_process_blocks_delete_and_process_exit_releases_occupancy.
+  it("refuses observer deletion without taking control away from the owning connection", async () => {
     const server = await spawnScriptedOpenAiStreamServer([]);
     const runtime = await createRealServeMessenger(server.baseUrl);
     const other = new TomcatMessenger({ executable: await ensureTomcatBinary(), env: runtime.fixture.env, cwd: runtime.fixture.workspacePath, requestTimeoutMs: 10_000 });
@@ -55,8 +60,9 @@ describe("real Serve session deletion", () => {
       const second = await initializeServe(other);
       expect(second.sessionId).toBe(first.sessionId);
       const id = first.sessionId!;
-      const refused = await runtime.messenger.request({ type: "delete_session", sessionId: id });
-      expect(refused.error).toBe("session_in_use");
+      const refused = await other.request({ type: "delete_session", sessionId: id });
+      expect(refused.success).toBe(false);
+      expect(refused.error).toBe("read_only_session");
       const reopened = await runtime.messenger.request({ type: "switch_session", sessionId: id });
       expect(reopened.success, JSON.stringify(reopened)).toBe(true);
       expect((await other.request({ type: "close_session", sessionId: id })).success).toBe(true);

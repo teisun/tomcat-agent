@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { TomcatMessenger } from "../TomcatMessenger";
-import { createSpawnFactory, FakeChildProcess } from "./fakes";
+import { createReadyMessenger } from "./fakes";
+import { createConnectionFactory, FakeConnection } from "./fakes";
 
-function readSingleCommandLine(child: FakeChildProcess): Record<string, unknown> {
+function readSingleCommandLine(child: FakeConnection): Record<string, unknown> {
   return JSON.parse(child.readStdin().trim()) as Record<string, unknown>;
 }
 
 describe("TomcatMessenger context-window wrapper", () => {
   it("sends the set_context_window serve command", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
     const pending = messenger.sendSetContextWindow("s1", "gpt-5.6", 1_000_000);
     const command = readSingleCommandLine(child);

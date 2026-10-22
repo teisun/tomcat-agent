@@ -3,6 +3,24 @@ import { describe, expect, it } from "vitest";
 import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
+  it("keeps observation across state/history refreshes and changes it only on open", () => {
+    const store = new WebviewStateStore();
+    const origin = { kind: "acp" as const, clientName: "paperclip" };
+    store.applySessionOpen({ sessionId: "host", access: "observe", origin });
+    for (const busy of [true, false]) {
+      store.applySessionState({ sessionId: "host", agentMode: "chat", model: "gpt-5.4", busy, activePlan: null });
+      store.hydrateHistory("host", { sessionId: "host", messages: [], hasMore: false });
+      expect(store.snapshot().sessionViews.host).toMatchObject({ access: "observe", origin, ownedByThisFrontend: false, busy });
+      expect(store.snapshot().sessions[0]).toMatchObject({ origin, ownedByThisFrontend: false });
+    }
+    store.syncSessionList({ scope: "disk", activeSessionId: "host", sessions: [{ sessionId: "host", access: "control", origin, busy: false, isCurrent: true, title: null, updatedAt: 1 }] });
+    expect(store.snapshot().sessionViews.host.access).toBe("observe");
+    store.applySessionOpen({ sessionId: "native", access: "observe", origin: null });
+    store.applySessionOpen({ sessionId: "native", access: "control", origin: null });
+    expect(store.snapshot().sessionViews.native).toMatchObject({ access: "control", ownedByThisFrontend: true });
+    expect(store.snapshot().sessionViews.host.access).toBe("observe");
+  });
+
   it("applies one agent-mode broadcast consistently in two webview stores", () => {
     const first = new WebviewStateStore();
     const second = new WebviewStateStore();
@@ -274,6 +292,77 @@ describe("webview dual-channel state store", () => {
       id: "att-1",
       label: "README.md",
     });
+  });
+
+  it("replaces a replayed prefix in a revisited view and preserves whitespace before live deltas", () => {
+    const store = new WebviewStateStore();
+    const replay = (content: string, thinking_text: string) => store.applyEvent({
+      type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+      assistantMessageEvent: null, message: { role: "assistant", content, thinking_text },
+    });
+    replay("你好，", "先检查");
+    store.applyEvent({ type: "message_end", sessionId: "s1", assistantMessageId: "a1", message: {} });
+    const mutation = replay("你好，\n", "先检查 ");
+    expect(mutation.kind).toBe("patch");
+    for (const [kind, delta] of [["content_delta", "世界 👋"], ["thinking_delta", "再验证"]]) {
+      store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+        assistantMessageEvent: { kind, delta }, message: {} });
+    }
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.filter((item) => item.type === "message")).toMatchObject([{ id: "a1", text: "你好，\n世界 👋" }]);
+    expect(timeline.filter((item) => item.type === "thinking")).toMatchObject([{ text: "先检查 再验证" }]);
+  });
+
+  it.each([true, false])("merges full replay and completed history without repeating text (history first: %s)", (historyFirst) => {
+    const store = new WebviewStateStore();
+    const history = () => store.hydrateHistory("s1", { sessionId: "s1", upToSeq: null,
+      messages: [{ type: "message", id: "a1", message: {
+        role: "assistant", content: "complete answer", thinking_text: "complete thinking",
+      } }],
+    });
+    if (historyFirst) history();
+    store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+      assistantMessageEvent: null,
+      message: { role: "assistant", content: "complete ", thinking_text: "complete " } });
+    if (!historyFirst) history();
+    // These were already included in the committed assistant row. Both channels
+    // must reject them even if message_end has not reached the consumer yet.
+    for (const kind of ["content_delta", "thinking_delta"]) {
+      store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+        assistantMessageEvent: { kind, delta: "SHOULD_NOT_APPEND" }, message: {} });
+    }
+    store.applyEvent({ type: "message_end", sessionId: "s1", assistantMessageId: "a1", message: {} });
+    history();
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.filter((item) => item.type === "message")).toMatchObject([{ id: "a1", text: "complete answer" }]);
+    expect(timeline.filter((item) => item.type === "thinking")).toMatchObject([{ text: "complete thinking" }]);
+  });
+
+  it("retains an ended replay while history is still behind, then converges by durable id", () => {
+    const store = new WebviewStateStore();
+    store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+      assistantMessageEvent: null, message: { role: "assistant", content: "just ended", thinking_text: "reason" } });
+    store.applyEvent({ type: "message_end", sessionId: "s1", assistantMessageId: "a1", message: {} });
+    store.hydrateHistory("s1", { sessionId: "s1", upToSeq: null, messages: [] });
+    expect(store.snapshot().sessionViews.s1.timeline).toHaveLength(2);
+    store.hydrateHistory("s1", { sessionId: "s1", upToSeq: null, messages: [{
+      type: "message", id: "a1", message: { role: "assistant", content: "just ended", thinking_text: "reason" },
+    }] });
+    expect(store.snapshot().sessionViews.s1.timeline).toHaveLength(2);
+  });
+
+  it("admits empty and thinking-only replay without inventing an answer or mixing sessions", () => {
+    const store = new WebviewStateStore();
+    for (const [sessionId, thinking_text] of [["s1", ""], ["s2", "only thinking "]]) {
+      store.applyEvent({ type: "message_update", sessionId, assistantMessageId: "same-id",
+        assistantMessageEvent: null, message: { role: "assistant", content: "", thinking_text } });
+    }
+    expect(store.snapshot().sessionViews.s1.timeline).toHaveLength(0);
+    expect(store.snapshot().sessionViews.s2.timeline).toMatchObject([{ type: "thinking", text: "only thinking " }]);
+    store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "same-id",
+      assistantMessageEvent: { kind: "content_delta", delta: "first text" }, message: {} });
+    expect(store.snapshot().sessionViews.s1.timeline).toMatchObject([{ text: "first text" }]);
+    expect(store.snapshot().sessionViews.s2.timeline).toHaveLength(1);
   });
 
   it("deduplicates live assistant, thinking, and tool entries when history rehydrates", () => {

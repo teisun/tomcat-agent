@@ -13,6 +13,9 @@ use crate::core::permission::{PermissionDecision, PermissionGate};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::i18n::tr;
 
+#[path = "project_agents.rs"]
+mod agents;
+
 pub const MAX_FILE_BYTES: usize = 65_536;
 const MAX_HEADER_BYTES: usize = 4096;
 const MAX_ENTRIES: usize = 4096;
@@ -41,6 +44,8 @@ pub struct PromptFile {
     pub card: InstructionCard,
     pub file_path: PathBuf,
     pub always_apply: bool,
+    // AGENTS.md uses raw Markdown, a repository containment boundary and no rule budget.
+    agents_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +127,15 @@ pub fn read_body(root: &Path, path: &Path, gate: &dyn PermissionGate) -> Result<
     safe_path(root, path)?;
     readable(gate, path)?;
     let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let text = read_text_file(&mut file)?;
+    let (_, _, body) = parse_document(&text)?;
+    if body.trim().is_empty() {
+        return Err(tr("instructions.empty", &[]));
+    }
+    Ok(body.to_string())
+}
+
+fn read_text_file(file: &mut File) -> Result<String, String> {
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES as u64 {
         return Err(tr("instructions.notRegular", &[]));
@@ -134,12 +148,21 @@ pub fn read_body(root: &Path, path: &Path, gate: &dyn PermissionGate) -> Result<
     if bytes.len() > MAX_FILE_BYTES {
         return Err(tr("instructions.fileLarge", &[]));
     }
-    let text = String::from_utf8(bytes).map_err(|_| tr("instructions.utf8", &[]))?;
-    let (_, _, body) = parse_document(&text)?;
-    if body.trim().is_empty() {
-        return Err(tr("instructions.empty", &[]));
-    }
-    Ok(body.to_string())
+    String::from_utf8(bytes).map_err(|_| tr("instructions.utf8", &[]))
+}
+
+/// AGENTS.md follows the session cwd; ordinary rules keep their existing discovery root.
+pub fn discover_rules(
+    root: &Path,
+    cwd: &Path,
+    resource_dir: &str,
+    gate: &dyn PermissionGate,
+) -> Discovery {
+    let mut result = agents::discover(cwd);
+    let ordinary = discover(root, resource_dir, true, gate);
+    result.files.extend(ordinary.files);
+    result.diagnostics.extend(ordinary.diagnostics);
+    result
 }
 
 pub fn discover(
@@ -361,6 +384,7 @@ fn scan(
                     },
                     file_path: path,
                     always_apply,
+                    agents_root: None,
                 });
             }
             Err(e) => result
@@ -380,18 +404,20 @@ pub fn render_rules(
     let limit = 32_000.min(budget / 10);
     let mut text = String::new();
     let mut loaded = 0;
+    let mut rule_chars = 0;
+    const HEADER: &str = "## User Custom Instructions\n\n";
     for file in &discovery.files {
         if !file.always_apply {
             diagnostics.push(tr("instructions.notAlways", &[("path", &file.card.path)]));
             continue;
         }
-        match read_body(root, &file.file_path, gate) {
+        let body = match &file.agents_root {
+            Some(repo) => agents::read_body(repo, &file.file_path, gate),
+            None => read_body(root, &file.file_path, gate),
+        };
+        match body {
             Ok(body) => {
-                let header = if text.is_empty() {
-                    "## User Custom Instructions\n\n"
-                } else {
-                    "\n\n"
-                };
+                let header = if text.is_empty() { HEADER } else { "\n\n" };
                 let description = if file.card.description.is_empty() {
                     String::new()
                 } else {
@@ -401,9 +427,16 @@ pub fn render_rules(
                     "{header}### Source: {}\n{description}{body}",
                     file.card.path
                 );
-                if text.chars().count() + entry.chars().count() > limit {
-                    diagnostics.push(tr("instructions.budget", &[("path", &file.card.path)]));
-                    continue;
+                if file.agents_root.is_none() {
+                    // Charge the same header as an ordinary-only render, independent of AGENTS.md.
+                    let prefix = if rule_chars == 0 { HEADER } else { "\n\n" };
+                    let cost =
+                        entry.chars().count() - header.chars().count() + prefix.chars().count();
+                    if rule_chars + cost > limit {
+                        diagnostics.push(tr("instructions.budget", &[("path", &file.card.path)]));
+                        continue;
+                    }
+                    rule_chars += cost;
                 }
                 text.push_str(&entry);
                 loaded += 1;

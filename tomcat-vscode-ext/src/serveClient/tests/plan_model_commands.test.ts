@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { TomcatMessenger } from "../TomcatMessenger";
-import { createSpawnFactory, FakeChildProcess } from "./fakes";
+import { createReadyMessenger } from "./fakes";
+import { createConnectionFactory, FakeConnection } from "./fakes";
 
-function readSingleCommandLine(child: FakeChildProcess): Record<string, unknown> {
+function readSingleCommandLine(child: FakeConnection): Record<string, unknown> {
   const written = child.readStdin().trim();
   expect(written.length).toBeGreaterThan(0);
   return JSON.parse(written);
@@ -11,10 +11,10 @@ function readSingleCommandLine(child: FakeChildProcess): Record<string, unknown>
 
 describe("TomcatMessenger plan/model wrappers", () => {
   it("sends set_plan_mode with the expected shape", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pending = messenger.sendSetPlanMode({
@@ -55,10 +55,10 @@ describe("TomcatMessenger plan/model wrappers", () => {
   });
 
   it("sends list_models with the expected shape", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pending = messenger.sendListModels();
@@ -88,10 +88,10 @@ describe("TomcatMessenger plan/model wrappers", () => {
   });
 
   it("sends model admin commands with the expected payloads", async () => {
-    const child = new FakeChildProcess();
-    const messenger = new TomcatMessenger({
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({
       executable: "tomcat",
-      spawnFactory: createSpawnFactory(child),
+      connectFactory: createConnectionFactory(child),
     });
 
     const pendingUpsert = messenger.sendUpsertModel({

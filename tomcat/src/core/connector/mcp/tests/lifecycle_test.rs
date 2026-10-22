@@ -22,6 +22,7 @@ async fn same_generation_old_attempt_cannot_publish_fail_or_close_the_next_conne
         id: old_id,
         manager: manager.self_weak.clone(),
         workspace_root: manager.workspace_root.clone(),
+        environment: None,
         oauth_store: manager.oauth_store.clone(),
         cancel: run.cancel.child_token(),
         cleanup: run.cleanup.clone(),

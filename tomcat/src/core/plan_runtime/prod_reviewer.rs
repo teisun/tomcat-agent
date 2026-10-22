@@ -519,6 +519,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let confirmation = Arc::clone(&deps.confirmation);
         let audit = Arc::clone(&deps.audit);
         let bash_ast = deps.bash_ast.clone();
+        let bash_cwd = deps.agent_workspace_dir.clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
@@ -593,7 +594,9 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                             confirmation.clone(),
                             audit.clone(),
                             bash_ast.clone(),
+                            Some(bash_cwd.clone()),
                         );
+                    bash_task_registry.set_environment(primitive.child_environment());
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,
@@ -890,6 +893,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let confirmation = Arc::clone(&deps.confirmation);
         let audit = Arc::clone(&deps.audit);
         let bash_ast = deps.bash_ast.clone();
+        let bash_cwd = deps.agent_workspace_dir.clone();
         let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
         let model_id = deps.resolve_model(&plan_runtime);
         let thinking_level = Some(deps.resolve_thinking_level(&model_id));
@@ -955,7 +959,9 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                             confirmation.clone(),
                             audit.clone(),
                             bash_ast.clone(),
+                            Some(bash_cwd.clone()),
                         );
+                    bash_task_registry.set_environment(primitive.child_environment());
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,

@@ -44,7 +44,7 @@ pub(super) mod media;
 
 use std::sync::Arc;
 
-use crate::core::connector::ConnectorRegistry;
+use crate::core::connector::mcp::manager::McpToolView;
 use crate::core::tools::primitive::{BashTaskRegistry, PrimitiveExecutor};
 #[cfg(test)]
 use crate::infra::error::AppError;
@@ -149,7 +149,7 @@ struct ToolExecCtx<'a> {
     todos_runtime: Option<&'a Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     plan_runtime: Option<&'a Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&'a Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
-    connector_registry: Option<&'a Arc<ConnectorRegistry>>,
+    connector_tools: Option<&'a Arc<McpToolView>>,
     plugin_engine_config: Option<&'a crate::ext::PluginEngineConfig>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     expose_skills_to_reviewer: bool,
@@ -355,7 +355,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
     todos_runtime: Option<&Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
-    connector_registry: Option<&Arc<ConnectorRegistry>>,
+    connector_tools: Option<&Arc<McpToolView>>,
     plugin_engine_config: Option<&crate::ext::PluginEngineConfig>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     expose_skills_to_reviewer: bool,
@@ -380,7 +380,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
         todos_runtime,
         plan_runtime,
         skill_set,
-        connector_registry,
+        connector_tools,
         plugin_engine_config,
         subagent_type,
         expose_skills_to_reviewer,
@@ -400,13 +400,50 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
     }
 }
 
+/// Resolve once before file stamps, plan guards and baseline capture see the input.
+/// Only filesystem tool fields are rewritten; command text and MCP arguments stay intact.
+fn resolve_file_arguments(
+    primitive: &dyn PrimitiveExecutor,
+    name: &str,
+    args: &mut serde_json::Value,
+) {
+    if !matches!(
+        name,
+        "read" | "write" | "edit" | "hashline_edit" | "list_dir" | "search_files"
+    ) {
+        return;
+    }
+    let resolve = |object: &mut serde_json::Value| {
+        if let Some(path) = object
+            .get("path")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.trim().is_empty())
+        {
+            object["path"] = primitive
+                .resolve_path(path)
+                .to_string_lossy()
+                .into_owned()
+                .into();
+        }
+    };
+    resolve(args);
+    if name == "read" || name == "edit" {
+        let key = if name == "read" { "paths" } else { "files" };
+        if let Some(files) = args.get_mut(key).and_then(|v| v.as_array_mut()) {
+            for file in files {
+                resolve(file);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_tuple_full(
     ctx: &ToolExecCtx<'_>,
     tc: &ToolCallInfo,
     display_out: &mut Option<ToolDisplay>,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
-    let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
+    let mut args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -416,6 +453,8 @@ async fn execute_tool_tuple_full(
             )
         }
     };
+
+    resolve_file_arguments(ctx.primitive.as_ref(), &tc.name, &mut args);
 
     // B3-guard：reviewer 子 Agent 不允许调 catalog 白名单外的任何工具（双保险——
     // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
