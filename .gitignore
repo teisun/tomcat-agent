@@ -61,3 +61,4 @@ pi-rust-wasm/.integration_test_output.log
 pi-rust-wasm/.integration_test_output_lib.log
 pi-rust-wasm/.integration_develop_merge.log
 pi-rust-wasm/.integration_retry_*.log
+.playwright-mcp/
