@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-10-23 22:43 +0800 | ACTIVE | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-10-24 | ACTIVE | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -22,10 +22,10 @@
 - LLM 仅在无显式代理、主地址与可选 fallback 都为回环时绕过自动代理；远端与显式代理语义保留。窗口语言按连接环境解析，服务生成的文本仍使用进程级语言，不承诺多窗口独立重译。
 - 未新增 wire 字段或安装／服务生命周期协议。
 
-### 验证记录（此前结果，本次不重跑）
+### Windows 验证记录（此前结果，Mac 不机械重跑）
 
-- 按用户本次要求，不运行测试、构建、安装或视觉验收；提交准备仅审查 diff、文件范围、版本声明和 Git 空白检查。Cov% 未测量，不将用例通过率当作代码覆盖率。
-- 选择器修复此前验证：`npm run lint` 与相关 22 个测试文件的 470 项用例通过；随后构建/编译及纯 VSIX 内容检查通过。本次提交不重跑。
+- Windows 提交准备阶段按用户当时要求，不运行测试、构建、安装或视觉验收；提交准备仅审查 diff、文件范围、版本声明和 Git 空白检查。Cov% 未测量，不将用例通过率当作代码覆盖率。
+- 选择器修复此前验证：`npm run lint` 与相关 22 个测试文件的 470 项用例通过；随后构建/编译及纯 VSIX 内容检查通过。当时提交未重跑。
 - 隔离 Windows VS Code 1.143 + 真实 CLI 的 `assertWebviewPickContextFlow` 已验证真实点击 `+`、原生 QuickPick 和附件/引用回填；PNG/ARIA/console 已检查，无 Tomcat Webview 控制台错误。系统文件对话框仍由替身返回 URI 并校验互斥参数，不标作原生选择文件验收通过；测试模型图像能力警告与加载中的缩略图不作为图片预览验收。
 - 本地诊断及制品证据：`.agents/acceptance/composer-drag-probe/verification.md`、`gui-ru4M8V/` 和扩展目录下纯 VSIX，均不纳入 Git。原安装版 VS Code 更新锁、Windows fake-Serve 夹具 `spawn EFTYPE` 阻塞保留记录，后改用隔离副本和既有真实 CLI 夹具完成菜单/回填验证。
 - 第一项计划此前记录：Windows Rust 影响范围回归 717/717；Native／ACP 冷构建与三次预热每轮 8/8；真实 VS Code 旁观与关窗旅程各 1/1，PNG／ARIA／console 已读回。
@@ -33,14 +33,44 @@
 - 最终真实 VS Code 重启旅程及外层检查退出 0：实例 A 切换到 B，非标题模型请求保持 2 次，关窗后禁止自动拉起的 Native IPC 仍连接 B；四组最终 PNG／ARIA／console 已读回。
 - 详细本地证据：`.agents/acceptance/windows-shared-serve-report.md`、`.agents/acceptance/update-restart/report.md`；最终重启截图目录 `.agents/acceptance/update-restart/ui/gui-u7Ujzh/`。这些日志、截图和构建产物不纳入 Git，Mac 拉取代码不会自动获得本机证据文件。
 
+### macOS 联合验收（2026-10-23–24）
+
+```text
+8a5b7885 → 共用自动化 → 真实 VS Code 旁观 / 重启 / 关窗
+                              ↓
+                    Mac 制品 → 安装 / Dock / 项目连接 / 语言（已补证）
+                              → 正式重启 A→B → Reload / 全退出 / Dock 重开仍 B
+```
+
+- **本机自动化验收完成**：macOS 13.7.8 x86_64 / VS Code 1.139.0；Rust 定向 252 passed（3336 skipped 不计通过），扩展 gate:fast 两份 tsc + host 807 / GUI 877，四项真实服务 integration 修复后 11/11。
+- 本轮修复的是验收准备：新 CLI 首次启动无输出超过 fixture 15 秒预算；既有构建准备增加有 120 秒上限的只读 `--version`，失败原样抛出，不放大 init/产品超时。新增 3 条回归测试和定向 strict tsc 通过；保留原始 10/11 失败及诊断，不推测系统扫描原因。
+- 两条真实 VS Code 场景各 1 passing：同项目 ACP 实时只读旁观、跨项目隔离、Reload；真实写文件任务、菜单只补全、发送后后台 A→B、草稿清空，关窗后禁止自动启动的 Native IPC 仍连接 B。重启前后非标题模型请求为同样两次。
+- 6 组 PNG/ARIA/console 均已逐项读取；两条截图脚本先最大化面板，真实图片为桌面 1381×794、窄屏 331×738（workbench 为 1440×900 / 390×844）。捕获窗口无 Tomcat 业务错误；不据此声称 VS Code 全进程零告警。
+- 本轮没有改产品逻辑、依赖或版本；隔离自动化未改正式环境，未调用真实供应商。后续经用户明确授权，仅在正常 UI 中信任自建测试目录、切换语言并恢复 auto；未改日常代理，Agent 未执行正式安装或重启（由用户独立完成）。Windows 代码页 936、隐藏控制台、Job Object、EXE 替换在 Mac 为不适用。
+- 两份本地报告：`.agents/acceptance/macos/8a5b7885f212f4549043a9b26502e6a6e89f5b20/shared-serve-native-acp.md` 与同目录 `update-restart.md`。目录内保留原始日志、截图、失败、源码快照；这些制品不纳入 Git。
+- Mac release CLI 0.1.81 与内置同一 CLI 的 darwin-x64 VSIX 0.1.97 已构建校验，见 `artifacts/artifact-verification.json`。用户实际明确选择“纯插件 0.1.97 + 独立 CLI 0.1.81”，两者安装分别由 `manual-cli-install-20261023-232133.json` 和 `manual-pure-vsix-install-20261024-000233.json` 核对：软链/版本/哈希正确，纯包 251 个载荷文件及 manifest 与安装内容一致；不要求改装内置包。用户已确认 Dock 启动；新日志 process-path 指向独立 CLI 并 ready，后台 0.1.81 / PID 68026 / instanceId 66777c7a… 与退出前一致。
+- `manual-ui-acceptance.md` 补充实际生产窗口：中文/空格测试项目连接；auto 跟随英文宿主、保存中文、关闭重开仍中文、恢复 auto；四张原 PNG 已逐张读取。新窗口首次自动启动被 Agent 保护拒绝、随后连接已有后台的日志保留，未移除保护。该普通窗口未取得完整 DOM ARIA / webview console，不将截图补证冒充新的全套 UI 门禁；正式重启及保活证据见下条。
+
+- 用户明确回复“已重启”，`manual-official-restart.json` 记录正式服务 PID 68026 / 66777c7a… → PID 30430 / 5739b8b1…，版本 0.1.81，插件日志恢复 ready。新进程的可执行映射指向本轮交付 release，入口 SHA-256 与交付一致；不冒充手动重启瞬间的菜单/草稿截图。
+- `manual-window-liveness.json` 完成正式保活补证：独立 Terminal 在 Reload 后和 Code 进程为零、尚未重开时采到 B/PID 30430；中间用户从启动台打开，随后按指导退出并明确确认“已从 Dock 重开”，07:10:22 新 Code PID 68569、插件 process-path → 独立 CLI → ready，后台仍 B/PID 30430。自动脚本原 Dock 点击 -1728 失败保留，不宣称全程自动；重开前采样来自第一次脚本退出。Terminal 辅助功能按用户要求保持开启。
+
+
+### Windows 新修复同步与 Mac 合并检查（2026-10-24）
+
+- 已拉取 `e9d8db38`（文件选择器）及 `4cba7ec0`（忽略 Playwright 本地产物），在其上恢复四项 Mac 验收代码改动；仅状态文档存在冲突，双方修复记录与未验收边界均保留。
+- 合并后两份 TypeScript 检查通过；host 全部用例 808 + provider 流程 69 + 构建就绪 3，共 57 文件 / 880 项通过。原 Mac 验收的 Rust/共享服务检查未机械重跑，也不将其旧制品当成包含新选择器修复。
+- 当前源码构建成功；隔离 VS Code 的 `routes smart picker selections into attachments and context chips` 为 1 passing。两组 PNG/ARIA/console 已读取：原生 QuickPick 的文件/文件夹入口可见，图片及两种引用回填正确，捕获范围内没有运行时 error；VS Code feature/sandbox 警告及测试模型不支持图片的提示保留。
+- 本次使用既有 fake-Serve 与系统文件对话框替身，只证明真实扩展菜单交互及回填，不代签 Windows 原生对话框、真实模型或拖拽验收；未安装新插件或重启正式服务。详细证据：`.agents/acceptance/macos/merge-windows-4cba7ec0/report.md`。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
-| macOS 回归 | 本次两项整改尚未在 Mac 实跑；Windows 结果不能代签 | 拉取同一提交，验证 Native／ACP、PATH、语言、代理、软链接与真实 VS Code 重启／保活；保留 Mac 自己的日志和截图 |
-| 新版本交付 | 已生成含选择器修复的纯扩展 0.1.97，但不含 CLI、未安装；不能据此推断用户正在运行的 CLI／扩展／后台版本 | 用户从 VSIX 安装后核对实际版本与路径；本次不自动安装或重启 |
+| macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
+| Mac 已安装版本 | 纯插件 0.1.97、独立 CLI/serve 0.1.81、process-path 已核对；这是 8a5b7885 基线制品，不含后来选择器修复 | 保留被软链引用的 release 文件；源码合并不等于已安装插件更新 |
+| 选择器修复制品 | Windows 已生成含选择器修复的纯扩展 0.1.97，但不含 CLI、未自动安装；同版本号不证明包内容相同 | 安装修复包后核对实际版本、路径与内容；本次合并不自动安装或重启 |
 | Windows 原生文件选择 | 已修复互斥参数，宿主菜单与回填通过；系统文件对话框的实际选取仍未验收 | 安装本次纯插件包后验证普通文件可见并可添加，文件夹入口仍可用 |
 | 文件树拖拽无提示 | 根因未确认；CDP 鼠标探针未产生源头 dragstart，不能视为有效复现或成功验收；拖拽代码未改 | 在用户故障窗口捕获真实 dragstart、Shift 状态及 iframe dragover/drop，再按事件断点定位 |
-| 用户手工验收 | 用户表示 Windows 可能已验收完成，但未提供逐项版本、路径和实例记录 | Mac 交接时补齐真实安装与后台身份确认；Agent 不替用户重启共享服务 |
+| Mac 正式保活（已补证） | 用户正式重启 A→B，Reload、全退出后重开前、最终用户 Dock 重开均仍 B；脚本与用户操作分开记账 | 不再要求重复操作；保留自动点击失败原件与组合回执 |
 | CI 与外部宿主 | 本机整改验收不代替本次提交的 GitHub Windows 系统代理 CI；本轮外部宿主为源码契约对照，不是完整宿主重验 | 推送后检查 CI；保留 Multica 上层 30 秒交接与 backend 65 秒清理预算不一致的未实测风险 |
-| 提交范围 | 本次仅本地提交，不推送、不打标签、不合并或发布 | 用户确认后推送，再在 Mac 拉取验收 |
+| 提交范围 | 本次按用户授权合并 Windows 新提交与本地 Mac 验收改动，并在本地提交 | 不推送、不打标签、不发布；不安装或重启正式服务 |

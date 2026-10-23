@@ -52,7 +52,10 @@ export async function assertSharedObservationFlow(getApi: () => Promise<TomcatEx
     void turn.catch(() => undefined);
     await until(() => JSON.stringify(host.updates).includes(prefix), "host prefix before opening");
     chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    // Capture a real desktop-width panel, not a narrow sidebar inside a wide workbench.
+    await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
     await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "desktop observer panel is wide");
     await chat.click("session-select");
     await until(() => api.__testing.getWebviewState().sessions.some(row => row.sessionId === sessionId), "ordinary dropdown refresh finds the new host session");
     assert.equal(api.__testing.getWebviewState().sessions.some(row => row.sessionId === foreign.sessionId), false);

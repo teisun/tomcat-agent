@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolveCargoCommand } from "./resolveCargoCommand";
 
@@ -32,5 +32,14 @@ export async function buildTomcatBinary(): Promise<string> {
       else reject(new Error(`cargo build failed (${code ?? signal}); see cargo output above`));
     });
   });
-  return builtTomcatBinary();
+  const executable = await builtTomcatBinary();
+  // A fresh macOS executable can exceed the fixture's 15s budget before producing output.
+  // Keep this read-only readiness check in build setup, not the fixture's init budget.
+  await new Promise<void>((resolve, reject) => {
+    execFile(executable, ["--version"], { timeout: 120_000, windowsHide: true }, (error, stdout) => {
+      if (error) reject(error);
+      else { console.log(`[tomcat ready] ${stdout.trim()}`); resolve(); }
+    });
+  });
+  return executable;
 }

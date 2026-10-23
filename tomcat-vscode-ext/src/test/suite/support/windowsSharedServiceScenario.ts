@@ -46,20 +46,22 @@ export async function assertSharedServiceLifecycle(getApi: () => Promise<TomcatE
       const consoleReport = JSON.parse(await fs.readFile(`${stem}.console.json`, "utf8"));
       assert.deepEqual(consoleReport.errors, []);
     };
+    // Keep the panel maximized in both viewports; the captured frame must really be wide.
+    await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
     await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "desktop lifecycle panel is wide");
     await capture("shared-service-completed", "Shared service task complete.");
     await chat.fill('[data-testid="composer-input"]', "/");
     await chat.waitForSnapshot(snapshot => snapshot.text.includes("/restart"), "restart option rendered");
     await capture("restart-menu-desktop", "/restart");
-    // Match the existing visual harness: narrow the actual panel, not editor + sidebar.
-    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    // Narrow the already-maximized panel, not editor + sidebar together.
     try {
       await chat.setViewport(390, 844);
       await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 300, "narrow capture uses the maximized panel, not the 159px sash minimum");
       await capture("restart-menu-narrow", "/restart");
     } finally {
       await chat.setViewport(1440, 900);
-      await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+      await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "desktop lifecycle panel restored");
     }
     const option = await chat.evaluate<number>(`[...document.querySelectorAll('[data-testid="slash-command-option"]')].findIndex(node => node.id === "slash-command-terminal%3Arestart")`);
     assert.ok(option >= 0, "host restart menu option exists");
