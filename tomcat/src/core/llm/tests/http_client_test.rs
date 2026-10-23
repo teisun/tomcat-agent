@@ -115,7 +115,7 @@ async fn web_search_build_http_client_prefers_proxy_override_over_config_and_env
         ..LlmConfig::default()
     };
     let runtime = cfg.runtime();
-    let client = build_http_client(&runtime, Some(&format!("{} ", override_proxy.url)))
+    let client = build_http_client(&runtime, Some(&format!("{} ", override_proxy.url)), Some("http://example.test"), None)
         .expect("build http client");
     let response = client
         .get("http://example.test/override")
@@ -142,7 +142,7 @@ async fn web_search_build_http_client_uses_env_proxy_when_config_is_absent() {
         ("no_proxy", Some("127.0.0.1,localhost")),
     ]);
     let runtime = LlmConfig::default().runtime();
-    let client = build_http_client(&runtime, None).expect("build http client");
+    let client = build_http_client(&runtime, None, Some("http://example.test"), None).expect("build http client");
     let response = client
         .get("http://example.test/from-env")
         .send()
@@ -151,4 +151,40 @@ async fn web_search_build_http_client_uses_env_proxy_when_config_is_absent() {
     let body = response.text().await.expect("read response body");
     assert_eq!(body, "env");
     assert!(env_proxy.saw("GET http://example.test/from-env HTTP/1.1"));
+}
+
+// No NO_PROXY escape hatch: these requests must exercise the client's route decision.
+#[tokio::test]
+#[serial]
+async fn loopback_routes_bypass_discovery_but_preserve_explicit_proxy_and_remote_fallback() {
+    for (remote_primary, fallback, explicit_proxy, expected) in [
+        (false, None, false, "direct"),
+        (false, Some("http://127.0.0.2:1234"), false, "direct"),
+        (true, None, false, "proxy"),
+        (false, Some("http://fallback.invalid"), false, "proxy"),
+        (false, None, true, "proxy"),
+    ] {
+        let proxy = ProxyCaptureServer::start("proxy").await;
+        let model = ProxyCaptureServer::start("direct").await;
+        #[cfg(unix)]
+        let _lowercase = EnvGuard::set_many(&[
+            ("http_proxy", None), ("https_proxy", None), ("all_proxy", None), ("no_proxy", None),
+        ]);
+        let _env = EnvGuard::set_many(&[
+            ("HTTP_PROXY", Some(&proxy.url)), ("HTTPS_PROXY", None),
+            ("ALL_PROXY", None), ("NO_PROXY", Some("")),
+        ]);
+        let cfg = LlmConfig {
+            proxy: explicit_proxy.then(|| proxy.url.clone()),
+            api_base_fallback: fallback.map(str::to_owned),
+            ..LlmConfig::default()
+        };
+        let target = if remote_primary { "http://model.invalid" } else { &model.url };
+        let route = crate::core::llm::registry::ProviderRoute::new(&cfg.runtime(), Some(target)).unwrap();
+        let body = route.client.get(format!("{target}/route-check"))
+            .timeout(std::time::Duration::from_secs(5)).send().await.unwrap().text().await.unwrap();
+        assert_eq!(body, expected, "remote={remote_primary}, fallback={fallback:?}, explicit={explicit_proxy}");
+        assert_eq!(proxy.saw("/route-check"), expected == "proxy");
+        assert_eq!(model.saw("/route-check"), expected == "direct");
+    }
 }

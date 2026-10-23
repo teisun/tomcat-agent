@@ -176,6 +176,20 @@ cd tomcat
 
 For the extension, `npm run gate:fast` and `npm run test:integration` run on Windows. The VS Code end-to-end suites that use a fake CLI script (`gate:full`, `test:e2e:*`) only run on macOS and Linux; the Windows package is verified with the real `tomcat.exe` by the release pipeline.
 
+#### Build and update the installed copy
+
+First run `tomcat init` once to configure PATH. For subsequent Windows development updates, run this in an **independent PowerShell/CMD terminal**, from the repository root:
+
+```powershell
+.\scripts\dev-install.cmd
+```
+
+The script enters `tomcat/` and delegates to `cargo run --release --bin tomcat -- self-install`. Cargo builds and runs its actual output, honoring `CARGO_TARGET_DIR`; a failed build never installs an older PATH executable. Ordinary `cargo build` and test builds do not install. The project rule `.cursor/rules/windows-dev-update.mdc` records this entry for agents that load project rules.
+
+`self-install` installs only the current executable into `~/.local/bin`; it does not run the setup wizard, change PATH/configuration/credentials, or restart services. It works before initialization and with a broken config. Installation failures exit nonzero; an unchanged or user-managed entry is reported neutrally, not as an update. On Windows, a running old copy is parked as `*.old`, replacement failure uses the existing best-effort rollback, and later installations try to clean parked files; this is not a transactional upgrade. Tomcat Agent tools are blocked by the nested-invocation guard—do not remove it to run this script; use an independent terminal.
+
+**Updating files does not switch the running backend.** Use `/restart` in the main VS Code composer, or **Tomcat: Restart Shared Service (Stops All Tasks)** in the Command Palette when input is disabled. A standalone terminal can also run `tomcat serve restart`. This stops every shared-service task, including those from other windows/hosts. Closing or reloading a window still only disconnects that window. Explicit `tomcat.path` settings and bundled VSIX binaries keep their existing priority; updating `~/.local/bin` only benefits extensions using that entry. macOS keeps its existing symlink: rebuild the target/profile it points to, then explicitly restart the backend.
+
 ### Working Directory
 
 By default, tomcat stores all data under `~/.tomcat/`. You can change `work_dir` in the `[storage]` section of `tomcat.config.toml`.
@@ -447,6 +461,8 @@ Independent CLI config set ────┘
 ```
 
 `ui.language` accepts `auto` (default), `zh-CN`, and `en`. Set it from an independent terminal with `tomcat config set ui.language en` (or `zh-CN` / `auto`). Auto uses VS Code's display language for the extension and the system locale for the standalone CLI. `TOMCAT__UI__LANGUAGE` is a process-level override, for example `TOMCAT__UI__LANGUAGE=en tomcat --help`.
+
+In shared-service mode, Auto and `TOMCAT__UI__LANGUAGE` are resolved from the connecting VS Code window's environment, not the service launcher's. Missing keys do not inherit the launcher's values. Each window receives its own effective UI language; service-generated prompts and errors use one process-wide language, following the most recently initialized window or language change. Simultaneous windows with different display languages therefore keep their own panel language, but do not get independently translated service messages.
 
 Saving in Settings updates the current window and Serve without restarting the session; other windows and standalone processes pick it up next time they start. Existing conversation content and already-produced backend messages are not translated again. Native VS Code contribution labels still follow VS Code's own language. Command names, flags, configuration keys, model IDs, and external diagnostic details do not change.
 

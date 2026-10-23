@@ -17,6 +17,7 @@ pub(crate) enum OutboundClientErrorKind {
 
 pub(crate) struct OutboundClientOptions<'a> {
     pub explicit_proxy_url: Option<&'a str>,
+    pub bypass_system_proxy: bool,
     pub timeout: Option<Duration>,
     pub read_timeout: Option<Duration>,
     pub connect_timeout: Option<Duration>,
@@ -28,6 +29,7 @@ impl<'a> OutboundClientOptions<'a> {
     pub(crate) fn new(explicit_proxy_url: Option<&'a str>) -> Self {
         Self {
             explicit_proxy_url,
+            bypass_system_proxy: false,
             timeout: None,
             read_timeout: None,
             connect_timeout: None,
@@ -68,6 +70,14 @@ pub(crate) fn clamp_timeout_within_budget(timeout_ms: u64, budget_ms: u64) -> Du
     Duration::from_millis(capped_ms.max(1))
 }
 
+/// Only literal loopback addresses and localhost; never DNS suffixes or private LANs.
+pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
+    url.domain() == Some("localhost")
+        || url.host_str().and_then(|host| {
+            host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()
+        }).is_some_and(|ip| ip.is_loopback())
+}
+
 pub(crate) fn build_outbound_client(
     options: OutboundClientOptions<'_>,
     error_kind: OutboundClientErrorKind,
@@ -76,6 +86,9 @@ pub(crate) fn build_outbound_client(
     // Shared service startup removes launcher proxy variables. Keep system
     // discovery enabled here; standalone CLI callers retain their environment.
     let mut builder = reqwest::Client::builder();
+    if options.bypass_system_proxy {
+        builder = builder.no_proxy();
+    }
 
     if options.use_public_ip_dns_resolver {
         builder = builder.dns_resolver(Arc::new(PublicIpDnsResolver));

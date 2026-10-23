@@ -77,10 +77,10 @@ pub fn read_language(path: &Path) -> Result<UiLanguage, AppError> {
     }
 }
 
-pub fn preferences(path: &Path, host: Option<&str>) -> Result<UiPreferences, AppError> {
+pub fn preferences(path: &Path, host: Option<&str>, override_language: Option<&str>) -> Result<UiPreferences, AppError> {
     resolve_preferences(
         read_language(path)?,
-        std::env::var("TOMCAT__UI__LANGUAGE").ok().as_deref(),
+        override_language,
         host,
         &system_language(),
     )

@@ -451,11 +451,83 @@ describe("shared slash submission and command waiting", () => {
     Object.assign(snapshot.sessionViews.s1, session);
     snapshot.slashCommands = slashCommands;
     await emitState({channel:"state",content:snapshot,messageId:"slash-ready"});
+    return snapshot;
   };
   const submit = async (text:string) => {
     await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>text}}); });
     fireEvent.click(screen.getByTestId("send-button"));
   };
+  it("offers restart only as text completion until Send is clicked", async () => {
+    const { postMessage } = mount(undefined, "en"); await ready();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "/" } }); });
+    const group = screen.getByRole("group", { name: translate("en", "slash.terminal") });
+    const option = within(group).getByRole("option", { name: /\/restart/ });
+    expect(option.textContent).toContain(translate("en", "host.action.restartSharedService"));
+    await act(async () => { fireEvent.mouseDown(option); fireEvent.click(option); });
+    expect(screen.getByTestId("composer-input").textContent).toBe("/restart ");
+    expect(postMessage.mock.calls.some(([m]) => ["restartSharedService", "prompt", "runSlashCommand"].includes(m.type))).toBe(false);
+  });
+  it.each(["/restart", "/restart "])("syncs the cleared draft before one host restart: %s", async (text) => {
+    const { postMessage } = mount(); await ready(); await submit(text);
+    const messages = postMessage.mock.calls.map(([m]) => m);
+    expect(messages.filter(m => m.type === "restartSharedService")).toHaveLength(1);
+    expect(messages[messages.findIndex(m => m.type === "restartSharedService") - 1]).toMatchObject({type:"syncComposerDraft", data:{sessionId:"s1", text:"", segments:[]}});
+    expect(messages.some(m => ["prompt", "runSlashCommand", "queueAction"].includes(m.type))).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+    await ready();
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+  });
+  it("restarts directly while busy instead of queueing a prompt", async () => {
+    const { postMessage } = mount();
+    const snapshot = await ready({busy:true}); snapshot.messageQueueSupported = true;
+    await emitState({channel:"state",content:snapshot,messageId:"busy-restart"});
+    await submit("/restart");
+    expect(postMessage.mock.calls.filter(([m]) => m.type === "restartSharedService")).toHaveLength(1);
+    expect(postMessage.mock.calls.some(([m]) => ["prompt", "runSlashCommand", "queueAction"].includes(m.type))).toBe(false);
+  });
+  it.each(["/restart now", "/restart.txt"])("keeps non-exact restart text on the ordinary route: %s", async text => {
+    const { postMessage } = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"prompt",data:expect.objectContaining({text})}));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  const restartResources: Array<[string, Partial<WebviewSessionSnapshot>]> = [
+    ["reference", {composerDraft:{text:"/restart app.ts",segments:[{type:"text",text:"/restart "},{type:"reference",kind:"file",label:"app.ts",path:"app.ts"}]}}],
+    ["instruction", {composerDraft:{text:"/restart",segments:[{type:"instruction",kind:"command",label:"/restart",resourceId:"command:.cursor/commands/restart.md"}]}}],
+    ["attachment", {composerDraft:{text:"/restart",segments:[{type:"text",text:"/restart"}]},pendingAttachments:[{id:"image",label:"image.png",blobSha:"a".repeat(64),filename:"image.png",kind:"image",mimeType:"image/png",bytes:10}]}],
+  ];
+  it.each(restartResources)("does not steal restart with %s", async (_name, session) => {
+    const { postMessage } = mount(); await ready(session);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(true);
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("keeps restart disabled during attachment preparation", async () => {
+    const { postMessage } = mount(); await ready();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>"/restart"}}); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("does not bypass missing model credentials for restart", async () => {
+    const { postMessage } = mount(); await ready({modelReady:false}); await submit("/restart");
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("does not offer the local restart command in the history editor", async () => {
+    mount(undefined, "en");
+    const snapshot = await ready({timeline:[{type:"message",id:"old",kind:"user",text:"Edit me",rewindEligible:true}]});
+    snapshot.rewindSupported = true;
+    await emitState({channel:"state",content:snapshot,messageId:"history-menu"});
+    fireEvent.click(screen.getByText("Edit me"));
+    const editor = screen.getByTestId("edit-composer-input");
+    await act(async () => { fireEvent.keyDown(editor, {key:"a",ctrlKey:true}); });
+    await act(async () => { fireEvent.paste(editor, {clipboardData:{getData:()=>"/"}}); });
+    expect(editor.textContent).toBe("/");
+    const menu = screen.getByTestId("slash-command-menu");
+    expect(within(menu).getByText("/reload")).toBeTruthy();
+    expect(within(menu).queryByText("/restart")).toBeNull();
+  });
   it.each(["/reload", "/install './folder with space' agent"])("routes plain leading command without a transcript user message: %s", async (text) => {
     const {postMessage} = mount(); await ready(); await submit(text);
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"runSlashCommand", data:{sessionId:"s1",text}}));

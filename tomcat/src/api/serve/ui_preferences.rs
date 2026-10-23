@@ -5,8 +5,18 @@ use crate::infra::config::{ui, UiLanguage};
 use crate::infra::i18n::set_locale;
 use crate::AppError;
 
-pub(super) fn snapshot(path: &std::path::Path) -> Result<ui::UiPreferences, AppError> {
-    ui::preferences(path, std::env::var("TOMCAT_HOST_LOCALE").ok().as_deref())
+fn language_environment(state: &ServeState) -> (Option<String>, Option<String>) {
+    let environment = state.child_environment();
+    let value = |key| match &environment {
+        Some(environment) => environment.get(key).map(str::to_owned),
+        None => std::env::var(key).ok(),
+    };
+    (value("TOMCAT_HOST_LOCALE"), value("TOMCAT__UI__LANGUAGE"))
+}
+
+pub(super) fn snapshot(state: &ServeState) -> Result<ui::UiPreferences, AppError> {
+    let (host, override_language) = language_environment(state);
+    ui::preferences(&state.config_path, host.as_deref(), override_language.as_deref())
 }
 
 pub(super) async fn set_language(
@@ -15,9 +25,10 @@ pub(super) async fn set_language(
     language: UiLanguage,
 ) -> Result<(), AppError> {
     let path = state.config_path.clone();
+    let (host, override_language) = language_environment(state);
     let result = tokio::task::spawn_blocking(move || {
         ui::write_language(&path, language)?;
-        let preferences = snapshot(&path)?;
+        let preferences = ui::preferences(&path, host.as_deref(), override_language.as_deref())?;
         set_locale(preferences.effective);
         Ok::<_, AppError>(preferences)
     })

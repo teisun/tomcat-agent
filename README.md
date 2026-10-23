@@ -35,6 +35,10 @@ General prerequisites: you need a provider API key that matches the model you pl
 
 You only need Rust stable 1.70+ when building from source. The repository's `tomcat/.env` is only for local/CI test fixtures and is not the end-user configuration path.
 
+### Windows developer updates
+
+After first-time `tomcat init` has set up PATH, run `.\scripts\dev-install.cmd` from the repository root in an independent PowerShell/CMD terminal to build and update the installed executable. The [thin entry](scripts/dev-install.cmd) delegates to Cargo; it does not restart a running service. Then use `/restart` in VS Code (stops all tasks), or the existing restart command in the Command Palette. Tomcat Agent tools cannot bypass the self-install guard. See [the Windows workflow and path-selection boundaries](tomcat/docs/user-guide.md#windows-development-environment).
+
 ## Project Structure
 
 | Component | Purpose | Primary docs |

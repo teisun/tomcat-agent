@@ -426,10 +426,7 @@ fn http_client_builder(url: &str) -> Result<reqwest::ClientBuilder, AppError> {
         ))
     })?;
     let mut builder = reqwest::Client::builder();
-    if parsed
-        .host_str()
-        .is_some_and(|host| host == "localhost" || host == "127.0.0.1" || host == "::1")
-    {
+    if crate::infra::http_client::is_loopback_url(&parsed) {
         builder = builder.no_proxy();
     }
     Ok(builder.redirect(reqwest::redirect::Policy::none()))

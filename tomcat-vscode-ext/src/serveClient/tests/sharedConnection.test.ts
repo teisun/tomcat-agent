@@ -6,12 +6,25 @@ import { createServer, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { afterEach, expect, it, vi } from "vitest";
 import { TomcatMessenger } from "../TomcatMessenger";
-import { connectSharedService, ServiceVersionMismatchError, type SharedConnectionOptions, type SharedServiceInfo } from "../sharedConnection";
+import { connectSharedService, runSharedServiceAction, ServiceVersionMismatchError, type SharedConnectionOptions, type SharedServiceInfo } from "../sharedConnection";
+
+const { cliInvocations } = vi.hoisted(() => ({ cliInvocations: vi.fn() }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const { promisify } = await import("node:util");
+  const run = promisify(actual.execFile);
+  const execFile = (...args: Parameters<typeof actual.execFile>) => actual.execFile(...args);
+  // runCli uses promisify.custom; record that call without replacing the real child process.
+  Object.defineProperty(execFile, promisify.custom, {
+    value: (...args: Parameters<typeof run>) => { cliInvocations(...args); return run(...args); },
+  });
+  return { ...actual, execFile };
+});
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture(options: { stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; holdHello?: boolean; handshakeError?: string } = {}) {
+async function fixture(options: { stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; holdHello?: boolean; handshakeError?: string; actionExitCode?: number } = {}) {
   const root = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tc-connect-"));
   const endpoint = process.platform === "win32" ? String.raw`\\.\pipe\tc-connect-${randomUUID()}` : path.join(root, "serve.sock");
   const info: SharedServiceInfo = { service: "tomcat", running: true, protocolVersion: options.protocol ?? 1,
@@ -51,6 +64,9 @@ async function fixture(options: { stopped?: boolean; version?: string; protocol?
   await writeFile(script, `const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+if (args[0] === "serve" && ["stop", "restart"].includes(args[1]) && ${options.actionExitCode ?? 0}) {
+  console.error("management failed"); process.exit(${options.actionExitCode ?? 0});
+}
 fs.writeFileSync(${JSON.stringify(envLog)}, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() === "TEST_ENV_CASE"))));
 console.log(args[0] === "--version" ? "tomcat 0.1.80" : ${JSON.stringify(JSON.stringify(options.stopped ? { service: "tomcat", running: false } : info))});
 `);
@@ -65,10 +81,28 @@ console.log(args[0] === "--version" ? "tomcat 0.1.80" : ${JSON.stringify(JSON.st
   };
 }
 
+it.each([ ["stop", 80_000], ["restart", 150_000] ] as const)("gives %s its complete CLI budget", async (action, timeout) => {
+  const f = await fixture();
+  await runSharedServiceAction(f.connectOptions, action);
+  expect(await f.calls()).toEqual([["serve", action]]);
+  expect(cliInvocations).toHaveBeenCalledExactlyOnceWith(process.execPath, [...f.connectOptions.extraArgs!, "serve", action],
+    expect.objectContaining({ timeout, signal: f.abort.signal, windowsHide: true }));
+});
+
+it("preserves management failure and stderr instead of reporting success", async () => {
+  const f = await fixture({ actionExitCode: 7 });
+  await expect(runSharedServiceAction(f.connectOptions, "restart")).rejects.toMatchObject({ code: 7 });
+  expect(f.connectOptions.onStderr).toHaveBeenCalledWith(Buffer.from("management failed\n"));
+  expect(await f.calls()).toEqual([["serve", "restart"]]);
+});
+
 it("uses CLI discovery then native IPC with the controller environment, never logging the envelope", async () => {
   const f = await fixture();
   const connection = await connectSharedService(f.connectOptions);
   expect(connection.info.instanceId).toBe("instance");
+  for (const args of [["--version"], ["serve", "start"]]) {
+    expect(cliInvocations).toHaveBeenCalledWith(process.execPath, [...f.connectOptions.extraArgs!, ...args], expect.objectContaining({ timeout: 35_000 }));
+  }
   expect(await f.calls()).toEqual([["--version"], ["serve", "start"]]);
   expect(f.received[0].protocol).toBe("native");
   expect((f.received[0].environment as Record<string, string>).TEST_CONTROLLER_VALUE).toBe("private-value");
@@ -101,6 +135,7 @@ it("automatic recovery probes status without starting a stopped service", async 
   const f = await fixture({ stopped: true });
   await expect(connectSharedService({ ...f.connectOptions, allowStart: false })).rejects.toThrow("unavailable");
   expect(await f.calls()).toEqual([["--version"], ["serve", "status"]]);
+  expect(cliInvocations).toHaveBeenLastCalledWith(process.execPath, [...f.connectOptions.extraArgs!, "serve", "status"], expect.objectContaining({ timeout: 35_000 }));
   expect(f.received).toHaveLength(0);
 });
 

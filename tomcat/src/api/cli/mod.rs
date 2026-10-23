@@ -14,6 +14,7 @@ mod models_toml;
 mod package_cmd;
 mod pathrules_cmd;
 mod plugin_cmd;
+mod self_install_cmd;
 mod session_cmd;
 mod skill_cmd;
 pub(crate) mod splash;
@@ -75,6 +76,8 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
     Init,
+    /// 仅安装或更新当前可执行文件，不改配置、PATH 或运行中的服务
+    SelfInstall,
     /// 检测运行环境、QuickJS 资源与配置合法性，输出修复建议
     Doctor,
     /// 配置管理：get/set/edit
@@ -488,7 +491,7 @@ fn nested_agent_invocation_active() -> bool {
 
 fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
     match cmd {
-        Commands::Init => true,
+        Commands::Init | Commands::SelfInstall => true,
         Commands::Doctor => false,
         Commands::Config { sub } => !matches!(sub, ConfigSub::Get { .. }),
         Commands::Session { sub } => matches!(
@@ -571,6 +574,7 @@ pub fn run_cli() -> Result<(), AppError> {
 
     match cli.command.as_ref() {
         Some(Commands::Init) => return run_init(),
+        Some(Commands::SelfInstall) => return self_install_cmd::run_self_install(),
         Some(Commands::Doctor) => return run_doctor(),
         _ => {}
     }
@@ -639,6 +643,7 @@ pub fn run_cli() -> Result<(), AppError> {
 
     match cmd {
         Commands::Init => unreachable!("init handled before config load"),
+        Commands::SelfInstall => unreachable!("self-install handled before config load"),
         Commands::Doctor => unreachable!("doctor handled before config load"),
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),

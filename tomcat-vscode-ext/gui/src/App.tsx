@@ -1269,13 +1269,20 @@ function submitPrompt(
   onSubmitted: (pending: PendingComposerSubmission) => void,
   slashNames: readonly string[],
   hasAttachments: boolean,
+  onRestart: () => void,
   captured?: { draft: ComposerDraft; attachmentIds: string[] },
 ): void {
   const draft = captured?.draft ?? composer?.getDraft() ?? EMPTY_DRAFT;
   if (!canPrompt || !draft.hasContent) {
     return;
   }
-  if (!hasAttachments && draft.segments.every((segment) => segment.type === "text") && matchSlashCommand(draft.text, slashNames)) {
+  const plainCommand = !hasAttachments && draft.segments.every((segment) => segment.type === "text");
+  if (plainCommand && !captured?.attachmentIds.length && draft.text.trim() === "/restart") {
+    composer?.clear();
+    onRestart(); // Sync the cleared draft before the host disconnects, never enqueue a prompt.
+    return;
+  }
+  if (plainCommand && matchSlashCommand(draft.text, slashNames)) {
     postIntent(vscodeApi, "runSlashCommand", { sessionId: activeSessionId ?? null, text: draft.text });
     // Commands are not transcript messages and have no user-message delivery ack.
     // Clear via the normal local draft callback so a subsequent snapshot cannot revive it.
@@ -2683,7 +2690,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       flushComposerDraft();
       const submit = (captured?: { draft: ComposerDraft; attachmentIds: string[] }) => submitPrompt(vscodeApi, composerRef.current, sessionId, true, pending => {
         pendingComposerSubmissionRef.current.set(pending.messageId, { ...pending, revision: sessionId ? localDraftRevisionsRef.current.get(sessionId) ?? 0 : 0 });
-      }, state.slashCommands?.map(c => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0, captured);
+      }, state.slashCommands?.map(c => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0 || !!(sessionId && composerWorkRegistryRef.current.pendingCount(sessionId)), () => {
+        flushComposerDraft(sessionId);
+        postIntent(vscodeApi, "restartSharedService");
+      }, captured);
       const cutoff = sessionId ? composerWorkRegistryRef.current.cutoff(sessionId) : 0;
       const ids = sessionId ? composerWorkRegistryRef.current.pendingIds(sessionId, cutoff) : [];
       if (!state.messageQueueSupported || !sessionId || !ids.length) { submit(); return; }
@@ -2936,7 +2946,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         />
         <div className="tc-footer__composer" data-testid="composer-area">
           <div className="tc-main-composer" hidden={!!queueEditingItem} data-testid="main-composer-draft">
-            <ComposerSurface {...composerProps} canPrompt={composerProps.canPrompt && !queueEditingItem} ref={composerRef} />
+            <ComposerSurface {...composerProps} canPrompt={composerProps.canPrompt && !queueEditingItem} ref={composerRef}
+              slashCommands={[...(state.slashCommands ?? []), { name: "restart", usage: "/restart", summary: t("host.action.restartSharedService") }]} />
           </div>
           {queueEditingItem && activeSession ? <QueuedMessageEditor
             key={`${activeSession.sessionId}:${queueEditingItem.userMessageId}`}

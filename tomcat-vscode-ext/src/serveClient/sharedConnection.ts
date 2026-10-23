@@ -6,6 +6,10 @@ import type { Duplex } from "node:stream";
 
 const execFileAsync = promisify(execFile);
 const LOCAL_PROTOCOL_VERSION = 1;
+// service.rs: connect + hello (10s) + STOP_TIMEOUT (60s), plus 10s scheduling margin.
+const STOP_COMMAND_TIMEOUT_MS = 80_000;
+// stop (70s) + start probes/lock/readiness (up to 70s), plus 10s margin.
+const RESTART_COMMAND_TIMEOUT_MS = 150_000;
 
 export interface SharedServiceInfo {
   service: "tomcat";
@@ -80,7 +84,7 @@ export async function runSharedServiceAction(
   options: Omit<SharedConnectionOptions, "allowStart">,
   action: "stop" | "restart",
 ): Promise<void> {
-  await runCli(options, ["serve", action], action === "restart" ? 55_000 : 35_000);
+  await runCli(options, ["serve", action], action === "restart" ? RESTART_COMMAND_TIMEOUT_MS : STOP_COMMAND_TIMEOUT_MS);
 }
 
 export const connectSharedService: SharedConnectionFactory = async (options) => {

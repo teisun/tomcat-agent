@@ -12,6 +12,8 @@ export async function setupSharedServiceLifecycle(binary: string, systemProxy = 
   if (systemProxy && (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true")) {
     throw new Error("System-proxy GUI fixture requires the explicit GitHub Windows wrapper");
   }
+  const rulePath = path.resolve(__dirname, "../../.cursor/rules/windows-dev-update.mdc");
+  const ruleBody = (await fs.readFile(rulePath, "utf8")).replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
   const model = await spawnScriptedOpenAiStreamServer([
     { parts: [sseToolCall("lifecycle-write", "write", JSON.stringify({ path: "vscode-task.txt", content: "written by the real Tomcat tool" })), sseFinish("tool_calls"), sseDone()] },
     { parts: [sseDelta("Shared service task complete."), sseFinish("stop"), sseDone()] },
@@ -20,6 +22,15 @@ export async function setupSharedServiceLifecycle(binary: string, systemProxy = 
   const baseUrl = systemProxy ? model.baseUrl.replace("127.0.0.1", "tomcat-system-model.invalid") : model.baseUrl;
   try { real = await setupRealServeFixture(baseUrl, "openai", { binary }); }
   catch (error) { await model.close(); throw error; }
+  // Exercise the existing rules loader with the actual shipped rule, not a text snapshot fixture.
+  try {
+    const rules = path.join(real.workspacePath, ".cursor/rules");
+    await fs.mkdir(rules, { recursive: true });
+    await fs.copyFile(rulePath, path.join(rules, path.basename(rulePath)));
+  } catch (error) {
+    try { await real.cleanup(); } finally { await model.close(); }
+    throw error;
+  }
   const status = async () => JSON.parse((await promisify(execFile)(binary, ["serve", "status"], {
     cwd: real.workspacePath, env: real.env, timeout: 15_000,
   })).stdout);
@@ -34,6 +45,9 @@ export async function setupSharedServiceLifecycle(binary: string, systemProxy = 
       await fs.writeFile(path.join(artifacts, "model-requests.json"), JSON.stringify(requests, null, 2));
       assert.equal(requests.length, 2);
       assert.ok(requests[0].includes("Write the lifecycle fixture file"));
+      const messages = JSON.parse(requests[0].split("\r\n\r\n")[1]).messages as Array<{ role: string; content: unknown }>;
+      assert.ok(messages.some(message => message.role === "system" && typeof message.content === "string" && message.content.includes(ruleBody)),
+        "the shipped alwaysApply update rule reaches the model through the normal rules loader");
       const after = await status();
       assert.equal(after.running, true, "closing VS Code must not stop the service");
       assert.equal(after.instanceId, before.service.instanceId);
@@ -51,7 +65,7 @@ export async function setupSharedServiceLifecycle(binary: string, systemProxy = 
         assert.equal(final.instanceId, before.service.instanceId);
         assert.equal(final.pid, before.service.pid);
         await fs.writeFile(path.join(artifacts, "window-exit-lifecycle.json"), JSON.stringify({
-          status: "passed", platform: process.platform, before, after, final,
+          status: "passed", platform: process.platform, before, after, final, projectRuleVisible: true,
           proof: "real test-electron GUI process exited; status and Native IPC without allowing startup; same service identity",
         }, null, 2));
       } finally { await messenger.disposeAsync(); }

@@ -32,12 +32,18 @@ pub(crate) async fn handle_control_or_interrupt(
         } => {
             if subtype == "initialize" {
                 state.initialized.store(true, Ordering::SeqCst);
+                let preferences = super::ui_preferences::snapshot(&state).ok();
+                if state.shared {
+                    if let Some(preferences) = &preferences {
+                        crate::infra::i18n::set_locale(preferences.effective);
+                    }
+                }
                 let response = ControlFrame::response(
                     request_id,
                     session_id.or_else(|| state.active_session_id()),
                     serde_json::json!({
                         "protocolVersion": 2,
-                        "uiPreferences": super::ui_preferences::snapshot(&state.config_path).ok(),
+                        "uiPreferences": preferences,
                         "serverVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": [
                             "prompt",

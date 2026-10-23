@@ -2,6 +2,7 @@
   "tomcat": "Tomcat Agent CLI — a pluggable AI agent runtime",
   "tomcat.long": "Tomcat is a pluggable AI agent runtime powered by rquickjs. Use tomcat claw for a global conversation or tomcat code for a project-scoped conversation.",
   "tomcat.init": "Initialize configuration, model credentials and security settings",
+  "tomcat.self-install": "Install or update only this executable; leave configuration, PATH and running services unchanged",
   "tomcat.doctor": "Check the environment, QuickJS resources and configuration",
   "tomcat.config": "Read, update or edit configuration",
   "tomcat.config.get": "Read a configuration key, or print the complete configuration",

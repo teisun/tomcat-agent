@@ -135,7 +135,7 @@ async fn rejected_thinking_format_is_retried_once_and_cached_for_this_provider()
         env_name: "TEST_KEY".to_string(),
         value: "stub".to_string(),
     };
-    let route = super::super::ProviderRoute::new(&runtime).expect("shared route");
+    let route = super::super::ProviderRoute::new(&runtime, entry.base_url.as_deref()).expect("shared route");
     let provider =
         AnthropicProvider::with_route(&entry, &runtime, &credential, &route).expect("provider A");
     let mut entry_b = entry.clone();

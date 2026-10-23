@@ -87,7 +87,7 @@ pub(crate) async fn list_remote_models_within(
     timeout: Duration,
 ) -> Result<Vec<RemoteModelView>, RemoteModelsFailure> {
     let network = || RemoteModelsFailure::new(RemoteModelsFailureReason::Network, None);
-    let client = build_http_client(runtime, None).map_err(|_| network())?;
+    let client = build_http_client(runtime, None, Some(&request.base_url), None).map_err(|_| network())?;
     let key = request
         .api_key
         .map(|key| key.trim().to_string())

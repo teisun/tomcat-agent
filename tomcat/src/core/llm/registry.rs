@@ -30,9 +30,9 @@ pub(crate) struct ProviderRoute {
 }
 
 impl ProviderRoute {
-    pub fn new(runtime: &LlmRuntimeConfig) -> Result<Self, AppError> {
+    pub fn new(runtime: &LlmRuntimeConfig, base_url: Option<&str>) -> Result<Self, AppError> {
         Ok(Self {
-            client: super::http_client::build_http_client(runtime, None)?,
+            client: super::http_client::build_http_client(runtime, None, base_url, runtime.api_base_fallback.as_deref())?,
             semaphore: (runtime.max_concurrent_requests > 0)
                 .then(|| Arc::new(Semaphore::new(runtime.max_concurrent_requests as usize))),
         })
@@ -132,7 +132,7 @@ pub fn build_provider(
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
-    build_provider_with_route(entry, runtime, credential, &ProviderRoute::new(runtime)?)
+    build_provider_with_route(entry, runtime, credential, &ProviderRoute::new(runtime, entry.base_url.as_deref())?)
 }
 
 /// 已注册的 wire api id 集合（供测试与文档/工具引用，避免在外部硬编码）。

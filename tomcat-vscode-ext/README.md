@@ -170,7 +170,7 @@ The extension contributes these commands:
 
 - `Tomcat: Focus Agent Box`
 - `Tomcat: Open Settings`
-- `Tomcat: Restart Serve`
+- `Tomcat: Restart Shared Service (Stops All Tasks)`
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`
 
@@ -181,10 +181,11 @@ Type / → choose a command (inserts text) → send → notice/error reply
 ```
 
 - `/reload` rescans Skills and plugin tools without restarting the running session. After external CLI or manual resource changes, run it explicitly; it is not a configuration reload or MCP reconnect.
+- `/restart` in the **main composer** invokes the existing host restart command and **stops all shared-service tasks**. Selecting it only completes the text; sending the exact plain-text command executes it without a model request or queue entry. Parameters, references, attachments and same-named resource chips keep the ordinary message route. Existing input restrictions remain; use the Command Palette when disconnected or otherwise unable to send. It is not offered in history/queue editors and does not require a server slash catalog.
 - `/install './path with spaces' agent` and `/uninstall package-name agent` install/uninstall and synchronize automatically. Specify `current-project` (`scope`), `agent`, or `global`; missing arguments return usage.
 - Uninstall uses the package name listed by `tomcat packages`, not a tool name. Only ledger-managed packages are uninstalled; manually placed directories must be removed from that layer's `plugins/` / `skills/`, then `/reload`.
 - Suggestions open at the start, after whitespace, or on a new line, not inside paths/URLs. Terminal operations are hidden mid-message. Only leading shared operations in text-only drafts execute locally; references/attachments and unknown text remain normal prompts.
-- Send and Build are disabled while a command reply is pending. No fake user turn is added. Servers that do not advertise the command table keep the old composer behavior.
+- Send and Build are disabled while a resource-command reply is pending. No fake user turn is added. Servers without a resource-command table keep the old resource-command routing; the local `/restart` entry is independent of that table.
 
 ### Project prompt commands, skills and rules
 

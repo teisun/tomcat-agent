@@ -120,7 +120,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 当前消息补发记录 | 当前一条助手消息的累计正文、思考及是否结束 | `event_pump.rs` 转发处的会话内记录【新增】 | 下一条 message_start 才替换，slot 卸载时释放；不以 message_end 当落盘确认 | 只补正在说的这句话，不重做整场会议纪要。 |
 | 会话来源 `origin` | 这个会话是否经 ACP 创建及创建方名称 | 【新增】transcript 第一行的可选对象 `{kind:"acp", clientName:…}` | 只在 ACP new 时写一次；原生/老会话缺省；名称不参与权限判断 | “谁开的会话”，不是“谁现在在线”。 |
 | 本窗口访问方式 `access` | 本窗口此刻是 control 还是 observe | 【新增】switch_session 回复及扩展会话视图内存 | 服务按来源和控制者判断；不落盘，与消息 role 无关；重新打开才重新判定 | 这扇窗口现在能不能下指令。 |
-| 连接环境快照 | 客户端交给会话子进程的环境 | 内存 `map<string,string>` | 不全局 `set_var`，不写聊天、日志或会话文件 | 每个任务带自己的工具箱。 |
+| 连接环境快照 | 客户端交给会话子进程的环境；另只读 `TOMCAT_HOST_LOCALE` 和 `TOMCAT__UI__LANGUAGE` 解析本连接的界面语言 | 内存 `map<string,string>` | 不全局 `set_var`，不写聊天、日志或会话文件；缺省键不借服务进程的同名变量 | 每个任务带自己的工具箱，窗口带自己的语言。 |
 
 “唯一执行者”只保证**这个共享 serve 内**同一会话不被重复创建或控制。本期保留现有 usage 共享锁，不声称它能排斥另一个独立 `chat`/旧 stdio 进程执行同一历史；该兼容边界见 §9。
 
@@ -453,6 +453,8 @@ VS Code 点开会话
 `initialize.ts` 显式提供窗口目录；`commands.rs::resume_current_command` 复用原项目 key、`SessionManager::current_session_entry`、`SessionScope` 与打开流程。`resumeCurrent` 默认 false，普通“新建会话”及 ACP 的新建行为不变；它仅保留旧私有 serve 的“恢复当前／没有才新建”，不每次重连制造空会话，不新增连接项目字段、握手字段或第二套项目标识。若已有 current 来自 ACP，也不抢控制权。
 
 `TomcatMessenger` 只持有 socket，dispose 半关闭并等连接收尾，不给共享 PID 发信号；超时如实说明服务收尾未确认。`ServeConnectionSupervisor` 的自动重试不启动服务，用户点重新连接才允许启动；原重启命令明确命名为“重启共享服务（停止所有任务）”，调用 CLI restart，不加二次确认。重连前清理临时画面，不能在初始化之后清理，否则会删掉初始化期间刚补发的消息。读取使用 UTF-8 流解码；本机握手结束时 readline 会暂停 socket，移交给原 NDJSON reader 后必须 resume。版本不兼容直接报错，不回落私有 stdio。
+
+主输入框的 `/restart` 复用 `restartSharedService → tomcat.restartServe → tomcat serve restart`，只对无参数、无附件/引用的精确纯文本命令生效；先同步空草稿再断开，命令不进入模型或队列。它不放开输入禁用规则，无法发送时仍用命令面板。扩展管理命令的外层期限为 stop 80 秒、restart 150 秒，覆盖 CLI 的连接/握手、60 秒停止以及启动探测/锁/就绪阶段并留出余量；version/status/start 仍为 35 秒，Rust 清理期限与 supervisor 初始化计时不变。
 
 定向证据入口：`tomcat/src/api/serve/tests/connection_test.rs` 的 `session_bootstrap_*`；扩展 `src/serveClient/tests/{sharedConnection,messenger_disposal,ServeConnectionSupervisor}.test.ts`；真实多窗口、重载、停服与工具取消放在 `tomcat-vscode-ext/tests/serve_disposal_integration.test.ts`。真实 GUI 与只读开关另归 T20/T27，不能用这些连接测试替代。
 
@@ -1276,7 +1278,7 @@ tomcat serve start
 
 CLI 已更新时，也可明确执行 `tomcat serve restart`。旧连接不会因为别的窗口停服就自动拉起服务；VS Code 版本不匹配立即停止重试，给出带“会停止所有任务”后果的重启按钮，复用已有重启命令、不二次确认；不偷偷退回私有 stdio。回退同样先停共享服务；不要让旧 chat/stdio 与共享服务同时执行同一份历史。当前运行证据来自 macOS；Windows 命名管道、系统代理和 Job 生命周期转由 GitHub Windows CI 实际验证，个人 PC 体验可选，未取得云端结果前不计通过；Paperclip 包内启动命令使用 POSIX shell，不宣称原生 Windows 已支持。
 
-**Windows + Multica 必须预启动。** 在独立终端执行 `tomcat serve start`，或先打开使用同一 Tomcat 数据目录与 agent 的 VS Code 窗口，再派发 Multica 任务。Multica 的 Job 只有 `KILL_ON_JOB_CLOSE`、没有 `BREAKAWAY_OK`（`multica/server/pkg/agent/proc_windows.go::ownProcessTree`）；Tomcat 用 `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` 启动共享服务（`tomcat/src/infra/platform/process.rs::spawn_service_process`），在这种 Job 内会被 Windows 拒绝。已运行的服务可直接连接，任务结束后仍保持运行。
+**Windows + Multica 必须预启动。** 在独立终端执行 `tomcat serve start`，或先打开使用同一 Tomcat 数据目录与 agent 的 VS Code 窗口，再派发 Multica 任务。Multica 的 Job 只有 `KILL_ON_JOB_CLOSE`、没有 `BREAKAWAY_OK`（`multica/server/pkg/agent/proc_windows.go::ownProcessTree`）；Tomcat 用 `CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB` 启动共享服务（`tomcat/src/infra/platform/process.rs::spawn_service_process`），服务拥有供子进程继承的隐藏控制台，避免 git、bash 和 stdio MCP 弹出终端窗口；在这种 Job 内启动仍会被 Windows 拒绝。已运行的服务可直接连接，任务结束后仍保持运行。
 
 ```text
 Windows Multica 的受管 Job
@@ -1324,7 +1326,7 @@ Windows Multica 的受管 Job
 
 **代理需要迁移的用户。** 如果此前只在窗口终端或宿主智能体环境里设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，正式共享服务不再使用它们。请改用系统代理，或在 Tomcat 配置中保存 `llm.proxy`；模型、网页工具和插件 HTTP 复用普通客户端，不再维护会话代理句柄、代理路由键或接管刷新。服务启动时删除 8 个大小写代理变量，防止第一个启动者影响全部连接。
 
-远程 MCP HTTP/OAuth 只保留系统代理，不扩大 `llm.proxy` 的作用范围；localhost 保持直连。bash、MCP stdio 子进程的环境、cwd、权限和接管行为不变；它们自身的联网行为不属于“Tomcat HTTP 统一代理”的承诺。独立 CLI / `serve --stdio` 仍使用原环境代理逻辑。
+远程 MCP HTTP/OAuth 只保留系统代理，不扩大 `llm.proxy` 的作用范围；回环目标（`localhost`、`127.0.0.0/8`、`::1`）保持直连。LLM 未配置显式 `llm.proxy`，且主地址与可选 `llm.api_base_fallback` 全部为回环时，也绕过环境／系统自动发现的代理；显式代理语义不变。主地址为回环而 fallback 为远端时仍保留自动发现，因为它们共用一个 client。网页工具与插件 HTTP 不受此规则影响。bash、MCP stdio 子进程的环境、cwd、权限和接管行为不变；它们自身的联网行为不属于“Tomcat HTTP 统一代理”的承诺。独立 CLI / `serve --stdio` 除上述回环规则外仍使用原环境代理逻辑。
 
 **仅窗口测试入口的例外。** `scripts/run-vscode-devhost.ts` 可显式指定 `TOMCAT_E2E_WINDOW_PROXY_ENV=HTTPS_PROXY`（或一个 HTTP/ALL 的大小写别名），将该变量的地址交给 `scripts/realServeFixture.ts`，在新建的隔离 HOME 中写入 `llm.proxy` 后启动正式服务。明确的 `TOMCAT_E2E_LLM_PROXY` 测试配置优先；不选择时不读取开发机代理，所选变量缺失时使用原无代理夹具，非法地址直接报错且不输出凭据。不模拟完整多协议/NO_PROXY 优先级，不改用户 HOME，不给 ACP 或普通扩展加开关。仅适用于隔离真实服务测试，假服务和外部宿主观察入口不能借此修改已有后台。
 

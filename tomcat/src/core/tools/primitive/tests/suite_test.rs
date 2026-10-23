@@ -111,6 +111,19 @@ fn bash_preflight_and_cwd_expand_the_controllers_home_without_granting_it() {
         cwd.resolved_path(),
         crate::infra::platform::canonicalize(home.path()).unwrap()
     );
+    let child = home.path().join("controller-home-child");
+    std::fs::create_dir(&child).unwrap();
+    let native_home_path = format!("~{}controller-home-child", std::path::MAIN_SEPARATOR);
+    let cwd = ResolvedCwd::from_raw_in_environment(
+        Some(&native_home_path),
+        Some(workspace.path()),
+        Some(&environment),
+    )
+    .unwrap();
+    assert_eq!(
+        cwd.resolved_path(),
+        crate::infra::platform::canonicalize(&child).unwrap()
+    );
     let candidate = super::super::bash_task::resolve_preflight_path(
         "~/marker",
         workspace.path(),

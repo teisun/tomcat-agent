@@ -46,6 +46,14 @@ fn environment_home_paths_do_not_fall_back_to_the_service_home() {
     )]))
     .unwrap();
     assert_eq!(env.expand_home("~/file").unwrap(), root.path().join("file"));
+    let native_home_path = format!("~{}file", std::path::MAIN_SEPARATOR);
+    assert_eq!(
+        env.expand_home(&native_home_path).unwrap(),
+        root.path().join("file")
+    );
+    assert!(EnvironmentSnapshot::default()
+        .expand_home(&native_home_path)
+        .is_err());
     assert_eq!(
         env.expand_home("relative/file").unwrap(),
         PathBuf::from("relative/file")

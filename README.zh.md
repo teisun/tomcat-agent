@@ -35,6 +35,10 @@
 
 仅从源码编译时才需要 Rust stable 1.70+；仓库内的 `tomcat/.env` 仅用于本地/CI 测试夹具，不是终端用户的配置路径。
 
+### Windows 开发更新
+
+首次用 `tomcat init` 配好 PATH 后，在独立 PowerShell/CMD 终端的仓库根目录执行 `.\scripts\dev-install.cmd`，即可编译并更新安装副本。[这个薄入口](scripts/dev-install.cmd) 只转交 Cargo，不自动重启后台；随后在 VS Code 中执行 `/restart`（会停止所有任务），或使用命令面板的重启命令。Tomcat Agent 工具不能绕过自安装保护。详见[Windows 开发流程与路径选择边界](tomcat/docs/user-guide.zh.md#windows-开发环境)。
+
 ## 项目结构
 
 | 组件 | 作用 | 主要文档 |

@@ -8,6 +8,7 @@ use crate::infra::error::AppError;
 fn blocked_commands() -> Vec<Commands> {
     vec![
         Commands::Init,
+        Commands::SelfInstall,
         Commands::Session {
             sub: SessionSub::New { scope: None },
         },

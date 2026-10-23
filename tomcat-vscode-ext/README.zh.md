@@ -152,7 +152,7 @@ Chat、Plan 等技术术语和模型 ID 可以保留英文；给模型的工具�
 
 - `Tomcat: Focus Agent Box`
 - `Tomcat: Open Settings`
-- `Tomcat: Restart Serve`
+- `Tomcat: 重启共享服务（停止所有任务）`
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`
 
@@ -163,10 +163,11 @@ Chat、Plan 等技术术语和模型 ID 可以保留英文；给模型的工具�
 ```
 
 - `/reload` 同时重扫 Skill 和插件工具，不必重启会话。外部 CLI 或手工改资源后主动执行；不是配置热加载，也不是 MCP 重连。
+- **主输入框**的 `/restart` 直接调用既有宿主重启命令，**停止共享服务的所有任务**。选择只补全文本，发送精确的纯文本命令才执行，不调用模型、不进入消息队列。带参数、引用、附件或同名资源卡时沿用普通消息路由。现有输入禁用条件不变；断连等无法发送时用命令面板。历史/队列编辑器不展示该入口，也不依赖服务端斜杠目录。
 - `/install './带空格路径' agent` 与 `/uninstall 包名 agent` 自动同步资源。必须指定 `current-project`（`scope`）、`agent` 或 `global`；缺参数返回用法。
 - 卸载用 `tomcat packages` 列出的包名，不是工具名。手工放入、不在账本的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
 - 菜单在开头、空格后或换行后触发，路径/URL 内不触发；句中隐藏 Terminal 组。只有开头的共享管理命令且纯文字才本地执行；附件、引用和未知文字仍发普通提示词。
-- 等回包时禁用发送和 Build，不追加虚假用户消息。旧 Serve 没有命令表时保持原输入行为。
+- 等资源命令回包时禁用发送和 Build，不追加虚假用户消息。旧 Serve 没有资源命令表时保持原有资源命令路由；本地 `/restart` 入口不依赖该表。
 
 ### 项目 Commands、Skills 与 Rules
 

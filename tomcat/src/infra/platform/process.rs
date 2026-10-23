@@ -218,8 +218,9 @@ pub fn spawn_service_process(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS};
-        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+        use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW};
+        // Own a hidden console so console children (and grandchildren) do not open windows.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
     }
     command.spawn()
 }

@@ -128,7 +128,9 @@ impl EnvironmentSnapshot {
     /// Bash path checks must expand ~ using the same HOME as the child, not the
     /// service's HOME. A directory argument still does not expand arbitrary $VAR.
     pub fn expand_home(&self, path: &str) -> Result<PathBuf, AppError> {
-        if path != "~" && !path.starts_with("~/") {
+        let home_relative =
+            path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\"));
+        if !home_relative {
             return Ok(PathBuf::from(path));
         }
         let home = self.get("HOME");
@@ -139,7 +141,20 @@ impl EnvironmentSnapshot {
                 "bash path uses ~ but the controlling connection has no home directory".into(),
             )
         })?;
-        Ok(PathBuf::from(home).join(path.strip_prefix("~/").unwrap_or("")))
+        let rest = path
+            .strip_prefix("~/")
+            .or_else(|| {
+                #[cfg(windows)]
+                {
+                    path.strip_prefix("~\\")
+                }
+                #[cfg(not(windows))]
+                {
+                    None
+                }
+            })
+            .unwrap_or("");
+        Ok(PathBuf::from(home).join(rest))
     }
 }
 
