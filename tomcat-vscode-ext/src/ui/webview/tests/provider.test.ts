@@ -292,12 +292,12 @@ goal: Home-expanded plan
 });
 
 describe("attachment picker options", () => {
-  it("allows any file or folder and updates the action label", () => {
-    expect(buildAttachmentOpenDialogOptions()).toEqual({
-      canSelectFiles: true,
-      canSelectFolders: true,
+  it.each(["files", "folders"] as const)("selects only %s, including on Windows/Linux", (kind) => {
+    expect(buildAttachmentOpenDialogOptions(kind)).toEqual({
+      canSelectFiles: kind === "files",
+      canSelectFolders: kind === "folders",
       canSelectMany: true,
-      openLabel: "Add to Tomcat",
+      openLabel: translate("en", "host.addToTomcat"),
     });
   });
 });

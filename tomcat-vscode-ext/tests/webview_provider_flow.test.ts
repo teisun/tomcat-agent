@@ -30,6 +30,7 @@ const __testing = (
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
+      setQuickPickHandler(handler: ((items: vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined) | undefined): void;
       setOpenDialogHandler(
         handler: ((options: unknown) => vscode.Uri[] | Promise<vscode.Uri[] | undefined> | undefined) | undefined,
       ): void;
@@ -296,6 +297,7 @@ function deferred<T>() {
 
 function buildProvider(options: BuildProviderOptions = {}) {
   __testing.reset();
+  __testing.setQuickPickHandler(items => items[0]);
 
   const sessionState: MutableSessionState = {
     busy: false,
@@ -925,18 +927,23 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("routes mixed picker selections into attachments and references", async () => {
+  it("routes separate file and folder picks into the existing attachment and reference channels", async () => {
     const { provider } = buildProvider();
     __testing.registerFile("/workspace/diagram.png", "png-bytes");
     __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
     __testing.registerDirectory("/workspace/src/folder");
     __testing.registerFile("/outside/log.txt", "outside-log");
-    __testing.setOpenDialogHandler(() => [
-      vscode.Uri.file("/workspace/diagram.png"),
-      vscode.Uri.file("/workspace/src/app.ts"),
-      vscode.Uri.file("/workspace/src/folder"),
-      vscode.Uri.file("/outside/log.txt"),
-    ]);
+    const openDialog = vi.fn((options: unknown) => {
+      const { canSelectFiles, canSelectFolders, canSelectMany } = options as vscode.OpenDialogOptions;
+      expect(canSelectFiles).not.toBe(canSelectFolders);
+      expect(canSelectMany).toBe(true);
+      return canSelectFolders ? [vscode.Uri.file("/workspace/src/folder")] : [
+        vscode.Uri.file("/workspace/diagram.png"),
+        vscode.Uri.file("/workspace/src/app.ts"),
+        vscode.Uri.file("/outside/log.txt"),
+      ];
+    });
+    __testing.setOpenDialogHandler(openDialog);
 
     await provider.dispatchTestIntent({
       messageId: "ready-pick-context",
@@ -947,6 +954,10 @@ describe("webview provider integration", () => {
       messageId: "pick-context-1",
       type: "pickContext",
     });
+    __testing.setQuickPickHandler(items => items[1]);
+    await provider.dispatchTestIntent({ messageId: "pick-folders-1", type: "pickContext" });
+    expect(openDialog.mock.calls.map(([options]) => (options as vscode.OpenDialogOptions).canSelectFiles)).toEqual([true, false]);
+
 
     expect(
       provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
@@ -960,14 +971,14 @@ describe("webview provider integration", () => {
       },
       {
         kind: "file",
-        label: "folder/",
-        path: "src/folder/",
+        label: "log.txt",
+        path: "/outside/log.txt",
         type: "reference",
       },
       {
         kind: "file",
-        label: "log.txt",
-        path: "/outside/log.txt",
+        label: "folder/",
+        path: "src/folder/",
         type: "reference",
       },
     ]);
@@ -1001,6 +1012,24 @@ describe("webview provider integration", () => {
     });
 
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([]);
+    provider.dispose();
+  });
+
+  it.each(["type", "dialog", "error"])("settles picker work and preserves the draft on %s cancellation/failure", async (stage) => {
+    const { provider } = buildProvider();
+    const postEvent = vi.spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent").mockResolvedValue(undefined);
+    await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "existing-draft", data: { sessionId: "session-1", text: "keep me", segments: [{ type: "text", text: "keep me" }] } });
+    const before = provider.currentState().sessionViews["session-1"]?.composerDraft;
+    if (stage === "type") __testing.setQuickPickHandler(() => undefined);
+    const openDialog = vi.fn(() => {
+      if (stage === "error") throw new Error("picker unavailable");
+      return undefined;
+    });
+    __testing.setOpenDialogHandler(openDialog);
+    await provider.dispatchTestIntent({ type: "pickContext", messageId: "cancel-pick", data: { sessionId: "session-1", operationId: "pick-work" } });
+    expect(openDialog).toHaveBeenCalledTimes(stage === "type" ? 0 : 1);
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toEqual(before);
+    expect(postEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "composerWorkResult", operationId: "pick-work", sessionId: "session-1", success: stage !== "error" }));
     provider.dispose();
   });
 

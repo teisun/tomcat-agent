@@ -507,6 +507,8 @@ export const zhCN = {
   "plan.progress.completed": "Tomcat 计划已完成{suffix}",
   "plan.progress.updated": "Tomcat 计划状态已更新",
   "host.addToTomcat": "添加到 Tomcat",
+  "host.pickFiles": "添加文件…",
+  "host.pickFolders": "添加文件夹…",
   "host.droppedNoSession": "没有可接收拖入上下文的会话",
   "host.pickedNoSession": "没有可接收所选上下文的会话",
   "host.effortFailed": "无法更改思考强度",

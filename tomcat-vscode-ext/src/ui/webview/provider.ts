@@ -390,10 +390,11 @@ export async function classifyPickedUri(uri: vscode.Uri): Promise<PickedUriKind>
   return classifyPickedUriMetadata(await readPickedUriMetadata(uri));
 }
 
-export function buildAttachmentOpenDialogOptions(): vscode.OpenDialogOptions {
+export function buildAttachmentOpenDialogOptions(kind: "files" | "folders"): vscode.OpenDialogOptions {
+  // Windows/Linux turn a combined file+folder dialog into a folder-only picker.
   return {
-    canSelectFiles: true,
-    canSelectFolders: true,
+    canSelectFiles: kind === "files",
+    canSelectFolders: kind === "folders",
     canSelectMany: true,
     openLabel: t("host.addToTomcat"),
   };
@@ -2147,7 +2148,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             throw new Error(t("host.pickedNoSession"));
           }
           sessionId = resolvedSessionId;
-          const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
+          const choice = await vscode.window.showQuickPick([
+            { label: t("host.pickFiles"), resourceKind: "files" as const },
+            { label: t("host.pickFolders"), resourceKind: "folders" as const },
+          ], { title: t("host.addToTomcat") });
+          const picks = choice
+            ? await this.showOpenDialog(buildAttachmentOpenDialogOptions(choice.resourceKind))
+            : undefined;
           const prepared = picks?.length ? await this.ingestPickedUris(sessionId, picks, intent.data?.target === "edit" ? intent.data.operationId : undefined) : undefined;
           await this.postComposerWorkResult(intent.data?.operationId, sessionId, prepared?.error, prepared);
         } catch (error) {

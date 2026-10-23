@@ -5121,6 +5121,8 @@ const TINY_PNG_BASE64 =
 export async function assertWebviewPickContextFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
   const sessionId = await createFreshWebviewSession(
     api,
@@ -5144,20 +5146,32 @@ export async function assertWebviewPickContextFlow(
     baseline.composerDraft?.segments ?? []
   ).filter((segment) => segment.type === "reference").length;
 
-  api.__testing.setOpenDialogHandler(() => [
-    vscode.Uri.file(imagePath),
-    vscode.Uri.file(codePath),
-    vscode.Uri.file(folderPath),
-  ]);
+  const chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const workbench = await WorkbenchFindDriver.connectFromEnvironment();
+  const artifacts = requireEnv("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
+  api.__testing.setOpenDialogHandler(options => {
+    assert.notEqual(options.canSelectFiles, options.canSelectFolders, "native Windows/Linux dialogs must not combine files and folders");
+    assert.equal(options.canSelectMany, true);
+    return options.canSelectFolders
+      ? [vscode.Uri.file(folderPath)]
+      : [vscode.Uri.file(imagePath), vscode.Uri.file(codePath)];
+  });
 
   try {
-    await api.__testing.sendWebviewIntent(
-      buildWebviewIntent({
-        data: { sessionId },
-        messageId: "webview-pick-context",
-        type: "pickContext",
-      }),
-    );
+    for (const kind of ["files", "folders"] as const) {
+      await chat.click("attachment-add");
+      await workbench.waitForVisibleText(en["host.pickFiles"]);
+      await workbench.waitForVisibleText(en["host.pickFolders"]);
+      if (kind === "files") await captureWorkbenchArtifacts(path.join(artifacts, "context-picker-menu.png"));
+      if (kind === "folders") await vscode.commands.executeCommand("workbench.action.quickOpenSelectNext");
+      await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+      await waitForWebviewState(api, state => {
+        const view = state.sessionViews[sessionId];
+        const references = view?.composerDraft?.segments.filter(segment => segment.type === "reference");
+        return view?.pendingAttachments.length === baselineAttachmentCount + 1 &&
+          references?.length === baselineReferenceCount + (kind === "files" ? 1 : 2) ? view : undefined;
+      });
+    }
 
     const settled = await waitForWebviewState(
       api,
@@ -5222,7 +5236,11 @@ export async function assertWebviewPickContextFlow(
       rendered.html.includes('data-testid="composer-reference-chip"'),
       "expected picker references to render as visible composer chips",
     );
+    await chat.capture(path.join(artifacts, "context-picker-result.png"));
+    assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
   } finally {
+    chat.close();
+    workbench.close();
     api.__testing.setOpenDialogHandler(undefined);
   }
 }

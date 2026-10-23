@@ -509,6 +509,8 @@ export const en = {
   "plan.progress.completed": "Tomcat completed plan{suffix}",
   "plan.progress.updated": "Tomcat plan state updated",
   "host.addToTomcat": "Add to Tomcat",
+  "host.pickFiles": "Add files…",
+  "host.pickFolders": "Add folders…",
   "host.droppedNoSession": "No session is available for dropped context",
   "host.pickedNoSession": "No session is available for picked context",
   "host.effortFailed": "Unable to change reasoning effort",
