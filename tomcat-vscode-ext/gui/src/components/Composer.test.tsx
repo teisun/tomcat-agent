@@ -653,21 +653,27 @@ describe("Composer", () => {
     expect(onInterrupt).not.toHaveBeenCalled();
   });
 
-  it("hydrates a draft without treating it as a user edit", async () => {
+  it.each([false, true])("hydrates without a user edit and only focuses if the document owns focus (%s)", async documentFocused => {
     const { onDraftChange, ref } = renderComposer();
+    const input = screen.getByTestId("composer-input");
+    const focus = vi.spyOn(input, "focus");
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(documentFocused);
     onDraftChange.mockClear();
-
-    await act(async () => {
-      ref.current?.replaceDraft({
-        hasContent: true,
-        segments: [{ text: "restored B draft", type: "text" }],
-        text: "restored B draft",
+    try {
+      await act(async () => {
+        ref.current?.replaceDraft({
+          hasContent: true,
+          segments: [{ text: "restored B draft", type: "text" }],
+          text: "restored B draft",
+        });
+        await new Promise(resolve => window.requestAnimationFrame(resolve));
       });
-    });
-
-    expect(ref.current?.getDraft().text).toBe("restored B draft");
-    expect(screen.getByTestId("composer-input").textContent).toContain("restored B draft");
-    expect(onDraftChange).not.toHaveBeenCalled();
+      expect(ref.current?.getDraft().text).toBe("restored B draft");
+      expect(input.textContent).toContain("restored B draft");
+      expect(onDraftChange).not.toHaveBeenCalled();
+      if (documentFocused) expect(focus).toHaveBeenCalled();
+      else expect(focus).not.toHaveBeenCalled();
+    } finally { hasFocus.mockRestore(); }
   });
 
   it("inserts repeated selections with distinct occurrence identities", async () => {

@@ -26,6 +26,7 @@ function makeWorkspaceFolder(fsPath: string, index = 0): vscode.WorkspaceFolder 
 function createProvider() {
   const postedFrames: HostToWebviewFrame[] = [];
   const provider = new TomcatWebviewViewProvider({
+    extensionMode: vscode.ExtensionMode.Development,
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {} as never,
@@ -48,6 +49,7 @@ function createProvider() {
   });
 
   provider.resolveWebviewView({
+    onDidDispose: () => new vscode.Disposable(() => undefined),
     onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
     show() {},
     visible: true,

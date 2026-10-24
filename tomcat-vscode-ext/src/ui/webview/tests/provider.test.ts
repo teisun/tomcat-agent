@@ -380,6 +380,7 @@ describe("draft fork delivery", () => {
     postMessage: ReturnType<typeof vi.fn>,
   ): void {
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,
@@ -399,6 +400,8 @@ describe("draft fork delivery", () => {
     try {
       const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
       const provider = new TomcatWebviewViewProvider({
+        // This fixture advances every timer to test fork retries, not heartbeat.
+        extensionMode: vscode.ExtensionMode.Development,
         extensionUri: vscode.Uri.file("/workspace/extension"),
         getDefaultCwd: () => "/workspace",
         ide: {} as never,
@@ -1020,6 +1023,7 @@ function buildSearchProvider(): {
   });
 
   provider.resolveWebviewView({
+    onDidDispose: () => new vscode.Disposable(() => undefined),
     onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
     show() {},
     visible: true,
@@ -2835,6 +2839,7 @@ describe("serve connection readiness", () => {
     const provider = createProvider(initialize);
     const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,
@@ -2918,6 +2923,7 @@ describe("serve connection readiness", () => {
     const provider = createProvider(async () => ({ sessionId: "s1" }));
     (provider as any).deps.reportBootstrapFailure = reportBootstrapFailure;
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,

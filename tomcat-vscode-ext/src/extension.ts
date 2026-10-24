@@ -602,6 +602,7 @@ export async function activate(
   context: vscode.ExtensionContext,
 ): Promise<TomcatExtensionApi> {
   setLocale(normalizeLocale(vscode.env.language ?? "en"));
+  await vscode.commands.executeCommand("setContext", "tomcat.chatView.rebuilding", false);
   const output = vscode.window.createOutputChannel("Tomcat");
   const ide = new VsCodeIde();
   const observedEvents: ServeEvent[] = [];
@@ -829,6 +830,7 @@ export async function activate(
       ? extensionPackage.tomcat.bundledCliVersion
       : null;
   webviewProvider = new TomcatWebviewViewProvider({
+    extensionMode: context.extensionMode,
     // Workspace-scoped: the attachment directory follows the tomcat data dir, which can
     // differ per workspace, and a wrong remembered path would grant the wrong root.
     attachmentRootMemento: context.workspaceState,

@@ -1,6 +1,9 @@
 import type { ZhCatalog } from "./en";
 
 export const zhCN = {
+  "host.webviewUnresponsive": "Tomcat 面板反复失去响应，任务仍在后台运行。",
+  "host.reloadWebview": "重新加载面板",
+  "host.webviewRebuildFailed": "Tomcat 未能重建面板，任务未被中断。请尝试隐藏 TOMCAT 视图后重新打开。",
   "error.unknown": "发生了意外错误。",
   "state.unknownError": "未知错误",
   "state.noteNudge": "计划未收口，已要求继续",

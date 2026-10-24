@@ -1,4 +1,5 @@
 export const env = { language: "en" };
+export enum ExtensionMode { Production = 1, Development = 2, Test = 3 }
 
 type CommandHandler = (...args: any[]) => any;
 type Provider = { provideTextDocumentContent(uri: Uri): string };

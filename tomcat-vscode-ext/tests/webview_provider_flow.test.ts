@@ -448,6 +448,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
   const openSettings = options.openSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
+    extensionMode: vscode.ExtensionMode.Development,
     extensionUri: vscode.Uri.file("/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {
@@ -484,6 +485,7 @@ async function prepareBroadcastProvider(options: BuildProviderOptions = {}) {
   await provider.dispatchTestIntent({ messageId: "prime-broadcast", type: "ready" });
   const postedFrames: HostToWebviewFrame[] = [];
   provider.resolveWebviewView({
+    onDidDispose: () => new vscode.Disposable(() => undefined),
     onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
     show() {}, visible: true,
     webview: {

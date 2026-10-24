@@ -49,9 +49,14 @@ type PackagedWebviewApi = {
   __testing: {
     captureWebviewDom(): Promise<{ html: string }>;
     clearObservedWebviewErrors(): void;
+    createFreshWebviewSession(): Promise<string>;
+    getServeProcessId(): number | undefined;
+    getSessionState(sessionId: string): Promise<{ busy: boolean }>;
+    sendWebviewIntent(intent: { type: "prompt"; messageId: string; data: { sessionId: string; text: string } }): Promise<void>;
+    sendWebviewDomAction(action: { kind: "clickTestId" | "setInputValue"; testId: string; value?: string }): Promise<void>;
     focusWebview(): Promise<void>;
     getObservedWebviewErrors(): Array<{ message: string; stack?: string }>;
-    sendWebviewHostEvent(content: WebviewErrorBoundaryCrashFixture): Promise<void>;
+    sendWebviewHostEvent(content: WebviewErrorBoundaryCrashFixture | { type: "__test.pause_liveness"; enabled: boolean }): Promise<void>;
     waitForWebviewReady(timeoutMs?: number): Promise<void>;
   };
 };
@@ -417,6 +422,56 @@ suite("Installed Tomcat extension", () => {
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertTranscriptUiFlow(api);
+  });
+
+  test("recovers an unresponsive webview with its running task and answer draft intact", async function () {
+    this.timeout(60_000);
+    const api = await hostE2e.getTomcatExtensionApi() as PackagedWebviewApi;
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    const sessionId = await api.__testing.createFreshWebviewSession();
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "liveness-question", data: { sessionId, text: "answer card showcase" } });
+    await waitForPackagedDom(api, snapshot => snapshot.html.includes('data-testid="approval-option-deploy-target-staging"'));
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "approval-option-deploy-target-__custom__" });
+    await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "approval-custom-deploy-target", value: "Keep this custom deployment answer" });
+    await api.__testing.sendWebviewDomAction({ kind: "setInputValue", testId: "composer-input", value: "Keep this unsent recovery draft" });
+    await waitForPackagedDom(api, snapshot => snapshot.html.includes("Keep this unsent recovery draft"));
+    const backendPid = api.__testing.getServeProcessId();
+    const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({ content: "Keep editor focus during panel recovery" }));
+    await api.__testing.sendWebviewHostEvent({ type: "__test.pause_liveness", enabled: true });
+    await waitForPackagedDom(api, snapshot => snapshot.html.includes("data-tomcat-liveness-paused"));
+    const started = Date.now();
+    let restored: { html: string } | undefined;
+    let lastError: unknown;
+    while (Date.now() - started < 30_000) {
+      try {
+        const snapshot = await api.__testing.captureWebviewDom();
+        if (!snapshot.html.includes("data-tomcat-liveness-paused") && snapshot.html.includes("answer card showcase")) {
+          restored = snapshot;
+          break;
+        }
+      } catch (error) { lastError = error; } // The old view can disappear between captures.
+      await sleep(100);
+    }
+    assert.ok(restored && Date.now() - started <= 30_000, `No replacement document within 30s: ${String(lastError)}`);
+    const selection = restored.html.match(/<button[^>]*data-testid="approval-option-deploy-target-__custom__"[^>]*>/u)?.[0];
+    assert.ok(restored.html.includes("Keep this custom deployment answer"), "Custom answer text must survive recovery");
+    assert.ok(selection?.includes('aria-checked="true"'), "The unfinished answer must survive a real document replacement");
+    assert.ok(restored.html.includes("Keep this unsent recovery draft"), "Composer draft must survive recovery");
+    assert.equal((await api.__testing.getSessionState(sessionId)).busy, true);
+    assert.equal(api.__testing.getServeProcessId(), backendPid);
+    assert.equal(vscode.window.activeTextEditor?.document, editor.document);
+    const recoveredFrame = await workbenchCapture.SettingsFrameDriver.connectFromEnvironment(".tc-shell") as unknown as {
+      evaluate<T>(expression: string): Promise<T>; close(): void;
+    };
+    try {
+      assert.equal(await recoveredFrame.evaluate("document.hasFocus()"), false, "Draft hydration must not steal keyboard focus from the editor");
+    } finally { recoveredFrame.close(); }
+    console.log(`Webview recovery: ${Date.now() - started}ms, VS Code ${vscode.version}`);
+    await captureStartupCheckpoint("webview-liveness-recovered");
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "approval-continue" });
+    await waitForPackagedDom(api, snapshot => snapshot.html.includes("Recorded your answer."));
+    assert.equal((await api.__testing.getSessionState(sessionId)).busy, false);
   });
 
   // This intentionally remains last: the fixture replaces the live application with

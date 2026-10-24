@@ -504,6 +504,8 @@ export type WebviewSessionPatchOp =
     };
 
 export type HostEventFrameContent =
+  | { type: "ping" }
+  | { type: "__test.pause_liveness"; enabled: boolean }
   | { type: "composerSubmissionResult"; sessionId: string; userMessageId: string; accepted: boolean }
   | SessionFilesResult
   | MessageEditEvent
@@ -629,6 +631,7 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "pong" }
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | { messageId: string; type: "queueAction"; data: {
@@ -1218,6 +1221,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
 
   switch (value.type) {
     case "ready":
+    case "pong":
     case "listSessions":
       return true;
     case "webviewError":

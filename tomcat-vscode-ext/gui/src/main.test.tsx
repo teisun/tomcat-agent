@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, screen, waitFor } from "@testing-library/react";
 
 import type { VsCodeApiLike } from "./types";
 
 describe("chat webview entry point", () => {
+  const listeners = vi.spyOn(window, "addEventListener");
+  beforeEach(() => { listeners.mockClear(); });
   afterEach(() => {
+    for (const [type, listener, options] of listeners.mock.calls) {
+      window.removeEventListener(type, listener, options);
+    }
     document.body.replaceChildren();
     Reflect.deleteProperty(window, "acquireVsCodeApi");
     vi.resetModules();
@@ -38,6 +43,18 @@ describe("chat webview entry point", () => {
         type: "ready",
       }),
     );
+    const hostEvent = (content: unknown) => window.dispatchEvent(new MessageEvent("message", { data: { channel: "event", content } }));
+    hostEvent({ type: "ping" });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pong" }));
+    postMessage.mockClear();
+    hostEvent({ type: "__test.pause_liveness", enabled: true });
+    expect(document.getElementById("root")?.hasAttribute("data-tomcat-liveness-paused")).toBe(true);
+    hostEvent({ type: "ping" });
+    expect(postMessage).not.toHaveBeenCalled();
+    hostEvent({ type: "__test.pause_liveness", enabled: false });
+    expect(document.getElementById("root")?.hasAttribute("data-tomcat-liveness-paused")).toBe(false);
+    hostEvent({ type: "ping" });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pong" }));
   });
 
   it("test-only crash fixture renders the boundary fallback and reports the host", async () => {
@@ -87,6 +104,9 @@ describe("chat webview entry point", () => {
           type: "webviewError",
         }),
       );
+      postMessage.mockClear();
+      window.dispatchEvent(new MessageEvent("message", { data: { channel: "event", content: { type: "ping" } } }));
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "pong" }));
     } finally {
       consoleError.mockRestore();
     }

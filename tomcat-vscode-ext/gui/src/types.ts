@@ -558,6 +558,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "pong" }>
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "retryConnection" | "restartSharedService" | "viewConnectionLogs" }>
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }

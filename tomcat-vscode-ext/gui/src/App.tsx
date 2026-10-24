@@ -88,10 +88,6 @@ const COMPOSER_DRAFT_DEBOUNCE_MS = 250;
  */
 const ATTACHMENT_FEEDBACK_TIMEOUT_MS = 8000;
 
-interface PersistedGuiState {
-  approvalAnswers: Record<string, ApprovalAnswerState>;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -146,18 +142,6 @@ function pruneApprovalAnswers(
     }
   }
   return changed ? next : current;
-}
-
-function persistGuiState(
-  vscodeApi: VsCodeApiLike,
-  snapshot: WebviewStateSnapshot,
-  approvalAnswers: Record<string, ApprovalAnswerState>,
-): void {
-  const persisted: WebviewStateSnapshot & PersistedGuiState = {
-    ...snapshot,
-    approvalAnswers,
-  };
-  vscodeApi.setState?.(persisted);
 }
 
 interface ContextSearchState {
@@ -1316,6 +1300,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
     () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
   );
+  // The host replays conversations; only unfinished answers need a GUI backup.
+  // The initial write also replaces legacy full-snapshot state.
+  useEffect(() => {
+    vscodeApi.setState?.({ approvalAnswers });
+  }, [vscodeApi, approvalAnswers]);
   const [pendingQuestionDockCollapsed, setPendingQuestionDockCollapsed] = useState<Record<string, boolean>>({});
   const [contextSearch, setContextSearch] = useState<ContextSearchState>(
     EMPTY_CONTEXT_SEARCH_STATE,
@@ -1888,7 +1877,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         approvalAnswersRef.current = nextAnswers;
         setApprovalAnswers(nextAnswers);
         setState(nextState);
-        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1901,7 +1889,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         approvalAnswersRef.current = nextAnswers;
         setApprovalAnswers(nextAnswers);
         setState(nextState);
-        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1929,7 +1916,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         );
         setApprovalAnswers(approvalAnswersRef.current);
         setState(patched.state);
-        persistGuiState(vscodeApi, patched.state, approvalAnswersRef.current);
         return;
       }
       if (frame.channel === "event") {
@@ -1990,7 +1976,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             };
             approvalAnswersRef.current = next;
             setApprovalAnswers(next);
-            persistGuiState(vscodeApi, stateRef.current, next);
           }
           return;
         }
@@ -2219,9 +2204,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       };
       approvalAnswersRef.current = next;
       setApprovalAnswers(next);
-      persistGuiState(vscodeApi, stateRef.current, next);
     },
-    [vscodeApi],
+    [],
   );
 
   const handlePendingQuestionDockCollapse = useCallback(
@@ -2258,7 +2242,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       };
       approvalAnswersRef.current = next;
       setApprovalAnswers(next);
-      persistGuiState(vscodeApi, stateRef.current, next);
       answerQuestion(vscodeApi, ownerSessionId, requestId, result);
     },
     [vscodeApi],

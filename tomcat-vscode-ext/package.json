@@ -108,7 +108,8 @@
         {
           "id": "tomcat.chatView",
           "name": "TOMCAT",
-          "type": "webview"
+          "type": "webview",
+          "when": "!tomcat.chatView.rebuilding"
         }
       ]
     },

@@ -2616,6 +2616,7 @@ describe("Tomcat webview App", () => {
     expect(document.activeElement).toBe(screen.getByTestId("approval-option-q-draft-yes"));
 
     const persisted = first.getPersistedState();
+    expect(Object.keys(persisted as object)).toEqual(["approvalAnswers"]);
     first.unmount();
     mount(persisted);
     await emitState({
@@ -2626,6 +2627,43 @@ describe("Tomcat webview App", () => {
     expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
       "true",
     );
+  });
+
+  it("does not persist unchanged answer drafts on state, sessionView or sessionPatch frames", async () => {
+    const { vscodeApi, getPersistedState } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({ channel: "state", content: snapshot, messageId: "initial-answers" });
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    const writes = vi.mocked(vscodeApi.setState!).mock.calls.length;
+    const saved = getPersistedState();
+    for (let index = 0; index < 3; index += 1) {
+      await emitState({ channel: "state", content: snapshot, messageId: `state-${index}` });
+      await emitState({ channel: "sessionView", content: { sessionId: "s1", view: snapshot.sessionViews.s1 }, messageId: `view-${index}` });
+      await emitState({ channel: "sessionPatch", content: { sessionId: "s1", seq: 1, ops: [] }, messageId: `patch-${index}` });
+    }
+    expect(vscodeApi.setState).toHaveBeenCalledTimes(writes);
+    expect(getPersistedState()).toBe(saved);
+    // Resolving the question really changes the answers, so it must still save.
+    snapshot.sessionViews.s1.timeline = [];
+    await emitState({ channel: "state", content: snapshot, messageId: "question-resolved" });
+    expect(vscodeApi.setState).toHaveBeenCalledTimes(writes + 1);
+    expect(getPersistedState()).toEqual({ approvalAnswers: {} });
+  });
+
+  it("replaces a legacy full snapshot on mount while restoring its answer draft", async () => {
+    const first = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({ channel: "state", content: snapshot, messageId: "legacy-question" });
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    const answersOnly = first.getPersistedState() as { approvalAnswers: unknown };
+    first.unmount();
+    const restored = mount({ ...snapshot, ...answersOnly });
+    expect(restored.vscodeApi.setState).toHaveBeenCalledTimes(1);
+    expect(restored.getPersistedState()).toEqual(answersOnly);
+    expect(Object.keys(restored.getPersistedState() as object)).toEqual(["approvalAnswers"]);
+    await emitState({ channel: "state", content: snapshot, messageId: "legacy-replayed" });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe("true");
+    expect(restored.vscodeApi.setState).toHaveBeenCalledTimes(1);
   });
 
   it("submits the prompt on Enter without Shift", async () => {

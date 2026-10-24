@@ -3153,6 +3153,8 @@ export class WebviewStateStore {
   private applyEventUnchecked(frame: HostEventFrameContent): SessionRenderMutation {
     if (
       frame.type === "__test.capture_dom" ||
+      frame.type === "ping" ||
+      frame.type === "__test.pause_liveness" ||
       frame.type === "__test.dom_action" ||
       frame.type === "contextSearchResult" ||
       frame.type === "pathsResolved" ||

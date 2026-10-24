@@ -344,7 +344,7 @@ function ApprovalCardComponent({
                   <label className="tc-field tc-approval-custom">
                     <span>{t("question.custom")}</span>
                     <input
-                      autoFocus={isPendingPanel}
+                      autoFocus={isPendingPanel && document.hasFocus()}
                       className="tc-approval-custom__input"
                       data-testid={`approval-custom-${question.id}`}
                       disabled={submitting}

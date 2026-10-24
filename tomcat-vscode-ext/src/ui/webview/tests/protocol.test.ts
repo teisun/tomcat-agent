@@ -18,6 +18,12 @@ describe("shared slash intents", () => {
 });
 
 describe("webview protocol helpers", () => {
+  it("accepts parameterless liveness frames with the normal message envelope", () => {
+    expect(isWebviewIntent({ type: "pong", messageId: "pong-1" })).toBe(true);
+    expect(isWebviewIntent({ type: "pong" })).toBe(false);
+    expect(isHostToWebviewFrame({ channel: "event", content: { type: "ping" }, messageId: "ping-1" })).toBe(true);
+  });
+
   it("accepts a bounded webview crash report", () => {
     expect(
       isWebviewIntent({

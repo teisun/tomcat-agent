@@ -1035,7 +1035,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ? [{ text: nextDraft.text, type: "text" } satisfies WebviewMessageSegment]
           : [];
       editor.commands.setContent(createComposerDocument(segments), { emitUpdate: false });
-      editor.commands.focus("end");
+      // A recovered/background webview can hydrate while the VS Code editor owns
+      // keyboard focus. Keep normal in-panel restoration, but never take it back.
+      if (document.hasFocus()) editor.commands.focus("end");
       applyDraft(serializeComposerDocument(editor.getJSON()));
     },
   }), [editor, insertReferences, mentionSuggestion, slashSuggestion]);

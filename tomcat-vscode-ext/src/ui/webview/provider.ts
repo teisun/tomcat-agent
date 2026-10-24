@@ -140,6 +140,7 @@ function sessionFileIdentity(value: string): string {
 }
 
 export interface TomcatWebviewProviderDeps {
+  extensionMode?: vscode.ExtensionMode;
   /**
    * Where to keep composer drafts.
    *
@@ -631,6 +632,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private contextSearchTokenSource?: vscode.CancellationTokenSource;
   private messageSubscription?: vscode.Disposable;
   private visibilitySubscription?: vscode.Disposable;
+  private viewDisposeSubscription?: vscode.Disposable;
+  private livenessTimer?: ReturnType<typeof setInterval>;
+  private unansweredPings = 0;
+  private lastAutomaticRebuildAt?: number;
   private view?: vscode.WebviewView;
 
   constructor(private readonly deps: TomcatWebviewProviderDeps) {
@@ -816,6 +821,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   dispose(): void {
     this.disposed = true;
+    this.stopLivenessProbe();
+    this.viewDisposeSubscription?.dispose();
+    this.view = undefined;
+    this.isReady = false;
+    this.webviewGeneration += 1;
     this.fileGeneration += 1;
     this.fileSubscriptions.forEach((subscription) => subscription.dispose());
     this.contextSearchTokenSource?.cancel();
@@ -836,6 +846,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   resolveWebviewView(view: vscode.WebviewView): void | Thenable<void> {
+    this.stopLivenessProbe();
+    this.viewDisposeSubscription?.dispose();
     this.view = view;
     this.isReady = false;
     this.webviewGeneration += 1;
@@ -859,13 +871,93 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.messageSubscription = view.webview.onDidReceiveMessage((message: unknown) => {
-      void this.handleWebviewMessage(message);
+      if (this.view === view && !this.disposed) void this.handleWebviewMessage(message);
     });
     this.visibilitySubscription = view.onDidChangeVisibility(() => {
-      if (view.visible) {
+      if (this.view === view && view.visible) {
         void this.broadcastFullState({ force: true });
       }
     });
+    this.viewDisposeSubscription = view.onDidDispose(() => {
+      if (this.view !== view) return;
+      this.view = undefined;
+      this.isReady = false;
+      this.webviewGeneration += 1;
+      this.stopLivenessProbe();
+      this.messageSubscription?.dispose();
+      this.visibilitySubscription?.dispose();
+    });
+    this.startLivenessProbe(view);
+  }
+
+  private stopLivenessProbe(): void {
+    clearInterval(this.livenessTimer);
+    this.livenessTimer = undefined;
+    this.unansweredPings = 0;
+  }
+
+  private startLivenessProbe(view: vscode.WebviewView): void {
+    if (this.disposed || this.deps.extensionMode === vscode.ExtensionMode.Development) return;
+    this.livenessTimer = setInterval(() => {
+      if (!view.visible) {
+        this.unansweredPings = 0;
+        return;
+      }
+      if (this.unansweredPings >= 3) {
+        this.stopLivenessProbe();
+        void this.recoverUnresponsiveView(view).catch((error: unknown) => {
+          console.warn("[Tomcat webview] rebuild failed", error);
+          if (!this.disposed) void vscode.window.showErrorMessage(t("host.webviewRebuildFailed"));
+        });
+        return;
+      }
+      this.unansweredPings += 1;
+      // Workbench delivery is not a pong. Never await it or gate ping on ready.
+      try {
+        void Promise.resolve(view.webview.postMessage({
+          channel: "event", content: { type: "ping" }, messageId: createHostFrameMessageId("ping"),
+        } satisfies HostToWebviewFrame)).catch(() => undefined);
+      } catch {
+        // A rejected/disposed bridge counts as an unanswered ping too.
+      }
+    }, 5_000);
+    this.livenessTimer.unref();
+  }
+
+  private async recoverUnresponsiveView(view: vscode.WebviewView): Promise<void> {
+    const automatic = this.lastAutomaticRebuildAt === undefined || Date.now() - this.lastAutomaticRebuildAt >= 60_000;
+    console.warn(`[Tomcat webview] unresponsive generation=${this.webviewGeneration} automatic=${automatic}`);
+    if (!automatic) {
+      const reload = { title: t("host.reloadWebview") };
+      const choice = await vscode.window.showWarningMessage(t("host.webviewUnresponsive"), reload);
+      if (choice !== reload) return;
+    }
+    // A notification can outlive its view or the provider. Never rebuild a replacement.
+    if (this.disposed || this.view !== view) return;
+    if (automatic) this.lastAutomaticRebuildAt = Date.now();
+    await this.rebuildView(view, automatic);
+  }
+
+  private async rebuildView(view: vscode.WebviewView, automatic: boolean): Promise<void> {
+    const generation = this.webviewGeneration;
+    const started = Date.now();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let subscription: vscode.Disposable | undefined;
+    const disposed = new Promise<boolean>((resolve) => {
+      subscription = view.onDidDispose(() => resolve(true));
+      timeout = setTimeout(() => resolve(false), 5_000);
+    });
+    try {
+      await vscode.commands.executeCommand("setContext", "tomcat.chatView.rebuilding", true);
+      if (!await disposed) throw new Error("Timed out waiting for the Tomcat webview to be disposed");
+      console.warn(`[Tomcat webview] rebuild generation=${generation} automatic=${automatic} disposedAfterMs=${Date.now() - started}`);
+    } finally {
+      clearTimeout(timeout);
+      subscription?.dispose();
+      // Even if removal fails or the provider shuts down, never leave the view hidden.
+      await vscode.commands.executeCommand("setContext", "tomcat.chatView.rebuilding", false);
+    }
+    if (!this.disposed) await vscode.commands.executeCommand("tomcat.chatView.focus", { preserveFocus: true });
   }
 
   /** Await pending draft persistence after synchronous disposal stops new UI input. */
@@ -1887,6 +1979,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "pong":
+        this.unansweredPings = 0;
+        return;
       case "webviewError":
         this.observedWebviewErrors.push({
           message: intent.data.message,
@@ -1903,7 +1998,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         // root: the replacement document will send its own ready message.
         const webviewGeneration = this.webviewGeneration;
         await this.attachmentRootPrimed;
-        if (webviewGeneration !== this.webviewGeneration) {
+        if (this.disposed || webviewGeneration !== this.webviewGeneration) {
           return;
         }
         this.messageQueue.cancelEditors();
@@ -3288,13 +3383,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const sessions = Object.values(snapshot.sessionViews);
     await Promise.all(sessions.map((session) => this.enrichPlanSession(session)));
     return snapshot;
-  }
-
-  private refreshHtml(): void {
-    if (!this.view) {
-      return;
-    }
-    this.view.webview.html = this.renderHtml(this.view.webview);
   }
 
   private readBuildModelConfig(): string {
