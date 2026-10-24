@@ -1070,7 +1070,7 @@ describe("context search intent handling", () => {
             reference: {
               kind: "file",
               label: "app.ts",
-              path: "src/app.ts",
+              path: "/workspace/src/app.ts",
               type: "reference",
             },
           },
@@ -1151,7 +1151,7 @@ describe("context search intent handling", () => {
             reference: {
               kind: "file",
               label: "new.ts",
-              path: "src/new.ts",
+              path: "/workspace/src/new.ts",
               type: "reference",
             },
           },

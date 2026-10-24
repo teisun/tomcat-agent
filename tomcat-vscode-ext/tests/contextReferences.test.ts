@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as vscode from "vscode";
 import { __testing } from "vscode";
 
@@ -61,7 +62,62 @@ function createEditor(
   } as unknown as vscode.TextEditor;
 }
 
+beforeEach(() => __testing.reset());
+afterEach(() => __testing.reset());
+
 describe("context references", () => {
+  it("keeps multi-root file and selection targets distinct despite identical short labels", () => {
+    (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
+      { uri: vscode.Uri.file("/projects/remotecontrol_wins"), name: "Remote" },
+      { uri: vscode.Uri.file("/projects/webrtc-sdk"), name: "WebRTC" },
+    ];
+    const paths = [
+      "/projects/remotecontrol_wins/src/sunmi/webrtc_patch.h",
+      "/projects/webrtc-sdk/src/sunmi/webrtc_patch.h",
+    ];
+    // Model the real VS Code API: false drops the root, default/true keeps its display name.
+    expect(vscode.workspace.asRelativePath(vscode.Uri.file(paths[1]), false)).toBe("src/sunmi/webrtc_patch.h");
+    expect(vscode.workspace.asRelativePath(vscode.Uri.file(paths[1]))).toBe("WebRTC/src/sunmi/webrtc_patch.h");
+    expect(vscode.workspace.asRelativePath(vscode.Uri.file(paths[1]), true)).toBe("WebRTC/src/sunmi/webrtc_patch.h");
+    for (const filePath of paths) {
+      expect(buildFileReference(vscode.Uri.file(filePath))).toMatchObject({ path: filePath, label: "webrtc_patch.h" });
+      const editor = createEditor(filePath, "selected", new vscode.Position(0, 0), new vscode.Position(0, 8));
+      expect(buildSelectionReference(editor)).toMatchObject({ path: filePath, label: "webrtc_patch.h:1", text: "selected" });
+      expect(buildSelectionReferenceFromParts(editor.document.uri, "preview", 3, 4)).toMatchObject({
+        path: filePath, label: "webrtc_patch.h:3-4", text: "preview",
+      });
+      expect(buildFileReference(vscode.Uri.file(filePath.slice(0, filePath.lastIndexOf("/"))), { isDirectory: true }))
+        .toMatchObject({ path: `${filePath.slice(0, filePath.lastIndexOf("/"))}/`, label: "sunmi/" });
+    }
+  });
+
+  it("does not rebase references when the user overrides the session directory or closes the workspace", () => {
+    const uri = vscode.Uri.file("/workspace/src/app.ts");
+    __testing.setConfiguration("tomcat.session.defaultCwd", "/elsewhere");
+    expect(buildFileReference(uri).path).toBe(uri.fsPath);
+    (vscode.workspace as { workspaceFolders: unknown[] }).workspaceFolders = [];
+    expect(vscode.workspace.asRelativePath(uri)).toBe(uri.fsPath);
+    expect(buildFileReference(uri).path).toBe(uri.fsPath);
+  });
+
+  it.each([String.raw`D:\dev\webrtc-sdk\src\补丁 file.h`, String.raw`\\server\share\webrtc-sdk\src\补丁 file.h`])(
+    "preserves the supplied Windows fsPath without URI encoding or losing its prefix: %s", (fsPath) => {
+      // Input preservation only; real Windows URI conversion requires Windows Host acceptance.
+      const uri = { fsPath, path: "/not-the-filesystem-path" } as vscode.Uri;
+      expect(buildFileReference(uri)).toMatchObject({ path: fsPath, label: "补丁 file.h" });
+      expect(buildSelectionReferenceFromParts(uri, "snapshot", 1, 1)).toMatchObject({ path: fsPath, label: "补丁 file.h:1" });
+    },
+  );
+
+  it("keeps the native directory prefix and uses one trailing slash marker", () => {
+    const directory = path.join(path.resolve("/workspace"), "nested");
+    const uri = { fsPath: `${directory}${path.sep}` } as vscode.Uri;
+    expect(buildFileReference(uri, { isDirectory: true })).toMatchObject({
+      path: `${directory}/`, label: "nested/",
+    });
+    expect(buildFileReference(uri).path).toBe(uri.fsPath);
+  });
+
   it("truncates oversized selection snapshots with a visible suffix", () => {
     const input = `${"x".repeat(12_500)}\nsecond line`;
 
@@ -87,7 +143,7 @@ describe("context references", () => {
       label: "app.ts:2-3",
       lineEnd: 3,
       lineStart: 2,
-      path: "src/app.ts",
+      path: "/workspace/src/app.ts",
       text: "const beta = 2;\nconst gamma = alpha + beta;",
       type: "reference",
     });
@@ -106,7 +162,7 @@ describe("context references", () => {
       label: "sample.plan.md:12-14",
       lineEnd: 14,
       lineStart: 12,
-      path: "plans/sample.plan.md",
+      path: "/workspace/plans/sample.plan.md",
       text: "first line\nsecond line",
       type: "reference",
     });
@@ -136,7 +192,7 @@ describe("context references", () => {
       label: "sample.plan.md",
       lineEnd: null,
       lineStart: null,
-      path: "plans/sample.plan.md",
+      path: "/workspace/plans/sample.plan.md",
       text: "orphan selection",
       type: "reference",
     });
@@ -163,7 +219,7 @@ describe("context references", () => {
     expect(reference?.text?.length).toBeLessThan(text.length);
   });
 
-  it("builds in-workspace directory references with relative paths and trailing slashes", () => {
+  it("builds in-workspace directory references with absolute paths and trailing slashes", () => {
     const reference = buildFileReference(vscode.Uri.file("/workspace/src/nested"), {
       isDirectory: true,
     });
@@ -171,12 +227,12 @@ describe("context references", () => {
     expect(reference).toEqual({
       kind: "file",
       label: "nested/",
-      path: "src/nested/",
+      path: "/workspace/src/nested/",
       type: "reference",
     });
   });
 
-  it("falls back to absolute paths for files outside the workspace", () => {
+  it("keeps absolute paths for files outside the workspace", () => {
     const reference = buildFileReference(vscode.Uri.file("/outside/log.txt"));
 
     expect(reference).toEqual({
@@ -194,13 +250,13 @@ describe("context references", () => {
     await expect(resolveUriToFileReference(vscode.Uri.file("/workspace/src/app.ts"))).resolves.toEqual({
       kind: "file",
       label: "app.ts",
-      path: "src/app.ts",
+      path: "/workspace/src/app.ts",
       type: "reference",
     });
     await expect(resolveUriToFileReference(vscode.Uri.file("/workspace/src/folder"))).resolves.toEqual({
       kind: "file",
       label: "folder/",
-      path: "src/folder/",
+      path: "/workspace/src/folder/",
       type: "reference",
     });
   });

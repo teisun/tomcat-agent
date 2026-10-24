@@ -676,6 +676,24 @@ describe("Composer", () => {
     } finally { hasFocus.mockRestore(); }
   });
 
+  it("submits distinct absolute targets with identical short labels after draft restoration", async () => {
+    const submitted = vi.fn();
+    const { ref } = renderComposer({ onSubmit: () => submitted(ref.current!.getDraft()) });
+    const paths = ["/projects/A/src/app.ts", "/projects/B/src/app.ts"];
+    await act(async () => {
+      ref.current?.insertReferences(paths.map((path) => ({ type: "reference", kind: "file", label: "app.ts", path })));
+    });
+    const draft = ref.current!.getDraft();
+    expect(draft.segments.filter((segment) => segment.type === "reference").map((segment) => segment.path)).toEqual(paths);
+    await act(async () => { ref.current?.replaceDraft(draft); });
+    const chips = screen.getAllByTestId("composer-reference-chip");
+    expect(chips.map((chip) => chip.textContent)).toEqual(["app.ts", "app.ts"]);
+    expect(chips.map((chip) => chip.getAttribute("title"))).toEqual(paths);
+    fireEvent.keyDown(screen.getByTestId("composer-input"), { key: "Enter" });
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(submitted).toHaveBeenCalledWith(draft);
+  });
+
   it("inserts repeated selections with distinct occurrence identities", async () => {
     const { onDraftChange, ref } = renderComposer();
 

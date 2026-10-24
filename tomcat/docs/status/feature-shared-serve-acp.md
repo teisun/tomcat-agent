@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-10-24 | ACTIVE | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-10-24 15:00 | ACTIVE | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
+
+- [✓] 修复 VS Code 多根工作区引用丢失所属项目地址的问题：文件、目录及选区保留完整路径，标签仍简短；`@` 搜索独立显示项目名与相对目录，避免同名文件混淆。产品逻辑只改引用构造与搜索展示两处，补齐草稿/发送/历史、Rust 真实读取和双根 Host 回归；Windows 实机验收未完成。
 
 - [✓] 修复 Windows/Linux Composer `+` 同时启用文件/文件夹选择导致只显示目录的问题：原生 QuickPick 先选类型，保留多选、分次追加及取消/异常时的草稿和操作收尾；补充英中文案、参数/回填回归与真实宿主菜单交互用例。
 - [✓] 已生成包含本次修复的纯插件包 `tomcat-vscode-ext-0.1.97-pure-composer-fix.vsix`（不含 CLI），构建、可解压性及包内代码与当前构建一致性检查通过；未自动安装或重启用户服务。
@@ -13,6 +15,8 @@
 - 更新双语 README、用户指南与共享服务架构文档，明确“更新磁盘文件”和“显式重启后台”是两步操作。
 
 ### INTERFACE（接口与行为边界）
+
+- 新文件系统引用的 `path` 保留扩展宿主 `uri.fsPath`（目录尾 `/` 契约不变），`label` 与搜索描述独立显示；会话 cwd、权限、重复 occurrence 及 wire 字段不变。旧相对路径不猜测迁移，旧歧义引用需重加；更新/重载扩展后新添加的引用才按修复后的规则生成。
 
 - Composer `pickContext` 先显示“添加文件 / 添加文件夹”，`buildAttachmentOpenDialogOptions(kind)` 只开启对应类型；两类需分次选择，继续复用原有附件/引用分类与 `composerWorkResult`。未改拖拽事件处理、只读判定或共享服务。
 - `tomcat self-install` 只安装当前可执行文件，复用既有平台安装函数；Windows 复制、macOS 软链接策略不变，不初始化配置、不改 PATH／凭据、不自动重启。保留 `TOMCAT_AGENT_ACTIVE` 嵌套保护。
@@ -34,6 +38,9 @@
 - 详细本地证据：`.agents/acceptance/windows-shared-serve-report.md`、`.agents/acceptance/update-restart/report.md`；最终重启截图目录 `.agents/acceptance/update-restart/ui/gui-u7Ujzh/`。这些日志、截图和构建产物不纳入 Git，Mac 拉取代码不会自动获得本机证据文件。
 
 ### macOS 联合验收（2026-10-23–24）
+
+- **多根引用修复本机验证完成**：macOS 13.7.8 / VS Code 1.143.1；扩展/GUI/启动器分批有效覆盖 1008 项（15+16+881+73+23），Rust 定向 3 项，真实 Host 6 项通过；构建、类型检查及格式检查通过。初始 Provider 两条旧路径期望、搜索测试断言与 Host 夹具问题修正后仅复跑受影响范围，不声称全仓一次全绿。本次提交按用户要求不重跑测试、构建或覆盖率，Cov% 继续未测量。
+- 多根 Host 的 7 组最终 PNG/ARIA/console 已逐项读取，侧栏实际宽度 941/389px；截图、ARIA 与发送数据分别确认项目可区分、短标签和完整目标。Host 使用测试后端，Rust 录制模型与真实 read 独立验证收到 B 完整引用、读取 `ONLY_B` 且 cwd/授权边界不变；不冒充模型自主选文件或原生鼠标拖拽验证。捕获期 console 无 error，宿主警告另列。仓库根本地产物 `.agents/acceptance/multi-root-references.md` 与 `.agents/shots/multi-root-references/gui-1zk4mf/` 不纳入 Git，Windows 不会自动获得这些产物；Windows 复验使用相同 npm Host 入口及 Rust 定向测试。
 
 ```text
 8a5b7885 → 共用自动化 → 真实 VS Code 旁观 / 重启 / 关窗
@@ -66,6 +73,7 @@
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
+| 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
 | macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
 | Mac 已安装版本 | 纯插件 0.1.97、独立 CLI/serve 0.1.81、process-path 已核对；这是 8a5b7885 基线制品，不含后来选择器修复 | 保留被软链引用的 release 文件；源码合并不等于已安装插件更新 |
 | 选择器修复制品 | Windows 已生成含选择器修复的纯扩展 0.1.97，但不含 CLI、未自动安装；同版本号不证明包内容相同 | 安装修复包后核对实际版本、路径与内容；本次合并不自动安装或重启 |
@@ -73,4 +81,4 @@
 | 文件树拖拽无提示 | 根因未确认；CDP 鼠标探针未产生源头 dragstart，不能视为有效复现或成功验收；拖拽代码未改 | 在用户故障窗口捕获真实 dragstart、Shift 状态及 iframe dragover/drop，再按事件断点定位 |
 | Mac 正式保活（已补证） | 用户正式重启 A→B，Reload、全退出后重开前、最终用户 Dock 重开均仍 B；脚本与用户操作分开记账 | 不再要求重复操作；保留自动点击失败原件与组合回执 |
 | CI 与外部宿主 | 本机整改验收不代替本次提交的 GitHub Windows 系统代理 CI；本轮外部宿主为源码契约对照，不是完整宿主重验 | 推送后检查 CI；保留 Multica 上层 30 秒交接与 backend 65 秒清理预算不一致的未实测风险 |
-| 提交范围 | 本次按用户授权合并 Windows 新提交与本地 Mac 验收改动，并在本地提交 | 不推送、不打标签、不发布；不安装或重启正式服务 |
+| 提交范围 | 本次按用户要求本地提交多根引用修复及必要测试、文档、既有 Host 启动器和状态文件；不重跑测试，验收产物保持本地忽略 | 不推送、不打标签、不发布；不安装或重启正式服务；Windows 验收继续待完成 |

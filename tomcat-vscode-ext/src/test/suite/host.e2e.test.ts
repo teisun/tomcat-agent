@@ -29,6 +29,7 @@ import {
   assertWebviewReviewProgressFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
   assertWebviewAtMentionReferenceFlow,
+  assertMultiRootContextReferences,
   assertWebviewDraftForkPreservesReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
@@ -277,6 +278,11 @@ suite("Tomcat host E2E", () => {
   test("lazy loads a giant historical tool group without rendering half a group", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewGiantGroupLazyLoadFlow(api);
+  });
+
+  test("preserves file targets across multi-root context references", async function () {
+    this.timeout(120_000);
+    await assertMultiRootContextReferences(await getTomcatExtensionApi());
   });
 
   test("adds editor selections to the webview composer and rehydrates them from history", async () => {

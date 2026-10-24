@@ -12,16 +12,17 @@ describe("ReferenceChip", () => {
           label: "app.ts:8-12",
           lineEnd: 12,
           lineStart: 8,
-          path: "src/app.ts",
+          path: "/projects/webrtc-sdk/src/app.ts",
           text: "const total = items.length;",
           type: "reference",
         }}
       />,
     );
 
-    expect(screen.getByTestId("reference-chip").getAttribute("title")).toBe("src/app.ts:8-12");
+    expect(screen.getByTestId("reference-chip").textContent).toBe("app.ts:8-12");
+    expect(screen.getByTestId("reference-chip").getAttribute("title")).toBe("/projects/webrtc-sdk/src/app.ts:8-12");
     expect(screen.getByTestId("reference-chip").getAttribute("aria-label")).toBe(
-      "src/app.ts:8-12",
+      "/projects/webrtc-sdk/src/app.ts:8-12",
     );
   });
 

@@ -165,6 +165,10 @@ process.exit(result.status ?? 1);
   try {
     runCommand("npm", ["run", "build"], { cwd: extensionDevelopmentPath });
     await seedChatUserSettings(userDataDir);
+    // VS Code cannot enter a new workspace during extension tests. Start with a
+    // one-root workspace so journeys can append/remove siblings without replacing A.
+    const workspaceFile = path.join(userDataDir, "host.code-workspace");
+    await fs.writeFile(workspaceFile, JSON.stringify({ folders: [{ path: fixture.workspaceDir }] }));
 
     await fs.access(extensionTestsPath);
     const vscodeExecutablePath = process.platform === "win32" && !process.env.VSCODE_EXECUTABLE_PATH
@@ -184,7 +188,7 @@ process.exit(result.status ?? 1);
         `--remote-debugging-port=${cdpPort}`,
         `--user-data-dir=${userDataDir}`,
         // Search/drag/file fixtures belong to the disposable workspace, never the repository.
-        fixture.workspaceDir,
+        workspaceFile,
       ],
       vscodeExecutablePath,
     });

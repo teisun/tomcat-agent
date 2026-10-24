@@ -487,13 +487,21 @@ export const commands = {
 };
 
 export const workspace = {
-  asRelativePath(resource: string | Uri): string {
+  asRelativePath(resource: string | Uri, includeWorkspaceFolder?: boolean): string {
     const raw = typeof resource === "string" ? resource : resource.fsPath;
-    const normalized = raw.replace(/\\/g, "/");
-    const workspaceRoot = normalizePath(workspace.workspaceFolders[0]?.uri.fsPath ?? "/workspace");
-    return normalized.startsWith(`${workspaceRoot}/`)
-      ? normalized.slice(workspaceRoot.length + 1)
-      : raw;
+    const normalized = normalizePath(raw);
+    const containing = workspace.workspaceFolders
+      .map((folder) => ({ folder, root: normalizePath(folder.uri.fsPath).replace(/\/+$/u, "") }))
+      .filter(({ root }) => normalized.startsWith(`${root}/`))
+      .sort((a, b) => b.root.length - a.root.length)[0];
+    if (!containing) {
+      return raw;
+    }
+    const { folder, root } = containing;
+    const relative = normalized.slice(root.length + 1);
+    const includeRoot = includeWorkspaceFolder ?? workspace.workspaceFolders.length > 1;
+    const name = folder.name ?? root.split("/").at(-1);
+    return includeRoot && name ? `${name}/${relative}` : relative;
   },
   fs: {
     async readFile(uri: Uri): Promise<Uint8Array> {
@@ -624,7 +632,7 @@ export const workspace = {
       if (!isInWorkspace(uri)) {
         continue;
       }
-      const relativePath = normalizePath(workspace.asRelativePath(uri));
+      const relativePath = normalizePath(workspace.asRelativePath(uri, false));
       if (!includeMatcher.test(relativePath)) {
         continue;
       }
@@ -724,7 +732,7 @@ export const workspace = {
     });
   },
   textDocuments,
-  workspaceFolders: [{ uri: Uri.file("/workspace") }],
+  workspaceFolders: [{ uri: Uri.file("/workspace") }] as Array<{ uri: Uri; name?: string }>,
 };
 
 export const window = {

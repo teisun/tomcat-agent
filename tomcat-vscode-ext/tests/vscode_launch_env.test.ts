@@ -193,7 +193,7 @@ describe("VS Code GUI launch environment", () => {
         fixture: { env, workspaceDir: root }, extensionTestsEnv: env, harnessRoot: root,
         extensionDevelopmentPath: root, extensionTestsPath: "fake-test", harnessTestsPath: "fake-test",
         extensionRoot: root, userDataDir: path.join(root, "profile"), extensionsDir: root,
-        workspaceDir: root, screenshotsDir: root, reportPath: path.join(root, "report.json"),
+        workspaceDir: root, workspaceFile: path.join(root, "profile", "host.code-workspace"), screenshotsDir: root, reportPath: path.join(root, "report.json"),
         artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345,
       };
       const code = ts.transpileModule(`${calls[0].getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -203,7 +203,8 @@ describe("VS Code GUI launch environment", () => {
       expect(runTests.mock.calls[0][0].launchArgs.filter((arg: string) => arg === "--use-inmemory-secretstorage"))
         .toEqual(["--use-inmemory-secretstorage"]);
       if (name === "devhost") {
-        expect(runTests.mock.calls[0][0].launchArgs).toContain(root);
+        expect(runTests.mock.calls[0][0].launchArgs).toContain(locals.workspaceFile);
+        expect(runTests.mock.calls[0][0].launchArgs).not.toContain(root);
         expect(runTests.mock.calls[0][0].launchArgs).not.toContain(path.dirname(root));
       }
     },

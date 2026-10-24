@@ -11,7 +11,6 @@ import {
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
 } from "../../../constants";
-import { resolveUriToFileReference } from "../../../ui/webview/contextReferences";
 import type {
   ObservedEventFilter,
   TomcatExtensionApi,
@@ -4477,6 +4476,145 @@ export async function assertWebviewInstructionInvocationFlow(api: TomcatExtensio
   assert.ok(history.messageTexts.some(text=>text.includes("/host-review")));
 }
 
+export async function assertMultiRootContextReferences(api: TomcatExtensionApi): Promise<void> {
+  const first = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(first, "the disposable workspace must have a real first root");
+  assert.equal(vscode.workspace.workspaceFolders?.length, 1);
+  const second = vscode.Uri.file(await fs.mkdtemp(path.join(path.dirname(first.uri.fsPath), "webrtc-sdk-")));
+  const relativeDir = `multi-root-${Date.now().toString(36)}`;
+  const directories = [first.uri, second].map(root => path.join(root.fsPath, relativeDir));
+  const files = directories.map(dir => vscode.Uri.file(path.join(dir, "webrtc_patch.h")));
+  const driver = await WorkbenchFindDriver.connectFromEnvironment();
+  const artifacts = requireEnv("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
+  const measurements: Array<{ name: string; sidebarWidth: number }> = [];
+  let maximized = false;
+  let secondRootConfirmed = false;
+  async function updateSecondRoot(add: boolean): Promise<void> {
+    const index = vscode.workspace.workspaceFolders?.findIndex(folder => folder.uri.toString() === second.toString()) ?? -1;
+    if (!add && index < 0) return;
+    let observed = false;
+    const subscription = vscode.workspace.onDidChangeWorkspaceFolders(event => {
+      observed = (add ? event.added : event.removed).some(folder => folder.uri.toString() === second.toString());
+    });
+    try {
+      if (!add) assert.ok(index > 0, "never remove the first workspace root");
+      assert.ok(add
+        ? vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders!.length, 0, { uri: second, name: "webrtc-sdk" })
+        : vscode.workspace.updateWorkspaceFolders(index, 1));
+      await waitFor(() => observed, 20_000, "workspace-folder change event missing");
+    } finally { subscription.dispose(); }
+  }
+  async function capture(name: string, minimumWidth: number): Promise<void> {
+    const snapshot = await waitForWebviewDomSnapshot(api, snapshot => {
+      const surface = snapshot.composerControlMetrics["composer-surface"];
+      return surface && surface.left + surface.width + surface.right >= minimumWidth ? snapshot : undefined;
+    });
+    const surface = snapshot.composerControlMetrics["composer-surface"];
+    assert.ok(surface?.width > 0, "composer must be laid out");
+    measurements.push({ name, sidebarWidth: surface.left + surface.width + surface.right });
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(path.join(artifacts, `${name}.png`));
+  }
+  try {
+    await updateSecondRoot(true);
+    secondRootConfirmed = true;
+    assert.deepEqual(vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath), [first.uri.fsPath, second.fsPath]);
+    await api.__testing.reloadWebview();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    api.__testing.clearObservedWebviewErrors();
+    const sessionId = await createFreshWebviewSession(api, "multi-root-context-references");
+    const originalCwd = (await api.__testing.getSessionState(sessionId)).cwd;
+    assert.ok(originalCwd);
+    assert.equal(await fs.realpath(originalCwd), await fs.realpath(first.uri.fsPath));
+    await clearComposerDraft(api, sessionId);
+    for (let index = 0; index < directories.length; index += 1) {
+      await fs.mkdir(directories[index]);
+      await writeCreatedMentionFixture(files[index].fsPath, `ONLY_${index === 0 ? "A" : "B"}\n`);
+    }
+    await fs.mkdir(artifacts, { recursive: true });
+    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    maximized = true;
+    await driver.setViewport(1000, 900);
+    await setComposerInputValue(api, "@webrtc_patch");
+    const dropdown = await waitForWebviewDomSnapshot(api, snapshot =>
+      files.every(file => snapshot.html.includes(`title="${file.fsPath}"`)) &&
+      snapshot.html.includes('data-testid="context-search-dropdown"') ? snapshot : undefined);
+    assert.equal((dropdown.html.match(/data-testid="context-search-option"/gu) ?? []).length, 2);
+    assert.ok(dropdown.html.includes(`${first.name}/${relativeDir}`));
+    assert.ok(dropdown.html.includes(`webrtc-sdk/${relativeDir}`));
+    await capture("multi-root-search-desktop", 600);
+    await driver.setViewport(448, 844);
+    await capture("multi-root-search-narrow", 300);
+    assert.ok(measurements[1].sidebarWidth < measurements[0].sidebarWidth, JSON.stringify(measurements));
+    // Choose by independently known fixture URI, never by the reference constructor.
+    const secondIndex = dropdown.html.indexOf(`title="${files[1].fsPath}"`) < dropdown.html.indexOf(`title="${files[0].fsPath}"`) ? 0 : 1;
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "context-search-option", index: secondIndex });
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.composerDraft?.segments.some(
+      segment => segment.type === "reference" && segment.path === files[1].fsPath) ? true : undefined);
+    // Opening an editor exits maximized chat. Restore the desktop first so VS Code
+    // does not squeeze and persist the ordinary sidebar down to 159px.
+    await driver.setViewport(1000, 900);
+    await waitForWebviewDomSnapshot(api, snapshot =>
+      snapshot.composerControlMetrics["composer-surface"]?.width > 600 ? snapshot : undefined);
+    const document = await vscode.workspace.openTextDocument(files[1]);
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    editor.selection = new vscode.Selection(0, 0, 0, document.lineAt(0).text.length);
+    await api.__testing.executeCommand(TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND);
+    // Intent injection exercises host drop handling; it is not a native mouse-drag test.
+    await api.__testing.sendWebviewIntent(buildWebviewIntent({ type: "resolveDrop", messageId: "multi-root-drop", data: {
+      sessionId, uris: files.map(file => file.toString()),
+    } }));
+    const draft = await waitForWebviewState(api, state => {
+      const refs = state.sessionViews[sessionId]?.composerDraft?.segments.filter(segment => segment.type === "reference");
+      return refs?.length === 4 ? refs : undefined;
+    });
+    const expectedPaths = [files[0].fsPath, files[1].fsPath, files[1].fsPath, files[1].fsPath].sort();
+    assert.deepEqual(draft.map(reference => reference.path).sort(), expectedPaths);
+    assert.ok(draft.some(reference => reference.kind === "selection" && reference.path === files[1].fsPath && reference.text === "ONLY_B"));
+    await api.__testing.reloadWebview();
+    await api.__testing.waitForWebviewReady();
+    const restored = await waitForWebviewDomSnapshot(api, snapshot =>
+      (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length === 4 ? snapshot : undefined);
+    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    await driver.setViewport(448, 844);
+    assert.ok(restored.html.includes(`title="${files[1].fsPath}:1"`));
+    assert.ok(restored.html.includes(`aria-label="${files[1].fsPath}"`));
+    assert.deepEqual(api.__testing.getWebviewState().sessionViews[sessionId].composerDraft?.segments
+      .filter(segment => segment.type === "reference").map(reference => reference.path).sort(), expectedPaths);
+    await capture("multi-root-draft-narrow", 300);
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "send-button" });
+    await waitForEvent(api, { sessionId, type: "agent_end" });
+    await api.__testing.reloadWebview();
+    await api.__testing.waitForWebviewReady();
+    const history = await waitForWebviewState(api, state => {
+      const message = state.sessionViews[sessionId]?.timeline.find(item => item.type === "message" && item.kind === "user");
+      return message?.type === "message" && message.segments?.some(segment => segment.type === "reference") ? message : undefined;
+    });
+    assert.deepEqual(history.segments?.filter(segment => segment.type === "reference").map(reference => reference.path).sort(), expectedPaths);
+    await waitForWebviewDomSnapshot(api, snapshot => snapshot.html.includes('data-testid="history-reference-chip"') ? snapshot : undefined);
+    await driver.setViewport(1000, 900);
+    await capture("multi-root-history-desktop", 600);
+    assert.equal((await api.__testing.getSessionState(sessionId)).cwd, originalCwd);
+    assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
+    await fs.writeFile(path.join(artifacts, "multi-root-evidence.json"), JSON.stringify({
+      platform: process.platform, vscodeVersion: vscode.version, roots: [first.uri.fsPath, second.fsPath],
+      cwd: originalCwd, expectedPaths, measurements, references: draft,
+      transport: "real extension host with fixture backend; real Rust read verified separately",
+    }, null, 2));
+  } finally {
+    await driver.setViewport(1200, 900);
+    if (maximized) await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    driver.close();
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    // A rejected/timed-out addition must remain the primary failure, not be masked
+    // by a second update while VS Code still has an unconfirmed workspace.
+    if (secondRootConfirmed) await updateSecondRoot(false);
+    for (const file of files) await fs.rm(file.fsPath, { force: true });
+    for (const directory of directories) await fs.rmdir(directory).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await fs.rmdir(second.fsPath);
+  }
+}
+
 export async function assertWebviewSelectionReferenceFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -4490,7 +4628,7 @@ export async function assertWebviewSelectionReferenceFlow(
 
   const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
   const filePath = path.join(workspaceDir, "selection-context.ts");
-  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
+  const referencePath = vscode.Uri.file(filePath).fsPath;
   await fs.writeFile(
     filePath,
     [
@@ -4653,7 +4791,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
     `draft-fork-reference-${Date.now().toString(36)}.md`,
   );
   await fs.writeFile(filePath, "# draft fork reference\n", "utf8");
-  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
+  const referencePath = vscode.Uri.file(filePath).fsPath;
 
   try {
     await api.__testing.sendWebviewIntent(
@@ -4762,7 +4900,7 @@ export async function assertWebviewFileDropReferenceFlow(
   );
   assert.deepEqual(
     draft.map((segment) => segment.path).sort(),
-    [filePath, filePath, secondFilePath].map(file => vscode.workspace.asRelativePath(vscode.Uri.file(file), false)).sort(),
+    [filePath, filePath, secondFilePath].map(file => vscode.Uri.file(file).fsPath).sort(),
     "expected both dropped files to be preserved as composer references",
   );
   const rendered = await waitForWebviewDomSnapshot(
@@ -4833,9 +4971,7 @@ export async function assertWebviewAtMentionReferenceFlow(
     const filePath = path.join(scratchDir, `${stem}.ts`);
     // Node writes notify VS Code asynchronously: synchronize both file and directory fixtures.
     await writeCreatedMentionFixture(filePath, "export const atMentionTarget = true;\n");
-    const fileReference = await resolveUriToFileReference(
-      vscode.Uri.file(filePath),
-    );
+    const fileReference = { path: vscode.Uri.file(filePath).fsPath, label: path.basename(filePath) };
 
     await setComposerInputValue(api, `@${stem}`);
 
@@ -4990,9 +5126,7 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   const dirPath = path.join(scratchDir, dirStem);
   await fs.mkdir(dirPath, { recursive: true });
   await writeCreatedMentionFixture(path.join(dirPath, "nested.txt"), "nested\n");
-  const dirReference = await resolveUriToFileReference(
-    vscode.Uri.file(dirPath),
-  );
+  const dirReference = { path: `${vscode.Uri.file(dirPath).fsPath}/`, label: `${path.basename(dirPath)}/` };
 
   await setComposerInputValue(api, `@${dirReference.label}`);
   await waitForContextSearchIntent(

@@ -120,6 +120,37 @@ describe("fuzzyRank", () => {
 });
 
 describe("ContextSearchService", () => {
+  it("separates multi-root targets from display names and excludes absolute parent paths from ranking", async () => {
+    let previousDescriptions: Array<string | null | undefined> | undefined;
+    for (const parent of [ROOT, ws("unrelated-long-parent")]) {
+      const roots = [path.join(parent, "remotecontrol_wins"), path.join(parent, "webrtc-sdk")];
+      (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
+        { uri: vscode.Uri.file(roots[0]), name: "Remote" },
+        { uri: vscode.Uri.file(roots[1]), name: "WebRTC" },
+      ];
+      __testing.setConfiguration("files.exclude", { "generated/**": true });
+      const targets = roots.map((root) => path.join(root, "src", "webrtc_patch.h"));
+      targets.forEach((target) => __testing.registerFile(target, "content"));
+      roots.forEach((root) => __testing.registerFile(path.join(root, "generated", "webrtc_patch.h"), "excluded"));
+      const service = new ContextSearchService();
+      try {
+        const result = await service.search({ query: "webrtc_patch" });
+        expect(result.matches).toHaveLength(2);
+        expect(result.matches.map((match) => match.reference.path).sort()).toEqual([...targets].sort());
+        expect(result.matches.map((match) => match.reference.label)).toEqual(["webrtc_patch.h", "webrtc_patch.h"]);
+        const descriptions = result.matches.map((match) => match.description);
+        expect([...descriptions].sort()).toEqual(["Remote/src", "WebRTC/src"]);
+        if (previousDescriptions) expect(descriptions).toEqual(previousDescriptions);
+        previousDescriptions = descriptions;
+        const directories = (await service.search({ query: "src/" })).matches
+          .filter((match) => match.reference.label.endsWith("/"));
+        expect(directories.map((match) => match.reference.path).sort())
+          .toEqual(roots.map((root) => `${path.join(root, "src")}/`).sort());
+        expect(directories.map((match) => match.reference.label)).toEqual(["src/", "src/"]);
+      } finally { service.dispose(); }
+    }
+  });
+
   it("resolves files, directories, and missing paths for Markdown chips", async () => {
     __testing.registerFile(ws("src/app.ts"), "export const app = true;\n");
     __testing.registerDirectory(ws("docs"));
@@ -185,7 +216,7 @@ describe("ContextSearchService", () => {
     const service = new ContextSearchService();
     const result = await service.search({ query: "foo" });
 
-    expect(result.matches.map((match) => match.reference.path)).toEqual(["src/foo.ts"]);
+    expect(result.matches.map((match) => match.reference.path)).toEqual([ws("src/foo.ts")]);
     service.dispose();
   });
 
@@ -223,8 +254,8 @@ describe("ContextSearchService", () => {
     const service = new ContextSearchService();
     const firstResult = await service.search({ query: "app" });
     expect(firstResult.matches.map((match) => match.reference.path)).toEqual([
-      "lib/app.ts",
-      "src/app.ts",
+      ws("lib/app.ts"),
+      ws("src/app.ts"),
     ]);
 
     const srcDocument = await vscode.workspace.openTextDocument(
@@ -234,8 +265,8 @@ describe("ContextSearchService", () => {
 
     const secondResult = await service.search({ query: "app" });
     expect(secondResult.matches.map((match) => match.reference.path)).toEqual([
-      "src/app.ts",
-      "lib/app.ts",
+      ws("src/app.ts"),
+      ws("lib/app.ts"),
     ]);
 
     service.dispose();
@@ -260,7 +291,7 @@ describe("ContextSearchService", () => {
           reference: {
             kind: "file",
             label: "two.ts",
-            path: "src/two.ts",
+            path: ws("src/two.ts"),
             type: "reference",
           },
         },
@@ -283,7 +314,7 @@ describe("ContextSearchService", () => {
       __testing.registerFile(ws("src/two.ts"), "two");
       finish([vscode.Uri.file(ws("src/one.ts"))]);
       const result = await searching;
-      expect(result.matches.map((match) => match.reference.path)).toContain("src/two.ts");
+      expect(result.matches.map((match) => match.reference.path)).toContain(ws("src/two.ts"));
       await service.search({ query: "two" });
       expect(find).toHaveBeenCalledTimes(2);
     } finally { find.mockRestore(); service.dispose(); }

@@ -616,7 +616,7 @@ host 内部异常       → 记 console.error + 回空结果；不 throw 到 int
 | `@` 触发与中文 IME 冲突 | 中 | 复用既有 `isComposingRef`（`compositionstart/end`）守卫，组字期不触发 suggestion，不误发送 | 中文输入时打 @ 不乱弹、回车不误发 |
 | Enter 在下拉开时误发送消息 | 高 | `isMentionOpenRef` 门控：open 态 keydown 直接 `return false` 交 suggestion 消费（§3.2.3） | 菜单开着按回车是选中，不是发送 |
 | `@` 引用与 `+`/拖拽产出不一致 | 中 | 统一走 `buildFileReference` + `ReferenceNode`；`occurrenceId` 保留每次用户添加、只去除同次投递回声；集成测试断言同形 | 三个入口插进去的 chip 必须一模一样 |
-| 无工作区 / 多根工作区路径歧义 | 低 | 无工作区回空 + 提示；多根用 `asRelativePath`（既有 `contextReferences.ts` 口径），必要时 label 带根名 | 没打开文件夹给提示；多根用相对路径 |
+| 无工作区 / 多根工作区路径歧义 | 低 | 无工作区回空 + 提示；引用 path 保留 uri.fsPath，label 仍为短文件名；仅 displayPath/description 使用 `asRelativePath`，多根带工作区名称，机器绝对父目录不参与排序 | 列表能分清项目，实际发送完整地址，不靠当前聊天目录猜位置 |
 | 后端被误改导致协议扩散 | 中 | 关键承诺测试：git diff 不含 `*.rs`、`wire.d.ts`、`serve.schema.json`；serve schema fixture 无 diff（§8） | 用测试兜住「真没碰后端」 |
 | 缓存与磁盘不同步（新建文件搜不到） | 低 | `FileSystemWatcher` create/delete 失效缓存；兜底可加 TTL 定时重建（P2） | 新建的文件也能很快搜到 |
 
@@ -630,6 +630,8 @@ host 内部异常       → 记 console.error + 回空结果；不 throw 到 int
 - ~~「引用只能靠 `+` / 拖拽 / 选区三入口」~~ → **否**：新增第四入口「输入框 `@` 搜索」，但**刻意不新增数据模型**——`@` 产出与前三者同形的 file 引用（R4）。
 
 ### 10.2 跨文档修订
+
+- 多根引用修复：新引用统一使用完整文件系统路径，搜索展示仍保持简短；旧草稿/历史中的相对路径不猜测迁移，需重新添加歧义引用。会话 cwd、权限规则和既有协议不变，详见 `context-references.md §4.1`。
 
 - [`context-references.md`](context-references.md) **§2.2 非目标第 2 条**已同步更新为：「`@` 内联搜索已由 [`at-mention-context-search.md`](at-mention-context-search.md) 立项覆盖，`+`/拖拽/选区仍为并存入口」。
 - 参与者（participant）前端不涉及 `@` 搜索（无富输入框）；本方案仅作用于 webview 前端，participant 行为不变，无需修订其文档。

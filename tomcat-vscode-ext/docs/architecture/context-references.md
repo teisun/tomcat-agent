@@ -148,7 +148,7 @@ selection:
   {
     type: "reference",
     kind: "selection",
-    path,       // 工作区内用相对路径，工作区外回退绝对路径
+    path,       // 完整文件系统路径（uri.fsPath），不依赖会话 cwd
     label,      // 例：app.ts:12-18
     lineStart,
     lineEnd,
@@ -159,12 +159,14 @@ file:
   {
     type: "reference",
     kind: "file",
-    path,       // 工作区内用相对路径，工作区外回退绝对路径
+    path,       // 完整文件系统路径（uri.fsPath），不依赖会话 cwd
     label       // 文件名（目录保留尾部 /）
   }
 ```
 
 具体构造逻辑见 [`../../src/ui/webview/contextReferences.ts`](../../src/ui/webview/contextReferences.ts)。
+
+**定位地址与显示名称分离**：同一 VS Code 工作区可以包含多个独立项目；工作区名称不是磁盘父目录。新引用在选区、文件选择、拖入和 `@` 入口统一保留完整文件系统路径，短 label 只负责展示，目录仍保留尾部 `/`。不随编辑器切换会话 cwd，也不自动扩大访问权限。草稿/历史沿用原结构；旧相对路径原样保留，无法确定归属的旧引用需用户重新添加，不猜测迁移。
 
 ### 4.2 消息 segments
 
@@ -192,7 +194,7 @@ type Segment =
   {
     "type": "input_reference",
     "ref_kind": "selection",
-    "path": "src/app.ts",
+    "path": "/project/src/app.ts",
     "label": "app.ts:3-5",
     "line_start": 3,
     "line_end": 5,
@@ -457,7 +459,7 @@ hover title  = path:lineStart-lineEnd
 
 ```text
 label = app.ts:12-18
-title = src/app.ts:12-18
+title = /project/src/app.ts:12-18
 ```
 
 这样做的原因很简单：
@@ -471,8 +473,8 @@ title = src/app.ts:12-18
 
 ```text
 chip label  -> 一律用文件名（目录保留尾部 /）
-工作区内    -> hover / path 用相对路径
-工作区外    -> hover / path 回落到绝对路径
+hover / path -> 工作区内外均保留完整文件系统路径
+@ 次文案    -> 单根显示相对父目录，多根显示项目名/相对父目录
 ```
 
 ### 9.3 大选区护栏

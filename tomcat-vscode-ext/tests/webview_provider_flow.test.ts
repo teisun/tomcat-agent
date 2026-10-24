@@ -967,7 +967,7 @@ describe("webview provider integration", () => {
       {
         kind: "file",
         label: "app.ts",
-        path: "src/app.ts",
+        path: "/workspace/src/app.ts",
         type: "reference",
         occurrenceId: expect.any(String),
       },
@@ -980,7 +980,7 @@ describe("webview provider integration", () => {
       {
         kind: "file",
         label: "folder/",
-        path: "src/folder/",
+        path: "/workspace/src/folder/",
         type: "reference",
       },
     ]);
@@ -1095,9 +1095,15 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("shapes @ search references like dropped file references and preserves them in prompt segments", async () => {
+  it("shapes multi-root @ search references like dropped file references and preserves their targets in prompt segments", async () => {
     const { messenger, provider } = buildProvider();
-    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
+      { uri: vscode.Uri.file("/workspace"), name: "Remote" },
+      { uri: vscode.Uri.file("/webrtc-sdk"), name: "WebRTC" },
+    ];
+    const target = "/webrtc-sdk/src/app.ts";
+    __testing.registerFile("/workspace/src/app.ts", "ONLY_A");
+    __testing.registerFile(target, "ONLY_B");
 
     const postEventSpy = vi
       .spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent")
@@ -1116,14 +1122,17 @@ describe("webview provider integration", () => {
     const searchEvent = postEventSpy.mock.calls
       .map(([content]) => content)
       .find((content) => content.type === "contextSearchResult");
-    const searchReference = (searchEvent as {
+    const matches = (searchEvent as {
       matches: Array<{ reference: Record<string, unknown> }>;
-    }).matches[0]?.reference;
+    }).matches;
+    expect(matches.map((match) => match.reference.path).sort()).toEqual([target, "/workspace/src/app.ts"].sort());
+    const searchReference = matches.find((match) => match.reference.path === target)?.reference;
+    expect(searchReference).toMatchObject({ path: target, label: "app.ts" });
 
     await provider.dispatchTestIntent({
       data: {
         sessionId: "session-1",
-        uris: [vscode.Uri.file("/workspace/src/app.ts").toString()],
+        uris: [vscode.Uri.file(target).toString()],
       },
       messageId: "drop-shape-1",
       type: "resolveDrop",
@@ -1200,14 +1209,14 @@ describe("webview provider integration", () => {
       {
         kind: "file",
         label: "app.ts",
-        path: "src/app.ts",
+        path: "/workspace/src/app.ts",
         type: "reference",
         occurrenceId: expect.any(String),
       },
       {
         kind: "file",
         label: "folder/",
-        path: "src/folder/",
+        path: "/workspace/src/folder/",
         type: "reference",
       },
     ]);

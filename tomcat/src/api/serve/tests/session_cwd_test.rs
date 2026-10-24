@@ -1,6 +1,6 @@
 //! Session cwd must reach both model context and the real tool execution path.
 use super::*;
-use crate::core::llm::StreamEvent;
+use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, ChatMessageRole, StreamEvent};
 use serial_test::serial;
 use std::sync::{atomic::Ordering, Arc};
 
@@ -16,6 +16,150 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> Vec<Result<StreamEvent
             reason: "tool_calls".into(),
         }),
     ]
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn absolute_reference_reaches_model_and_reads_second_project_without_changing_cwd() {
+    let _key = install_test_api_key();
+    let data = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    for name in ["A", "B"] {
+        let root = projects.path().join(name);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/value.txt"), format!("ONLY_{name}\n")).unwrap();
+    }
+    let cwd = crate::infra::platform::canonicalize(projects.path().join("A")).unwrap();
+    let second = crate::infra::platform::canonicalize(projects.path().join("B")).unwrap();
+    let target = second.join("src/value.txt").to_string_lossy().into_owned();
+    let process_cwd = std::env::current_dir().unwrap();
+    let mut cfg = serve_test_config(data.path(), "http://127.0.0.1:1");
+    cfg.primitive.auto_confirm = false;
+    cfg.workspace.workspace_roots = vec![
+        cwd.to_string_lossy().into_owned(),
+        second.to_string_lossy().into_owned(),
+    ];
+    let runtime = runtime::ServeRuntime::new(
+        cfg.clone(),
+        write_test_config(&cfg),
+        build_shared_model_prefs(&cfg).unwrap(),
+        true,
+    )
+    .unwrap();
+    // Recorded calls test transport and real tool interpretation, not autonomous model choice.
+    let (provider, requests) = RecordingMockLlm::new(vec![
+        call(
+            "read-second-project",
+            "read",
+            serde_json::json!({"paths":[{"path":target}]}),
+        ),
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "done".into(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ],
+    ]);
+    let (writer, output) = spawn_buffered_writer(&cfg.serve);
+    let connection = ServeState::connect_with_source(
+        runtime.clone(),
+        writer,
+        None,
+        crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
+        None,
+    );
+    connection.initialized.store(true, Ordering::SeqCst);
+    let mut slot = create_session_slot(
+        connection.clone(),
+        NewSessionParams {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let ctx = Arc::get_mut(&mut Arc::get_mut(&mut slot).unwrap().ctx).unwrap();
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        Arc::new(provider),
+        "gpt-5.4",
+        ctx.global_services.model_catalog.snapshot(),
+    ));
+    *slot.controller.lock() = Some(connection.connection_id);
+    runtime.registry.insert(slot.clone()).unwrap();
+    register_slot_hooks(&connection, &slot);
+    connection.set_active_session(&slot.session_id).unwrap();
+    handle_command(
+        connection.clone(),
+        ServeCommand::Prompt {
+            id: Some("absolute-reference".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "Read the referenced file".into(),
+            params: serde_json::from_value(serde_json::json!({"segments":[{
+                "type":"reference", "kind":"file", "path":target, "label":"value.txt"
+            }]}))
+            .unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while !read_ndjson_lines(&output)
+            .iter()
+            .any(|frame| frame["type"] == "agent_idle")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let requests = requests.0.lock();
+        assert_eq!(requests.len(), 2);
+        let reference = requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == ChatMessageRole::User)
+            .filter_map(|message| match &message.content {
+                Some(ChatMessageContent::Parts(parts)) => Some(parts),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|part| match part {
+                ChatMessageContentPart::InputReference { reference } => Some(reference),
+                _ => None,
+            })
+            .expect("the actual model request must contain the file reference");
+        assert_eq!(reference.path, target);
+        assert!(reference.to_prompt_text().contains(&target));
+        let tools = requests[1]
+            .messages
+            .iter()
+            .filter(|message| message.role == ChatMessageRole::Tool)
+            .filter_map(|message| message.first_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            tools.contains("ONLY_B"),
+            "expected actual B content: {tools}"
+        );
+        assert!(!tools.contains("ONLY_A"));
+        let system = requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == ChatMessageRole::System)
+            .filter_map(|message| message.first_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(system.contains(&format!("(agent_workspace_dir): {}", cwd.display())));
+    }
+    assert_eq!(slot.cwd.as_deref(), cwd.to_str());
+    assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    cleanup_session_slot(&connection, &slot, SlotCleanup::Close)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

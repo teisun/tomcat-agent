@@ -8,17 +8,10 @@ const SELECTION_SNAPSHOT_CHAR_LIMIT = 12_000;
 const SELECTION_TRUNCATION_SUFFIX = "\n...[truncated by Tomcat]";
 
 function withDirectorySuffix(value: string, isDirectory: boolean): string {
-  if (!isDirectory || value.endsWith("/") || value.endsWith(path.sep)) {
+  if (!isDirectory || value.endsWith("/")) {
     return value;
   }
-  return `${value}/`;
-}
-
-function relativeLabel(uri: vscode.Uri, isDirectory: boolean): string {
-  const relative = vscode.workspace.asRelativePath(uri, false);
-  const fallback = uri.fsPath || uri.path;
-  const base = relative && relative !== uri.fsPath ? relative : fallback;
-  return withDirectorySuffix(base, isDirectory);
+  return `${value.endsWith(path.sep) ? value.slice(0, -1) : value}/`;
 }
 
 function basenameLabel(displayPath: string): string {
@@ -63,8 +56,9 @@ export function buildSelectionReferenceFromParts(
   if (!rawText) {
     return null;
   }
-  const displayPath = relativeLabel(uri, false);
-  const base = basenameLabel(displayPath);
+  // References may outlive the active editor or move to a session with another cwd.
+  const filePath = uri.fsPath || uri.path;
+  const base = basenameLabel(filePath);
   const text = truncateSelectionSnapshot(rawText);
   const hasLines = typeof lineStart === "number" && typeof lineEnd === "number";
   const label = hasLines
@@ -77,7 +71,7 @@ export function buildSelectionReferenceFromParts(
     label,
     lineEnd: hasLines ? lineEnd : null,
     lineStart: hasLines ? lineStart : null,
-    path: displayPath,
+    path: filePath,
     text,
     type: "reference",
   };
@@ -109,11 +103,11 @@ export function buildFileReference(
   } = {},
 ): WebviewReference {
   const isDirectory = options.isDirectory === true;
-  const displayPath = relativeLabel(uri, isDirectory);
+  const filePath = withDirectorySuffix(uri.fsPath || uri.path, isDirectory);
   return {
     kind: "file",
-    label: withDirectorySuffix(basenameLabel(displayPath), isDirectory),
-    path: displayPath,
+    label: withDirectorySuffix(basenameLabel(filePath), isDirectory),
+    path: filePath,
     type: "reference",
   };
 }
