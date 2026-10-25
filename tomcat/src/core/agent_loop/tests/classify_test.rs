@@ -11,6 +11,37 @@ use crate::infra::error::{
 };
 
 #[test]
+fn classify_observed_gateway_codes_preserves_fatal_precedence() {
+    for code in [
+        "server_error",
+        "upstream_http2_stream_error",
+        "upstream_stream_read_error",
+    ] {
+        assert!(matches!(
+            classify_error(llm_stream_terminal_error(
+                "fixture",
+                "temporary failure",
+                Some(code.into())
+            )),
+            LoopError::Retryable(_)
+        ));
+        for summary in ["content_filter", "insufficient credits", "invalid api key"] {
+            assert!(
+                matches!(
+                    classify_error(llm_stream_terminal_error(
+                        "fixture",
+                        summary,
+                        Some(code.into())
+                    )),
+                    LoopError::Fatal(_)
+                ),
+                "{code}: {summary}"
+            );
+        }
+    }
+}
+
+#[test]
 fn classify_error_retryable_429() {
     let e = llm_http_status_error("openai", 429, "rate limit");
     let r = classify_error(e);

@@ -143,10 +143,11 @@ pub struct LlmConfig {
     /// 非流式请求失败时的重试次数（仅对可重试错误如 429/5xx）。
     #[serde(default = "default_llm_retry_count")]
     pub retry_count: u32,
-    /// Agent loop 顶层重试次数（provider 内重试耗尽后仍可继续尝试整轮）。
+    /// 每次逻辑模型请求的尝试上限（含首次）；provider 内部 HTTP 重试不变。
+    /// 压缩、空答、附件降级仍消耗当前请求额度；下一份可接受回复才开启新额度。
     #[serde(default = "default_agent_max_attempts")]
     pub agent_max_attempts: u32,
-    /// Agent loop 顶层指数退避基础延迟（毫秒）。
+    /// Agent 单请求重试的指数退避基础延迟（毫秒）。
     #[serde(default = "default_agent_retry_base_delay_ms")]
     pub agent_retry_base_delay_ms: u64,
     /// 流式 SSE chunk 空闲超时（秒）；0 表示关闭。

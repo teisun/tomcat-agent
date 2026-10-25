@@ -381,6 +381,7 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  errorRecovery?: { errorId: string; dueAt: number };
   access?: import("../../serveClient/sessionRouter").SessionAccess;
   origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
@@ -631,6 +632,7 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "cancelErrorRecovery"; data: { sessionId: string; errorId: string; dueAt: number } }
   | { messageId: string; type: "pong" }
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
@@ -1435,6 +1437,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (value.data.sessionId === undefined || value.data.sessionId === null || isString(value.data.sessionId));
     case "compact":
       return isRecord(value.data) && isString(value.data.sessionId);
+    case "cancelErrorRecovery":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.errorId)
+        && typeof value.data.dueAt === "number" && Number.isFinite(value.data.dueAt);
     case "recoverErrorTurn":
       return (
         isRecord(value.data) &&

@@ -22,6 +22,8 @@ import { mergeSessionViewSnapshot, reconcileStateSnapshot } from "../gui/src/sta
 import { applySessionPatchFrame } from "../gui/src/statePatch";
 import { getLocale, setLocale } from "../src/shared/i18n";
 import { en } from "../src/shared/i18n/en";
+import { recoveryClock } from "../src/ui/webview/tests/errorRecoveryClock";
+import type { ErrorRecoveryClock } from "../src/ui/webview/errorRecovery";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -60,6 +62,7 @@ type MutableSessionState = {
 };
 
 type BuildProviderOptions = {
+  errorRecoveryClock?: ErrorRecoveryClock;
   sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
   messageQueueSupported?: boolean;
   getMessagesImpl?: (
@@ -465,6 +468,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     openSettings,
     sessionRouter: sessionRouter as never,
     sessionPinStorage: options.sessionPinStorage,
+    errorRecoveryClock: options.errorRecoveryClock,
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
@@ -530,6 +534,30 @@ function replayFrames(frames: HostToWebviewFrame[]): WebviewStateSnapshot {
 const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
+  it("projects host countdown identically in full and session frames and calls only the existing retry route", async () => {
+    const time = recoveryClock();
+    const historyMessages = [
+      { type: "message", id: "u1", message: { role: "user", content: "original", superseded: true, turn_failed: true } },
+      { type: "error", id: "e1", summary: "HTTP 403", detail: "Forbidden" },
+    ];
+    const retry = vi.fn();
+    const { provider, internals, postedFrames, messenger } = await prepareBroadcastProvider({ historyMessages, errorRecoveryClock: time.clock, retryImpl: retry });
+    try {
+      await internals.handleServeEvent({ type: "agent_end", sessionId: "session-1", messages: [], error: "HTTP 403" });
+      await internals.handleServeEvent({ type: "agent_idle", sessionId: "session-1", outcome: "failed" });
+      await internals.postState(); await internals.postSessionView("session-1");
+      const expected = { errorId: "e1", dueAt: time.clock.now() + 300_000 };
+      const full = postedFrames.filter(f => f.channel === "state").at(-1)!;
+      const single = postedFrames.filter(f => f.channel === "sessionView").at(-1)!;
+      expect(full.channel === "state" && full.content.sessionViews["session-1"].errorRecovery).toEqual(expected);
+      expect(single.channel === "sessionView" && single.content.view.errorRecovery).toEqual(expected);
+      time.advance(300_000); await new Promise(resolve => setTimeout(resolve, 30));
+      expect(retry).toHaveBeenCalledExactlyOnceWith("session-1", "u1");
+      expect(messenger.requestCalls.filter(c => c.type === "prompt")).toHaveLength(0);
+      expect(replayFrames(postedFrames).sessionViews["session-1"].errorRecovery).toBeUndefined();
+    } finally { provider.dispose(); }
+  });
+
   it.each([
     { messageQueueSupported: false, busy: false },
     { messageQueueSupported: true, busy: false },

@@ -2342,6 +2342,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [activeSession?.sessionId, activeSession?.busy, canPrompt, vscodeApi],
   );
+  const handleCancelErrorRecovery = useCallback((errorId: string, dueAt: number) => {
+    if (!activeSession?.sessionId) return;
+    postIntent(vscodeApi, "cancelErrorRecovery", { sessionId: activeSession.sessionId, errorId, dueAt });
+  }, [activeSession?.sessionId, vscodeApi]);
   const handleRecoverErrorTurn = useCallback(
     (errorId: string, action: "resume" | "retry") => {
       if (!activeSession?.sessionId || !canPrompt || activeSession.busy) {
@@ -2822,6 +2826,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onOpenPlanFile={handleOpenPlanFile}
                 resolvePaths={resolvePaths}
                 onRecoverErrorTurn={readOnly ? undefined : handleRecoverErrorTurn}
+                onCancelErrorRecovery={readOnly ? undefined : handleCancelErrorRecovery}
+                errorRecovery={activeSession.errorRecovery}
                 onRetryUserMessage={readOnly ? undefined : handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}

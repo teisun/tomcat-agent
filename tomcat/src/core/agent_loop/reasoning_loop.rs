@@ -1,41 +1,31 @@
-//! # Agent Loop 第三层：Reasoning Loop
+//! # Agent Loop 第二层：Reasoning Loop
 //!
-//! 单 turn 内的 LLM 流式 + 工具执行 + Steering/Abort 检查的调度骨架。
-//! 已把"具体动作"全部委托给同级子模块，本文件只关心**何时调用谁**：
+//! 调度模型与工具回合，跨单请求重试保留已接受正文和工具轮次。
 //!
-//! 1. **取消预检**：`cancel_token.is_cancelled()` → `make_aborted`（早返回）
-//! 2. **请求前 guard**：每次请求前 `maybe_reduce_before_next_llm`，必要时减负或折叠
-//! 3. **TurnStart 发射**（带 unix_ts_ms 时间戳）
-//! 4. **首轮 metrics**：`turn_index == 1` 时 `emit_context_metrics()` + 诊断 info!
-//! 5. **Stream 消费**：`stream_handler::run_chat_stream`（同步发 Message{Start,Update,End}）
-//! 6. **Stream 中断善后**：把 partial `content_buf` 落到 messages，再 `make_aborted`
-//! 7. **text-only 收束**：`tool_calls.is_empty()` → `turn_finalize::finalize_turn_after_text` →
-//!    立即 `Ok(final_text)`（不再发 TurnEnd，因为 finalize 内已发）
-//! 8. **tool_calls 调度**：`tool_dispatcher::run_tool_calls`（统一 push assistant +
-//!    block 检查 + 事件配对 + cancel 抢占）
-//! 9. **TurnEnd 发射**（携带 dispatch.tool_results）
-//! 10. **Steering**：`dispatch.steered == true` 立即 `continue`，跳过 follow-up / max_tool_rounds
-//! 11. **FollowUp**：非 steered 且后续仍要继续请求时，先 drain `follow_up_queue`
-//! 12. **轮次上限**：`turn_index >= max_tool_rounds` 时 `emit_context_metrics` + `Ok`
+//! ```text
+//! request_retry::run_request → 可接受回复 → 提交正文 / 调度工具 → 下一请求
+//! ```
 //!
-//! ## 为什么是自由函数而非 `impl AgentLoop`
+//! 请求前 guard、TurnStart、首轮 metrics、流消费与响应判定由 request_retry 负责。
+//! 本层处理流中断后的 partial 落盘；text-only 收束委托 turn_finalize，
+//! 按结果结束或继续；工具执行委托 tool_dispatcher，再发布携带工具结果的 TurnEnd。
+//! Steering 直接进入下一轮；其他情况先检查工具轮次上限，再消费 FollowUp。
+//! 工具执行和正文提交始终在请求重试之外，避免重放已完成工具。
 //!
-//! Phase 3 抽 `run.rs` 瘦身时，`run.rs` 已含 Conversation/Attempt 两层共 ~200 行。
-//! 把第三层留在 `run.rs` 会撞 [RUST_FILE_LINES_SPEC §A](../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
-//! 的 300 行红线。抽为本文件的 `pub(super)` 自由函数，签名 `&mut AgentLoop`，
-//! 与 `stream_handler` / `tool_dispatcher` / `turn_finalize` 协议一致。
+//! ## 函数边界
+//!
+//! Conversation 在 run.rs，单请求的尝试与有限重试在 request_retry.rs。
+//! 本文件还提供多个调用方共用的请求组装、缓存 key 和消息结构校验助手。
+//! 使用 pub(super) 自由函数，与同级 stream/tool/finalize 模块保持一致。
 
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::core::llm::{
-    ChatMessage, ChatMessageRole, ChatRequest, MessageKind, PromptCacheKeyFamily,
-};
-use crate::infra::error::llm_empty_response_error;
+use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind, PromptCacheKeyFamily};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
-use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
-use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
+use super::types::{AgentLoop, LoopError, ToolCallInfo};
+use super::{tool_dispatcher, turn_finalize, turn_summary};
 
 /// Creates the provider request without changing the persisted conversation.
 ///
@@ -82,21 +72,6 @@ pub(crate) fn cache_key_for(agent: &AgentLoop) -> Option<String> {
         kind => PromptCacheKeyFamily::Subagent(kind.as_str()),
     };
     family.key_for(&agent.config.session_id)
-}
-
-fn is_normal_stop_finish_reason(reason: Option<&str>) -> bool {
-    matches!(reason.map(str::trim), Some("stop" | "end_turn"))
-}
-
-fn is_output_truncation_finish_reason(reason: Option<&str>) -> bool {
-    matches!(
-        reason.map(str::trim),
-        Some("max_tokens")
-            | Some("max_output_tokens")
-            | Some("max_completion_tokens")
-            | Some("length")
-            | Some("output_length")
-    )
 }
 
 /// Removes leading tool results whose declaration is absent from the request history.
@@ -159,125 +134,33 @@ pub(super) fn validate_request_shape(messages: &mut Vec<ChatMessage>) -> Result<
     Ok(())
 }
 
-fn prompt_prefix_fingerprint_enabled() -> bool {
-    std::env::var("TOMCAT_PROMPT_PREFIX_FINGERPRINT")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-}
-
+/// Model/tool rounds keep their accepted text and tool budget across request retries.
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
-    attempt: u32,
-    max_attempts: u32,
 ) -> Result<String, LoopError> {
     agent.reasoning_turn_budget_exhausted = false;
     let mut final_text = String::new();
-    let mut turn_index: usize = 0;
-
+    let mut turn_index = 0usize;
     loop {
         if agent.cancel_token.is_cancelled() {
             return Err(agent.make_aborted(messages, final_text));
         }
-        // The collapse helper cancels only summary generation. Once publication
-        // starts, join it to avoid cancellation between disk and memory updates.
-        let reduced = current_tail_guard::maybe_reduce_before_next_llm(agent, messages).await;
-        if agent.cancel_token.is_cancelled() {
-            return Err(agent.make_aborted(messages, final_text));
-        }
-        reduced.map_err(LoopError::Fatal)?;
-        validate_request_shape(messages)?;
-
-        if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.live.finish_reason = None;
-            ctx_state.live.error_message = None;
-            ctx_state.live.error_code = None;
-        }
-
         turn_index += 1;
-        agent.emit_event(AgentEvent::TurnStart {
-            turn_index,
-            timestamp: unix_ts_ms(),
-        });
-
-        let request_messages = assemble_request_messages(messages, agent);
-        let ephemeral_tail = request_messages
-            .iter()
-            .rev()
-            .find(|message| matches!(message.kind, MessageKind::EphemeralTail))
-            .and_then(ChatMessage::text_content);
-        if let Some(ctx_state) = agent.context_state.as_mut() {
-            ctx_state.session_obs.observe_ephemeral_tail(ephemeral_tail);
-        }
-        let mut req = ChatRequest {
-            messages: request_messages,
-            model: agent.wire_model().to_string(),
-            temperature: None,
-            max_tokens: None,
-            resolved_output_limit: None,
-            diagnostic_request_id: prompt_prefix_fingerprint_enabled()
-                .then(|| format!("{}:{}", agent.config.session_id, turn_index)),
-            stream: Some(true),
-            model_override: None,
-            thinking_level: agent.config.thinking_level,
-            speed: agent.config.speed,
-            cache_key: cache_key_for(agent),
-            tools: Some(agent.config.tool_definitions.clone()),
-        };
-        let wire_limit_source = agent.binding.apply_resolved_output_limit(&mut req);
-        let request_max_tokens = req.max_tokens;
-        let wire_output_limit = req.resolved_output_limit;
-        let thinking_budget = agent
-            .binding
-            .thinking_budget_for_request(req.thinking_level, wire_output_limit);
-        let diagnostic_request_id = req.diagnostic_request_id.clone();
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "llm_request_resolved",
-            model = %agent.wire_model(),
-            api = %agent.binding.api,
-            model_limit = ?agent.binding.limits.model_max_output_tokens,
-            request_limit = ?request_max_tokens,
-            wire_limit = ?wire_output_limit,
-            context_window = agent.binding.limits.context_window,
-            input_budget = agent.binding.limits.input_budget_tokens,
-            context_source = agent.binding.limits.context_source.as_str(),
-            output_source = agent.binding.limits.output_source.as_str(),
-            wire_limit_source = wire_limit_source.as_str(),
-        );
-
-        // 首次请求前只发一条 fallback 估算。每次 provider Usage 到达时，
-        // stream_handler 会立即另发一条实测 metrics，不必等整个工具链结束。
-        if turn_index == 1 {
-            agent.emit_context_metrics(false);
-            if let Some(ref ctx_state) = agent.context_state {
-                info!(
-                    target: "tomcat_chat_diag",
-                    phase = "emit_context_metrics_turn1",
-                    turn_index,
-                    input_tokens_used = ctx_state.live.input_tokens_used,
-                    context_utilization_ratio = ctx_state.live.context_utilization_ratio,
-                    compaction_count = ctx_state.session_obs.compaction_count
-                );
+        let outcome = match super::request_retry::run_request(agent, messages, turn_index).await {
+            Ok(outcome) => outcome,
+            Err(LoopError::Aborted {
+                partial_text,
+                partial_messages,
+            }) => {
+                final_text.push_str(&partial_text);
+                return Err(LoopError::Aborted {
+                    partial_text: final_text,
+                    partial_messages,
+                });
             }
-        }
-
-        // Capture the local prediction immediately before this request. The
-        // provider's Usage event below is the corresponding ground truth.
-        let estimated_prompt_tokens = agent
-            .context_state
-            .as_ref()
-            .map(|state| state.estimated_token_count());
-
-        // Stream 消费（含 LLM connect + MessageStart/Update/End 发射 + cancel 抢占）
-        // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
-        // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
-        let outcome = stream_handler::run_chat_stream(agent, req, attempt, max_attempts).await?;
+            Err(error) => return Err(error),
+        };
         let super::types::StreamOutcome {
             content_buf,
             tool_calls_buf,
@@ -290,70 +173,6 @@ pub(super) async fn run_reasoning_loop(
             usage,
             aborted,
         } = outcome;
-
-        if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.live.finish_reason = finish_reason.clone();
-            ctx_state.live.error_message = error_message.clone();
-            ctx_state.live.error_code = error_code.clone();
-        }
-        if let Some(usage) = usage.as_ref() {
-            info!(
-                target: "tomcat_chat_diag",
-                phase = "llm_usage",
-                model = %agent.wire_model(),
-                prompt_tokens = usage.prompt_tokens,
-                completion_tokens = usage.completion_tokens,
-                cache_read_tokens = ?usage.cache_read_tokens,
-                cache_write_tokens = ?usage.cache_write_tokens,
-            );
-            if let Some(request_id) = diagnostic_request_id.as_deref() {
-                // These names intentionally match Anthropic's response fields,
-                // even though TokenUsage stores the normalized values. The
-                // paired request-side fingerprint has the same request id.
-                info!(
-                    target: "tomcat_chat_diag",
-                    phase = "prompt_prefix_result",
-                    request_id,
-                    cache_read_input_tokens = ?usage.cache_read_tokens,
-                    cache_creation_input_tokens = ?usage.cache_write_tokens,
-                );
-            }
-            if let Some(estimated_prompt_tokens) = estimated_prompt_tokens {
-                let actual_prompt_tokens = usage.prompt_tokens as usize;
-                let absolute_error_tokens = estimated_prompt_tokens.abs_diff(actual_prompt_tokens);
-                let relative_error = if actual_prompt_tokens == 0 {
-                    0.0
-                } else {
-                    absolute_error_tokens as f64 / actual_prompt_tokens as f64
-                };
-                info!(
-                    target: "tomcat_chat_diag",
-                    phase = "context_estimate_check",
-                    request_id = ?diagnostic_request_id,
-                    estimated_prompt_tokens,
-                    actual_prompt_tokens,
-                    absolute_error_tokens,
-                    relative_error,
-                );
-            }
-        }
-        if is_output_truncation_finish_reason(finish_reason.as_deref()) {
-            info!(
-                target: "tomcat_chat_diag",
-                phase = "output_truncated",
-                model = %agent.wire_model(),
-                request_max_tokens = ?request_max_tokens,
-                wire_max_tokens = ?wire_output_limit,
-                thinking_budget = ?thinking_budget,
-                completion_tokens = ?usage.as_ref().map(|usage| usage.completion_tokens),
-                prompt_tokens = ?usage.as_ref().map(|usage| usage.prompt_tokens),
-                usage_ratio = agent.context_state.as_ref().map(|state| state.usage_ratio()),
-                has_reasoning_continuation = reasoning_continuation.is_some(),
-            );
-        }
-
-        // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
-        // 让 ctx_state 也把它计入消息预算；再返回 Aborted 携带 partial。
         if aborted {
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.live.finish_reason = None;
@@ -362,11 +181,7 @@ pub(super) async fn run_reasoning_loop(
             }
             if !content_buf.is_empty() {
                 if let Some(ref mut ctx_state) = agent.context_state {
-                    // A cancelled stream may never emit Usage. In that case
-                    // excluding the persisted partial response from the
-                    // post-usage delta hides it from the next timing-2
-                    // boundary check. Prefer this one-shot overestimate to
-                    // risking a missed overflow safeguard.
+                    // Cancelled streams may have no Usage; account for the committed partial once.
                     ctx_state.on_message_appended(content_buf.len());
                 }
                 let forced_id = agent.take_or_mint_pending_assistant_entry_id();
@@ -383,16 +198,9 @@ pub(super) async fn run_reasoning_loop(
             }
             return Err(agent.make_aborted(messages, final_text));
         }
-
         final_text.push_str(&content_buf);
-
-        let has_malformed_tool_call = tool_calls_buf
-            .iter()
-            .any(|tool_call| tool_call.name.trim().is_empty());
         let tool_calls: Vec<ToolCallInfo> = tool_calls_buf
             .into_iter()
-            // A malformed streaming delta may carry an empty/whitespace tool name.
-            // It cannot be executed or replayed as a valid OpenAI tool_call.
             .filter(|tc| !tc.name.trim().is_empty())
             .map(|tc| ToolCallInfo {
                 id: tc.id,
@@ -400,119 +208,6 @@ pub(super) async fn run_reasoning_loop(
                 arguments: tc.arguments,
             })
             .collect();
-
-        // “只思考、不回答”不是成功回合。不能只看 thinking_text：provider 可加密或
-        // 因 display 配置省略它。终态、reasoning continuation 和 provider 明确报告的
-        // reasoning token 都是事实信号；provider 适配层只翻译上游终态，不依据 usage
-        // 猜测或改写 finish reason。`completion_tokens` 仅表示输出配额消耗，合法结构化
-        // 收尾也会消耗它，不能作为失败判据。
-        let thinking_only_or_truncated = thinking_text.as_deref().is_some_and(|thinking| {
-            let content = content_buf.trim();
-            !thinking.trim().is_empty()
-                && (content.is_empty()
-                    || content == thinking
-                    || (thinking.starts_with(content)
-                        && content.len().saturating_mul(2) < thinking.len()))
-        });
-        let has_no_visible_output = content_buf.trim().is_empty();
-        let output_truncated = is_output_truncation_finish_reason(finish_reason.as_deref());
-        let has_hidden_output = reasoning_continuation.is_some()
-            || usage
-                .as_ref()
-                .and_then(|usage| usage.reasoning_tokens)
-                .is_some_and(|tokens| tokens > 0);
-        let response_id = reasoning_continuation
-            .as_ref()
-            .and_then(|continuation| continuation.provider_refs.as_ref())
-            .and_then(|refs| refs.openai_response_id.as_deref());
-        let clean_stop = tool_calls.is_empty()
-            && !has_malformed_tool_call
-            && error_code.is_none()
-            && error_message.is_none()
-            && is_normal_stop_finish_reason(finish_reason.as_deref());
-        let silent_reply = clean_stop && has_no_visible_output;
-        let silent_reply_accepted = silent_reply
-            && agent.silent_reply_allowed
-            && (agent.last_reply_silent || attempt >= max_attempts);
-        agent.last_reply_silent = silent_reply;
-        let empty_turn_failure = !silent_reply_accepted
-            && tool_calls.is_empty()
-            && (has_malformed_tool_call
-                || thinking_only_or_truncated
-                || (has_no_visible_output && (output_truncated || has_hidden_output)));
-        if empty_turn_failure {
-            let thinking_chars = thinking_text.as_deref().map(str::len).unwrap_or_default();
-            let failure_kind = if output_truncated {
-                "output_truncated"
-            } else if has_hidden_output {
-                "hidden_output"
-            } else if has_malformed_tool_call {
-                "malformed_tool_call"
-            } else {
-                "thinking_only"
-            };
-            let _ = agent.persist_custom_entry_if_needed(serde_json::json!({
-                "event": "empty_turn",
-                "turn_index": turn_index,
-                "finish_reason": finish_reason.as_deref(),
-                "thinking_chars": thinking_chars,
-                "thinking_text": thinking_text.as_deref(),
-                "has_reasoning_continuation": reasoning_continuation.is_some(),
-                "completion_tokens": usage.as_ref().map(|usage| usage.completion_tokens),
-                "reasoning_tokens": usage.as_ref().and_then(|usage| usage.reasoning_tokens),
-                "text_tokens": usage.as_ref().and_then(|usage| usage.text_tokens),
-                "failure_kind": failure_kind,
-                "attempt": attempt,
-                "response_id": response_id,
-            }));
-            agent.clear_pending_assistant_entry_id();
-            let message = match failure_kind {
-                "output_truncated" => crate::infra::i18n::tr("agentLoop.outputTruncated", &[]),
-                "hidden_output" => {
-                    if attempt >= max_attempts {
-                        crate::infra::i18n::tr(
-                            "agentLoop.hiddenExhausted",
-                            &[("count", &attempt.saturating_sub(1).to_string())],
-                        )
-                    } else {
-                        crate::infra::i18n::tr("agentLoop.hiddenRetry", &[])
-                    }
-                }
-                "malformed_tool_call" => {
-                    if attempt >= max_attempts {
-                        crate::infra::i18n::tr(
-                            "agentLoop.malformedExhausted",
-                            &[("count", &attempt.saturating_sub(1).to_string())],
-                        )
-                    } else {
-                        crate::infra::i18n::tr("agentLoop.malformedRetry", &[])
-                    }
-                }
-                _ => {
-                    if attempt >= max_attempts {
-                        crate::infra::i18n::tr(
-                            "agentLoop.thinkingExhausted",
-                            &[("count", &attempt.saturating_sub(1).to_string())],
-                        )
-                    } else {
-                        crate::infra::i18n::tr("agentLoop.thinkingRetry", &[])
-                    }
-                }
-            };
-            if failure_kind == "output_truncated" {
-                return Err(LoopError::Fatal(crate::infra::error::AppError::Llm(
-                    message,
-                )));
-            }
-            return Err(LoopError::Retryable(llm_empty_response_error(
-                agent.llm.provider_name(),
-                message,
-            )));
-        }
-
-        if clean_stop && !has_no_visible_output {
-            agent.silent_reply_allowed = true;
-        }
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。

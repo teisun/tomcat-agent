@@ -1828,7 +1828,8 @@ function handlePrompt(frame) {
     return;
   }
 
-  if (text.includes("retry 403 showcase") || text.includes("retry rejected showcase")) {
+  // The countdown scenario uses the same durable Retry route, with the real host's five-minute timer.
+  if (text.includes("retry 403 showcase") || text.includes("retry rejected showcase") || text.includes("automatic error recovery countdown")) {
     const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
     const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
     session.retry403ShowcaseAttempts = Number(session.retry403ShowcaseAttempts || 0) + 1;

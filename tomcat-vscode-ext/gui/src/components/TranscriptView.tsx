@@ -136,6 +136,8 @@ export function TranscriptView({
   onOpenImagePreview,
   onOpenPlanFile,
   onRecoverErrorTurn,
+  onCancelErrorRecovery,
+  errorRecovery,
   onRestoreCheckpoint,
   onRetryUserMessage,
   onSelectContextWindow,
@@ -179,6 +181,8 @@ export function TranscriptView({
   onOpenImagePreview?(imageId: string): void;
   onOpenPlanFile(path: string): void;
   onRecoverErrorTurn?(errorId: string, action: "resume" | "retry"): void;
+  onCancelErrorRecovery?(errorId: string, dueAt: number): void;
+  errorRecovery?: { errorId: string; dueAt: number };
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
   onSelectContextWindow(modelId: string, contextWindow: number): void;
@@ -287,6 +291,8 @@ export function TranscriptView({
               onOpenImagePreview={onOpenImagePreview}
               onRecover={onRecoverErrorTurn}
               onRetry={onRetryUserMessage}
+              onCancelRecovery={onCancelErrorRecovery}
+              recoveryDueAt={errorRecovery?.errorId === item.id ? errorRecovery.dueAt : undefined}
               recoveryDisabled={busy}
               resolvePaths={resolvePaths}
               onZoomImage={onZoomImage}

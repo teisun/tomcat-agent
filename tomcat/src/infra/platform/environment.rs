@@ -143,7 +143,7 @@ impl EnvironmentSnapshot {
         })?;
         let rest = path
             .strip_prefix("~/")
-            .or_else(|| {
+            .or({
                 #[cfg(windows)]
                 {
                     path.strip_prefix("~\\")

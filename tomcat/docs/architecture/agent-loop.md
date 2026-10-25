@@ -35,233 +35,125 @@ text-only/合法静默 finalize 成功
 
 **仍存在的风险（本期延期）**：`run_inner` 最后一次查队列之后，经过 chat 监听注销、上下文停车与收尾持久化，直到 Serve `mark_idle` 之前，仍可能接受一条 `queued:true` 的真实输入，却暂时没有消费者，需等下一次输入。admission 与 idle 未在同一临界区，此次不宣称已消除。后续单独设计防丢唤醒，并先用确定性 barrier 固定时序；Signal 空闲不唤醒、中断、维护 busy 的优先级应保留。
 
-原生写入的 commit-aware 停止由 primitive/dispatcher 边界负责，Attempt Loop 不取消丢弃整个 reasoning future；非写盘 compaction 请求在自身边界响应取消。已开始写盘的工具要等真正提交结果及备份登记完成，才能报告停止并恢复文件。
+原生写入的 commit-aware 停止由 primitive/dispatcher 边界负责，不能取消丢弃整个 reasoning future；非写盘 compaction 请求在自身边界响应取消。已开始写盘的工具要等真正提交结果及备份登记完成，才能报告停止并恢复文件。
 
 ## 13.1 概述与设计目标
 
-Agent Loop 是 Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。本设计与 pi-mono、openclaw 对齐，采用三层嵌套循环，并明确与插件事件系统的发布时机对应关系。
+Agent Loop 编排模型请求、工具执行、Steering / FollowUp / Abort 和消息持久化。三层职责为 **Conversation → Reasoning → Request Retry**：重试只包住一次逻辑模型请求，不重新进入整个工具循环。
+
+```text
+接收输入
+  └─ Conversation：输入、FollowUp、最终收尾
+       └─ Reasoning：保留已接受正文、工具结果、工具轮次
+            ├─ Request Retry：得到下一份可接受回复（有限尝试）
+            └─ 提交回复 / 执行工具 → 下一请求获得新额度
+```
+
+工具、权限、持久化和用户停止仍由原有边界负责；请求恢复不代表任务结束，也不代表消息已经保存。
 
 ### 设计目标
 
-1. **生命周期清晰**：对话管理 → 容错重试 → 思考-行动，三层职责分离、边界明确。
+1. **生命周期清晰**：对话管理 → 思考-行动 → 单请求容错重试，三层职责分离、边界明确。
 2. **pi-mono 生态兼容**：事件名、Steering/FollowUp 语义、消息类型边界与 pi-mono 一致。
 3. **可观测**：所有关键节点向事件总线发布 AgentEvent/ExtensionEvent，便于 UI 与插件订阅。
-4. **可恢复**：Context Overflow、Rate Limit、网络超时等可重试错误由第二层统一处理。
+4. **可恢复**：Context Overflow、Rate Limit、网络超时等可重试错误由 Request Retry 统一处理。
 5. **可扩展**：插件通过 Hook 点参与 Prompt 构建、工具调用前后等环节。
 
----
+## 13.2 术语与次数
 
-## 13.2 术语表
-
-| 术语 | 说明 |
-|------|------|
+| 术语 | 含义 |
+| --- | --- |
 | **Agent Loop** | 智能体循环：接收用户输入 → 调用 LLM → 执行工具 → 结果回注 → 再调用 LLM → … → 最终回答。 |
-| **Turn** | 轮次：一次 LLM 调用 + 可能的若干工具执行。无工具请求时 Turn 结束即 Loop 结束。 |
 | **Tool Call** | 工具调用：LLM 通过结构化请求委托宿主执行 read_file、write_file、edit_file、execute_bash、list_dir 等。 |
+| **Context Overflow** | 上下文溢出：对话历史超过 LLM 的 context window 限制。 |
+| **Tool Loop Detection** | 工具循环检测：防止同一工具+同参数或 A↔B 交替无进展地重复调用。 |
+| **Turn / 逻辑模型请求** | 为得到下一份可接受回复而进行的一组尝试；成功后可能执行工具，再进入下一 Turn。响应头、部分正文、工具预览都不算成功。 |
+| **Attempt** | 同一逻辑请求的一次尝试：重新组装请求、完整消费流及尾随 usage、检查空答等终态；不是整个思考行动循环。 |
 | **Steering** | 转向/中断注入：用户于 Agent 工作中插话；当前工具执行完后跳过剩余工具，注入新消息并重新调用 LLM。 |
 | **FollowUp** | 追加消息：Agent 刚结束时用户追加消息，在同一会话上下文中继续处理，不重新初始化。 |
-| **Abort** | 中止：用户完全取消执行（如 Ctrl+C）；当前工具完成后终止循环，发布 agent_end(interrupted)。 |
-| **Context Overflow** | 上下文溢出：对话历史超过 LLM 的 context window 限制。 |
-| **Compaction** | 上下文压缩：保留 System Prompt + 最近 N 条，对中间历史做摘要或截断，腾出空间。 |
-| **Attempt** | 尝试：一次完整的「思考-行动循环」执行；失败时由第二层重试（Compaction/Backoff）。 |
-| **Tool Loop Detection** | 工具循环检测：防止同一工具+同参数或 A↔B 交替无进展地重复调用。 |
+| **Compaction / 附件降级** | 上下文压缩保留 System Prompt + 最近 N 条，对中间历史做摘要或截断，腾出空间；压缩或附件降级后仍在同一请求内再试，消耗原额度，不清零。 |
+| **Abort** | 用户停止；不再发请求，保存已收到的部分内容及已完成工具结果，按原规则收尾。 |
 
----
+- 交互模式：`max_attempts`（配置默认 **4**）；无人值守临时故障和空答：**10**。均**含首次**，所以10次意味着首次加最多9次重试。
+- 无人值守的其他可恢复错误：当前尝试序号达到默认交互上限4时停止，不因换错误类型再送4次。
+- 账户、鉴权、内容拒绝等明确错误仍立即结束本次执行。普通未知流错误、Parse 的范围不放宽。
+- `max_tool_rounds` 属于 Reasoning；请求重试既不刷新它，也不额外消耗一个工具轮次。`final_text` 同样跨请求重试保留。
+- provider 的 HTTP 重试不变：例如 Agent 2次 × 每次2次HTTP = 4次HTTP，不等于2次HTTP。标题、压缩、hostcall 不递归套入新循环。
 
-## 13.3 整体结构：三层嵌套循环
+### 历史来源
 
-从外到内职责递进：
+这次是**修正旧设计，不是恢复某个曾经正确的实现**。Git `eb2cd0a9`（2026-03-11）把 Attempt 定义为整段思考行动；`9f25ac4e`（2026-03-12）按该设计实现；`09333a6d`（2026-08-10）把无人值守额度增至10，但没有改计数范围。因此一次成功请求之后的工具执行不会刷新后续请求的额度。现在通过交换循环位置解决，而非给整个任务计数器添加清零回调。
 
-```
-用户发送消息（或 FollowUp 追加）
-│
-▼
-┌─────────────────────────────────────────────────────────┐
-│  第一层：对话管理循环（Conversation Loop）                │
-│  职责：用户输入、FollowUp 追加、Transcript 持久化         │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  第二层：容错重试循环（Attempt Loop）                 │ │
-│  │  职责：Context Overflow→Compaction；Rate Limit→退避  │ │
-│  │  ┌─────────────────────────────────────────────────┐ │ │
-│  │  │  第三层：思考-行动循环（Reasoning Loop）          │ │ │
-│  │  │  职责：LLM 流式调用 + 工具执行 + Steering 检查   │ │ │
-│  │  │  退出：无工具请求 / Steering 中断 / Abort       │ │ │
-│  │  └─────────────────────────────────────────────────┘ │ │
-│  └─────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-│
-▼
-等待下一次用户输入
-```
-
-### 13.3.1 流程图（Flowchart）
+## 13.3 控制流与安全边界
 
 ```mermaid
 flowchart TD
-    UserInput["用户输入 / FollowUp 追加"] --> EmitAgentStart
-
-    subgraph Layer1["第一层：对话管理循环"]
-        EmitAgentStart["发布 agent_start 事件"] --> BuildPrompt
-        BuildPrompt["构建 System Prompt\n+ 组装历史上下文"] --> CheckSteering
-        CheckSteering["检查 Steering 队列\n（有则注入消息）"] --> Layer2Entry
-    end
-
-    subgraph Layer2["第二层：容错重试循环"]
-        Layer2Entry["开始 Attempt"] --> EmitRetryStart
-        EmitRetryStart["发布 auto_retry_start\n（非首次时）"] --> Layer3Entry
-        Layer3Entry --> AttemptResult
-        AttemptResult{Attempt 结果} -->|ContextOverflow| EmitCompact
-        AttemptResult -->|"RateLimit / Timeout"| Backoff
-        AttemptResult -->|Success| AttemptDone
-        AttemptResult -->|"Fatal Error"| FatalError
-        EmitCompact["发布 context_overflow_trim_start\n物理截断/压缩\n发布 context_overflow_trim_end"] --> Layer2Entry
-        Backoff["指数退避等待\n发布 auto_retry_end"] --> Layer2Entry
-    end
-
-    subgraph Layer3["第三层：思考-行动循环"]
-        Layer3Entry["发布 turn_start 事件"] --> LLMCall
-        LLMCall["LLM chat_stream\n流式调用"] --> StreamEvents
-        StreamEvents["消费流式事件\n发布 message_start/update/end"] --> HasTools
-        HasTools{LLM 请求了工具?} -->|No| TurnDone
-        HasTools -->|Yes| ToolLoopCheck
-        ToolLoopCheck["ToolLoopGuard 检查"] --> LoopDetected
-        LoopDetected{检测到循环?} -->|"Warning/Critical"| InjectWarning["注入警告消息给 LLM"]
-        LoopDetected -->|OK| ExecTools
-        InjectWarning --> ExecTools
-        ExecTools["逐个执行工具\n发布 tool_execution_* 与 ExtensionEvent tool_call/tool_result\n每工具后检查 Steering"] --> SteeringCheck2
-        SteeringCheck2{有 Steering?} -->|Yes| SkipRemaining["跳过剩余工具\n注入用户消息"]
-        SteeringCheck2 -->|No| CheckAbort
-        CheckAbort{用户 Abort?} -->|Yes| AbortExit["终止循环"]
-        CheckAbort -->|No| NextTurn["发布 turn_end → 下一轮"]
-        SkipRemaining --> NextTurn
-        NextTurn --> LLMCall
-        TurnDone["发布 turn_end"]
-    end
-
-    AttemptDone --> Persist["写入 Transcript (JSONL)"]
-    FatalError --> EmitError["发布 agent_end\n（含错误信息）"]
-    AbortExit --> EmitAbort["发布 agent_end\n（interrupted）"]
-    Persist --> EmitAgentEnd["发布 agent_end\n（success）"]
-    EmitAgentEnd --> CheckFollowUp{FollowUp 队列?}
-    CheckFollowUp -->|有| EmitAgentStart
-    CheckFollowUp -->|无| WaitInput["等待下一次用户输入"]
+    Input[输入 / FollowUp] --> Reasoning[开始或继续工具循环]
+    Reasoning --> Budget[新逻辑请求：局部 attempt = 1]
+    Budget --> Request[guard / 组装 / 完整消费流 / 检查终态]
+    Request -->|可恢复失败且有额度| Repair[必要的压缩或降级；检查进展]
+    Repair --> Backoff[auto_retry_start / 可取消退避 / attempt 加一]
+    Backoff --> Request
+    Request -->|可接受回复| EndRetry[若发生过重试：auto_retry_end success]
+    Request -->|不可恢复 / 耗尽 / 用户取消| Exit[结束重试；原有失败或取消收尾]
+    Repair -->|压缩无进展| Exit
+    EndRetry --> Commit[持久化回复；若有工具则执行并保存结果]
+    Commit -->|还有工具轮次| Budget
+    Commit -->|正常收尾| FollowUp{有追加输入且未耗尽工具预算?}
+    FollowUp -->|有| Reasoning
+    FollowUp -->|无| End[任务完成]
+    Commit -->|提交失败| Exit
 ```
 
-### 13.3.2 控制流伪代码
+### 控制流伪代码
 
+```text
+run_inner(messages):                         # run.rs：Conversation
+    发布 agent_start
+    注入 steering / follow-up
+    run_reasoning_loop(messages)
+    正常完成且工具预算未耗尽 → 按原顺序消费追加输入，否则收尾
+
+run_reasoning_loop(messages):                # reasoning_loop.rs：Reasoning
+    保留 turn_index、final_text
+    对每个逻辑请求：
+        outcome = run_request(messages, turn_index)
+        取消 → 保存 partial，按原规则返回 Interrupted
+        回复可接受 → 提交正文 / 调度工具并保存结果
+        提交失败 → 报错，不在请求循环里重新询问模型
+        有后续请求且工具预算未耗尽 → 继续；否则正常收尾
+
+run_request(messages, turn_index):           # request_retry.rs：Request Retry
+    按当前执行模式选择额度；attempt = 1
+    每次尝试：
+        非首次 → auto_retry_start；退避（可被取消）
+        run_request_once：guard → 校验结构 → 组装 → 收完整个流 → 终态检查
+        成功 / 取消 / Fatal → 退出
+        Retryable → 沿用压缩、无进展停止、附件降级、错误种类与额度限制
+    若发出过 auto_retry_start：只发一次 auto_retry_end
+    返回结果，不执行工具
 ```
-fn agent_run(session, user_message):
-    emit(AgentStart { session_id })
-    messages = session.build_context(context_cap)
-    messages.append(user_message)
 
-    # === 第一层：对话管理循环 ===
-    loop:
-        inject_steering_messages(messages)
+**取消与副作用：** 失败流中的工具预览不能执行；此前已完成工具不会被恢复入口重放。原生写入保持 commit-aware 停止，不能取消丢弃整个 reasoning future。不能承诺模型以后永远不再要求相同外部操作。
 
-        # === 第二层：容错重试循环 ===
-        attempt_count = 0
-        loop:
-            attempt_count += 1
-            if attempt_count > MAX_ATTEMPTS:
-                emit(AgentEnd { error: "max attempts exceeded" })
-                return
-            if attempt_count > 1:
-                emit(AutoRetryStart { attempt: attempt_count })
+### 13.3.1 VS Code 的五分钟恢复是另一个阶段
 
-            result = run_reasoning_loop(session, messages)
-
-            match result:
-                Ok(response):
-                    emit(AutoRetryEnd { success: true })
-                    break
-                Err(ContextOverflow):
-                    emit(ContextOverflowTrimStart { reason: "context_overflow" })
-                    messages = compact(messages)
-                    emit(ContextOverflowTrimEnd { ... })
-                    continue
-                Err(RateLimit { retry_after }):
-                    sleep(exponential_backoff(attempt_count, retry_after))
-                    emit(AutoRetryEnd { success: false })
-                    continue
-                Err(Fatal(e)):
-                    emit(AgentEnd { error: e })
-                    return
-
-        session.append_message(user_message)
-        session.append_message(response)
-        emit(AgentEnd { success })
-
-        if reasoning_turn_budget_exhausted or follow_up_queue.is_empty():
-            break
-        else:
-            messages.append(follow_up_queue.drain())
-            emit(AgentStart { session_id })
-            continue
-
-fn run_reasoning_loop(session, messages) -> Result:
-    tool_loop_guard = ToolLoopGuard::new()
-    turn_index = 0
-    loop:
-        # reasoning loop 仍受 max_tool_rounds 硬上限约束；
-        # 若因预算触顶退出，必须把该事实回传给外层 conversation loop，
-        # 禁止外层再 drain follow_up_queue 开一个新的 attempt。
-        if turn_index >= MAX_TOOL_ROUNDS:
-            reasoning_turn_budget_exhausted = true
-            return Ok(last_response)
-        emit(TurnStart { turn_index })
-        turn_index += 1
-
-        llm_messages = convert_to_llm_format(messages)
-        tools = build_tool_definitions()
-        system_prompt = build_system_prompt(session)
-        emit(MessageStart { role: assistant })
-        stream = llm.chat_stream(system_prompt, llm_messages, tools)
-
-        text_buf = ""; tool_calls = []
-        for event in stream:
-            match event:
-                ContentDelta(delta): text_buf += delta; emit(MessageUpdate { delta })
-                ToolCallDelta(...): accumulate_tool_call(tool_calls, ...)
-                FinishReason(reason): break
-                Error(e): return Err(classify_error(e))
-
-        emit(MessageEnd { text_buf, tool_calls })
-        messages.append(AssistantMessage { text_buf, tool_calls })
-
-        if tool_calls.is_empty():
-            emit(TurnEnd { turn_index })
-            return Ok(text_buf)
-
-        guard_result = tool_loop_guard.check(tool_calls)
-        if guard_result == Critical:
-            messages.append(SystemMessage("检测到工具调用循环，请换一种方式"))
-            continue
-
-        for tc in tool_calls:
-            if cancel_token.is_cancelled():
-                emit(TurnEnd { turn_index })
-                return Err(Aborted { partial_text, partial_messages: messages[start_idx..] })
-            emit(ToolExecutionStart { ... })
-            # 工具执行 await 被 tokio::select! 包裹，cancel 触发后立即返回
-            result = select {
-                r = execute_tool(session, tc) => r,
-                _ = cancel_token.cancelled() => {
-                    emit(ToolExecutionEnd { tc.id, result: "[interrupted]", ok: false })
-                    return Err(Aborted { partial_text, partial_messages: messages[start_idx..] })
-                }
-            }
-            emit(ToolExecutionEnd { ... })
-            messages.append(ToolResultMessage { tc.id, result })
-            if tool_returns_follow_up_parts:
-                messages.append(ChatMessage::user_with_parts(parts))
-            if steering_queue.has_pending():
-                inject_steering_messages(messages)
-                break
-        emit(TurnEnd { turn_index })
-        maybe_reduce_before_next_llm(messages)
-        continue
+```text
+任务失败 → 原 Retry / Resume 按钮显示 05:00
+            ├─ 点击：立即执行原动作
+            ├─ 到期：自动执行同一动作；再次失败再等5分钟
+            └─ 取消 / 提交新输入：停止本次等待，手动按钮保留
 ```
+
+扩展宿主按会话计时，网页只显示 `{ errorId, dueAt }`，不修改消息增量协议。只有本窗口收到的现场失败、且有效历史应用后确有恢复动作，才能排程；打开旧失败历史不会自动启动。到期复核空闲、权限、问题待答及同一错误动作，再复用原 `retry` / `resume` RPC。
+
+- 所有具备任务恢复按钮的错误都适用，包括鉴权和余额错误；这不改变请求内的立即失败规则。
+- 五分钟冷却**不限轮数**，因此整个任务的累计等待和费用没有总上限。
+- 取消只影响当前等待；提交新输入、编辑重发、关闭会话等接管操作同步撤销它。只改草稿、切换会话、隐藏侧栏、重建页面不会取消或重置截止时间，后台恢复不抢焦点。
+- 关闭窗口、宿主销毁、工作区替换、服务断连/重启后清理，不跨重启持久化，不替 observer 会话执行，也不自动回答权限问题。执行已经开始后用原 Stop。
+- RPC 拒绝或 ACK 不确定不盲目再发；已接受后仅刷新失败不重开已点击按钮。新的现场失败才允许新一轮等待，包括复用同一 errorId 的 Resume 再次失败。
+
+实现及验证入口见扩展 `docs/testing-layers.md`。
 
 > **Aborted 语义**（见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md)）：
 > - `LoopError::Aborted { partial_text, partial_messages }` 由 `make_aborted` 构造，`partial_messages = messages[start_idx..]`，天然包含本轮已完成的 `tool_result` 与（若存在）已作为 partial push 的 assistant 消息。
@@ -309,30 +201,20 @@ ChatMessage（统一表示，直接发给 LLM）
 
 Agent Loop 与 [事件系统](events.md) 的对应关系：每个 AgentEvent 在 Loop 中的**精确发布时机**如下。
 
+```text
+agent_start
+  ├─ turn_start                       ← 每个逻辑请求一次
+  │    ├─ message_start/update/end    ← 一次流尝试
+  │    ├─ [context_overflow_trim_*]   ← 必要时修复当前请求上下文
+  │    ├─ [auto_retry_start → 再尝试]  ← 可重复，含本次退避信息
+  │    └─ [auto_retry_end]            ← 该请求重试的统一出口
+  ├─ 持久化可接受回复 / tool_execution_*、tool_call/tool_result
+  ├─ turn_end
+  ├─ 下一逻辑请求（新额度）……
+  └─ agent_end                       ← 真正任务收尾，不跟随 auto_retry_end 提前结束
 ```
-agent_start              ← 第一层开始，用户消息进入
-│
-├─ [auto_retry_start]    ← 第二层非首次 Attempt 开始时
-│
-├─ turn_start            ← 第三层每轮开始
-│  ├─ message_start      ← LLM 流式响应开始
-│  ├─ message_update x N ← 每收到 ContentDelta / ToolCallDelta
-│  ├─ message_end        ← LLM 流式响应结束
-│  ├─ tool_execution_start（JSON `type`；Rust `ToolExecutionStart`）← 每个工具执行前（观察）
-│  ├─ tool_call（ExtensionEvent；钩子，执行前）← 与上不同名
-│  ├─ [tool_execution_update] ← 工具执行中（可选，如 bash 流式）
-│  ├─ tool_result（ExtensionEvent；钩子，执行后）
-│  ├─ tool_execution_end（JSON `type`；Rust `ToolExecutionEnd`）← 每个工具执行后（观察）
-│  └─ turn_end           ← 本轮结束
-│     … 如有更多工具请求，重复 turn_start → turn_end …
-│
-├─ [context_overflow_trim_start]  ← Context Overflow 路径（Rust `ContextOverflowTrimStart`）
-├─ [context_overflow_trim_end]    ← Overflow 截断/压缩完成（Rust `ContextOverflowTrimEnd`）
-├─ [auto_retry_end]         ← 重试结束
-│
-└─ agent_end             ← 整个 Agent 处理结束
-   status: success | error | interrupted
-```
+
+`auto_retry_end.success=true` 只表示本次模型请求恢复；提交或工具后续仍可能失败。只有发布过 `auto_retry_start` 才发布一次结束事件；取消、Fatal、额度耗尽和压缩无进展同样收口，保持事件与 transcript 口径一致。
 
 方括号 `[]` 表示条件性发布（仅在对应场景触发）。
 
@@ -374,7 +256,7 @@ agent_start              ← 第一层开始，用户消息进入
 | 入口 | 触发时机 | 写入载体 | 谁消费 | 会不会打断当前 tool list | 典型来源 |
 |------|----------|----------|--------|---------------------------|----------|
 | `steer(msg)` | Agent 工作中 | `steering_queue.push(ChatMessage::steering(msg))` | `inject_steering_messages(...)` | **会**。当前单个 tool 做完后就 break，剩余 tool_calls 不再执行 | 用户中途改方向、宿主主动插话 |
-| `follow_up(msg)` | 一个 attempt/turn 收口后，或宿主补进新事实时 | `follow_up_queue.push(ChatMessage::user(msg))` | turn 入口 / reasoning batch boundary drain | **不会直接打断当前单个 tool**。它只影响“下一次发给 LLM 的消息集”，不回头改已执行完的 tool_calls | 用户追加一句话、后台任务完成的 synthetic 通知 |
+| `follow_up(msg)` | 一个 turn 正常收口后，或宿主补进新事实时 | `follow_up_queue.push(ChatMessage::user(msg))` | turn 入口 / reasoning batch boundary drain | **不会直接打断当前单个 tool**。它只影响“下一次发给 LLM 的消息集”，不回头改已执行完的 tool_calls | 用户追加一句话、后台任务完成的 synthetic 通知 |
 | `user_with_parts(parts)` | 单个 tool_result 已生成之后 | 直接 `push_message(..., ChatMessage::user_with_parts(parts))` | 同一轮 `messages` | **不会单独打断**；但它必须出现在 tool_result 之后、steering break 之前 | `read` 命中图片 / PDF 后的 `follow_up_parts` |
 | `abort()` / Ctrl+C | 任何 await 点 | `cancel_token.cancel()` | stream / tool await 的 `tokio::select!` | 相当于整个 turn 终止，不只是跳过剩余工具 | 用户中止 |
 
@@ -431,7 +313,7 @@ chat host 在同一轮里可能同时拿到两样东西：
 
 ### 13.7.6 `max_tool_rounds` 不能被 follow-up 绕过
 
-一个很隐蔽的边界是：`max_tool_rounds` 限的是**单次 reasoning loop 内部**还能再做几轮 LLM/tool 往返，而 `follow_up_queue` 的消费点在**外层 conversation loop**。如果不把“这次是因为预算触顶才结束”的原因显式传出去，外层会把一次“预算耗尽返回”误判成“正常收尾”，随后又因为队列非空而再开一个 attempt。
+一个很隐蔽的边界是：`max_tool_rounds` 限的是**单次 reasoning loop 内部**还能再做几轮 LLM/tool 往返，而 `follow_up_queue` 的消费点在**外层 conversation loop**。如果不把“这次是因为预算触顶才结束”的原因显式传出去，外层会把一次“预算耗尽返回”误判成“正常收尾”，随后又因为队列非空而再开一个 reasoning loop。
 
 ```text
 错误路径
@@ -440,7 +322,7 @@ reasoning loop 达到 max_tool_rounds
         └─ return Ok(...)
              │
              └─ conversation loop 看到 follow_up_queue 非空
-                  └─ 再开一个 attempt
+                  └─ 再开一个 reasoning loop
                        -> 预算名义上结束，实际上继续跑
 
 修正后
@@ -457,7 +339,7 @@ reasoning loop 达到 max_tool_rounds
 
 ### 13.7.7 与 current-tail guard 的关系
 
-Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发给 LLM 的 messages”。阶段二 current-tail guard 的观察点正好就在这里：
+Steering / FollowUp / `user_with_parts` 都会改变“下一次发给 LLM 的 messages”。current-tail guard 在每次请求尝试前检查这一工作集，包括压缩或附件降级后的重发：
 
 ```text
 单个 tool 执行完成
@@ -481,7 +363,7 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 - 维护最近 HISTORY_SIZE（如 30）条工具调用的滑动窗口。
 - 同一工具名 + 同参数 hash 重复超过 WARNING_THRESHOLD（如 10）→ 向 LLM 注入警告。
-- 超过 CRITICAL_THRESHOLD（如 20）→ 强制终止当前 Attempt。
+- 超过 CRITICAL_THRESHOLD（如 20）→ 强制终止当前工具循环。
 
 **第二道：Ping Pong（乒乓检测）**
 
@@ -490,7 +372,7 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 **第三道：Global Circuit Breaker（全局熔断）**
 
-- 单次 Attempt 内工具调用总次数超过 GLOBAL_BREAKER（如 30）→ 强制终止。
+- 单次工具循环内工具调用总次数超过 GLOBAL_BREAKER（如 30）→ 强制终止。
 
 处理策略：
 
@@ -511,9 +393,9 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 - **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll；成功 apply boundary 时其内部紧接执行 L0）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
 - **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换并在内部执行 L0（ratio >= 0.98 时可化异步为同步等待）→ 成功时 `messages` 从更新后的 `ctx_state.messages` 重新拍平，并接回已持久化的本轮输入
-- **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）；该路径发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`（JSON wire：`context_overflow_trim_start` / `context_overflow_trim_end`），不再使用 `AutoCompactionStart` / `AutoCompactionEnd`
+- **③ 单请求内 API 返回 Context Overflow**：L3物理截断 + 重试（Request Retry）；发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`，不能靠压缩重置额度。
 
-**context_metrics_update 发射节奏**（单次第三层 `run_reasoning_loop`）：
+**context_metrics_update 发射节奏**（单次 `run_reasoning_loop`）：
 
 - **首次**向 LLM 发起 `chat_stream` **之前**（`turn_index == 1`）发一条估算；每一次 provider `Usage` 到达时，`stream_handler` 立即发一条实测 metrics，发生在工具调用被调度之前；assistant **无** `tool_calls` 时 timing ⑤ 再发最终估算，若因 **`max_tool_rounds`** 耗尽退出则在该轮 `TurnEnd` 后再发估算。
 - tool round 之间只有 current-tail guard 实际改写上下文时才追加一条估算 metrics；正常工具执行不会为每一轮额外刷事件。`providerUsageMeasured=true` 仅标记直接来自当前 `Usage` 的事件，所有其余快照均为 `false`。
@@ -527,13 +409,13 @@ Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发�
 
 | 类别 | 处理方 | 示例 | 行为 |
 |------|--------|------|------|
-| **可重试** | 第二层 Attempt Loop | ContextOverflow（含结构化 `http_status=400 + context_length_exceeded` 等，由 `is_context_overflow(&AppError)` 统一判定）、RateLimit、NetworkTimeout、ServerError(5xx) | L3 物理截断（若有 ContextState）/ 指数退避后重试 |
+| **可重试** | Request Retry | ContextOverflow、RateLimit、NetworkTimeout、ServerError(5xx)，以及 `server_error`、`upstream_http2_stream_error`、`upstream_stream_read_error` | 沿用分类、L3压缩及退避，消耗同一请求额度；明确账户/内容拒绝优先 |
 | **致命** | 直接终止 | 401、非上下文类 400（如 invalid model）、ModelNotFound、MaxAttemptsExceeded | 发布 agent_end { error } |
 | **工具错误** | 不终止 Loop | 文件不存在、权限拒绝、命令失败 | 作为 ToolResult 返回 LLM，由 LLM 调整策略 |
 
 - **单一事实来源**：LLM 错误分类不再靠散落的裸字符串 `contains("503")` / `contains("timeout")` 猜测；统一由 `infra/error/llm.rs` 基于 `LlmErrorStage + http_status` 提供 `is_retryable_llm_error`、`llm_connect_or_network`、`is_context_overflow` 三个判定入口。
-- **provider 重试边界**：`openai` / `openai-responses` 的 provider 层仅在**首个 delta 产出前**对流式建连故障做自动重试；一旦已经开始消费正文，后续 `BodyRead` / `Parse` 等错误必须原样上抛给 Attempt Loop，避免重复出字。
-- **Attempt Loop 退避口径**：顶层重试由 `[llm].agent_max_attempts`（默认 `4`）和 `[llm].agent_retry_base_delay_ms`（默认 `500ms`）驱动；实际等待为指数退避再叠加 `±20%` jitter，并封顶 `8s`。
+- **provider 重试边界**：`openai` / `openai-responses` 的 provider 层仅在**首个 delta 产出前**对流式建连故障做自动重试；一旦已经开始消费正文，后续 `BodyRead` / `Parse` 等错误必须原样上抛给 Request Retry，避免重复出字。
+- **请求重试退避**：`[llm].agent_retry_base_delay_ms` 默认500ms；指数退避叠加±20% jitter，交互封顶8s、无人值守封顶30s；已有 `Retry-After` 优先。请求额度见13.2，扩展的五分钟冷却见13.3.1。
 
 ---
 
@@ -559,14 +441,15 @@ Loop 在以下位置发布 ExtensionEvent，插件通过 `agent.on(event_name, c
 | 2.2 LLM 接入 | Loop 调用 chat_stream() |
 | 2.3 4 原语 / 2.4 工具注册中心 | Loop 通过工具注册中心执行工具 |
 | 8. 事件系统 | Loop 是 AgentEvent/ExtensionEvent 的主要发布者，发布时机见 13.6、13.11 |
-| 9. 会话存储 | Loop 在 agent_end 时写入 Transcript |
+| 9. 会话存储 | 合法消息边界即时append；请求重试不包住消息提交 |
 | 11. 异步 Hostcall | 插件通过 Hostcall 调用 LLM/exec 时，底层走异步 submit/poll |
 | 12. JS API 对齐 | 插件注册的自定义工具经工具注册中心进入 Loop 的 tool_definitions |
 
-代码映射建议：
+代码映射：
 
-- **src/core/agent_loop.rs**（新增）：AgentLoop 结构体，三层循环逻辑。
-- **src/core/tool_loop_guard.rs**（新增）：工具循环检测。
-- **src/core/compaction.rs**（新增）：上下文压缩策略。
-- **src/infra/events.rs**（已有）：事件枚举已定义，无需改枚举。
-- **src/api/chat.rs**（重构）：由直接实现循环改为调用 AgentLoop::run()。
+- `src/core/agent_loop/run.rs`：Conversation生命周期。
+- `src/core/agent_loop/reasoning_loop.rs`：模型与工具循环、回复提交及工具轮次。
+- `src/core/agent_loop/request_retry.rs`：单次请求组装与响应判定、有限重试与统一结束事件。
+- `src/core/agent_loop/error_classifier.rs`：复用公共分类、上下文与附件恢复。
+- `src/infra/error/llm.rs`：公共LLM故障语义。
+- `src/api/chat/run_loop/mod.rs`：沿用现有配置装配，不另建预算来源。

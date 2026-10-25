@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { applySessionPatchFrame } from "./statePatch";
 
 import type {
   WebviewSessionSnapshot,
@@ -82,6 +83,25 @@ function review(id: string, summary = "Looks good") {
 }
 
 describe("stateReconcile", () => {
+  it("publishes and removes only the session-level countdown, preserving timeline references and patches", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.sessionViews.s1.errorRecovery = { errorId: "error-1", dueAt: 12345 };
+    for (const scheduled of [reconcileStateSnapshot(previous, next), mergeSessionViewSnapshot(previous, { sessionId: "s1", view: next.sessionViews.s1 })]) {
+      expect(scheduled.sessionViews.s1.errorRecovery).toEqual(next.sessionViews.s1.errorRecovery);
+      expect(scheduled.sessionViews.s1.timeline).toBe(previous.sessionViews.s1.timeline);
+      expect(reconcileStateSnapshot(scheduled, structuredClone(scheduled))).toBe(scheduled);
+      const cleared = mergeSessionViewSnapshot(scheduled, { sessionId: "s1", view: previous.sessionViews.s1 });
+      expect(cleared.sessionViews.s1.errorRecovery).toBeUndefined();
+      expect(cleared.sessionViews.s1.timeline).toBe(previous.sessionViews.s1.timeline);
+      for (const state of [scheduled, cleared]) {
+        const patch = applySessionPatchFrame(state, { sessionId: "s1", ops: [{ type: "appendText", id: "s1-m2", text: " delta" }] });
+        expect(patch.ok).toBe(true);
+        if (patch.ok) expect(patch.state.sessionViews.s1.errorRecovery).toEqual(state.sessionViews.s1.errorRecovery);
+      }
+    }
+  });
+
   it("publishes access and provenance changes even without a timeline change", () => {
     const previous = snapshot();
     const next = snapshot();

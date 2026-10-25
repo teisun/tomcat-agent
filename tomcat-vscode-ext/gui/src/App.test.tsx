@@ -49,6 +49,30 @@ function mount(initialState?: unknown, locale?: Locale) {
   };
 }
 
+describe("error recovery countdown projection", () => {
+  it("routes cancel and immediate recovery from only the matching error card, retaining manual recovery after cancel", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const session = snapshot.sessionViews.s1;
+    session.busy = false;
+    session.timeline = [
+      { type: "message", kind: "user", id: "original", text: "Original input" },
+      { type: "message", kind: "error", id: "old-error", text: "Earlier failure" },
+      { type: "message", kind: "error", id: "error-1", text: "Current failure", recoveryAction: "resume" },
+    ];
+    session.errorRecovery = { errorId: "error-1", dueAt: Date.now() + 300_000 };
+    await emitState({ channel: "state", content: snapshot, messageId: "scheduled" });
+    expect(screen.getAllByTestId("error-recovery-countdown")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("cancel-error-recovery"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "cancelErrorRecovery", data: { sessionId: "s1", ...session.errorRecovery } }));
+    await emitState({ channel: "sessionView", content: { sessionId: "s1", view: createSessionSnapshot({ ...session, errorRecovery: undefined }) }, messageId: "cancelled" });
+    expect(screen.queryByTestId("error-recovery-countdown")).toBeNull();
+    fireEvent.click(screen.getByTestId("recover-error-turn"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "recoverErrorTurn", data: { sessionId: "s1", errorId: "error-1", action: "resume" } }));
+    expect(screen.getByText("Current failure")).toBeTruthy();
+  });
+});
+
 describe("read-only session observation", () => {
   it("locks write actions while busy and idle, keeps reading available, and restores a writable session", async () => {
     const { postMessage } = mount(undefined, "en");
@@ -584,6 +608,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     checkpoints: fixture.checkpoints,
     composerDraft: fixture.composerDraft,
     messageQueue: fixture.messageQueue,
+    errorRecovery: fixture.errorRecovery,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,

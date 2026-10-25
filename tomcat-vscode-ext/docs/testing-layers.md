@@ -152,7 +152,38 @@ captureWebviewDom()
 
 前者能准确定位数据或跨进程协议错误，后者能抓住「状态是对的、组件却没渲染/被样式藏掉」的问题。需要验证用户可见结果的 E2E 一律两层都写；仅验证纯后台副作用时，可只写数据契约并在用例说明原因。
 
-## 6. 常用命令
+## 6. 五分钟错误恢复的验证边界
+
+```text
+真实任务失败 → 宿主收到现场失败 → 有效历史中有 Retry / Resume
+                                      ↓
+                               宿主等五分钟
+                     ┌────────────────┼───────────────┐
+                  自动执行         用户立即点击      取消 / 接管
+                     └──── 原恢复 RPC ────┘          保留手动按钮
+```
+
+请求内的4/10次有限尝试由 Rust 拥有（含首次），每个逻辑模型请求独立计数。这里验证的是之后的恢复阶段：五分钟冷却可无限轮，包括有恢复按钮的账户错误；累计费用和等待没有任务总上限。窗口、宿主或服务生命周期结束就清理，不扫描旧历史重新启动；只切会话、隐藏侧栏、重建网页则保持原截止时间。取消不删错误卡，新输入接管不复活旧等待。
+
+| 测试 | 证明什么 / 不证明什么 |
+| --- | --- |
+| `src/ui/webview/tests/provider_error_recovery.test.ts` | 注入宿主专用时钟，验证300000ms边界、接管清单、同拍竞争、过期历史、连续失败、权限与生命周期；不伪造整个RPC环境的时间。 |
+| `gui/src/components/MessageBubble.test.tsx`、`App.test.tsx`、`stateReconcile.test.ts` | 数字刷新、稳定可访问名称、取消和立即恢复接线、full/sessionView/patch保持同一会话投影；jsdom不能替代视觉验收。 |
+| `tests/webview_provider_flow.test.ts` | Provider广播与原Router接线；倒计时只在会话元数据，不写进消息、不新增patch操作。 |
+| `tests/serve_error_recovery.test.ts` | 真实Rust服务、Router、RPC、历史与本地脚本模型；仅加速宿主五分钟。Retry保留原输入及附件审计，Resume携带已完成工具结果而不重放，并覆盖相同errorId再次失败、后台不换会话。 |
+| `src/test/suite/host.e2e.test.ts` 的 `automatic error recovery countdown` | 真VS Code / Chromium + fake backend；使用生产五分钟等待，无缩短时长开关。验证页面真正销毁重建、取消后键盘恢复、中英文窄宽布局、后台恢复不抢编辑器焦点。不能用fixture截图声称Rust恢复正确。 |
+
+手动恢复回归沿用原 `same-session retry` / `failed tool turn` 场景。时钟助手放在 `src/ui/webview/tests/errorRecoveryClock.ts`，共享给集成测试，但不从 `src/` 导入 `tests/` 外部源码（`tsconfig.rootDir=src`）。
+
+```sh
+npm run test:integration -- tests/webview_provider_flow.test.ts tests/serve_error_recovery.test.ts
+# TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR 显式指向项目资源目录的 shots/error-recovery-countdown
+TOMCAT_E2E_GREP='automatic error recovery countdown' TOMCAT_E2E_SCREENSHOT=1 npm run test:e2e:webview-devhost
+```
+
+UI验收须读 PNG、ARIA、console 三类证据：Retry等待、Resume等待、取消后、成功后；中英文均实际渲染，至少桌面与390px窄宽，不做全排列。此场景独立使用360秒超时，不放宽全局。`__testing.reloadWebview()` 不是页面重建证据，使用浏览器真实 `location.reload()` 并验证文档身份变化、deadline不变。
+
+## 7. 常用命令
 
 ```bash
 npm run lint                      # tsc --noEmit，最快的门禁

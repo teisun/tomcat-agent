@@ -1,8 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-10-24 15:00 | ACTIVE | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-10-25 10:21 | ACTIVE | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
+
+- [✓] 修复临时 LLM 故障分类与重试额度按任务累计：`server_error`、`upstream_http2_stream_error`、`upstream_stream_read_error` 进入统一临时故障判定，账户/内容拒绝保持优先；每次逻辑模型请求独立计数，交互默认 4 次、无人值守临时故障和空答 10 次，均含首次。成功正文及已完成工具不因后续请求重试而重放。
+- [✓] 增加宿主拥有的五分钟自动 Retry/Resume，页面只展示会话级倒计时并提供取消；沿用原 RPC、错误卡与手动按钮，同 errorId 连续失败可重新恢复，后台会话不抢焦点。
+- [✓] 自动恢复复核 F1～F6 全部完成：补 Build 接管与外部执行取消，移出 Keep，恢复文件夹变化和历史加载原有边界；资格检查仅用于自动到期；单次请求及专用辅助函数逐字集中到 `request_retry.rs`，恢复无关文档。验收中的 `environment.rs` Clippy 修正仅为 `.or_else` → `.or` 等价改写，平台路径规则不变。
 
 - [✓] 修复 VS Code 多根工作区引用丢失所属项目地址的问题：文件、目录及选区保留完整路径，标签仍简短；`@` 搜索独立显示项目名与相对目录，避免同名文件混淆。产品逻辑只改引用构造与搜索展示两处，补齐草稿/发送/历史、Rust 真实读取和双根 Host 回归；Windows 实机验收未完成。
 
@@ -16,6 +20,9 @@
 
 ### INTERFACE（接口与行为边界）
 
+- `AgentLoopConfig.max_attempts` 改为每次逻辑模型请求的额度，`max_tool_rounds` 仍归模型/工具循环；取消、压缩、附件降级、消息提交及工具执行的原有安全边界保留，重试不清零当前请求计数。
+- 宿主↔webview 新增会话投影 `errorRecovery: { errorId, dueAt }` 与 `cancelErrorRecovery` 意图；Retry/Resume RPC 不变。取消只停自动恢复，不清除错误卡或手动按钮；切换会话不停止等待，真实断连、关闭环境或宿主销毁会清理；等待不持久化。
+
 - 新文件系统引用的 `path` 保留扩展宿主 `uri.fsPath`（目录尾 `/` 契约不变），`label` 与搜索描述独立显示；会话 cwd、权限、重复 occurrence 及 wire 字段不变。旧相对路径不猜测迁移，旧歧义引用需重加；更新/重载扩展后新添加的引用才按修复后的规则生成。
 
 - Composer `pickContext` 先显示“添加文件 / 添加文件夹”，`buildAttachmentOpenDialogOptions(kind)` 只开启对应类型；两类需分次选择，继续复用原有附件/引用分类与 `composerWorkResult`。未改拖拽事件处理、只读判定或共享服务。
@@ -24,7 +31,7 @@
 - 主输入框精确纯文本 `/restart` 先清空并同步草稿，再调用 `restartSharedService`；停止所有共享任务，不调用模型、不入队。参数、引用、附件和同名资源卡沿用普通消息路由；输入禁用条件不变。
 - stop／restart 等待上限为 80／150 秒，version／status／start 仍为 35 秒；关窗与 Reload 仍只断开窗口，不停止后台。
 - LLM 仅在无显式代理、主地址与可选 fallback 都为回环时绕过自动代理；远端与显式代理语义保留。窗口语言按连接环境解析，服务生成的文本仍使用进程级语言，不承诺多窗口独立重译。
-- 未新增 wire 字段或安装／服务生命周期协议。
+- Rust serve wire 及安装／服务生命周期协议未改动；本次协议增量仅限上述宿主↔webview 的恢复投影与取消意图。
 
 ### Windows 验证记录（此前结果，Mac 不机械重跑）
 
@@ -37,9 +44,12 @@
 - 最终真实 VS Code 重启旅程及外层检查退出 0：实例 A 切换到 B，非标题模型请求保持 2 次，关窗后禁止自动拉起的 Native IPC 仍连接 B；四组最终 PNG／ARIA／console 已读回。
 - 详细本地证据：`.agents/acceptance/windows-shared-serve-report.md`、`.agents/acceptance/update-restart/report.md`；最终重启截图目录 `.agents/acceptance/update-restart/ui/gui-u7Ujzh/`。这些日志、截图和构建产物不纳入 Git，Mac 拉取代码不会自动获得本机证据文件。
 
-### macOS 联合验收（2026-10-23–24）
+### macOS 联合验收（2026-10-23–25）
 
-- **多根引用修复本机验证完成**：macOS 13.7.8 / VS Code 1.143.1；扩展/GUI/启动器分批有效覆盖 1008 项（15+16+881+73+23），Rust 定向 3 项，真实 Host 6 项通过；构建、类型检查及格式检查通过。初始 Provider 两条旧路径期望、搜索测试断言与 Host 夹具问题修正后仅复跑受影响范围，不声称全仓一次全绿。本次提交按用户要求不重跑测试、构建或覆盖率，Cov% 继续未测量。
+- **请求级重试与自动恢复已在提交前完成验证**：最新扩展类型检查、宿主 900 项、GUI 888 项及 Provider/真实 Rust 服务集成 72 项通过；Rust 定向 394 通过 / 1 原有忽略，最终 `gate-fast` 严格 Clippy、库 3437 通过 / 5 忽略，集成 470 通过 / 30 跳过；无新增跳过，定向结果不与全量重复累计。doctest 为 0，不当作行为证据。
+- 此前真实 Dev Host 已验证生产五分钟等待、页面重建保留 deadline、取消后手动恢复及后台不抢焦点，中英文桌面/窄屏 PNG、ARIA、console 已读取。整改未改 GUI 渲染或真实计时，按批准计划不重跑五分钟场景；四个搬移函数前后 SHA-256 一致，最终差异检查通过。早期磁盘不足、构建锁等待与截图夹具失败及后续成功结果保留在本地 `.agents/acceptance/error-recovery.md`，截图和制品不纳入 Git；不冒充真实上游或 Windows 验收。本次提交遵照用户要求不再运行测试、构建或覆盖率，Cov% 保持未测量。
+
+- **多根引用修复本机验证完成**：macOS 13.7.8 / VS Code 1.143.1；扩展/GUI/启动器分批有效覆盖 1008 项（15+16+881+73+23），Rust 定向 3 项，真实 Host 6 项通过；构建、类型检查及格式检查通过。初始 Provider 两条旧路径期望、搜索测试断言与 Host 夹具问题修正后仅复跑受影响范围，不声称全仓一次全绿。当时提交按用户要求不重跑测试、构建或覆盖率，Cov% 继续未测量。
 - 多根 Host 的 7 组最终 PNG/ARIA/console 已逐项读取，侧栏实际宽度 941/389px；截图、ARIA 与发送数据分别确认项目可区分、短标签和完整目标。Host 使用测试后端，Rust 录制模型与真实 read 独立验证收到 B 完整引用、读取 `ONLY_B` 且 cwd/授权边界不变；不冒充模型自主选文件或原生鼠标拖拽验证。捕获期 console 无 error，宿主警告另列。仓库根本地产物 `.agents/acceptance/multi-root-references.md` 与 `.agents/shots/multi-root-references/gui-1zk4mf/` 不纳入 Git，Windows 不会自动获得这些产物；Windows 复验使用相同 npm Host 入口及 Rust 定向测试。
 
 ```text
@@ -73,6 +83,7 @@
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
+| 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
 | 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
 | macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
 | Mac 已安装版本 | 纯插件 0.1.97、独立 CLI/serve 0.1.81、process-path 已核对；这是 8a5b7885 基线制品，不含后来选择器修复 | 保留被软链引用的 release 文件；源码合并不等于已安装插件更新 |
@@ -81,4 +92,4 @@
 | 文件树拖拽无提示 | 根因未确认；CDP 鼠标探针未产生源头 dragstart，不能视为有效复现或成功验收；拖拽代码未改 | 在用户故障窗口捕获真实 dragstart、Shift 状态及 iframe dragover/drop，再按事件断点定位 |
 | Mac 正式保活（已补证） | 用户正式重启 A→B，Reload、全退出后重开前、最终用户 Dock 重开均仍 B；脚本与用户操作分开记账 | 不再要求重复操作；保留自动点击失败原件与组合回执 |
 | CI 与外部宿主 | 本机整改验收不代替本次提交的 GitHub Windows 系统代理 CI；本轮外部宿主为源码契约对照，不是完整宿主重验 | 推送后检查 CI；保留 Multica 上层 30 秒交接与 backend 65 秒清理预算不一致的未实测风险 |
-| 提交范围 | 本次按用户要求本地提交多根引用修复及必要测试、文档、既有 Host 启动器和状态文件；不重跑测试，验收产物保持本地忽略 | 不推送、不打标签、不发布；不安装或重启正式服务；Windows 验收继续待完成 |
+| 提交范围 | 本次本地提交请求级重试、五分钟自动恢复及 F1～F6 整改的全部相关代码、测试、文档和状态；不重跑测试，验收产物保持本地忽略 | 不推送、不打标签、不发布；不安装或重启正式服务；既有 Windows 待验收事项保留 |

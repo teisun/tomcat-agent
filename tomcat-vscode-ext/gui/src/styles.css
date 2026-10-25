@@ -2650,7 +2650,23 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-message__recovery-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
   margin-top: 8px;
+}
+
+.tc-message__countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+.tc-message__recovery-hint {
+  color: var(--vscode-descriptionForeground);
+  flex-basis: 100%;
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .tc-message__recovery-button {
@@ -2658,7 +2674,7 @@ span.tc-attachment-strip__file-chip {
   display: inline-flex;
   gap: 7px;
   justify-content: center;
-  width: 100%;
+  width: auto;
 }
 
 .tc-message__recovery-button:hover:not(:disabled) {

@@ -14,20 +14,17 @@
 ### 1.1 三层嵌套循环 + 干预点（ASCII）
 
 ```text
-Layer 1  Conversation Loop
-    |     FollowUp 队列非空 -> 注入 User 再继续
+Layer 1  Conversation Loop：输入、FollowUp、最终收尾
+    |
     v
-Layer 2  Attempt Loop (max_attempts, 指数退避)
-    |     ContextOverflow 检测 -> 触发 Layer 1~3 Compaction -> 重试
+Layer 2  Reasoning Loop：保留已接受正文与工具轮次
+    +--> Layer 3 Request Retry：本次模型请求的有限尝试
+    |      guard / 组装 / 完整消费流 / 响应判定
+    |      压缩、降级、空答不清零；成功后返回
+    +--> 提交回复 / 执行工具 / 检查 Steering、Abort
+    |      下一逻辑请求获得新额度，已完成工具不重放
     v
-Layer 3  Reasoning Loop
-    |     LLM 流式 -> tool_calls?
-    |     +-- 执行工具 -> Layer 0 截断超大 ToolResult -> ToolResult 回注
-    |     +-- Steering 队列 -> 改向，跳过后续工具
-    |     +-- Abort 信号 -> 中断
-    |     +-- ContextState 动态估算更新
-    v
-  final_text (由调用方决定是否写 Session)
+  final_text；消息按合法 append 边界持久化
 ```
 
 - **消息类型**：统一使用 `ChatMessage`（OpenAI wire format），通过 `MessageKind` 字段区分 Steering/CompactionSummary 等语义。
@@ -35,7 +32,7 @@ Layer 3  Reasoning Loop
 
 ## 2. 设计方案 (Design Details)
 
-- **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；消息统一使用 `ChatMessage`，无需在 LLM 边界做类型转换。`MessageKind` 枚举区分 Normal/Steering/CompactionSummary 等内部语义。
+- **设计模式**：三层嵌套循环（Conversation → Reasoning → Request Retry），职责分离；消息统一使用 `ChatMessage`，无需在 LLM 边界做类型转换。`MessageKind` 枚举区分 Normal/Steering/CompactionSummary 等内部语义。
 - **关键权衡**：会话消息只有一份。回合间停放在 `ContextState.messages`，进入 `AgentLoop::run` 时 move 到局部工作列表，所有退出路径再停回该字段。`system_prompt` 由 `AgentLoopConfig` 保存，只在构造 `ChatRequest` 时临时前置；它不属于会话历史，也不进入 transcript。每条消息由 AgentLoop 的 append sink 落盘，调用方在 `run()` 返回后只持久化观测与 checkpoint。
 - **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<ChatMessage>>>`，`cancel_token` 为 `CancellationToken`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与取消信号，无数据竞争。流式 delta 通过 `EventBus` 的 `message_update` 事件推送，调用方（如 `chat.rs`）通过 `event_bus.on("message_update", ...)` 订阅。
 
@@ -47,10 +44,10 @@ Layer 3  Reasoning Loop
 - **AgentLoopConfig**：`max_attempts`、`max_tool_rounds`、`retry_base_delay_ms`、`model`、`session_id`、`tool_definitions`、`context_config`，以及仅用于请求组装的 `system_prompt: Option<String>`。
 - **AgentRunResult**：`{ final_text: String, new_messages: Vec<ChatMessage> }`，run 成功时最后一轮 LLM 文本回复及本次产生的所有新消息。
 - **AgentLoop::new(llm, primitive, event_bus, config, cancel_token)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
-- **AgentLoop::run_turn(&mut self, messages, turn_start) -> AgentRunOutcome**：主入口；`turn_start` 由调用方在追加用户输入时精确记录，执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。**`run(messages)`** 仅是兼容封装，适用于列表以且仅以一条用户消息收尾的调用方。
-- **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `ChatMessage::steering(msg)`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
+- **AgentLoop::run_turn(&mut self, messages, turn_start) -> AgentRunOutcome**：主入口；`turn_start` 由调用方在追加用户输入时精确记录，执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Reasoning Loop（LLM ↔ 工具）、第三层 Request Retry（单请求重试与分类）。**`run(messages)`** 仅是兼容封装，适用于列表以且仅以一条用户消息收尾的调用方。
+- **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `ChatMessage::steering(msg)`；Reasoning 每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `ChatMessage::user(msg)`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
-- **AgentLoop::abort(&self)**：调用 `cancel_token.cancel()`；第三层每工具执行前检查取消状态，命中后返回中断结果并发布 `agent_end(interrupted)`。
+- **AgentLoop::abort(&self)**：调用 `cancel_token.cancel()`；Reasoning 每工具执行前检查取消状态，命中后返回中断结果并发布 `agent_end(interrupted)`。
 - **LoopError**（内部）：`Retryable(AppError)`、`Fatal(AppError)`、`Aborted`；`classify_error(AppError)` 不再靠字符串猜测，而是优先基于结构化 `LlmError { stage, http_status, summary }` 判定：`401` → Fatal，`is_context_overflow(&AppError)`（如 `http_status=400 + context_length_exceeded`）→ Retryable 并触发 L3 截断，其余 `400` → Fatal，`429/500/502/503/504` 与传输阶段错误 → Retryable。
 
 ### 3.2 上下文管理 API（TASK-17）
@@ -92,9 +89,9 @@ Layer 3  Reasoning Loop
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| max_attempts | u32 | 3 | 第二层 Attempt 最大重试次数（含首次） |
-| max_tool_rounds | usize | usize::MAX | 单次 Attempt 内第三层最大工具轮次（不再硬限，由 token 预算兜底） |
-| retry_base_delay_ms | u64 | 300 | 指数退避基准延迟（ms），实际 delay = base × 2^(attempt-1) |
+| max_attempts | u32 | 4 | 每次逻辑模型请求的尝试上限（含首次），无人值守临时故障/空答10次；详见架构文档 |
+| max_tool_rounds | usize | usize::MAX | 单次 Reasoning 的工具轮次上限；请求重试不重置、不额外占用轮次 |
+| retry_base_delay_ms | u64 | 500 | 指数退避，含 jitter；交互封顶8s、无人值守30s，Retry-After 优先 |
 | model | String | — | LLM 模型名，由调用方从 Session/Config 填入 |
 | session_id | String | — | 会话 ID，随 AgentEvent 发布 |
 | tool_definitions | Vec<serde_json::Value> | [] | 传入 LLM 的工具 JSON Schema |
@@ -123,8 +120,8 @@ flowchart TD
     Caller["调用方 chat_loop"]
     Run["AgentLoop::run(initial_messages)"]
     Conv["第一层 Conversation Loop"]
-    Attempt["第二层 Attempt Loop"]
-    Reason["第三层 Reasoning Loop"]
+    Attempt["第三层 Request Retry"]
+    Reason["第二层 Reasoning Loop"]
     LLM["llm.chat_stream"]
     Tools["execute_tool 循环"]
     SteeringCheck["steering_queue 非空?"]
@@ -133,10 +130,11 @@ flowchart TD
 
     Caller --> Run
     Run --> Conv
-    Conv --> Attempt
-    Attempt --> Reason
-    Reason --> LLM
-    LLM --> Tools
+    Conv --> Reason
+    Reason --> Attempt
+    Attempt --> LLM
+    LLM -->|失败且有额度| Attempt
+    LLM -->|回复可接受| Tools
     Tools --> SteeringCheck
     SteeringCheck -->|是| Reason
     SteeringCheck -->|否| Reason
@@ -146,9 +144,11 @@ flowchart TD
     Persist --> Caller
 ```
 
-- 第一层：处理用户输入与 FollowUp；每次循环开始注入 steering_queue 中已有消息；Attempt 成功后在循环尾检查 follow_up_queue，非空则 drain 追加后 continue，否则 return。
-- 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。**ContextOverflow 检测**：若错误命中结构化 `is_context_overflow(&AppError)`，触发 L3 截断后以压缩后的上下文重试。provider 层的流式自动重试只允许发生在**首个 delta 前**；一旦正文已开始输出，后续 `BodyRead` / `Parse` 错误必须原样上抛给第二层，避免重复出字。
-- 第三层：turn_start → chat_stream → message_start/update/end → 若有 tool_calls 则逐个 execute_tool，每工具前检查 abort、每工具后检查 steering_queue；同时**动态更新** `ContextState.estimate_context_chars`。
+- 第一层：处理输入、FollowUp 和任务收尾；工具预算耗尽不能靠追加输入重新开启循环。
+- 第二层：模型与工具交替运行；保留已接受的正文、工具结果、工具轮次，提交失败不重发模型请求。
+- 第三层：每次逻辑请求重新计数；网络、空答、压缩、附件降级共享该请求额度。完整回复通过判定后，先结束请求重试，再交回第二层提交 / 执行工具。取消、Fatal、压缩无进展与额度耗尽都结束重试事件。
+- provider 内的首个 delta 前重试不变；出字后的断流上抛至单请求重试，不执行失败流的工具预览。
+- Git `eb2cd0a9` → `9f25ac4e` 的旧设计把 Attempt 包住整个 Reasoning；`09333a6d` 只增加无人值守次数。本次调整归属，不提高数值。完整规则及扩展五分钟冷却见 [Agent Loop 设计](../../docs/architecture/agent-loop.md)。
 
 ### 6.1 上下文管理集成流程（TASK-17）
 
@@ -165,7 +165,7 @@ flowchart TD
       |
       v  AgentLoop::run()
       |    - Layer 2: timing ②/⑤/mid-turn 的 ready preheat 直接改写工作列表；Layer 0 严格止于 history_end
-      |    - Layer 3 Attempt: ContextOverflow → force_drop_oldest；历史为空则同次 collapse → 重试
+      |    - Request Retry: ContextOverflow → force_drop_oldest；历史为空则同次 collapse → 同一额度内重试
       |    - 动态维护 estimate_context_chars
       |
       v  take_context_state ← 取回 ContextState

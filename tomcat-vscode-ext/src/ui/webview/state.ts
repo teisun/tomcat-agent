@@ -3021,6 +3021,14 @@ export class WebviewStateStore {
     runtime.dismissedErrorIds.add(errorId);
   }
 
+  /** A finished failed run can reuse the same durable error id (e.g. repeated 401). */
+  clearDismissedErrorRecoveries(sessionId: string): void {
+    const runtime = this.ensureRuntime(sessionId);
+    runtime.dismissedErrorIds.clear();
+    runtime.dismissedErrorCards.clear();
+    // The following successful history hydration recomputes the current action.
+  }
+
   restoreDismissedErrorRecovery(sessionId: string, errorId: string): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);

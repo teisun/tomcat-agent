@@ -107,6 +107,7 @@ pub trait EphemeralTailProvider: Send + Sync {
 // ─── 配置与结果 ─────────────────────────────────────────────────────────────
 
 pub struct AgentLoopConfig {
+    /// 每次逻辑模型请求的尝试上限，含首次；压缩、空答与降级不重置额度。
     pub max_attempts: u32,
     /// 请求组装时置于消息列表之前的稳定 system prompt。
     ///
@@ -119,7 +120,7 @@ pub struct AgentLoopConfig {
     /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
     /// receive plan-writing capabilities merely to gain a transport retry budget.
     pub unattended_retry: bool,
-    /// 单次 Attempt 最大工具轮次。默认 `usize::MAX`（不限制）；
+    /// 单次 Reasoning Loop 最大工具轮次，网络重试不重置；默认 `usize::MAX`（不限制）；
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,

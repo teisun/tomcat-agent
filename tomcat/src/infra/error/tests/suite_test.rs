@@ -125,6 +125,80 @@ fn is_retryable_llm_error_matches_truth_table() {
 }
 
 #[test]
+fn observed_gateway_codes_are_typed_transport_failures() {
+    for (code, kind) in [
+        ("server_error", LlmFailureKind::UpstreamTransient),
+        (
+            "upstream_http2_stream_error",
+            LlmFailureKind::StreamInterrupted,
+        ),
+        (
+            "upstream_stream_read_error",
+            LlmFailureKind::StreamInterrupted,
+        ),
+    ] {
+        for error in [
+            llm_stream_terminal_error("fixture", "opaque detail", Some(code.into())),
+            llm_stream_terminal_error(
+                "fixture",
+                format!(r#"{{"error":{{"code":"{code}"}}}}"#),
+                None,
+            ),
+            llm_stream_terminal_error(
+                "fixture",
+                format!(r#"{{"error":{{"type":"{code}"}}}}"#),
+                None,
+            ),
+        ] {
+            let failure = classify_llm_failure(&error);
+            assert_eq!(failure.kind, kind, "{code}: {error}");
+            assert_eq!(failure.domain, FailureDomain::Transport);
+            assert!(is_retryable_llm_error(&error));
+        }
+    }
+}
+
+#[test]
+fn observed_gateway_codes_do_not_override_account_or_content_failures() {
+    for code in [
+        "server_error",
+        "upstream_http2_stream_error",
+        "upstream_stream_read_error",
+    ] {
+        for (summary, kind) in [
+            (
+                r#"{"error":{"type":"billing_error"}}"#,
+                LlmFailureKind::Billing,
+            ),
+            (
+                r#"{"error":{"type":"authentication_error"}}"#,
+                LlmFailureKind::Authentication,
+            ),
+            (
+                "response blocked by content_filter",
+                LlmFailureKind::ContentFiltered,
+            ),
+        ] {
+            let error = llm_stream_terminal_error("fixture", summary, Some(code.into()));
+            assert_eq!(classify_llm_failure(&error).kind, kind, "{code}: {summary}");
+            assert!(!is_retryable_llm_error(&error));
+        }
+        for status in [401, 403] {
+            let error = llm_http_status_error(
+                "fixture",
+                status,
+                format!(r#"{{"error":{{"code":"{code}"}}}}"#),
+            );
+            assert_eq!(
+                classify_llm_failure(&error).kind,
+                LlmFailureKind::Authentication
+            );
+            assert!(!is_retryable_llm_error(&error));
+        }
+    }
+}
+
+#[test]
 fn llm_connect_or_network_matches_truth_table() {
     assert!(llm_connect_or_network(&llm_error(
         "openai",

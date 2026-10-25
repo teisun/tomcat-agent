@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Socket } from "node:net";
 
 export type ScriptedPart = { body: string; delayMs?: number; waitFor?: Promise<void> };
-export type ScriptedResponse = { parts: ScriptedPart[] };
+export type ScriptedResponse = { parts: ScriptedPart[]; status?: number };
 export function sseDelta(content: string): ScriptedPart {
   return { body: `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n` };
 }
@@ -57,7 +57,7 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     }
     const scripted = responses[responseIndex++];
     if (!scripted) { response.statusCode = 500; response.end("unexpected request"); return; }
-    response.writeHead(200, { "Cache-Control": "no-cache", Connection: "close", "Content-Type": "text/event-stream" });
+    response.writeHead(scripted.status ?? 200, { "Cache-Control": "no-cache", Connection: "close", "Content-Type": scripted.status && scripted.status !== 200 ? "application/json" : "text/event-stream" });
     for (const part of scripted.parts) {
       if (part.waitFor) await part.waitFor;
       if (part.delayMs && part.delayMs > 0) await delay(part.delayMs, undefined, { signal: abort.signal });

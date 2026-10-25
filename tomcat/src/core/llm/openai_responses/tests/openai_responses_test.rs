@@ -2993,6 +2993,163 @@ async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
 }
 
 #[tokio::test]
+async fn cross_layer_request_budgets_preserve_completed_tools_and_bound_http_retries() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingRead(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for CountingRead {
+        async fn read_file(&self, _: &str, _: &str) -> Result<String, AppError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("completed exactly once".into())
+        }
+        async fn list_dir(&self, p: &str, id: &str) -> Result<Vec<DirEntry>, AppError> {
+            UnusedPrimitive.list_dir(p, id).await
+        }
+        async fn write_file(
+            &self,
+            p: &str,
+            c: &str,
+            o: bool,
+            id: &str,
+        ) -> Result<WriteFileResult, AppError> {
+            UnusedPrimitive.write_file(p, c, o, id).await
+        }
+        async fn edit_file(
+            &self,
+            p: &str,
+            e: Vec<EditOperation>,
+            id: &str,
+        ) -> Result<EditFileResult, AppError> {
+            UnusedPrimitive.edit_file(p, e, id).await
+        }
+        async fn execute_bash(
+            &self,
+            c: &str,
+            d: Option<&str>,
+            id: &str,
+            w: Option<u64>,
+        ) -> Result<BashResult, AppError> {
+            UnusedPrimitive.execute_bash(c, d, id, w).await
+        }
+        async fn require_user_confirmation(
+            &self,
+            _: PrimitiveOperation,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, AppError> {
+            Ok(true)
+        }
+    }
+    let sse = |events: &[&str]| ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".into(), "text/event-stream".into())],
+        body: responses_sse_body(events),
+        delay_ms: 0,
+        declared_content_length: None,
+    };
+    let server = MockHttpServer::start(vec![
+        sse(&[r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"temporary upstream failure"}}}"#]),
+        sse(&[
+            r#"{"type":"response.output_text.delta","delta":"before "}"#,
+            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"once","name":"read","arguments":"{\"path\":\"/a\"}"}}"#,
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#,
+        ]),
+        ScriptedHttpResponse::json(503, r#"{"error":"temporary upstream failure"}"#),
+        sse(&[
+            r#"{"type":"response.output_text.delta","delta":"discarded partial"}"#,
+            r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_bad","call_id":"bad","name":"write","arguments":"{\"path\":\"discarded\",\"content\":\"never\"}"}}"#,
+            // EOF without response.completed: even a fully parsed call must not run.
+        ]),
+        sse(&[
+            r#"{"type":"response.output_text.delta","delta":"after"}"#,
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#,
+        ]),
+    ]).await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 1);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let sink = Arc::new(CrossLayerAppendSink::default());
+    let bus = Arc::new(DefaultEventBus::new());
+    let ends = Arc::new(Mutex::new(Vec::new()));
+    let captured = ends.clone();
+    bus.on(
+        wire::WIRE_AUTO_RETRY_END,
+        Box::new(move |ctx: EventContext| {
+            captured.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+    let mut agent = AgentLoop::new(
+        ResolvedCall::from_parts_unchecked(Arc::new(provider), "gpt-5", "gpt-5"),
+        Arc::new(CountingRead(reads.clone())),
+        bus,
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let result = agent
+        .run(vec![ChatMessage::user("read once")])
+        .await
+        .unwrap();
+    assert_eq!(result.final_text, "before after");
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        server.request_count(),
+        5,
+        "A: two model attempts; B: two attempts plus one adapter retry"
+    );
+    for request in server.request_texts().iter().skip(2) {
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let outputs: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["type"] == "function_call_output")
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["call_id"], "once");
+        assert!(outputs[0].to_string().contains("completed exactly once"));
+        assert!(!body.to_string().contains("discarded"));
+    }
+    {
+        let messages = sink.messages.lock().unwrap();
+        assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 1);
+        assert!(messages
+            .iter()
+            .all(|m| !m.to_string().contains("discarded")));
+        let ends = ends.lock().unwrap();
+        assert_eq!(ends.len(), 2);
+        assert!(ends
+            .iter()
+            .all(|e| e["success"] == true && e["attempt"] == 2));
+    }
+    server.shutdown().await;
+
+    // Agent attempts and adapter HTTP retries remain separately bounded, not infinite.
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(
+            503,
+            r#"{"error":"temporary"}"#
+        );
+        4
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 1);
+    let (mut agent, _) = cross_layer_agent(provider, None);
+    assert!(agent.run(vec![ChatMessage::user("bounded")]).await.is_err());
+    assert_eq!(
+        server.request_count(),
+        4,
+        "2 logical attempts × (1 first HTTP + 1 adapter retry)"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn cross_layer_truncated_stream_retries_without_persisting_partial() {
     for tail in [
         "",

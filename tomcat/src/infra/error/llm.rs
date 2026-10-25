@@ -584,6 +584,11 @@ pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
         return LlmFailure::new(LlmFailureKind::Authentication, FailureDomain::Account);
     }
 
+    // Deterministic refusals must win over transient gateway codes and statuses.
+    if is_deterministic_stream_refusal_text(&summary) {
+        return LlmFailure::new(LlmFailureKind::ContentFiltered, FailureDomain::Content);
+    }
+
     if matches_any(
         code.as_deref(),
         &[
@@ -602,9 +607,16 @@ pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
 
     if matches_any(
         code.as_deref(),
-        &["upstream_error", "bad_gateway", "gateway_error"],
-    ) || matches_any(error_type.as_deref(), &["upstream_error", "gateway_error"])
-        || matches!(status, Some(500 | 502 | 503 | 504))
+        &[
+            "upstream_error",
+            "server_error",
+            "bad_gateway",
+            "gateway_error",
+        ],
+    ) || matches_any(
+        error_type.as_deref(),
+        &["upstream_error", "server_error", "gateway_error"],
+    ) || matches!(status, Some(500 | 502 | 503 | 504))
         || contains_any(
             &summary,
             &[
@@ -618,24 +630,29 @@ pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
         return LlmFailure::new(LlmFailureKind::UpstreamTransient, FailureDomain::Transport);
     }
 
-    if matches_any(code.as_deref(), &["stream_interrupted"])
-        || matches!(
-            llm_stage(err),
-            Some(
-                LlmErrorStage::Connect
-                    | LlmErrorStage::Send
-                    | LlmErrorStage::BodyRead
-                    | LlmErrorStage::IdleTimeout
-                    | LlmErrorStage::ReadTimeout
-            )
+    if matches_any(
+        code.as_deref(),
+        &[
+            "stream_interrupted",
+            "upstream_http2_stream_error",
+            "upstream_stream_read_error",
+        ],
+    ) || matches_any(
+        error_type.as_deref(),
+        &["upstream_http2_stream_error", "upstream_stream_read_error"],
+    ) || matches!(
+        llm_stage(err),
+        Some(
+            LlmErrorStage::Connect
+                | LlmErrorStage::Send
+                | LlmErrorStage::BodyRead
+                | LlmErrorStage::IdleTimeout
+                | LlmErrorStage::ReadTimeout
         )
-    {
+    ) {
         return LlmFailure::new(LlmFailureKind::StreamInterrupted, FailureDomain::Transport);
     }
 
-    if is_deterministic_stream_refusal_text(&summary) {
-        return LlmFailure::new(LlmFailureKind::ContentFiltered, FailureDomain::Content);
-    }
     if is_unsupported_multimodal_text(&summary) {
         return LlmFailure::new(
             LlmFailureKind::UnsupportedMultimodal,

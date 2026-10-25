@@ -359,6 +359,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  errorRecovery?: { errorId: string; dueAt: number };
   access?: import("../../src/serveClient/sessionRouter").SessionAccess;
   origin?: import("../../src/serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
@@ -850,6 +851,7 @@ export type WebviewIntent =
         sessionId: string;
       };
     }
+  | { messageId: string; type: "cancelErrorRecovery"; data: { sessionId: string; errorId: string; dueAt: number } }
   | {
       messageId: string;
       type: "recoverErrorTurn";

@@ -3274,6 +3274,104 @@ export async function assertWebviewReviewProgressFlow(
   assert.ok(failed.html.includes("FAIL"));
 }
 
+/** Real extension + Chromium, fake backend; one production five-minute timer (no time override). */
+export async function assertAutomaticErrorRecoveryCountdown(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  // The ready notification precedes async bootstrap; await its existing workflow
+  // before creating the fixture session so late bootstrap cannot reselect session 1.
+  await api.__testing.sendWebviewIntent({ type: "ready", messageId: "recovery-bootstrap" });
+  await api.__testing.sendSettingsIntent({ type: "settings.ready", messageId: "recovery-settings-ready", data: { route: "general" } });
+  const setLanguage = async (language: "en" | "zh-CN") => {
+    await api.__testing.sendSettingsIntent({ type: "setUiLanguage", messageId: `recovery-language-${language}`, data: { language } });
+    await waitFor(() => api.__testing.getWebviewState().locale === language);
+  };
+  await setLanguage("en");
+  const retryId = await createFreshWebviewSession(api, "automatic-error-recovery-retry");
+  await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "auto-retry-prompt", data: { sessionId: retryId, text: "automatic error recovery countdown" } });
+  await waitForWebviewState(api, state => state.sessionViews[retryId]?.errorRecovery ?? undefined);
+  const deadline = api.__testing.getWebviewState().sessionViews[retryId].errorRecovery!.dueAt;
+  let chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const capture = async (name: string) => {
+    if (process.env.TOMCAT_E2E_SCREENSHOT !== "1") return;
+    const target = transcriptVisualArtifactPath(`error-recovery-${name}.png`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await chat.capture(target);
+  };
+  const maximize = "workbench.action.toggleMaximizedAuxiliaryBar";
+  let maximized = false;
+  try {
+    await api.__testing.executeCommand(maximize); maximized = true;
+    await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000, "Desktop evidence must capture a genuinely wide panel");
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "recover-error-turn" && /Retry.*0[45]:[0-5][0-9]/.test(b.name)), "Retry countdown must render");
+    assert.equal(await chat.evaluate(`document.querySelector('[data-testid="recover-error-turn"]').getAttribute('aria-label')`), en["common.retry"]);
+    await capture("retry-en-desktop");
+
+    // Destroy the actual browser document, rather than calling the host-only reload seam.
+    await chat.evaluate("globalThis.__recoveryDocumentMarker = true; setTimeout(() => location.reload(), 0); true");
+    await pause(300); chat.close();
+    chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "cancel-error-recovery"), "Countdown survives a real document reload");
+    assert.equal(await chat.evaluate("globalThis.__recoveryDocumentMarker"), undefined);
+    assert.equal(api.__testing.getWebviewState().sessionViews[retryId].errorRecovery?.dueAt, deadline);
+
+    const resumeId = await createFreshWebviewSession(api, "automatic-error-recovery-resume");
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "auto-resume-prompt", data: { sessionId: resumeId, text: "resume card showcase" } });
+    await waitForWebviewState(api, state => state.sessionViews[resumeId]?.errorRecovery ?? undefined);
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "recover-error-turn" && /Resume.*0[45]:[0-5][0-9]/.test(b.name)), "Resume countdown must render in English");
+    assert.equal(await chat.evaluate(`document.querySelector('[data-testid="recover-error-turn"]').getAttribute('aria-label')`), en["common.resume"]);
+    await capture("resume-en-desktop");
+    await setLanguage("zh-CN");
+    // A maximized 448px workbench leaves a ~390px chat frame after VS Code chrome.
+    // Never force a 390px root inside an unchanged 289px sidebar and crop the evidence.
+    await chat.setViewport(448, 844);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 320 && dom.viewport.width <= 390, "Narrow evidence must fit the actual visible panel");
+    await waitFor(() => chat.evaluate<boolean>(`document.documentElement.lang === 'zh-CN' && !!document.querySelector('[data-testid="error-recovery-countdown"]')`));
+    const fits = await chat.evaluate<boolean>(`(() => {
+      const actions = document.querySelector('[data-testid="error-recovery-actions"]');
+      const buttons = [...actions.querySelectorAll('button')];
+      return document.documentElement.scrollWidth <= innerWidth && actions.scrollWidth <= actions.clientWidth + 1
+        && buttons.every(button => { const r = button.getBoundingClientRect(); return r.x >= 0 && r.right <= innerWidth; });
+    })()`);
+    assert.equal(fits, true);
+    await capture("resume-zh-390");
+    await chat.click("cancel-error-recovery");
+    await waitFor(() => !api.__testing.getWebviewState().sessionViews[resumeId].errorRecovery);
+    await chat.waitForSnapshot(dom => !dom.buttons.some(b => b.testId === "cancel-error-recovery") && dom.buttons.some(b => b.testId === "recover-error-turn"), "Cancel retains manual Resume");
+    await capture("cancelled-zh-390");
+    await chat.focusAndPress("recover-error-turn", "Enter");
+    await waitFor(() => api.__testing.getWebviewState().sessionViews[resumeId].timeline.some(item => item.type === "message" && item.text.includes("same session Resume continued")));
+    await chat.setViewport(1440, 900);
+    await api.__testing.executeCommand(maximize); maximized = false;
+    await setLanguage("en");
+
+    const foregroundId = await createFreshWebviewSession(api, "automatic-error-recovery-foreground");
+    const editorPath = path.join(requireEnv(TEST_DEFAULT_CWD_ENV), "automatic-recovery-focus.txt");
+    await fs.writeFile(editorPath, "Automatic background recovery must not steal this editor.\n");
+    const document = await vscode.workspace.openTextDocument(editorPath);
+    await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+    await waitFor(() => chat.evaluate<boolean>("!document.hasFocus()"));
+    assert.ok(Date.now() < deadline, "Test setup must finish before the actual five-minute deadline");
+    await waitFor(() => api.__testing.getWebviewState().sessionViews[retryId].timeline.some(item => item.type === "message" && item.text.includes("same session retry succeeded")), Math.max(20_000, deadline - Date.now() + 20_000), "Production five-minute timer did not recover the background session");
+    // Assert focus before screenshots, which intentionally bring the test window forward.
+    assert.equal(api.__testing.getWebviewState().activeSessionId, foregroundId);
+    assert.equal(vscode.window.activeTextEditor?.document, document);
+    assert.equal(await chat.evaluate("document.hasFocus()"), false);
+    assert.equal(api.__testing.getWebviewState().sessionViews[retryId].errorRecovery, undefined);
+    await api.__testing.sendWebviewIntent({ type: "switchSession", messageId: "show-auto-success", data: { sessionId: retryId } });
+    await chat.waitForSnapshot(dom => dom.text.includes("same session retry succeeded"), "Recovered transcript is visible");
+    await api.__testing.executeCommand(maximize); maximized = true;
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000, "Success evidence must capture a genuinely wide panel");
+    await capture("success-en-desktop");
+  } finally {
+    await chat.setViewport(1440, 900);
+    if (maximized) await api.__testing.executeCommand(maximize);
+    chat.close();
+    await setLanguage("en");
+  }
+}
+
 export async function assertWebviewRetryRecoveryFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
