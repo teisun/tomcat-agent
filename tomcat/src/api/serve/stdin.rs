@@ -9,8 +9,9 @@ use super::ndjson::{extract_response_refs, parse_command_line};
 use super::types::{OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
 
-/// In-memory queue metadata, never part of either wire protocol. A prompt's
-/// token is created on receipt, so an interrupt cannot be lost before dequeue.
+/// In-memory queue metadata, never part of either wire protocol. ACP creates
+/// the prompt token on receipt; Native supplies none and its client uses
+/// `stopAfterAck` to interrupt a prompt once the server acknowledges admission.
 #[derive(Debug)]
 pub(crate) struct QueuedCommand {
     pub command: ServeCommand,

@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-01 21:54 | ACTIVE | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 06:50 | BLOCKED | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -93,10 +93,36 @@
 - 既有 `prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout` 隔离运行超过 60 秒仍未完成，停止后记为未验证；完整库门禁不记全绿。详细任务退出码记录在本地 write-plans 内置计划的验收 evidence 中。
 - 本次提交遵照用户要求不重跑测试、构建或覆盖率，Cov% 保持未测量；归档 bench、真实模型评测、release 构建、安装和服务重启均不执行。技能工作流附件的原文末尾空行保留，不为 Git 空白提示改写已验收资产。
 
+### 合并审查与验收（等待计划修订）
+
+| 审查组 | 规范 / 调用链与结论 | 测试落点 |
+| --- | --- | --- |
+| ① serve / IPC / 所有权 | 架构 §4/9：CLI 预检检查对端系统账号（`infra/platform/local_socket.rs::connect`），Node 第二条连接尚未保护发送环境；`service.rs:468` 仅比产品版本，本轮不升版本，不能挡住同版本旧构建。补握手识别是计划修订阻塞。CloseSession、晚注册 Bash 按已有计划复现；writer 失败的 busy 遗留另待复现。 | `sharedConnection.test.ts`、`serve/tests/{service,commands,connection,session_job}_test.rs`、`serve_shared_e2e.rs` |
+| ② ACP / MCP / 规则 / 插件 | 架构 §1/4/9：ACP 复用 serve，取消清理受 writer 顺序影响按计划修；MCP 私有层及 AGENTS 规则权限已有对应回归。插件执行停止、共享 scope 第二上下文的 SessionManager 弱引用、动态初始化 bare ID 与会话绑定的关系需先构造复现，不直接引入新生命周期。 | `acp_stdio_e2e.rs`、`serve/tests/connection_test.rs`、`chat/tests/{context,resource_inventory}_test.rs` |
+| ③ 重试 / 技能 / 提示 | 架构 §4.1/注释规范：`empty_turn` 吞错误是从 develop 原样迁移的旧问题，本轮补警告但保持尽力写入；请求预算、取消、禁用和同名覆盖按已有契约。技能文档缺 Connection 优先级说明待文档任务修正。 | `agent_loop/tests/run_basic_test.rs`、`request_retry_test.rs`；现有 skill/prompts 测试 |
+| ④ 扩展 / GUI / 引用 | 架构 §4/单一状态源：页面重建和迟到开头按计划修；新增线索为空窗口未建立 scope、隐藏面板版本冲突仍给普通 Retry、IPC ENOENT 被归为缺 CLI；`webview_provider_flow.test.ts` 的 switchSession 字符串替身已与对象回执漂移，进入 UI 任务核对。多根路径与标签分离保持原实现。 | `webview_provider_flow.test.ts`、`dual_channel.test.ts`、`provider_error_recovery.test.ts`、`ServeConnectionSupervisor.test.ts`、真实安装态 harness |
+| ⑤ Windows / 安装 / 代理 / CI | 架构 §5/12：`shell.rs::posix_shell_for` 由连接 PATH 定位 Git；`environment.rs:96-113` 将相对 PATH 拼到任务 cwd，`bash_task.rs:756-770` 先执行探测才授权。这是反驳计划“Git 不受项目控制”的新代码证据，修订后才能按最小边界调整。探测期限、夹具预算、CI 接线仍保留；代理快照不扩围。管理命令校验失败退出成功和 PATH 目录误判另待复现。 | `platform/tests/shell_test.rs`、`primitive/tests/suite_test.rs`、`cli_tests.rs`、`resolveTomcatExecutable.test.ts`、现有 fixture/CI 测试 |
+| ⑥ 宿主包 / 版本 / 文档 | 架构 §6/文档对齐：包清单、路径与哈希只读核验对应，等待精确基线 apply 检查；CLI/扩展/bundled 镜像一致。Multica 上层 30 秒与适配器 65 秒边界仍是明确未实测风险，不把本次 Tomcat 侧通过等同宿主通过。 | 包内 `VALIDATION.md` 检查、隔离基线 `git apply --check`、`release-version.mjs check` |
+
+- 基线：源 `970b6bb53bfdcf718341aee7ce2e0843933a33c7`，fetch 后 develop 由 `383a7b97b19f0471048c10a30cab68255503bcf0` 快进到 `86081c3121a183ffd1b65997998f88f7fd26f7e0`；merge-base 为前者。预演合并树与源树均为 `61b5b670fe0eb336d2bebe5713bcf009b7b49265`，无需回合并。开始时工作区干净，develop 无其它 worktree 占用；不清理已有工作树。
+- 环境：Darwin x86_64，rustc 1.96.0、nextest 0.9.140、Node 23.11.0；扩展依赖与隔离 VS Code harness 存在，初始可用磁盘 16GiB。默认 real-llm 必需的 `IDATATLAS_OPENAI_API_KEY` 未配置，仅核对存在性；Windows 环境未确认。真实模型与平台验收不能记为通过。
+- 审查覆盖：按 `383a7b97..970b6bb5` 的 385 个变更路径分六组检查 serve/IPC/所有权、ACP/MCP/插件、重试/技能/提示、扩展/GUI、多平台/CI、宿主包/版本/文档；以架构分层、错误传播、测试布局、Rust 惯用法和注释规范为依据，长文件不机械拆分。
+- 已知修复仍按计划推进。额外审查线索须由主 Agent 复核或用例复现后归因：开始回合前 writer 失败导致 busy 遗留、审批回复被入队命令阻塞、插件停止与第二会话的弱引用存活、空窗口初始化及 IPC ENOENT 分类、Git 探测早于授权、CLI 管理命令失败返回成功、可执行路径误选目录。未复现项不冒充运行时结论，不因报告建议直接扩大设计。
+- 握手兼容需特别核对：精确包版本不能区分同版本号的不同构建；fake-Serve 安装态夹具也是 Native 握手消费者。保持现有直连，不恢复已撤销的 relay。
+- 技能文档仍称 Project 最高优先级，但实现有 Connection 覆盖；在文档任务中修正。服务端文本采用进程级语言是既有边界，不扩成逐连接翻译。关窗清理失败通知、一次性 CI 代理原值修复不因审查报告自动恢复为新需求。
+- 两份宿主包只读审查的清单、27 个新增文件、69 个最终文件和四份 patch 哈希对应；精确基线隔离副本已找到，patch apply 检查待执行。Multica 宿主 30 秒与适配器 65 秒取消预算差异沿用既有风险记录，不能把 backend 单测当成宿主工作目录安全收尾证明。
+- 本轮审查小修：先补 Story 8c/8d 与 E2E-CLI-103～105、E2E-VSCEXT-036～037 的契约（待后续实现验收）；更正 QueuedCommand 注释；empty_turn 写盘失败增加含回合/尝试/分类的 warn，不打印正文、不改变重试额度或结果。
+- T16 红→绿：任务 `1793572679889-arqsiq`（日志 `~/.tomcat/agents/main/tool-results/bash-1793572679889-arqsiq.log`）先得到 0 passed / 1 failed，失败原因是两次空答诊断写失败没有 warn。修后任务 `1793572948891-ydxnc6`（同目录对应 `.log`）执行 `cargo test -p tomcat --lib empty_turn -- --nocapture`：6 passed / 0 failed / 0 ignored；校验正常与诊断失败都恰好请求三次、最终正文 recovered、不泄露思考文本/响应 ID/载荷哨兵。紧接 `cargo clippy -p tomcat --lib -- -D warnings` 退出 0。仅定向结果，未执行全库/全门禁。
+- `node scripts/release-version.mjs check` 与本轮 `git diff --check` 通过；版本未修改。测试后只更新状态说明，未改变行为或夹具。
+- 执行中计划正文不可直接编辑；握手同版本兼容与 Git 探测授权的两条新证据已与原决策相矛盾，等待切回 PLAN 修订后继续，预计修订获准后恢复实施。不绕过计划约束，也不把这些问题标成已修复。
+- 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
+| 本轮合并计划修订 | 同版本旧服务无法被产品版本门禁识别；Git 探测可能运行项目 PATH 中的程序且早于授权，原计划的两项前提不成立 | 切回 PLAN 修订握手识别与探测授权边界，并确认新增审查线索的复现范围后继续；当前只完成基线与审查小修 |
+| 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
 | write-plans 完整库验收 | 相关离线用例通过；全库批次有 1 项临时目录错误（单独重跑通过）、5 项忽略，另 1 项既有评审器测试挂起未验证 | 保留失败与未验证记录；后续单独处理测试隔离与挂起，不将本次提交标成全库全绿 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
 | 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |

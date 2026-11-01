@@ -17,8 +17,8 @@ use super::{current_tail_guard, stream_handler};
 use crate::core::llm::{ChatMessage, ChatRequest, MessageKind};
 use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
 use crate::infra::error::{
-    is_retryable_llm_error, is_unsupported_multimodal_text, llm_empty_response_error, llm_http_status,
-    llm_retry_after_ms, llm_stage, llm_summary, AppError,
+    is_retryable_llm_error, is_unsupported_multimodal_text, llm_empty_response_error,
+    llm_http_status, llm_retry_after_ms, llm_stage, llm_summary, AppError,
 };
 use crate::infra::events::{wire, AgentEvent};
 
@@ -456,7 +456,7 @@ pub(super) async fn run_request_once(
         } else {
             "thinking_only"
         };
-        let _ = agent.persist_custom_entry_if_needed(serde_json::json!({
+        if let Err(error) = agent.persist_custom_entry_if_needed(serde_json::json!({
             "event": "empty_turn",
             "turn_index": turn_index,
             "finish_reason": finish_reason.as_deref(),
@@ -469,7 +469,9 @@ pub(super) async fn run_request_once(
             "failure_kind": failure_kind,
             "attempt": attempt,
             "response_id": response_id,
-        }));
+        })) {
+            warn!(%error, turn_index, attempt, failure_kind, "empty_turn diagnostic write failed");
+        }
         agent.clear_pending_assistant_entry_id();
         let message = match failure_kind {
             "output_truncated" => crate::infra::i18n::tr("agentLoop.outputTruncated", &[]),

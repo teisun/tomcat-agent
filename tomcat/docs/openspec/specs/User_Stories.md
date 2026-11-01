@@ -179,6 +179,9 @@
 - [ ] `initialize` capabilities、schema 导出（`--print-schema`）与 committed fixture 长期保持一致，供 IDE/GUI 宿主编译期发现协议漂移
 - [ ] 宿主可经 `prompt.params.attachments` 发送多模态输入，Tomcat 在真实回合中按用户消息 part 组装，而不是退化为纯文本
 - [ ] 坏输入 / EOF / ask_question 回答与取消等边界路径均有明确、可恢复且可审计的行为
+- [ ] 扩展默认连接每个 Agent 的共享服务；Native 先发送不含环境的 hello，核对与已验系统账号的 CLI 预检一致的服务编号，再交控制者环境，收到 ready 才可发送业务请求。编号不符、坏回复或超时均不得外发环境；不新增接线进程。
+- [ ] 控制者关闭会话先停止并等待该会话的前台、后台 Bash、子 Agent 与私有 MCP，成功后才卸载并回复 closed；停止失败保留槽位与控制权并返回错误。旁观者关闭只退订，不影响其它会话或历史。
+- [ ] ACP 宿主发出取消后，即使暂时不读取输出，后台清理也立即开始；终态仍等待清理完成、排在此前输出之后，且只返回一次。连接关闭沿用原断连路径。
 
 ### Story 8d: VSCode Chat 扩展 Phase 2
 **作为 VSCode 用户**，我希望能在 `@tomcat` 聊天入口与自建 webview 面板中使用 `/plan`、`/model`、富工具卡/审批卡/思考块、多会话历史与 diff/edit 能力，并确保两个入口共享同一项目会话池而不互相抢占。
@@ -198,6 +201,8 @@
 - [ ] 历史编辑重发与模型移除保留后端原回执；后续视图/目录刷新失败单独提示，不覆盖原成功或失败原因，不自动重复已经提交的操作。
 - [ ] 编辑器/Plan Preview 的 `Add Selection to Tomcat Chat` 与 Shift 拖放文件都可把引用加入 composer；用户再次添加相同文件/选区保留新的 occurrence，只有同一 occurrence 的 event/snapshot 重放去重；reload / 历史回放保持顺序、文件名与行号。
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
+- [ ] webview 页面重建保留宿主当前仍有效的会话选择、旁观权限、草稿与恢复 deadline；所选会话已删除或服务重连时才回退原默认会话选择，不因页面 ready 新建会话。
+- [ ] 历史已包含某 assistant messageId 时，迟到的 message_start、正文和 thinking 增量不得重复渲染该消息；新的 messageId 仍正常流式显示。恢复 checkpoint 一旦接管，不得再由旧自动恢复倒计时触发重试。
 
 ### Story 8e: VSCode webview transcript 仿 Chat 体验（Phase 2+）
 **作为 VSCode 用户**，我希望侧栏 transcript 的视觉与交互对齐 VSCode Chat：用户消息右侧 pill、assistant 无框 markdown 流、thinking+tool 按 assistant response 折叠分组、utility 模型生成自然语言折叠标题、bash 折叠为 "Ran \<cmd\>"、plan/session todo 进度行、read 文件 chip 可点击打开。

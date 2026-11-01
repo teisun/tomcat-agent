@@ -219,6 +219,7 @@ fn large_user_turn(label: &str) -> ChatMessage {
 
 #[derive(Default)]
 struct RecordingAppendSink {
+    fail_custom_entries: bool,
     next_id: Mutex<u32>,
     messages: Mutex<Vec<serde_json::Value>>,
     custom_entries: Mutex<Vec<serde_json::Value>>,
@@ -234,6 +235,11 @@ impl MessageAppendSink for RecordingAppendSink {
 
     fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
         self.custom_entries.lock().unwrap().push(extra);
+        if self.fail_custom_entries {
+            return Err(AppError::Io(std::io::Error::other(
+                "diagnostic sink unavailable",
+            )));
+        }
         Ok(())
     }
 
@@ -1967,6 +1973,27 @@ async fn run_empty_messages_fails_before_calling_the_llm() {
 
 #[tokio::test]
 async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
+    assert_empty_turn_retry(false).await;
+}
+
+#[tokio::test]
+async fn empty_turn_diagnostic_failure_warns_without_changing_retry() {
+    assert_empty_turn_retry(true).await;
+}
+
+async fn assert_empty_turn_retry(fail_custom_entries: bool) {
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("warnings.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || log.try_clone().unwrap())
+        .finish();
+    // Keep callsite registration live while other tests use their own subscriber.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let (provider, requests) = RecordingStreamLlmProvider::new(vec![
         thinking_only_empty_stream(),
         hidden_empty_stream("resp_empty_2"),
@@ -1985,7 +2012,10 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
             }),
         );
     }
-    let sink = Arc::new(RecordingAppendSink::default());
+    let sink = Arc::new(RecordingAppendSink {
+        fail_custom_entries,
+        ..Default::default()
+    });
     let mut loop_ = AgentLoop::new(
         test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -2058,6 +2088,19 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
     assert_eq!(retry_ends.len(), 1);
     assert_eq!(retry_ends[0]["success"].as_bool(), Some(true));
     assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(3));
+    let logs = std::fs::read_to_string(log_path).unwrap();
+    assert_eq!(
+        logs.matches("empty_turn diagnostic write failed").count(),
+        if fail_custom_entries { 2 } else { 0 },
+        "diagnostic failures must be visible: {logs}"
+    );
+    assert!(!logs.contains("reasoning without a visible answer"));
+    assert!(!logs.contains("resp_empty_2"));
+    assert!(!logs.contains("opaque"));
+    if fail_custom_entries {
+        assert!(logs.contains("diagnostic sink unavailable"));
+        assert!(logs.contains("failure_kind=\"thinking_only\""));
+    }
 }
 
 #[tokio::test]
