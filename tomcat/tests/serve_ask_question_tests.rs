@@ -267,6 +267,8 @@ fn execution_workflow(stop: bool, restart: bool) {
         "history prefix must remain byte-identical"
     );
     assert!(first_tail.contains("kind=\"planner\""), "{first_tail}");
+    assert!(first_tail.contains("name=\"write-plans\""), "{first_tail}");
+    assert!(!next_tail.contains("write-plans"), "{next_tail}");
     assert!(!next_tail.contains("kind=\"planner\""));
     assert_eq!(
         next_tail.matches("kind=\"executor\"").count(),

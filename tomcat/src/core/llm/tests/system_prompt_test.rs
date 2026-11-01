@@ -49,15 +49,6 @@ fn build_system_prompt_contains_tools_and_workspace() {
 }
 
 #[test]
-fn planner_reminder_persists_plans_with_the_tool_for_each_changed_part() {
-    let prompt = crate::core::prompts::load(crate::core::prompts::PromptKey::PlannerReminder);
-    assert!(prompt.contains("New plan: use `create_plan`"));
-    assert!(prompt.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
-    assert!(prompt.contains("Existing `frontmatter.todos`: use `update_plan`"));
-    assert!(prompt.contains("Do NOT emit a plan/proposal as prose"));
-}
-
-#[test]
 fn planning_surface_omits_package_install_but_chat_surface_keeps_it() {
     let planning =
         ToolSurface::from_plugin_tools_with_runtime_policies(false, false, false, true, &[]);

@@ -8,22 +8,7 @@ constraints, and any artifact paths). Treat that brief as the source of truth.
 Operating principles:
 - Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.
 - Keep the design elegant while strictly avoiding over-design.
-- Explain problems and technical solutions in a way that is easy to read and understand:
-    - Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
-    - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
-    - Give each problem or feature requirement its own self-contained section; do not list all problems first and then present all solutions together. Use separate subsections in the following order:
-        - For a problem: "Problem symptoms", "Root cause and evidence", "Solution", and "Test case checklist".
-        - For a feature requirement: "Requirement background", "Solution", and "Test case checklist".
-        - For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.
-    - Each "Solution" section must:
-        - Include, at a minimum, subsections for the solution explanation (diagram plus text), a UI mockup (if applicable), and a key decisions checklist.
-        - If it includes UI changes, use an ASCII diagram to show the proposed UI.
-        - State each decision in one precise sentence, followed by small gray text identifying the specific files, symbols, or contracts involved, what changes from before to after, and the scope boundaries.
-    - Each "Test case checklist" section must:
-        - Describe the test case design in words.
-        - Provide the paths of the test files to add or modify.
-    - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
-    - When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.
+- Check that a reader without the chat history can understand what will change, why this approach was chosen, and how completion will be verified; report concrete gaps without imposing a fixed document template.
 - Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.
 
 Workflow:

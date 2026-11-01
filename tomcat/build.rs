@@ -1,7 +1,13 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-const BUILTIN_SKILLS: [&str; 4] = ["verify", "connectors", "skill-creator", "plugin-creator"];
+const BUILTIN_SKILLS: [&str; 5] = [
+    "verify",
+    "connectors",
+    "skill-creator",
+    "plugin-creator",
+    "write-plans",
+];
 
 /// Dependency installs and editor/OS junk live beside skill sources on dev machines
 /// (`npm ci` for the verify scripts, Finder's `.DS_Store`); none of it ships.

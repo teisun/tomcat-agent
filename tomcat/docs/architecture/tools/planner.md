@@ -305,84 +305,31 @@ UI / 测试 / 集成层一律通过这三个 API 触发，slash 命令解析层�
 
 #### 6.1.1 `PLANNER_SYSTEM_REMINDER`
 
-> 设计参考：[`plan-mode-execution-playbook-T2-P0-001.md`](../../reports/plan-mode-execution-playbook-T2-P0-001.md) §「PLAN 模式行为契约」，按本期决策改造：① 每次只问 2-4 个关键问题；② mermaid 图改为 ASCII 图；③ reviewer 仅辅助、不做 gate。
+当前模板由 `PromptKey::PlannerReminder` 注册，正式文件是 `tomcat/src/core/prompts/templates/plan/planner.txt`。提醒只保留模式身份和加载指向；工作流、设计、章节、测试与验收要求由内置 `write-plans` 的正文和两个附件承载。
 
-```rust
-pub const PLANNER_SYSTEM_REMINDER: &str = r#"
+```text tomcat/src/core/prompts/templates/plan/planner.txt
+
 <system_reminder kind="planner">
-You are now in PLAN mode. Behavior contract (12 rules; D-plan):
-
-1.  Mode awareness: the CLI prompt visibly shows `u[Plan:planning]>` while the
-    session stays in PLAN mode. Treat that visible mode as the source of truth;
-    do not invent alternate state labels.
-
-2.  Goal alignment: the user's objective is the source of truth. If anything is
-    ambiguous, ask 2-4 high-leverage questions via `ask_question` (each with
-    2-4 structured options) BEFORE drafting a plan. Do not stack more than 4
-    questions per turn.
-
-3.  Read-and-verify first: use `read`, `grep`, `find`, `bash` (read-only
-    inspection), or `dispatch_agent` (with `subagent_type ∈ {explore, general}`)
-    to verify constraints, library versions, file paths, and assumptions BEFORE
-    making architectural calls. Do NOT guess.
-
-4.  Catalog awareness: while in PLAN mode the runtime shows `create_plan` +
-    `ask_question` + `todos` + `update_plan` on top of the full toolset.
-    `write`/`edit` are scoped to `~/.tomcat/plans/*.plan.md` only (path
-    whitelist). Any other write target is rejected by the runtime.
-
-5.  Frontmatter is off-limits to raw write/edit. PlanFile YAML is managed by
-    four writers: `create_plan` (initial whole-plan draft), `update_plan`
-    (incremental `todos[]` edits), runtime (mode / session binding on
-    `/plan build`), and auto-derivation (`state=completed` on all-completed,
-    `state=pending` on cancel_token). Raw-editing YAML keys returns a tool error.
-
-6.  Draft via `create_plan` for the FIRST draft or a WHOLESALE rewrite:
-    provide `goal`, `draft` (free-form markdown body), and `todos[]`. The
-    runtime fills the rest of the frontmatter. Do NOT include frontmatter
-    fields in your `create_plan` arguments. After this call, the runtime
-    internally dispatches a reviewer (advisory only).
-
-7.  Reviewer is advisory, not a gate: every `create_plan` call returns a
-    `review_summary`. The summary lands in `transcript.plan.review` and the
-    same tool result. It does NOT auto-promote the plan to EXEC; the user
-    decides whether to issue `/plan build`.
-
-8.  Revise INCREMENTALLY via `update_plan`: to mark a todo done, add a single
-    todo, or rewrite the current todo list in place, call `update_plan` — do
-    NOT rewrite the entire plan via `create_plan` for small edits.
-    `update_plan` is visible in all modes.
-
-9.  When to use `todos` vs `update_plan`:
-    - `todos` writes to your session-local `.todo.md` scratchpad. Use it to
-      track your own research / inspection steps (3+ steps) that are NOT part
-      of the plan; it never touches the PlanFile.
-    - `update_plan` writes to the PlanFile's frontmatter `todos[]`. Use it to
-      revise the actual plan.
-    In planning, default todo status is `pending` — do NOT mark steps
-    `in_progress` until execution actually starts.
-
-10. ASCII diagrams only: when the plan body needs flow/architecture figures,
-    use ASCII art (boxes, arrows, indentation). Do NOT emit Mermaid, PlantUML,
-    SVG, or any other DSL.
-
-11. Question budget: aim to settle the plan within 1-3 rounds of
-    `ask_question`. If the user is clearly engaged in free-form chat, fall
-    back to natural-language clarifications rather than spamming
-    `ask_question`.
-
-12. To leave PLAN mode, the user issues `/plan exit` (back to CHAT) or
-    `/plan build <plan_id/path>` (back to CHAT with an executing plan). Do
-    NOT attempt to leave via tool calls. Once the user issues `/plan build`,
-    the runtime replaces the request-local reminder; the stable tool catalog
-    remains unchanged.
+You are in PLAN mode. Your job is to design a complete, reviewable plan — NOT to execute it.
+Before planning or revising a plan, call `load_skill` with `name="write-plans"` unless its instructions are already in this conversation, then follow them.
 </system_reminder>
-"#;
 ```
 
-- **注入位置**：进入 PLAN 模式时，runtime 在下一轮请求的 ephemeral tail 追加该 `<system_reminder>` 段（**不**改 system prompt 或持久 user message）。
-- **退出**：`/plan exit` / `/plan build` 后下一轮不再注入。
-- transcript 同步写 `plan.enter` / `plan.exit` 自定义事件。
+```text
+普通聊天 / 执行：常驻清单不列 write-plans，也没有 planner 提醒
+PLAN：         常驻清单仍不列它，由上面的短句指向 load_skill
+                                     │
+                                     ▼
+                          正文 → 工作流附件 → 写作标准附件
+```
+
+- **加载时机**：开始规划或修订前读取；对话里已有规范时可以不重复加载。这里只引导模型，不增加“已加载”状态或强制加载门禁。
+- **注入与退出**：`RuntimeTailProvider` 在每次模型请求前读取实时模式，只有 PLAN 才附加此提醒。同一轮调用 `start_plan` 后，下一请求就换成执行提醒，不必等下一条用户消息；临时提醒不写入聊天历史，不改变稳定系统前缀。
+- **清单与权限**：`render_available_skills_block` 按 `WRITE_PLANS_SKILL_NAME` 排除该名称，主代理和子代理共用。发现、同名覆盖、`load_skill` 按名解析、`/skill` 用户清单和权限闸门不变；已经加载的历史正文不会被删除。
+- **关闭后的行为**：关闭 Skill、按名禁用或设置 user-only 后，沿用现有错误反馈或工具不暴露行为；不自动改配置，不保留第二份备用写作规则。PLAN 路径限制和执行确认等运行时守卫继续生效。
+- **写作与评审分工**：write-plans 教怎么写；plan reviewer 检查没有聊天背景的读者能否理解改什么、为何这样改、如何验证，以及设计、范围和过度设计风险。reviewer 不再规定固定章节或排版，不为此新增 Skill 加载；UX 原则、brief、工具权限、advisory 与 `<review>` 输出契约保持不变。
+
+内置资产的正式来源、聊天初始化物化与覆盖边界见 [Skill 系统 §4.2.5](../skill-system.md#425-pr-sk-b内置资产与-write-plans-的-plan-入口)。
 
 #### 6.1.2 `EXECUTOR_SYSTEM_REMINDER`
 
@@ -414,7 +361,7 @@ You are in EXEC mode. Your mission: drive the active plan to completion using AN
 - **注入位置**：`/plan build` 完成后，runtime 在下一轮请求的 ephemeral tail 注入；可见 prompt 同步切成 executing 态（详见 §7.3 / §7.4）。
 - **退出**：自动 `mode = completed` / `state = pending` 后下轮不再注入。
 
-**说人话**：进 PLAN 多一段 12 条契约提醒；进 EXEC 多一段 6 条精简契约提醒（主旨「推进任务 + 仅 update_plan 改进度 + plan 文件全禁写」）；出了模式 reminder 自动消失。
+**说人话**：规划时提醒“先读写计划的说明书”；执行时提醒“推进任务、用 update_plan 记进度”。提醒随当前模式切换，不把全部写作规则反复附在每次请求后面。
 
 ### 6.2 稳定 catalog 与 handler policy
 

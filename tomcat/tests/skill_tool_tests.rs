@@ -316,6 +316,14 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
     let system_text = build_system_text(&ctx, &skill_set);
     assert!(system_text.contains("<available_skills>"));
     assert!(system_text.contains("<skill name=\"commit\">Create a git commit</skill>"));
+    assert_eq!(
+        skill_set
+            .resolve("write-plans")
+            .expect("built-in planning skill discovered")
+            .source,
+        tomcat::core::skill::SkillSource::Managed,
+    );
+    assert!(!system_text.contains("write-plans"));
     assert!(!system_text.contains("hidden-review"));
     assert!(!system_text.contains("# Commit"));
 

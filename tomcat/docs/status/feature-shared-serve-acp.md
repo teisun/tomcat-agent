@@ -1,8 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-10-25 10:21 | ACTIVE | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-01 21:54 | ACTIVE | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
+
+- [✓] 将 write-plans 三文件原样纳入正式内置资产并显式登记；复用现有物化、发现、同名覆盖、禁用及权限机制，不依赖试验目录或归档评测工具。
+- [✓] planner 只保留 PLAN 身份和一句加载指引；常驻技能清单静态排除 write-plans，同轮开始执行后的下一请求不再推荐；迁走的提示词契约改由正式资产测试守护。
+- [✓] 计划评审器的重复写作模板换成读者检查，保留 UX、设计挑战、反过度设计及独立评审职责；同步技能和 planner 架构文档。
 
 - [✓] 修复临时 LLM 故障分类与重试额度按任务累计：`server_error`、`upstream_http2_stream_error`、`upstream_stream_read_error` 进入统一临时故障判定，账户/内容拒绝保持优先；每次逻辑模型请求独立计数，交互默认 4 次、无人值守临时故障和空答 10 次，均含首次。成功正文及已完成工具不因后续请求重试而重放。
 - [✓] 增加宿主拥有的五分钟自动 Retry/Resume，页面只展示会话级倒计时并提供取消；沿用原 RPC、错误卡与手动按钮，同 errorId 连续失败可重新恢复，后台会话不抢焦点。
@@ -19,6 +23,8 @@
 - 更新双语 README、用户指南与共享服务架构文档，明确“更新磁盘文件”和“显式重启后台”是两步操作。
 
 ### INTERFACE（接口与行为边界）
+
+- write-plans 仅通过 PLAN 临时提醒自动推荐，显式 `load_skill`、用户 `/skill` 清单和历史正文不变；不增加模式配置、加载状态、协议或评审器技能权限。包含此改动的新二进制在创建聊天上下文时物化内置技能；源码提交不代表当前运行环境已更新。
 
 - `AgentLoopConfig.max_attempts` 改为每次逻辑模型请求的额度，`max_tool_rounds` 仍归模型/工具循环；取消、压缩、附件降级、消息提交及工具执行的原有安全边界保留，重试不清零当前请求计数。
 - 宿主↔webview 新增会话投影 `errorRecovery: { errorId, dueAt }` 与 `cancelErrorRecovery` 意图；Retry/Resume RPC 不变。取消只停自动恢复，不清除错误卡或手动按钮；切换会话不停止等待，真实断连、关闭环境或宿主销毁会清理；等待不持久化。
@@ -79,10 +85,19 @@
 - 当前源码构建成功；隔离 VS Code 的 `routes smart picker selections into attachments and context chips` 为 1 passing。两组 PNG/ARIA/console 已读取：原生 QuickPick 的文件/文件夹入口可见，图片及两种引用回填正确，捕获范围内没有运行时 error；VS Code feature/sandbox 警告及测试模型不支持图片的提示保留。
 - 本次使用既有 fake-Serve 与系统文件对话框替身，只证明真实扩展菜单交互及回填，不代签 Windows 原生对话框、真实模型或拖拽验收；未安装新插件或重启正式服务。详细证据：`.agents/acceptance/macos/merge-windows-4cba7ec0/report.md`。
 
+### write-plans 内置验证（2026-11-01，提交前已有结果）
+
+- 聚焦库测试 104 项、离线集成 9 项通过；期间删掉模板开头空行导致 3 项模式切换回归，恢复原空行后仅重跑受影响的 6 项库测试和 3 项端到端测试，均通过，不重复累计。
+- `cargo clippy --all-targets -- -D warnings`、受影响 Rust 格式及文档模板一致性检查通过；正式资产与原包逐字节一致，reviewer 仅替换原 11–26 行。doctest 命令成功但为 0 个用例，不作为行为证据。
+- 其余库测试批次为 3333 passed / 1 failed / 5 ignored；失败的 `package_install_manifest_authorizes_consumed_tree` 在加载配置时遇到其它测试的临时 HOME/temp 路径无效，未改源码单独重跑通过，保留原批次失败记录。
+- 既有 `prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout` 隔离运行超过 60 秒仍未完成，停止后记为未验证；完整库门禁不记全绿。详细任务退出码记录在本地 write-plans 内置计划的验收 evidence 中。
+- 本次提交遵照用户要求不重跑测试、构建或覆盖率，Cov% 保持未测量；归档 bench、真实模型评测、release 构建、安装和服务重启均不执行。技能工作流附件的原文末尾空行保留，不为 Git 空白提示改写已验收资产。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
+| write-plans 完整库验收 | 相关离线用例通过；全库批次有 1 项临时目录错误（单独重跑通过）、5 项忽略，另 1 项既有评审器测试挂起未验证 | 保留失败与未验证记录；后续单独处理测试隔离与挂起，不将本次提交标成全库全绿 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
 | 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
 | macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
@@ -92,4 +107,4 @@
 | 文件树拖拽无提示 | 根因未确认；CDP 鼠标探针未产生源头 dragstart，不能视为有效复现或成功验收；拖拽代码未改 | 在用户故障窗口捕获真实 dragstart、Shift 状态及 iframe dragover/drop，再按事件断点定位 |
 | Mac 正式保活（已补证） | 用户正式重启 A→B，Reload、全退出后重开前、最终用户 Dock 重开均仍 B；脚本与用户操作分开记账 | 不再要求重复操作；保留自动点击失败原件与组合回执 |
 | CI 与外部宿主 | 本机整改验收不代替本次提交的 GitHub Windows 系统代理 CI；本轮外部宿主为源码契约对照，不是完整宿主重验 | 推送后检查 CI；保留 Multica 上层 30 秒交接与 backend 65 秒清理预算不一致的未实测风险 |
-| 提交范围 | 本次本地提交请求级重试、五分钟自动恢复及 F1～F6 整改的全部相关代码、测试、文档和状态；不重跑测试，验收产物保持本地忽略 | 不推送、不打标签、不发布；不安装或重启正式服务；既有 Windows 待验收事项保留 |
+| 提交范围 | 本次本地提交 write-plans 默认内置、PLAN 短入口、常驻清单过滤及评审职责分离的全部相关代码、测试、文档和状态；不重跑测试，试验包与归档评测产物不纳入 | 不推送、不打标签、不发布；不安装或重启正式服务；既有 Windows 待验收事项保留 |

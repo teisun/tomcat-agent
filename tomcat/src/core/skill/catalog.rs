@@ -3,6 +3,10 @@ use crate::infra::i18n::tr;
 
 use super::model::{Skill, SkillSet};
 
+/// Advertised by the PLAN reminder, not the stable model-facing skill list.
+/// This does not restrict discovery, explicit loading, or the user inventory.
+pub const WRITE_PLANS_SKILL_NAME: &str = "write-plans";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvailableSkillsRender {
     pub block: String,
@@ -102,7 +106,8 @@ pub fn render_available_skills_block(
     budget_chars: usize,
     max_description_chars: usize,
 ) -> AvailableSkillsRender {
-    let visible = skill_set.visible_skills();
+    let mut visible = skill_set.visible_skills();
+    visible.retain(|skill| skill.name != WRITE_PLANS_SKILL_NAME);
     if visible.is_empty() || budget_chars == 0 {
         return AvailableSkillsRender {
             block: String::new(),

@@ -5,6 +5,8 @@
 > **安装入口补充（T2-P1-017 PackageManager）**：skill 仍然只通过三层磁盘根被发现，但现在除了手工把 `SKILL.md` 放进目录外，也支持走统一安装入口：shell 用 `tomcat install <source>` / `tomcat uninstall <package>` / `tomcat packages`，会话内用 `/install <source> [current-project|agent|global]`。`current-project` 只是 UI 标签，内部仍映射到 `scope`。code/claw 当前会话里的 `/install` 成功后会自动 `reload_skill_set()`，让新装的 skill 立即进入当前 `SkillSet`；这一步只刷新发现结果，不赋予 skill 额外权限。
 > **当前实现（2026-09）**：项目层不再硬编码 `.tomcat`。它由 `workspace.project_resource_dir` 决定，默认是 `.agents`，例如 `<project>/.agents/skills`。值必须是项目内的单个安全目录名；旧 `.tomcat` 资源目录不会被新代码写入。内置 `skill-creator` 与 `plugin-creator` 是 Managed（全局托管）技能，源文件在 `tomcat/assets/skills/`，不写项目目录。
 
+> **内置规划技能**：`write-plans` 的正式源在 `tomcat/assets/skills/write-plans/`，由 `build.rs` 登记并随二进制发布。内置文件在**创建聊天上下文时**写入托管目录，不以 `tomcat init` 为释放入口。它不列入任何模式或子代理的常驻 `<available_skills>`；只有主代理的 PLAN 提醒指向它。分发、覆盖、禁用及加载边界见 §4.2.5，写作与评审分工见 [planner §6.1.1](tools/planner.md#611-planner_system_reminder)。
+
 
 ---
 
@@ -68,12 +70,12 @@ LLM 看目录判断这轮用不用技能
         ▼  ① 发现 / 编目（启动后台 spawn 扫一次 · 首次披露前 await）
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │ 专业：启动后台 spawn 发现任务；discovery.rs 只扫三层磁盘根 P0>P1>P2、同名 first-wins 去重 →  │
-│      catalog.rs 建成 SkillSet；官方内置 skill 文件放 `tomcat/assets/skills/`，编译后由 init   │
-│      写入 P2 Managed；首次渲染 <available_skills> 前 await 该任务完成（不堵启动）             │
-│      P0 Project(<cwd>/.tomcat/skills) > P1 Agent(~/.tomcat/agents/<id>/skills) >            │
-│      P2 Managed(~/.tomcat/skills，含 init 写入的官方内置 skill)；有界：深度1·只读frontmatter │
-│ 说人话：开机后台先把技能翻一遍，第一次要用前等它扫完；出厂自带 skill 先由 init 放进全局托管   │
-│      目录，再和其他 managed skill 一起被发现；发现期只读「卡片」(frontmatter)，不读正文。    │
+│      catalog.rs 建成 SkillSet；build.rs 嵌入 `tomcat/assets/skills/` 中登记的内置资产；     │
+│      创建聊天上下文时写入 P2 Managed；首次渲染 <available_skills> 前等待发现完成。          │
+│      P0 Project(<project>/.agents/skills) > P1 Agent > P2 Managed(<work_dir>/skills)。     │
+│      内置资产由 `core/skill/builtin.rs` 写入，与普通 Managed 技能共用发现与加载路径。        │
+│ 说人话：创建聊天上下文时先把出厂说明书放进托管目录，再和用户安装的技能一起被发现；           │
+│      发现只记录名称和简介，正文在使用时才加载。                                            │
 │ 伪代码：SkillSet { by_name: Map<name, Skill>, diagnostics, warnings }（内存即缓存，不落盘） │
 │        Skill 只存元数据(name/description/file_path/source)，不读正文 → 省 token            │
 └───────┬─────────────────────────────────────────────────────────────────────────────────┘
@@ -122,9 +124,9 @@ LLM 看目录判断这轮用不用技能
 
 这张具体图把抽象链路**落到真实对象、关键模块与运行时约束**：P0→P2 roots、`SkillSet`、`<available_skills>`、`load_skill`、`PermissionGate` 都被点名，便于 reviewer 直接把“方案为什么成立”映射回 `catalog/discovery/tool_exec` 等正文小节。它回答的是“这条链在系统里到底怎么串起来”。
 
-**看图顺序（说人话）／四步心智模型**：①**发现 / 编目**——技能在启动时按 P0→P2 三层磁盘根（project `.tomcat/skills` → agent `~/.tomcat/agents/<id>/skills` → managed `~/.tomcat/skills`）被「发现」成一张只含名字+描述的目录卡片表（不读正文，省 token），去重后成 `SkillSet`；官方内置 skill 文件不再单列 P3，而是由 `tomcat init` 从 `tomcat/assets/skills/` 写入 P2 Managed；②**渐进式披露**——这张卡片表每轮通过一个系统提示 section 注入给模型，连同用户输入一起发出，让模型知道「有哪些技能、什么时候该用」（正文不进）；③**LLM 自主决策**——模型看完目录和用户请求，自己判断要不要用、用哪条；用不上就不碰，要用就发起 `load_skill(name)`；④**按需装载 → 执行**——`load_skill` 过 guard + 权限闸门，把那一条的 **完整正文** 拉进上下文，模型照着做；正文里要做的事仍逐次过权限闸门，技能零特权。
+**看图顺序（说人话）／四步心智模型**：①**发现 / 编目**——技能在启动时按 P0→P2 三层磁盘根（project `.tomcat/skills` → agent `~/.tomcat/agents/<id>/skills` → managed `~/.tomcat/skills`）被「发现」成一张只含名字+描述的目录卡片表（不读正文，省 token），去重后成 `SkillSet`；官方内置 skill 文件不再单列 P3，而是由聊天上下文初始化从二进制内嵌的 `tomcat/assets/skills/` 写入 P2 Managed；②**渐进式披露**——这张卡片表每轮通过一个系统提示 section 注入给模型，连同用户输入一起发出，让模型知道「有哪些技能、什么时候该用」（正文不进）；③**LLM 自主决策**——模型看完目录和用户请求，自己判断要不要用、用哪条；用不上就不碰，要用就发起 `load_skill(name)`；④**按需装载 → 执行**——`load_skill` 过 guard + 权限闸门，把那一条的 **完整正文** 拉进上下文，模型照着做；正文里要做的事仍逐次过权限闸门，技能零特权。
 
-> **一句话抓住心智模型**：先用**抽象总图**记住“发现/编目 → 渐进式披露 → LLM 决策 → 按名装载执行”这条主链，再用**具体总图**对上 `SkillSet` / `AvailableSkillsSection` / `load_skill` / `PermissionGate` 四个关键落点。注意顺序是**串行**：先把「技能目录」注入 prompt 发给模型，**模型决定**后才 `load_skill` 取正文——不是系统并行地预先装载。这条「全量披露目录 + 由模型自己挑」与主流一致：codex / openclaw / pi 同样把所有技能元数据注入、让模型决策，预算靠**压缩描述 / 降级 / 截断**而非系统侧筛选；唯一在系统侧做自动匹配的是 GenericAgent（服务端**语义检索** over ~10 万技能卡，返回 top-K 再交模型挑，见 §2.2）。tomcat 取同样的「披露给模型、模型决策」路线：更可审计、误命中可控；运行时只认三层磁盘根 P0→P2，官方自带 skill 先由 `tomcat init` 写入 `~/.tomcat/skills/` 再参与发现；**①′ 选择层**（技能爆量时起一个**筛选子 Agent** 挑 top-n 再披露）列为 P2 后续增强、**本期不做**（仅当技能规模爆预算 / 稀释注意力时启用，且 `must_include` 永不被筛掉、由主模型做最终决策，见 §11）。预算超限本期用 **A+D 两级降级**（截描述 → 降级 name-only，丢描述不丢技能）。
+> **一句话抓住心智模型**：先用**抽象总图**记住“发现/编目 → 渐进式披露 → LLM 决策 → 按名装载执行”这条主链，再用**具体总图**对上 `SkillSet` / `AvailableSkillsSection` / `load_skill` / `PermissionGate` 四个关键落点。注意顺序是**串行**：先把「技能目录」注入 prompt 发给模型，**模型决定**后才 `load_skill` 取正文——不是系统并行地预先装载。这条「全量披露目录 + 由模型自己挑」与主流一致：codex / openclaw / pi 同样把所有技能元数据注入、让模型决策，预算靠**压缩描述 / 降级 / 截断**而非系统侧筛选；唯一在系统侧做自动匹配的是 GenericAgent（服务端**语义检索** over ~10 万技能卡，返回 top-K 再交模型挑，见 §2.2）。tomcat 取同样的「披露给模型、模型决策」路线：更可审计、误命中可控；运行时只认三层磁盘根 P0→P2，官方自带 skill 先在创建聊天上下文时写入 `~/.tomcat/skills/` 再参与发现；**①′ 选择层**（技能爆量时起一个**筛选子 Agent** 挑 top-n 再披露）列为 P2 后续增强、**本期不做**（仅当技能规模爆预算 / 稀释注意力时启用，且 `must_include` 永不被筛掉、由主模型做最终决策，见 §11）。预算超限本期用 **A+D 两级降级**（截描述 → 降级 name-only，丢描述不丢技能）。
 
 ### B. ASCII 核心四图
 
@@ -138,7 +140,7 @@ LLM 看目录判断这轮用不用技能
 │ frontmatter.rs parse → SkillFrontmatter（name / description 必填）     │
 │ catalog.rs     merge(first-wins) → SkillSet · render_available_block() │
 │ model.rs       Skill{ name, description, file_path, source } · SkillSet │
-│ embedded.rs    assets/skills/** 编译嵌入，init 写入 P2 Managed          │
+│ builtin.rs     build.rs 嵌入资产，创建聊天上下文时写入 P2 Managed      │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ SkillSet（仅元数据，常驻进程）
         ┌───────────────────────┼───────────────────────────┐
@@ -346,10 +348,10 @@ sequenceDiagram
 | **skill catalog（可用技能清单）**         | 注入系统提示的技能元数据块                                          | `<available_skills>` 文本，由 `core::skill::catalog::render_available_skills_block()` 渲染 | 仅含 `name`/`description`（模型按名调用，目录不暴露路径）；`disable_model_invocation` 的技能不出现；超预算截断 + warning                          | 系统提示里那段「你有这些技能可用」。                  |
 | **skill body（技能正文）**              | `SKILL.md` 去掉 frontmatter 后的正文指令                       | 磁盘文件；`load_skill` 读出后作为 tool 消息文本                                                    | 仅在装载时读盘；可引用 `references/*.md` 等同目录附件（`load_skill(name, file=...)`）                                            | 技能的「正文操作步骤」。                        |
 | `**load_skill`（工具）**              | 模型按 **名字** 装载某条技能完整正文的内置工具                             | `BUILTIN_TOOL_CATALOG` 新条目；`tool_exec/branches/load_skill.rs::handle_load_skill`     | `scope=Read`、`read_only=true`；按 name 解析（避免模型猜路径）；正文读盘仍过 `PermissionGate`                                      | 模型说「我要用 pdf 技能」，这个工具就把 pdf 技能正文调出来。 |
-| **discovery root（发现根）**           | 扫描 `SKILL.md` 的来源目录层级                                  | `core::skill::discovery::skill_roots()`                                              | 三层优先级 P0→P2：Project（`agent_workspace_dir/.tomcat/skills`）> Agent（`~/.tomcat/agents/<agentId>/skills/`）> Managed（`~/.tomcat/skills/`）；Project = 当前 CLI cwd 下的 `.tomcat/skills`，与 `[permission-system.md](./permission-system.md)` 对 `agent_workspace_dir` 的语义一致；官方内置 skill 由 `tomcat init` 先写入 P2，再按普通 Managed skill 被发现 | 技能从哪几个目录找出来，谁优先。                    |
+| **discovery root（发现根）**           | 扫描 `SKILL.md` 的来源目录层级                                  | `core::skill::discovery::skill_roots()`                                              | 三层优先级 P0→P2：Project（`agent_workspace_dir/.tomcat/skills`）> Agent（`~/.tomcat/agents/<agentId>/skills/`）> Managed（`~/.tomcat/skills/`）；Project = 当前 CLI cwd 下的 `.tomcat/skills`，与 `[permission-system.md](./permission-system.md)` 对 `agent_workspace_dir` 的语义一致；官方内置 skill 在创建聊天上下文时先写入 P2，再按普通 Managed skill 被发现 | 技能从哪几个目录找出来，谁优先。                    |
 | **source / precedence（来源与优先级）**   | 同名技能的去重裁决依据                                            | `Skill.source: SkillSource{Project,Agent,Managed}`                                   | 同名 **first-wins**（高优先级先入选，低优先级丢弃 + warning）                                                                   | 同名技能撞车时，优先级高的赢。                     |
 | `**disable_model_invocation`**    | 该技能是否对模型隐藏（仅用户可用）                                      | frontmatter `disable-model-invocation: true` → `Skill.disable_model_invocation`      | `true` → 不进 `<available_skills>`、`load_skill` 拒绝；用户 `/skill use <name>` 仍可用                                              | 这条技能不让模型自己点，只能用户主动用。                |
-| **官方内置 skill 资产**                  | 随 tomcat 发版的官方 skill 文件源                                   | `tomcat/assets/skills/`（编译嵌入 `.rs`），`tomcat init` 写入 `~/.tomcat/skills/`          | 不是独立发现根；写入后按普通 Managed skill 参与发现/披露/装载；用户可见、可删、可被 P0/P1 覆盖                                             | 出厂自带几条 skill，但发现链路里不单独加一档。             |
+| **官方内置 skill 资产**                  | 随 tomcat 发版的官方 skill 文件源                                   | `tomcat/assets/skills/`（编译嵌入），创建聊天上下文时写入 `<work_dir>/skills/`          | 不是独立发现根；写入后按普通 Managed skill 参与发现/披露/装载；用户可见、可删、可被 P0/P1 覆盖                                             | 出厂自带几条 skill，但发现链路里不单独加一档。             |
 | **Skill vs Plugin（技能 vs 插件）**     | 技能是「惰性指令文本」，插件是「可执行代码」                                 | Skill：`core/skill`（无 hostcall）；Plugin：`ext/plugin`（`rquickjs` 插件运行时）                   | 技能 **不能** 自己执行代码、不注册工具；要执行的动作交给既有工具 + 权限闸门                                                                    | 技能是说明书，插件才是能跑的程序，两条线。               |
 
 
@@ -403,7 +405,7 @@ sequenceDiagram
 
 - **C1 主文件统一 `<name>/SKILL.md` + YAML frontmatter**（除 GenericAgent 外全员）→ A 照做（§5.1）。
 - **C2 元数据进 prompt、正文按需载入**（摘要与正文分离）→ A 的渐进式披露（§3 G2）。
-- **C3 多来源 + 同名去重 / 优先级是刚需** → A 三层根 P0→P2 first-wins（官方内置 skill 由 `init` 写入 P2 Managed，不单列发现根，§4.1）。
+- **C3 多来源 + 同名去重 / 优先级是刚需** → A 三层根 P0→P2 first-wins（官方内置 skill 在创建聊天上下文时写入 P2 Managed，不单列发现根，§4.1）。
 - **C4 frontmatter 至少 `name` + `description`** → A 二者必填、未知键忽略（§5.1）。
 - **C5 坏文件 / 重名 / 超预算必须可观测**（绝不静默、绝不 panic）→ A 的 `diagnostics` / `warnings`（§8）。
 - **C6 技能 = 提示资产，可执行能力交给插件 / 扩展** → A 技能零特权、可执行推给 `ext/plugin`（§3 G5）。
@@ -416,7 +418,7 @@ sequenceDiagram
 
 | 目标         | 观察指标（落地后可核对）                                                                                                                                             | 说人话                         |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| G1 发现闭环    | 启动期扫描 Project/Agent/Managed 三层根；每个合法 `<name>/SKILL.md` 进 `SkillSet`；坏文件（缺 frontmatter / 缺 `name`/`description`）被跳过 + 记 `diagnostics`，**不阻断**其余技能；官方内置 skill 由 `init` 先写入 P2 Managed | 能从几个目录把技能都找出来，一个坏的不连累其它。    |
+| G1 发现闭环    | 启动期扫描 Project/Agent/Managed 三层根；每个合法 `<name>/SKILL.md` 进 `SkillSet`；坏文件（缺 frontmatter / 缺 `name`/`description`）被跳过 + 记 `diagnostics`，**不阻断**其余技能；官方内置 skill 在创建聊天上下文时先写入 P2 Managed | 能从几个目录把技能都找出来，一个坏的不连累其它。    |
 | G2 渐进式披露   | `<available_skills>` 仅含 `name`/`description`；**正文不进** system_prompt；正文只在 `load_skill` / `read` 时进上下文                                          | 系统提示只放目录，正文要用才读。            |
 | G3 元数据预算封顶 | `<available_skills>` 总字符 ≤ 预算 `max(skills.prompt_budget_floor_chars, 上下文窗口字符 × skills.prompt_budget_pct%)`（默认 1% / floor 2000）；超限**两级降级**：〔A〕单条描述截 `max_description_chars`(250) →〔D〕整块仍超则全员只留 `name`（**丢描述不丢技能**）+ `warnings += "skills_prompt_truncated"` | 技能再多也不撑爆系统提示；宁可描述短，也保证每条技能都看得见。 |
 | G4 按名装载    | `load_skill(name)` 按 `name` 解析（非路径）；命中 → 返回 `<skill name=.. location=..>` 包裹正文；歧义/未知 → 结构化错误                                                             | 模型报技能名就能调出正文，不用猜路径。         |
@@ -463,8 +465,8 @@ sequenceDiagram
 | **技能 vs 插件边界**         | 技能要不要能执行代码 / 注册工具                | **采用** 技能=惰性指令资源，零 hostcall；执行交给既有工具 + `ext/plugin`。                             | `pi_agent_rust/src/resources.rs`（Skill 无 hostcall）+ `pi_agent_rust/docs/planning/EXTENSIONS.md`（skill pack vs executable）+ 本仓 `[plugin-system-overview.md](./plugin-system-overview.md)`                                                                       | 设计：技能只做文本说明书，副作用全走 `PermissionGate`；理由：复用 `ext/plugin` 既有可执行沙箱，避免造「可执行技能」放大攻击面、且与 P2「核心轻量」一致                                                                              | × cc-fork-01 `SkillTool` 的 inline shell 执行（`src/skills/loadSkillsDir.ts` `executeShellCommandsInPrompt`）——拒因：tomcat 权限模型要求一切副作用经闸门，技能内联跑 shell 绕过审计                                                                            | 技能是说明书不是程序；要跑代码走插件。        |
 | **调用机制**               | 模型怎么把技能正文拉进上下文                   | **采用** 专用 `load_skill(name)` 工具按名装载；不暴露裸路径。                                      | cc-fork-01 `src/tools/SkillTool/SkillTool.ts`（专用 `Skill` 工具）+ hermes `tools/skills_tool.py`（`skill_view`）+ 本仓 `src/core/agent_loop/tool_exec/mod.rs:311` match                                                                                                 | 设计：`BUILTIN_TOOL_CATALOG` 加 `load_skill` 条目 + `tool_exec` 增一臂；理由：tomcat 多来源技能（project/agent/managed）虽都在磁盘上，但唯有「按名解析」能统一覆盖、免模型猜路径、天然可审计，也便于 reviewer 白名单门控                        | × codex/pi 的裸 `read(<SKILL.md 路径>)`（`codex-rs/core-skills/src/render.rs` `SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS`、`pi_agent_rust/src/resources.rs` read 装载）——拒因：多来源路径对模型不透明、project 本地技能路径依赖当前 cwd，裸 read 容易猜错且审计弱 | 模型报名字调技能，别让它猜文件路径。         |
 | **渐进式披露形态**            | 正文进不进系统提示                        | **采用** 仅元数据（name+desc）进 prompt，正文按需装载。                                  | codex `core-skills/src/render.rs`（`<skills_instructions>` 仅 name+desc+path）+ openclaw `src/skills/loading/skill-contract.ts`（`<available_skills>`）+ pi_agent_rust `src/resources.rs::format_skills_for_prompt`                                                 | 设计：`AvailableSkillsSection` 渲染 `<available_skills>`，`Skill` 结构不缓存正文；理由：技能正文动辄上千字，常驻会爆上下文；元数据常驻足够模型做「该不该用」决策                                                               | × GenericAgent 的「无渐进式披露、`file_read` 读整文」（`GenericAgent/ga.py`）——拒因：技能多时整文常驻不可扩展，且 GenericAgent 靠 L1 索引人工维护，不适合自动发现                                                                                                             | 系统提示只给目录，正文要用再翻。           |
-| **发现根与优先级**            | 技能从哪找、谁覆盖谁                       | **采用** 三层 P0→P2：`Project(cwd/.tomcat/skills) > Agent(~/.tomcat/agents/<id>/skills) > Managed(~/.tomcat/skills)`，同名 first-wins。 | openclaw `src/skills/loading/workspace.ts::loadSkillEntries`（多层磁盘根）+ pi_agent_rust `src/resources.rs::merge_resource_paths`（Temp>Project>Global）+ 本仓 `[directory-structure.md](./directory-structure.md)`:9-20,40-41,93-94（`agents/<agentId>/` + `~/.tomcat/skills` + `agent_workspace_dir`） + `[permission-system.md](./permission-system.md)`:10-19 | 设计：`discovery::skill_roots()` 只扫三层磁盘根并 `merge` 去重；理由：project 本地技能最贴近当前仓库；agent 级技能次之；全局 Managed 再次；官方内置 skill 不再单列 P3，而是由 init 先写入 P2 Managed | × 单独 P3 Bundled 根——拒因：把“来源语义”和“实现手段”耦合，发现/优先级/诊断多一层分支，收益小；× codex 的六/七层根——拒因：当前单 agent、无 marketplace/admin 分层 | 当前 project 最优先，其次 agent，再全局托管。        |
-| **官方内置 skill 的交付方式** | 官方自带 skill 是独立发现根还是写入 Managed | **采用** skill 文件放 `tomcat/assets/skills/`，编译嵌入 `.rs`；`tomcat init` 解压到 `~/.tomcat/skills/`，作为 **P2 Managed** 参与发现，不保留独立 P3。 | codex `skills/src/lib.rs::install_system_skills`（嵌入后写入 `CODEX_HOME/skills/.system`）+ openclaw `src/skills/loading/workspace.ts`（从 bundled dir 作为磁盘技能源加载） | 设计：运行时发现链路统一成磁盘三层根；官方资产对用户可见、可编辑、可诊断；权限/路径/覆盖规则与 Managed 完全一致；实现上仍可通过 `tomcat/assets/skills` + `include_str!`/`include_dir!` 随版本发版 | × 单独 P3 Bundled 根——拒因：多一层 source/precedence 分支；× 纯内存不落盘——拒因：对用户不可见、难调试、与其他技能路径不一致 | 官方自带 skill 也先落到 `~/.tomcat/skills`，别在发现层再单独加一档。 |
+| **发现根与优先级**            | 技能从哪找、谁覆盖谁                       | **采用** 三层 P0→P2：`Project(cwd/.tomcat/skills) > Agent(~/.tomcat/agents/<id>/skills) > Managed(~/.tomcat/skills)`，同名 first-wins。 | openclaw `src/skills/loading/workspace.ts::loadSkillEntries`（多层磁盘根）+ pi_agent_rust `src/resources.rs::merge_resource_paths`（Temp>Project>Global）+ 本仓 `[directory-structure.md](./directory-structure.md)`:9-20,40-41,93-94（`agents/<agentId>/` + `~/.tomcat/skills` + `agent_workspace_dir`） + `[permission-system.md](./permission-system.md)`:10-19 | 设计：`discovery::skill_roots()` 只扫三层磁盘根并 `merge` 去重；理由：project 本地技能最贴近当前仓库；agent 级技能次之；全局 Managed 再次；官方内置 skill 不再单列 P3，而是在创建聊天上下文时先写入 P2 Managed | × 单独 P3 Bundled 根——拒因：把“来源语义”和“实现手段”耦合，发现/优先级/诊断多一层分支，收益小；× codex 的六/七层根——拒因：当前单 agent、无 marketplace/admin 分层 | 当前 project 最优先，其次 agent，再全局托管。        |
+| **官方内置 skill 的交付方式** | 官方自带 skill 是独立发现根还是写入 Managed | **采用** skill 文件放 `tomcat/assets/skills/`，编译嵌入；创建聊天上下文时写入 `<work_dir>/skills/`，作为 **P2 Managed** 参与发现，不保留独立 P3。 | codex `skills/src/lib.rs::install_system_skills`（嵌入后写入 `CODEX_HOME/skills/.system`）+ openclaw `src/skills/loading/workspace.ts`（从 bundled dir 作为磁盘技能源加载） | 设计：运行时发现链路统一成磁盘三层根；官方资产对用户可见、可编辑、可诊断；权限/路径/覆盖规则与 Managed 完全一致；实现上仍可通过 `tomcat/assets/skills` + `include_str!`/`include_dir!` 随版本发版 | × 单独 P3 Bundled 根——拒因：多一层 source/precedence 分支；× 纯内存不落盘——拒因：对用户不可见、难调试、与其他技能路径不一致 | 官方自带 skill 也先落到 `~/.tomcat/skills`，别在发现层再单独加一档。 |
 | **发现时机 / 缓存 / 更新**     | 启动扫盘会不会卡死、要不要缓存、怎么更新 | **采用** 启动后台 `tokio::spawn` 扫一次 + 首次渲染 `<available_skills>` 前 `await`；**不落盘**（内存 `SkillSet` 即缓存）；有界扫描（深度 1 / 只读 frontmatter ≤4 KiB / `max_skills` 封顶）；更新 = 显式 `/skill reload` + 配置变更重扫；外层只读 `tomcat skill list` + `tomcat skill reload`。 | codex `app-server/src/skills_watcher.rs`（`clear_cache()` + FileWatcher）+ cc-fork-01 `src/utils/skills/skillChangeDetector.ts`（chokidar/轮询 + 300ms debounce）+ pi_agent_rust `src/resources.rs::load_skills`（同步扫、内存 `Vec<Skill>`，无磁盘缓存）——三家均无磁盘 `.md` 缓存 | 设计：发现与启动初始化重叠、不堵启动；元数据在首轮 prompt 前必然就绪；内存即缓存、进程内有效。理由：`walk`+`stat` 是开销大头，磁盘缓存只省 frontmatter 解析、ROI 低且 staleness 风险高；现实本地技能仅几十到几百条 | × 磁盘缓存 manifest——拒因：省不掉 walk/stat，引入失效/损坏/一致性坑（列 P3 兜底）；× v1 文件监听热重载——拒因：跨平台/死锁/事件风暴复杂度高（列 P2，`notify`+debounce）；× 同步扫在启动关键路径——拒因：pathological N 会加启动延迟 | 开机后台先扫、第一次用前等一下；不存缓存文件，改了就 reload。 |
 | **命令面（统一命名）**       | 用户怎么列/重载/手动调技能，斜杠与外层 CLI 叫什么 | **采用** 统一单数 `skill`：聊天内斜杠 `/skill list` \| `/skill reload` \| `/skill use <name> "intent..."`（落地 = `parse_chat_command` 白名单加 `/skill` 一臂 + 子命令）；外层 CLI `tomcat skill list` \| `tomcat skill reload`（只读发现 / 重扫 + 诊断）。**不并存 `/skill` 与 `/skills` 两个名词**。 | 本仓 `src/api/chat/commands/parse.rs`（斜杠白名单 `/path\|/help\|/thinking\|/model\|/ckpt\|/restore\|/plan`，`/model use <id>` 子命令范式）+ `src/api/cli/mod.rs`（外层 clap 单数子命令 `plugin\|session\|config`，仿 `tomcat plugin list`） | 设计：单数 `skill` 与外层既有 `plugin/session/config` 同构；`use <name> "intent..."` 显式动词 + 意图文本，既避免与子命令 `list/reload` / 同名 skill 冲突，也允许用户在点名 skill 的同时补充本轮目标；外层只给只读 `list` + 重扫 `reload`（无缓存，reload≈重扫并打印诊断） | × 仅 `/skill use <name>` 无附加意图——拒因：常常还得再补一句需求，交互割裂；× 同时保留 `/skill <name>` 与 `/skills reload` 两种名词——拒因：一个子系统两个命令名，易混且不统一；× 外层支持 `use`——拒因：外层一次性退出、无「当前轮」可注入 | 点名 skill 时，顺手把这轮要它干嘛也一起说清。 |
 | **磁盘格式 / frontmatter** | 用啥结构、字段白名单多大                     | **采用** `<name>/SKILL.md` + YAML frontmatter；`name`/`description` 必填，其余走白名单忽略未知键。 | pi_agent_rust `src/resources.rs::ALLOWED_SKILL_FRONTMATTER` + hermes `tools/skill_manager_tool.py::_validate_frontmatter`（name/description 必填）+ openclaw `src/skills/loading/local-loader.ts`（缺 description 跳过）                                                | 设计：`SkillFrontmatter{name,description,license,compatibility,metadata,allowed_tools,disable_model_invocation}` + 白名单；理由：与七套竞品事实标准一致（Anthropic Agent Skills），白名单忽略未知键保证前向兼容 | × cc-fork-01 的宽松 `FrontmatterData`（十几个字段，`src/utils/frontmatterParser.ts`）——拒因：cc 字段（hooks/paths/agent/context）耦合其 slash-command 体系，tomcat 不需要，过宽 schema 增维护成本                                                                 | 一个文件夹一个 SKILL.md，至少要名字+描述。 |
@@ -478,6 +480,8 @@ sequenceDiagram
 **硬约束自检**：一格一事；每行可回答「若不采纳本行入选结论会付出什么代价」；证据均落到 `仓库/agent + 文件路径` 级别（如 `cc-fork-01/src/tools/SkillTool/SkillTool.ts`、`pi_agent_rust/src/resources.rs`、本仓 `src/core/agent_loop/tool_exec/guard.rs:3`）。
 
 ### 4.2 实施点（路线图）
+
+> 本节保留最初的分阶段路线图。PR-SK-B 当时设想由 init 释放资产；现行实现已改为创建聊天上下文时物化，具体代码与边界以 §4.2.5 为准。
 
 **实施顺序**：**① PR-SK-A**（model + frontmatter + 配置子表，无运行时）→ **② PR-SK-D**（发现 + 去重 + SkillSet）→ **③ PR-SK-P**（`<available_skills>` prompt section）→ **④ PR-SK-T**（`load_skill` 工具 + tool_exec 分发 + guard 门控）→ **⑤ PR-SK-C**（命令面：`/skill` 斜杠 + `tomcat skill` 外层）→ **⑥ PR-SK-B**（下期：官方 skill 资产嵌入 + `tomcat init` 写入 Managed）。**先定结构再接发现，先发现再注入，再挂工具，最后补命令面；官方内置 skill 资产下期再上**——避免 prompt/工具反复改字面量。
 
@@ -513,7 +517,7 @@ SKILL.md ──┐
 
 - **交付**：`skill_roots()` 返回 `Vec<(PathBuf, SkillSource)>`（仅 Project / Agent / Managed 三层磁盘根）；逐根扫 `<name>/SKILL.md`（深度 1）；`merge` 按 `SkillSource` 升序 first-wins；坏文件进 `Vec<SkillDiagnostic>`、重名进 `warnings`。
 - **执行时机（不堵启动）**：启动时 `tokio::spawn` 一个发现任务（`discover_async() -> SkillSet`），句柄存 `OnceCell<JoinHandle>`；`AvailableSkillsSection::render()`（即首次构造 `<available_skills>`）前 `await` 该句柄拿到 `SkillSet`。因为技能元数据是构造**首轮 prompt**（用户首条消息之后）才需要，扫描与其余启动初始化天然重叠；扫得快则首轮零等待，扫得慢则只在首轮前阻塞一次。
-- **有界扫描（防 pathological N）**：① 目录深度固定 1 层（只看 `<root>/<name>/SKILL.md`，不深度遍历）；② 每文件**只读 frontmatter**（读取上限 ~4 KiB，`name/description/flags` 足够），正文绝不在发现期读；③ 总数封顶 `max_skills`（默认 1000）→ 超出 `warnings += skills_discovery_truncated:max_skills=<N>` 并停扫；④ 跳过符号链接环 / 点目录；⑤ 单文件 IO/解析错 → `diagnostics`，**不阻断整批**。官方内置 skill 已在 init 时写入 P2，因此发现期不再区分额外内嵌根。
+- **有界扫描（防 pathological N）**：① 目录深度固定 1 层（只看 `<root>/<name>/SKILL.md`，不深度遍历）；② 每文件**只读 frontmatter**（读取上限 ~4 KiB，`name/description/flags` 足够），正文绝不在发现期读；③ 总数封顶 `max_skills`（默认 1000）→ 超出 `warnings += skills_discovery_truncated:max_skills=<N>` 并停扫；④ 跳过符号链接环 / 点目录；⑤ 单文件 IO/解析错 → `diagnostics`，**不阻断整批**。官方内置 skill 已在创建聊天上下文时写入 P2，因此发现期不再区分额外内嵌根。
 - **缓存与更新**：**不落盘**——内存 `SkillSet` 即进程生命周期缓存（同 codex/cc-fork/pi 内存方案，均无磁盘 `.md` 缓存）。更新走**显式重扫**：聊天内 `/skill reload` 命令 + `[skills]` 配置变更 / 新会话时重建；外层 `tomcat skill reload` 同义（重扫 + 打印诊断）。**理由**：目录 `walk`+`stat` 才是开销大头、缓存省不掉它（缓存只省 frontmatter 解析），磁盘缓存 ROI 低且引入 staleness；OS 文件监听热重载（`notify` + ~300ms debounce，镜像 codex `SkillsWatcher`）列 **P2**，磁盘 manifest 列 **P3 兜底**（仅当技能上数千且启动延迟敏感）。
 
 ```text
@@ -570,11 +574,27 @@ LLM: load_skill(name="pdf")
 
 **说人话**：模型报名字，工具按名找到技能、过安检读正文、包好还给模型；如果命中的是当前 project 下的 `.tomcat/skills` 而 cwd 尚未授权，就按权限系统拒绝 / 提示；审查小弟默认调不动。
 
-#### 4.2.5 PR-SK-B：官方 skill 资产嵌入与 init 写入 Managed
+#### 4.2.5 PR-SK-B：内置资产与 write-plans 的 PLAN 入口
 
-- **交付**：官方 skill 文件放 `tomcat/assets/skills/`，编译时嵌入 `embedded_assets.rs`；`tomcat init` 将其写入 `~/.tomcat/skills/`（即 **P2 Managed**），后续发现期按普通 Managed skill 扫描，无独立 P3 根；`tomcat init` 同时在当前 project 的 `.tomcat/skills/` 释放一条样例技能。
+```text
+tomcat/assets/skills/ → build.rs 显式名单 → 编译进二进制
+                                              │ 创建聊天上下文
+                                              ▼
+                                   <work_dir>/skills/ → 普通发现与加载
+                                              │
+                         ┌────────────────────┴──────────────────┐
+                         ▼                                       ▼
+                其它技能：常驻清单                  write-plans：仅 PLAN 提醒指向
+```
 
-**说人话**：出厂自带的 skill 不再单独占一档，`init` 先把它们放进 `~/.tomcat/skills/`，再像普通 Managed skill 一样被发现；项目里另外给一条样例照着写。
+- **正式来源**：`build.rs::BUILTIN_SKILLS` 登记 `verify`、`connectors`、`skill-creator`、`plugin-creator`、`write-plans`。新增内置技能必须登记，不是随便放一个目录就会打包。write-plans 的正文和两个附件以 `tomcat/assets/skills/write-plans/` 为维护源；构建和测试不读取试验目录 `acceptance-src/`，也不运行归档评测工具。
+- **写入时机**：`src/api/chat/context.rs` 创建聊天上下文时调用 `materialize_builtin_skills`，由 `src/core/skill/builtin.rs` 将内嵌文件写到 `<work_dir>/skills/`（默认 `~/.tomcat/skills/`）。缺失文件会补齐，内容相同跳过，不同则原子替换；不是由 `tomcat init` 释放，也不会热更新正在运行的二进制。
+- **定制与禁用**：直接修改或删除托管副本，下次物化会被恢复。持久定制使用项目或 Agent 层同名技能，仍按现有发现优先级选择；全局关闭、按名禁用及 user-only 设置不被绕过。
+- **PLAN 专属指引**：共用清单渲染函数按名称排除 write-plans，但不改发现结果、`resolve`、`visible_skills()` 或 `/skill` 清单。PLAN 提醒只说先调用 `load_skill`，正文再指向工作流和写作标准两个附件；对话已有规范时可不重复加载。不增加动态清单、预算分摊或“已加载”状态。
+- **生效与权限边界**：PLAN 提醒逐请求按实时模式生成，同轮 `start_plan` 后的下一请求也不再提示加载。历史中已加载的内容不清理；清单不推荐不等于禁止显式读取，所有读取仍走权限闸门。关闭技能后沿用现有错误反馈，不自动启用或提供隐藏的备用规范。
+- **独立评审**：reviewer 继续使用自己的审查提示词，不为这项功能加载写作技能。即使原有 `expose_to_reviewer` 已开启，共用清单也不列 write-plans；工具暴露和加载权限本身不变。
+
+回归入口：`src/core/skill/tests/builtin_test.rs::materialized_write_plans_skill_is_discovered_and_fully_loadable` 验证内置发现及正文/附件加载；`src/core/skill/tests/catalog_test.rs::render_available_skills_omits_write_plans_without_disabling_loading` 验证只隐藏推荐；`tests/serve_ask_question_tests.rs` 与 `tests/skill_tool_tests.rs` 覆盖真实请求和上下文。提示词契约迁移到 `src/core/prompts/tests/load_test.rs`，直接读取正式资产。
 
 ## 5. 协议（SKILL.md / load_skill / available_skills / 配置）
 
@@ -661,7 +681,7 @@ allowed-tools: [bash, read]
 
 | 字段     | JSON 类型 | 必填    | 默认   | 说明                                                    | 说人话            |
 | ------ | ------- | ----- | ---- | ----------------------------------------------------- | -------------- |
-| `name` | string  | **是** | —    | 要装载的技能名（须出现在 `<available_skills>`）；非路径                | 报技能名。          |
+| `name` | string  | **是** | —    | 要装载的技能名（已发现且允许模型调用，不要求出现在清单中）；非路径                | 报技能名。          |
 | `file` | string  | 否     | null | 装载技能目录下的附件相对路径（如 `references/x.md`）；缺省装 `SKILL.md` 正文 | 想看技能附带的某个参考文件。 |
 
 
@@ -695,6 +715,8 @@ unknown skill: "commti"; available skills: commit, code-review, pdf
 ```
 
 ### 5.3 `<available_skills>` 注入块（system prompt）
+
+`write-plans` 是固定的例外：其名称和简介不进入这块常驻清单，只由 PLAN 的短提醒指向；同名覆盖也遵守这一规则。这里仅控制自动推荐，不限制 `load_skill` 按名解析。其它技能仍走原有的过滤和预算逻辑。
 
 ```text
 <available_skills>
@@ -750,7 +772,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 │  │                 • discover() → walk <name>/SKILL.md → merge(first-wins)  │
 │  ├ catalog.rs      • render_available_skills_block(&SkillSet, budget)        │
 │  │                 • resolve(name) → &Skill（过滤 disable_model_invocation） │
-│  └ embedded_assets.rs • `tomcat/assets/skills/**` 编译嵌入；`tomcat init` 写入 P2 │
+│  └ builtin.rs     • build.rs 嵌入登记的资产；创建聊天上下文时写入 P2         │
 └──────────────┬──────────────────────────────────────────┬──────────────────┘
                │ 渐进式披露：元数据                         │ 按需装载：正文
                ▼                                           ▼
@@ -806,7 +828,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 | 磁盘 P0              | `<agent_workspace_dir>/.agents/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
 | 磁盘 P1              | `~/.tomcat/agents/<agentId>/skills/` | 当前 agent 专属技能                         | —           | 绑定 agent 的技能。 |
 | 磁盘 P2              | `~/.tomcat/skills/`                | 全局托管技能（Gateway 安装）                  | —           | 集中管理的技能。  |
-| 编译期资产源           | `tomcat/assets/skills/`             | 官方内置 skill 文件源（编译期）                  | build/init  | 不是发现根；`tomcat init` 写入 P2 Managed。 |
+| 编译期资产源 | `tomcat/assets/skills/` | 官方内置技能文件源，须登记进 `build.rs` | build/context | 不是发现根；创建聊天上下文时写入 P2 Managed。 |
 
 
 > **技能不读 env override 正文**：与 `prompts/mod.rs` 同口径，`SKILL.md` 正文从磁盘读但不支持 env 注入；env 仅控制开关 / 预算 / 路径。
@@ -849,6 +871,8 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 ---
 
 ## 9. 测试矩阵（验收）
+
+> 下表保留 2026-06-07 的历史验收快照，不代表当前内置资产仍未实现。现行内置资产和 write-plans 的回归入口见 §4.2.5。
 
 **当前状态（2026-06-07）**：`PR-SK-A / D / P / T / C` 已在本分支落地并回写验收状态；仅 `PR-SK-B`（官方内置 skill 资产 + `tomcat init` 写入 Managed）保留 **PENDING（下期）**。
 
@@ -893,6 +917,8 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 
 ## 11. 历史决策 / 跨文档修订
 
+> 本节及附录保留早期取舍。内置资产目前由聊天上下文初始化写入，不再采用下文曾计划的 init 入口；见 §4.2.5。
+
 - ~~技能正文随元数据一起常驻 system prompt~~ → **否**：技能正文动辄上千字，常驻会爆上下文。**改渐进式披露**：仅 name+description 常驻，正文经 `load_skill` 按需装载（对齐 codex/openclaw/pi）。
 - ~~用裸 `read(<SKILL.md 绝对路径>)` 装载（codex/pi 路线）~~ → **否**：内嵌技能无磁盘路径、托管技能在 `agent_definition_dir` 可写集判定之外、project 本地技能路径又依赖当前 cwd，模型易猜错路径。**改专用 `load_skill(name)` 按名装载**，统一覆盖三类来源且可被 guard 门控。
 - ~~技能可携带 `allowed-tools` 临时提权 / inline 跑 shell（cc-fork 路线）~~ → **否**：违背 tomcat「一切副作用经 `PermissionGate` + 审计」。**技能零特权**：`allowed-tools` 本期仅解析记录不强制；正文动作逐次过闸门。
@@ -933,4 +959,4 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 
 ---
 
-**一句话总结**：tomcat Skill 系统把技能当成「惰性指令资源」——运行时在 `core/skill` 只按 P0→P2 三层磁盘根（project `.tomcat/skills` > `~/.tomcat/agents/<id>/skills` > `~/.tomcat/skills`）发现 `<name>/SKILL.md`、同名 first-wins 去重成 `SkillSet`；官方内置 skill 文件来自 `tomcat/assets/skills/`，编译嵌入后由 `tomcat init` 写入 P2 Managed，再按普通 Managed skill 被发现；系统通过 `AvailableSkillsSection` 只注入 name+description（预算封顶，渐进式披露），正文经 `load_skill(name)` 按名装载、过 `PermissionGate` 读盘后包成 `<skill>` 回灌 LLM；技能零特权、坏文件容错不阻断、reviewer/verifier 默认门控，可执行逻辑明确推给 `ext/plugin`——磁盘格式 / 发现 / 披露镜像 `pi_agent_rust`，调用机制取 `cc-fork-01`/`hermes` 的专用工具按名解析，配置走 `[skills]` 顶层子表。
+**一句话总结**：tomcat Skill 系统把技能当成「惰性指令资源」——运行时在 `core/skill` 只按 P0→P2 三层磁盘根（project `.tomcat/skills` > `~/.tomcat/agents/<id>/skills` > `~/.tomcat/skills`）发现 `<name>/SKILL.md`、同名 first-wins 去重成 `SkillSet`；官方内置 skill 文件来自 `tomcat/assets/skills/`，编译嵌入后在创建聊天上下文时写入 P2 Managed，再按普通 Managed skill 被发现；系统通过 `AvailableSkillsSection` 只注入 name+description（预算封顶，渐进式披露），正文经 `load_skill(name)` 按名装载、过 `PermissionGate` 读盘后包成 `<skill>` 回灌 LLM；技能零特权、坏文件容错不阻断、reviewer/verifier 默认门控，可执行逻辑明确推给 `ext/plugin`——磁盘格式 / 发现 / 披露镜像 `pi_agent_rust`，调用机制取 `cc-fork-01`/`hermes` 的专用工具按名解析，配置走 `[skills]` 顶层子表。
