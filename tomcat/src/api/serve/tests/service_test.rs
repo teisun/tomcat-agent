@@ -254,6 +254,132 @@ fn local_hop_wire_is_pinned_to_protocol_version() {
     );
 }
 
+fn probe_fixture() -> (
+    tempfile::TempDir,
+    AppConfig,
+    super::LocalListener,
+    ServiceInfo,
+) {
+    let temp = tempfile::Builder::new()
+        .prefix("tc-probe-")
+        .tempdir_in(if cfg!(target_os = "macos") {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        })
+        .unwrap();
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let directory = super::service_directory(&cfg).unwrap();
+    super::local_socket::prepare_directory(&directory).unwrap();
+    let endpoint = super::local_socket::endpoint(&directory).unwrap();
+    let listener = super::LocalListener::bind(&endpoint).unwrap();
+    let info = ServiceInfo {
+        service: "tomcat".into(),
+        protocol_version: LOCAL_PROTOCOL_VERSION,
+        server_version: env!("CARGO_PKG_VERSION").into(),
+        instance_id: "probe-instance".into(),
+        pid: std::process::id(),
+        agent_id: cfg.agent.id.clone(),
+        endpoint,
+        running: true,
+    };
+    (temp, cfg, listener, info)
+}
+
+#[tokio::test]
+async fn discovery_retries_a_retiring_connection_without_replaying_work() {
+    let (_root, cfg, mut listener, info) = probe_fixture();
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["protocol"], "status");
+            assert_eq!(hello["environment"], json!({}));
+            if attempt == 1 {
+                write_json(&mut stream, &info).await.unwrap();
+            }
+            // The first peer closes after discovery connected but before its reply.
+        }
+    });
+    let info = super::probe_service(&cfg).await.unwrap().unwrap();
+    assert_eq!(info.instance_id, "probe-instance");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn discovery_does_not_retry_denials_or_identity_mismatches_as_absence() {
+    for denial in [true, false] {
+        let (_root, cfg, mut listener, info) = probe_fixture();
+        let mut reply = serde_json::to_value(info).unwrap();
+        if denial {
+            reply["error"] = json!("local_protocol_mismatch");
+        } else {
+            reply["agentId"] = json!("different-agent");
+        }
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["protocol"], "status");
+            write_json(&mut stream, &reply).await.unwrap();
+            // A retry would see a closed endpoint, masking this explicit rejection.
+        });
+        let error = super::probe_service(&cfg).await.unwrap_err().to_string();
+        assert!(
+            error.contains(if denial {
+                "local_protocol_mismatch"
+            } else {
+                "identity/protocol mismatch"
+            }),
+            "{error}"
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn discovery_keeps_one_deadline_and_never_calls_a_closing_live_endpoint_absent() {
+    let (_root, cfg, mut listener, _info) = probe_fixture();
+    let server: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        loop {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["protocol"], "status");
+        }
+    });
+    let result = tokio::time::timeout(
+        CONNECT_TIMEOUT * 2 + std::time::Duration::from_secs(2),
+        super::probe_service(&cfg),
+    )
+    .await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let error = result
+        .expect("discovery exceeded its original total budget")
+        .unwrap_err();
+    assert!(error.to_string().contains("discovery timed out"), "{error}");
+}
+
+#[tokio::test]
+async fn stop_still_requires_a_positive_cleanup_acknowledgement() {
+    for acknowledgement in [
+        None,
+        Some(json!({"stopped":false,"error":"cleanup failed"})),
+    ] {
+        let (_root, cfg, mut listener, info) = probe_fixture();
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["protocol"], "stop");
+            write_json(&mut stream, &info).await.unwrap();
+            if let Some(reply) = acknowledgement {
+                write_json(&mut stream, &reply).await.unwrap();
+            }
+        });
+        assert!(super::stop(&cfg).await.is_err());
+        server.await.unwrap();
+    }
+}
+
 #[test]
 fn service_command_removes_starter_proxy_variables() {
     let root = tempfile::tempdir().unwrap();

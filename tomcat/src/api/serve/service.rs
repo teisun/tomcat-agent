@@ -107,7 +107,7 @@ pub(crate) fn run(action: ServeSub, cfg: &AppConfig) -> Result<(), AppError> {
         match action {
             ServeSub::Start { foreground: false } => print_json(&ensure_running(cfg).await?),
             ServeSub::Start { foreground: true } => {
-                if let Some((_, info)) = open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await? {
+                if let Some(info) = probe_service(cfg).await? {
                     return print_json(&info);
                 }
                 let dir = service_directory(cfg)?;
@@ -119,8 +119,8 @@ pub(crate) fn run(action: ServeSub, cfg: &AppConfig) -> Result<(), AppError> {
                 Ok(())
             }
             ServeSub::Status => {
-                match open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await? {
-                    Some((_, info)) => print_json(&info),
+                match probe_service(cfg).await? {
+                    Some(info) => print_json(&info),
                     None => print_json(&serde_json::json!({"running": false, "endpoint": local_socket::endpoint(&service_directory(cfg)?)?})),
                 }
             }
@@ -199,18 +199,44 @@ async fn startup_lock(directory: &Path) -> Result<File, AppError> {
     }
 }
 
+/// A retiring endpoint can accept a connection then close before replying. Retry only
+/// read-only discovery, within the original connect + hello budget. Never treat a
+/// broken handshake as absence, or replay Stop/ACP/Native requests.
+async fn probe_service(cfg: &AppConfig) -> Result<Option<ServiceInfo>, AppError> {
+    let probe = async {
+        loop {
+            match open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await {
+                Ok(reply) => return Ok(reply.map(|(_, info)| info)),
+                Err(AppError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                            | io::ErrorKind::BrokenPipe
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    tokio::time::timeout(CONNECT_TIMEOUT * 2, probe)
+        .await
+        .map_err(|_| {
+            AppError::Config(
+                "local service discovery timed out; refusing to start another instance".into(),
+            )
+        })?
+}
+
 pub(crate) async fn ensure_running(cfg: &AppConfig) -> Result<ServiceInfo, AppError> {
-    if let Some((_, info)) =
-        open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await?
-    {
+    if let Some(info) = probe_service(cfg).await? {
         return Ok(info);
     }
     let directory = service_directory(cfg)?;
     local_socket::prepare_directory(&directory)?;
     let lock = startup_lock(&directory).await?;
-    if let Some((_, info)) =
-        open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await?
-    {
+    if let Some(info) = probe_service(cfg).await? {
         return Ok(info);
     }
     // Only the eventual listener, under its OWN lock, removes a stale socket.
@@ -234,9 +260,7 @@ pub(crate) async fn ensure_running(cfg: &AppConfig) -> Result<ServiceInfo, AppEr
     drop(lock); // The child reacquires it before probing/cleaning/binding.
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
-        if let Some((_, info)) =
-            open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await?
-        {
+        if let Some(info) = probe_service(cfg).await? {
             return Ok(info);
         }
         if let Some(status) = child.try_wait()? {
@@ -367,9 +391,7 @@ async fn run_service(cfg: &AppConfig) -> Result<(), AppError> {
         ));
     }
     let lock = startup_lock(&directory).await?;
-    if let Some((_, info)) =
-        open_management(cfg, ConnectionHello::new(ConnectionProtocol::Status)).await?
-    {
+    if let Some(info) = probe_service(cfg).await? {
         return print_json(&info);
     }
     let address = local_socket::endpoint(&directory)?;
