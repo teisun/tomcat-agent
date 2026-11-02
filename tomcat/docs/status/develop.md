@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 15:29 +0800 | Windows 定向补验通过（修复已合入 develop） | develop | - |
+| Tomcat Agent | 2026-11-02 22:07 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -159,6 +159,9 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-11-02]** Unix 命令入口改为独立副本：已有软链（含同目标与悬空链接）迁移为普通文件，内容不同的入口以同目录临时副本、`sync_all`、`rename` 替换；清理构建目录不再破坏入口，运行中的进程继续持有旧文件。新增 `scripts/dev-install.sh`（100755），沿用 Cargo、`CARGO_TARGET_DIR` 与 Agent 保护；脚本测试、非 Windows CI 步骤、双语文档及开发规则一并纳入本次本地提交。Windows 生产行为、插件路径选择与版本号不变。
+- [✓] **[本轮提交前的验收证据]** 定向库 13 项、self-install CLI 4 项通过（任务 `1793626820092-6y5212`）；Unix 包装器 2 项通过，Windows 2 项按平台跳过（`1793626881020-yjbd4e`）；`cargo fmt --check`（`1793626952581-m4wypu`）、定向 Clippy `-D warnings`（`1793627274153-2refvy`）及 diff 检查通过。按用户要求本次提交不重跑测试或构建，Cov% 未测量；只提交本次 12 个相关文件与两处 status，先前五个计划技能/提示词及其测试文件仍留在工作区，不推送或发布。
+- [✓] **[本机操作，2026-11-02]** NemuDrv 卸载成功，驱动目录和启动项链接已移至 `/Users/Shared/nemu-backup`，没有删除；launchd 原本未注册该任务，bootout 的“进程不存在”如实保留。复查 showloaded 成功且未发现 NemuDrv。用户在独立终端执行安装脚本两次后，已核实 `~/.local/bin/tomcat` 为 0755 普通文件、与 release 产物字节一致、版本 `0.1.81`；服务 PID 12802 及启动时间不变，Agent 保护未移除（安装核对任务 `1793628324840-uvzuia`）。这些机器操作不作为自动卸载机制进入仓库，不据此断言内核崩溃根因或永久治愈。
 - [✓] **[P1，2026-10-20，仅设计稿]** 共享 serve 与 Paperclip/Multica 标准 ACP 接入技术方案及架构索引随本次本地提交纳入，见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)。已同步最新计划的控制/旁观身份、普通打开与当前消息补发、慢连接不取消任务和背压降级边界；WebSocket 与断线续跑仍为后续规划。文档检查通过：19 个 JSON 样例、74 个本地链接、34 处源码行号引用、表格/围栏/差异格式；28 项功能验收均为 PENDING，未实施、未跑产品测试或构建，Cov% 未测量。后续从本次提交创建 `feature/shared-serve-acp` 开发分支；本次不推送、不升版、不发布。
 - [✓] **[P1，2026-10-19]** IP 中转站自动凭证槽修复：GUI `envNameForRelaySlug` 与 Rust `env_name_for_provider` 仅在规范化名称以数字开头时添加 `PROVIDER_`，使报告地址派生为 `PROVIDER_114215206196_API_KEY`；provider、模型 ID、显式槽优先级与冲突编号规则保持不变。5 个生产/测试文件及两处 status 全部纳入本次本地提交。此前 GUI 35/35、Rust auth 7/7、CLI 5/5、隔离环境后的 admin 28/28，以及 GUI 类型检查、目标 Rust 格式检查通过；CLI 新用例实际保存并清缓存重读 `.env`，确认 keyPresent 与 AuthStore 取回 Key。桌面/窄屏共 4 套 PNG/ARIA/console 已读取，真实设置组件使用模拟宿主，不冒充后端持久化或完整 VS Code E2E。按用户要求本次不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。本地记录 `.agents/acceptance/ip-relay.md` 与临时脚本/截图按既有忽略规则保留，不强制纳入 Git。
 - [✓] **[P1，2026-10-19]** macOS/Unix 回归修复：`normalize_path` 只剥离本机分隔符，避免把合法反斜杠文件名指向另一个文件；私有原子写入保留创建时的 0600 保护，并在第一字节前按句柄补足被 umask 扣除的属主权限。此前两项用例均完成红→绿，平台模块 54/54、env_file 2/2、OAuth 7/7 通过；平台修复后的严格 Clippy 复验通过。
@@ -199,6 +202,7 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-11-02 Unix 安装入口**：`install_user_command` 的签名不变；Unix 不再保留内容不同的普通入口，软链一律迁移为副本。`init`/`self-install` 安装当前程序的快照，后续仅编译不会自动刷新，需再次执行安装；macOS 通过根目录 `./scripts/dev-install.sh` 完成编译与安装，不改 PATH、配置、凭据或服务生命周期。
 - **2026-10-20 ACP 技术方案**：仅记录拟议接口与实现边界，未修改现有 CLI、serve、扩展或宿主接口；不能将文档中的 access/origin、共享连接和 ACP 示例当作已交付协议。
 - **2026-10-19 IP 中转站**：无新增接口、配置键、存储格式或依赖；仅改变数字开头的自动默认槽名，严格校验 `^[A-Z_][A-Z0-9_]*$` 不变。旧数字 provider 若使用默认槽，须重新配置 Key 或把启动器注入变量改为 `PROVIDER_<规范化名称>_API_KEY`；合法显式槽不变，不新增自动迁移或旧名回退。
 - **2026-10-19 平台兼容修复**：无新增 API、配置键、存储格式或依赖；Unix 的反斜杠保留为文件名字符，Windows 的两种分隔符行为不变。私有写入沿用创建→设权限→写入→原子发布流程，Windows DACL 与普通文件写入逻辑不变；NO_PROXY 改动仅在四个测试环境夹具内，不修改用户系统代理。
@@ -236,6 +240,8 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 命令入口整改的跨平台验证（2026-11-02） | 本机 macOS 定向验收通过；新代码的 Windows CI 尚未运行，旧 CI 不能代签 | 后续推送后核对本提交的 Windows 矩阵；本次仅本地提交且按要求不跑测试 |
+| 内核崩溃后续观察（2026-11-02） | 仅确认当前已卸载 MuMu 并备份，尚未重启核对或执行 Apple Diagnostics，崩溃根因未证实 | 用户方便时重启，核对 showloaded/AuxKC；必要时按原计划评估 clear-staging 后再重启，并观察新 panic，不自动重置全部驱动授权 |
 | 共享 serve / ACP 验收边界（2026-10-20） | 本次仅完成设计文档，计划尚未实施，T01–T28 全部待执行 | 后续在功能分支实施并验证两个宿主和 VS Code；文档校验不替代真实任务、停止、慢读及 UI 验收 |
 | IP 中转站验收边界（2026-10-19） | 此前 admin 首轮 26/28，两个删除 Key 用例继承本机 FCODEX_API_KEY/DEEPSEEK_API_KEY；仅对子进程移除这两个变量后 28/28，未修改凭证文件或断言 | 保留环境失败记录；浏览器使用模拟宿主，未访问报告 IP 或验证真实中转站认证；本次提交按要求不跑测试，不称全仓门禁通过 |
 | 会话菜单交付范围 | 已完成真实 Dev Host + fake Serve 的焦点／菜单验收并交付纯 VSIX；安装升级用例同步语义且类型检查通过 | Agent 未安装该 VSIX，不将源码宿主验证或用户请求提交等同于完整安装包／真实 CLI 验收；首次取证超时与后续通过记录均保留 |

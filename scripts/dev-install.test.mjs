@@ -9,6 +9,43 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 for (const exitCode of [0, 37]) {
+  test(`Unix dev-install forwards one Cargo invocation and exit ${exitCode}`, { skip: process.platform === "win32" }, () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "tomcat-dev-install-中文 "));
+    try {
+      for (const dir of ["scripts", "tomcat", "bin", "caller", "home", "custom target"]) {
+        fs.mkdirSync(path.join(fixture, dir));
+      }
+      const script = path.join(fixture, "scripts/dev-install.sh");
+      fs.copyFileSync(path.join(root, "scripts/dev-install.sh"), script);
+      const log = path.join(fixture, "cargo.jsonl");
+      // Execute the real wrapper; only Cargo is replaced, so this cannot build or install.
+      fs.writeFileSync(path.join(fixture, "bin/cargo"), '#!/bin/sh\nexec "$TEST_NODE" "$(dirname "$0")/cargo.cjs" "$@"\n', { mode: 0o755 });
+      fs.writeFileSync(path.join(fixture, "bin/cargo.cjs"), `
+const fs = require("node:fs");
+fs.appendFileSync(process.env.TEST_LOG, JSON.stringify({args:process.argv.slice(2), cwd:process.cwd(), target:process.env.CARGO_TARGET_DIR, home:process.env.HOME, active:process.env.TOMCAT_AGENT_ACTIVE}) + "\\n");
+process.exit(Number(process.env.TEST_EXIT));
+`);
+      const env = {
+        ...process.env,
+        PATH: `${path.join(fixture, "bin")}:${process.env.PATH ?? ""}`,
+        TEST_NODE: process.execPath, TEST_LOG: log, TEST_EXIT: String(exitCode),
+        CARGO_TARGET_DIR: path.join(fixture, "custom target"), HOME: path.join(fixture, "home"), TOMCAT_AGENT_ACTIVE: "1",
+      };
+      const result = spawnSync(script, [], {
+        cwd: path.join(fixture, "caller"), env, encoding: "utf8",
+      });
+      assert.equal(result.status, exitCode, `${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+      const entries = fs.readFileSync(log, "utf8").trim().split(/\r?\n/).map(JSON.parse);
+      assert.deepEqual(entries, [{ args: ["run", "--release", "--bin", "tomcat", "--", "self-install"],
+        cwd: fs.realpathSync(path.join(fixture, "tomcat")), target: env.CARGO_TARGET_DIR, home: env.HOME, active: "1" }]);
+      assert.deepEqual(fs.readdirSync(env.HOME), []);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const exitCode of [0, 37]) {
   test(`Windows dev-install forwards one Cargo invocation and exit ${exitCode}`, { skip: process.platform !== "win32" }, () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "tomcat-dev-install-中文 "));
     try {

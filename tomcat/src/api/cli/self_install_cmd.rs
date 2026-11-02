@@ -23,7 +23,7 @@ pub(super) fn run_self_install() -> Result<(), AppError> {
                 ),
             ))
         })?;
-    // None also covers preserved user files and skipped test artifacts, not just identical builds.
+    // None also covers skipped test artifacts and running from the command entry itself.
     let key = if installed.is_some() {
         "cli.selfInstall.updated"
     } else {

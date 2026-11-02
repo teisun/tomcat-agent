@@ -1375,13 +1375,8 @@ fn test_self_install_without_config_or_with_broken_config_is_idempotent() {
                 self_install_message(key, &entry)
             );
         }
-        #[cfg(windows)]
+        assert!(fs::symlink_metadata(&entry).unwrap().file_type().is_file());
         assert!(fs::read(&entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
-        #[cfg(unix)]
-        assert_eq!(
-            fs::read_link(&entry).unwrap(),
-            tomcat::infra::canonicalize(common::serve::cargo_bin_path()).unwrap()
-        );
         assert_eq!(
             fs::read_to_string(home.path().join(".zshrc")).unwrap(),
             "keep shell configuration"
@@ -1464,25 +1459,27 @@ fn test_self_install_reports_write_failure_without_changing_existing_file() {
     assert!(!home.path().join(".tomcat").exists());
 }
 
-#[cfg(unix)]
 #[test]
-fn test_self_install_preserves_user_owned_regular_command() {
+fn test_self_install_refreshes_a_stale_regular_command() {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".local").join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let entry = bin.join("tomcat");
-    fs::write(&entry, "user-owned executable").unwrap();
-    let output = common::serve::isolated_serve_command(home.path())
-        .arg("self-install")
-        .current_dir(home.path())
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        self_install_message("cli.selfInstall.unchanged", &entry)
-    );
-    assert_eq!(fs::read_to_string(entry).unwrap(), "user-owned executable");
+    let entry = bin.join(format!("tomcat{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&entry, "old executable").unwrap();
+    for key in ["cli.selfInstall.updated", "cli.selfInstall.unchanged"] {
+        let output = common::serve::isolated_serve_command(home.path())
+            .arg("self-install")
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            self_install_message(key, &entry)
+        );
+        assert!(fs::symlink_metadata(&entry).unwrap().file_type().is_file());
+        assert!(fs::read(&entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    }
 }
 
 /// Windows：HOME 指向临时目录时，init 不改真实的 HKCU\Environment\Path，只打印手动步骤。

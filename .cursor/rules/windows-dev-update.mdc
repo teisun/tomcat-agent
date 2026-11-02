@@ -7,6 +7,6 @@ alwaysApply: true
 
 - For an explicitly requested Windows build-and-install update, use `scripts/dev-install.cmd` from the repository root (PowerShell/CMD: `.\scripts\dev-install.cmd`). It only delegates to `cargo run --release --bin tomcat -- self-install` in `tomcat/`, honoring `CARGO_TARGET_DIR`.
 - This updates the user's `~/.local/bin/tomcat.exe` copy, not configuration, PATH, credentials or running services. First-time PATH setup remains `tomcat init`; explicit `tomcat.path` and bundled extension binaries are not changed.
-- Ordinary builds, tests and CI must not install implicitly. macOS keeps its existing symlink workflow.
+- Ordinary builds, tests and CI must not install implicitly. On macOS, use `./scripts/dev-install.sh` from the repository root in an independent terminal to build and update the standalone `~/.local/bin/tomcat` copy; it does not restart services and honors the same Agent guard.
 - Tomcat Agent tools carry `TOMCAT_AGENT_ACTIVE=1`; `self-install` is blocked there. Do not remove or override the guard. Offer the script command for the user's independent terminal instead; do not claim an installation happened after only building.
 - Never restart the shared service through Agent Bash. After installation, the user explicitly runs `/restart` or the existing VS Code restart command (stops all tasks).

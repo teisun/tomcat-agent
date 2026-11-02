@@ -39,6 +39,10 @@ You only need Rust stable 1.70+ when building from source. The repository's `tom
 
 After first-time `tomcat init` has set up PATH, run `.\scripts\dev-install.cmd` from the repository root in an independent PowerShell/CMD terminal to build and update the installed executable. The [thin entry](scripts/dev-install.cmd) delegates to Cargo; it does not restart a running service. Then use `/restart` in VS Code (stops all tasks), or the existing restart command in the Command Palette. Tomcat Agent tools cannot bypass the self-install guard. See [the Windows workflow and path-selection boundaries](tomcat/docs/user-guide.md#windows-development-environment).
 
+### macOS developer updates
+
+After first-time `tomcat init`, run [`./scripts/dev-install.sh`](scripts/dev-install.sh) from the repository root in an independent terminal. It builds and updates `~/.local/bin/tomcat` as a standalone copy, replacing old symlinks; cleaning `target/` no longer breaks the command. Rebuilds alone do not refresh this copy—run the script again to update it. It does not restart the shared service or bypass the Agent self-install guard.
+
 ## Project Structure
 
 | Component | Purpose | Primary docs |

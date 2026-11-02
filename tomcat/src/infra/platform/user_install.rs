@@ -1,6 +1,6 @@
 //! 用户级命令安装：把可执行文件装进用户命令目录，并把该目录加入用户 PATH。
 //!
-//! - Unix：命令入口是指向 exe 的软链；PATH 写进 shell 启动脚本（按 `$SHELL` 选择）。
+//! - Unix：命令入口是 exe 的独立副本，以 rename 原子替换；PATH 写进 shell 启动脚本（按 `$SHELL` 选择）。
 //! - Windows：命令入口是 exe 的副本；PATH 写进 `HKCU\Environment\Path`。不用 `setx`：它会把
 //!   PATH 截断到 1024 字符，并把 `%VAR%` 展开后写死。
 
@@ -32,11 +32,11 @@ pub fn manual_path_step(dir: &Path) -> ManualPathStep {
     }
 }
 
-/// 在 `dir` 里安装名为 `name` 的命令入口（Windows 自动加 `.exe`），指向 `exe`。
-/// 返回新装或更新的入口；已是最新、或入口位置被不该碰的文件占用时返回 `None`。
+/// 在 `dir` 里安装名为 `name` 的命令副本（Windows 自动加 `.exe`）。
+/// 返回新装或更新的入口；已是最新时返回 `None`。
 ///
-/// - 已有软链：指向同一个 exe 就跳过，指向别处就替换。
-/// - 已有普通文件：Unix 不碰（可能是用户自己装的）；Windows 视为上次复制的副本，内容不同才替换。
+/// - 已有软链：Unix 一律以副本替换链接本身；Windows 指向同一个 exe 就跳过，否则替换。
+/// - 已有普通文件：内容相同就跳过，否则替换；Unix 用同目录临时副本 + rename，不改写旧文件。
 ///
 /// # Errors
 /// * [`io::Error`] - `exe` 无法 canonicalize，或目录/入口无法创建、替换。
@@ -47,22 +47,42 @@ pub fn install_user_command(exe: &Path, dir: &Path, name: &str) -> io::Result<Op
     remove_parked_copies(&entry);
 
     match std::fs::symlink_metadata(&entry) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            if canonicalize(&entry).ok().as_deref() == Some(exe.as_path()) {
-                return Ok(None);
-            }
-            std::fs::remove_file(&entry)?;
-        }
-        Ok(_) => return refresh_regular_entry(&exe, &entry),
-        Err(_) => {}
+        Ok(meta) if meta.file_type().is_symlink() => replace_symlink_entry(&exe, &entry),
+        Ok(_) => refresh_regular_entry(&exe, &entry),
+        Err(_) => create_entry(&exe, &entry).map(|()| Some(entry)),
     }
-    create_entry(&exe, &entry)?;
-    Ok(Some(entry))
+}
+
+#[cfg(unix)]
+fn replace_symlink_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>> {
+    create_entry(exe, entry)?;
+    Ok(Some(entry.to_path_buf()))
+}
+
+#[cfg(windows)]
+fn replace_symlink_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>> {
+    if canonicalize(entry).ok().as_deref() == Some(exe) {
+        return Ok(None);
+    }
+    std::fs::remove_file(entry)?;
+    create_entry(exe, entry)?;
+    Ok(Some(entry.to_path_buf()))
 }
 
 #[cfg(unix)]
 fn create_entry(exe: &Path, entry: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(exe, entry)
+    let tmp = entry.with_file_name(format!(
+        ".{}.{}.tmp",
+        file_name(entry),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = std::fs::copy(exe, &tmp)
+        .and_then(|_| std::fs::File::open(&tmp)?.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, entry));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(windows)]
@@ -71,8 +91,12 @@ fn create_entry(exe: &Path, entry: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn refresh_regular_entry(_exe: &Path, _entry: &Path) -> io::Result<Option<PathBuf>> {
-    Ok(None)
+fn refresh_regular_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>> {
+    if std::fs::read(entry)? == std::fs::read(exe)? {
+        return Ok(None);
+    }
+    create_entry(exe, entry)?;
+    Ok(Some(entry.to_path_buf()))
 }
 
 /// 正在运行的 exe 不能覆盖或删除，但可以改名：先把旧副本改名成 `*.old` 再复制；
@@ -99,7 +123,6 @@ fn refresh_regular_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>
 #[cfg(windows)]
 const PARKED_COPY_SUFFIX: &str = ".old";
 
-#[cfg(windows)]
 fn file_name(entry: &Path) -> String {
     entry
         .file_name()

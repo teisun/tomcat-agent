@@ -2,7 +2,7 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
-2026-10-22，共享后台与 Paperclip/Multica ACP 接入已完成本机自动化及真实双宿主验收，Tomcat 已推送 `feature/shared-serve-acp`；验收代码 `401b6f0c` 在同一轮 GitHub CI `39765237685` 的五项必需检查全部通过，Windows 实际系统代理、Win32 Job、真实 VS Code 退出后后台存活及制品均已核对；后续收口仅更新状态文档，复用该代码修订的有效结果。最新修订、分项结果及证据以唯一状态表为准。不升版、不合并主干、不发布，宿主改动仅留本地分支。
+2026-11-02 22:07 +0800，Unix 命令入口改为独立副本并补齐 macOS 开发安装脚本，相关源码、测试、CI 与双语文档随本次本地提交纳入；先前五个独立的计划技能/提示词改动不纳入。此前定向验收及用户独立终端安装核对已通过，MuMu 当前卸载与备份已完成；重启后核对、硬件自检和新改动的 Windows CI 仍待验证。按用户要求，本次提交不跑测试、不构建、不推送；Cov% 未测量。详细结果和边界以唯一状态表为准。
 
 2026-10-19 11:36 +0800，CLI `0.1.80` / EXT `0.1.96` 标准发版完成，新 EXT 内置 CLI `0.1.80`。发布提交 `845416e664ce55aff8304a3ad20f5882e7cdcc25` 已推送 develop/main/master，两个标签均指向它；先确认 CLI 四平台资产齐全，再发布 EXT。GitHub 四份 CLI 归档、五份 VSIX 及各自 SHA256SUMS 已公开，9 份下载包哈希通过；四平台原生安装验收通过，包内 CLI 与发布归档一致，CHANGELOG 与发布提交一致。Marketplace 四平台已公开且全部 Validated，商店 SHA256 与 GitHub 一致；OpenVSX 跳过。本地未额外跑产品测试、构建或安装；main 普通 CI 已通过，develop Windows Rust 尚在运行，不称所有分支全绿。详情与证据见唯一状态表及 `.agents/acceptance/release-0.1.80-0.1.96/release.md`，Cov% 未测量。
 

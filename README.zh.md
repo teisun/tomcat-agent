@@ -39,6 +39,10 @@
 
 首次用 `tomcat init` 配好 PATH 后，在独立 PowerShell/CMD 终端的仓库根目录执行 `.\scripts\dev-install.cmd`，即可编译并更新安装副本。[这个薄入口](scripts/dev-install.cmd) 只转交 Cargo，不自动重启后台；随后在 VS Code 中执行 `/restart`（会停止所有任务），或使用命令面板的重启命令。Tomcat Agent 工具不能绕过自安装保护。详见[Windows 开发流程与路径选择边界](tomcat/docs/user-guide.zh.md#windows-开发环境)。
 
+### macOS 开发更新
+
+首次运行 `tomcat init` 后，在独立终端的仓库根目录执行 [`./scripts/dev-install.sh`](scripts/dev-install.sh)。它会编译并将 `~/.local/bin/tomcat` 更新为独立副本，替换已有软链；清理 `target/` 不再破坏命令入口。仅重新编译不会刷新副本，更新时需再次运行该脚本。脚本不重启共享服务，也不绕过 Agent 自安装保护。
+
 ## 项目结构
 
 | 组件 | 作用 | 主要文档 |

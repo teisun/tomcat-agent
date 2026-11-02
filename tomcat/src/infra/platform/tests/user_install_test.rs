@@ -15,14 +15,19 @@ fn manual_path_step_matches_the_platform_mechanism() {
 
 #[test]
 #[serial(env_lock)]
-fn install_user_command_creates_local_bin_and_points_to_exe() {
+fn install_user_command_creates_local_bin_with_a_copy_of_exe() {
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("target").join("debug").join("tomcat");
     let local_bin = dir.path().join(".local").join("bin");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
     std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
-    let installed = install_user_command(&exe, &local_bin, "tomcat").expect("install symlink");
+    let installed = install_user_command(&exe, &local_bin, "tomcat").expect("install copy");
     let link = installed.expect("should create canonical command entry");
     assert_eq!(
         link,
@@ -34,18 +39,17 @@ fn install_user_command_creates_local_bin_and_points_to_exe() {
     );
     assert!(local_bin.is_dir(), "local bin should be created");
 
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(std::fs::read(&link).unwrap(), std::fs::read(&exe).unwrap());
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::read_link(&link).unwrap(),
-            canonicalize(&exe).unwrap()
-        );
-    }
-    #[cfg(windows)]
-    {
-        assert!(
-            link.exists(),
-            "windows fallback should copy an .exe-like target"
+            std::fs::metadata(&link).unwrap().permissions().mode() & 0o777,
+            0o755
         );
     }
 }
@@ -63,20 +67,28 @@ fn install_user_command_replaces_existing_symlink_target() {
     std::fs::create_dir_all(&local_bin).unwrap();
     std::fs::write(&old_exe, b"old").unwrap();
     std::fs::write(&new_exe, b"new").unwrap();
-    std::os::unix::fs::symlink(&old_exe, &link).unwrap();
-
-    let installed = install_user_command(&new_exe, &local_bin, "tomcat").expect("refresh symlink");
-    assert_eq!(installed.as_deref(), Some(link.as_path()));
-    assert_eq!(
-        std::fs::read_link(&link).unwrap(),
-        canonicalize(&new_exe).unwrap()
-    );
+    // Both a different target and the current exe must migrate; neither may be written through.
+    for target in [&old_exe, &new_exe] {
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        let installed =
+            install_user_command(&new_exe, &local_bin, "tomcat").expect("refresh symlink");
+        assert_eq!(installed.as_deref(), Some(link.as_path()));
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(std::fs::read(&link).unwrap(), b"new");
+        assert_eq!(std::fs::read(&old_exe).unwrap(), b"old");
+        assert_eq!(std::fs::read(&new_exe).unwrap(), b"new");
+        std::fs::remove_file(&link).unwrap();
+    }
 }
 
 #[cfg(unix)]
 #[test]
 #[serial(env_lock)]
-fn install_user_command_preserves_existing_regular_file() {
+fn install_user_command_refreshes_a_different_unix_copy_atomically() {
+    use std::io::Read;
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("target").join("debug").join("tomcat");
     let local_bin = dir.path().join(".local").join("bin");
@@ -86,13 +98,93 @@ fn install_user_command_preserves_existing_regular_file() {
     std::fs::write(&exe, b"debug-binary").unwrap();
     std::fs::write(&existing, b"real-user-install").unwrap();
 
-    let installed =
-        install_user_command(&exe, &local_bin, "tomcat").expect("preserve regular file");
-    assert!(installed.is_none(), "regular file should not be replaced");
-    assert_eq!(std::fs::read(&existing).unwrap(), b"real-user-install");
+    let mut old_handle = std::fs::File::open(&existing).unwrap();
+    let installed = install_user_command(&exe, &local_bin, "tomcat").expect("refresh regular file");
+    assert_eq!(installed.as_deref(), Some(existing.as_path()));
+    assert_eq!(std::fs::read(&existing).unwrap(), b"debug-binary");
+    let mut old_bytes = Vec::new();
+    old_handle.read_to_end(&mut old_bytes).unwrap();
+    assert_eq!(old_bytes, b"real-user-install");
+    assert_eq!(sorted_file_names(&local_bin), ["tomcat"]);
+    let modified = std::fs::metadata(&existing).unwrap().modified().unwrap();
+    assert!(install_user_command(&exe, &local_bin, "tomcat")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        std::fs::metadata(&existing).unwrap().modified().unwrap(),
+        modified
+    );
 }
 
-#[cfg(windows)]
+#[cfg(unix)]
+#[test]
+fn install_user_command_replaces_a_dangling_symlink_with_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("new-exe");
+    let local_bin = dir.path().join("bin");
+    let entry = local_bin.join("tomcat");
+    std::fs::write(&exe, b"new").unwrap();
+    std::fs::create_dir(&local_bin).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing-target"), &entry).unwrap();
+
+    assert_eq!(
+        install_user_command(&exe, &local_bin, "tomcat").unwrap(),
+        Some(entry.clone())
+    );
+    assert!(std::fs::symlink_metadata(&entry)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(std::fs::read(&entry).unwrap(), b"new");
+}
+
+#[test]
+fn install_user_command_survives_deleting_the_build_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    let exe = target.join("tomcat");
+    let local_bin = dir.path().join("bin");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(&exe, b"build-output").unwrap();
+    let entry = install_user_command(&exe, &local_bin, "tomcat")
+        .unwrap()
+        .unwrap();
+
+    std::fs::remove_file(&exe).unwrap();
+    std::fs::remove_dir(&target).unwrap();
+    assert!(std::fs::symlink_metadata(&entry)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(std::fs::read(&entry).unwrap(), b"build-output");
+}
+
+#[cfg(unix)]
+#[test]
+fn install_user_command_keeps_the_old_entry_when_the_copy_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("requires an unprivileged user to exercise directory write denial");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("new-exe");
+    let local_bin = dir.path().join("bin");
+    let entry = local_bin.join("tomcat");
+    std::fs::write(&exe, b"new").unwrap();
+    std::fs::create_dir(&local_bin).unwrap();
+    std::fs::write(&entry, b"old").unwrap();
+    let permissions = std::fs::metadata(&local_bin).unwrap().permissions();
+    std::fs::set_permissions(&local_bin, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = install_user_command(&exe, &local_bin, "tomcat");
+    std::fs::set_permissions(&local_bin, permissions).unwrap();
+
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read(&entry).unwrap(), b"old");
+    assert_eq!(sorted_file_names(&local_bin), ["tomcat"]);
+}
+
 fn sorted_file_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()

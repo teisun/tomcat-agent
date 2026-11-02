@@ -74,6 +74,11 @@ jobs:
           esac
           rg --version
 
+      - name: Test Unix development-install wrapper without installing
+        if: runner.os != 'Windows'
+        working-directory: .
+        run: node --test scripts/dev-install.test.mjs
+
       - name: Run gate-fast
         run: |
           set -o pipefail
