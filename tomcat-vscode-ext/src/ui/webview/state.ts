@@ -3193,13 +3193,15 @@ export class WebviewStateStore {
         clearStreaming(runtime);
         return NO_SESSION_RENDER_MUTATION;
       case "message_start": {
+        const assistantMessageId = "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+          ? frame.assistantMessageId : null;
+        if (assistantMessageId && hasPersistedAssistant(runtime, assistantMessageId)) {
+          return NO_SESSION_RENDER_MUTATION;
+        }
         clearStreaming(runtime);
-        if (
-          "assistantMessageId" in frame &&
-          typeof frame.assistantMessageId === "string"
-        ) {
-          runtime.activeAssistantId = frame.assistantMessageId;
-          runtime.streamingAssistantId = frame.assistantMessageId;
+        if (assistantMessageId) {
+          runtime.activeAssistantId = assistantMessageId;
+          runtime.streamingAssistantId = assistantMessageId;
         }
         return NO_SESSION_RENDER_MUTATION;
       }

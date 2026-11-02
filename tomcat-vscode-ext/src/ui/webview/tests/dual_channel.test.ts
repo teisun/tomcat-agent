@@ -338,6 +338,35 @@ describe("webview dual-channel state store", () => {
     expect(timeline.filter((item) => item.type === "thinking")).toMatchObject([{ text: "complete thinking" }]);
   });
 
+  it("ignores a late message_start after history without blocking a new stream", () => {
+    const store = new WebviewStateStore();
+    store.hydrateHistory("s1", { sessionId: "s1", upToSeq: null, messages: [{
+      type: "message", id: "a1", message: {
+        role: "assistant", content: "complete answer", thinking_text: "complete thinking",
+      },
+    }] });
+    const before = store.snapshot().sessionViews.s1.timeline;
+    store.applyEvent({ type: "message_start", sessionId: "s1", assistantMessageId: "a1", message: {} });
+    for (const kind of ["content_delta", "thinking_delta"]) {
+      store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
+        assistantMessageEvent: { kind, delta: "SHOULD_NOT_APPEND" }, message: {} });
+    }
+    // No second history load is allowed to hide transient duplicated text.
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual(before);
+    store.applyEvent({ type: "message_start", sessionId: "s1", assistantMessageId: "a2", message: {} });
+    for (const [kind, delta] of [["content_delta", "new answer"], ["thinking_delta", "new thinking"]]) {
+      store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a2",
+        assistantMessageEvent: { kind, delta }, message: {} });
+    }
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.filter(item => item.type === "message")).toMatchObject([
+      { id: "a1", text: "complete answer" }, { id: "a2", text: "new answer" },
+    ]);
+    expect(timeline.filter(item => item.type === "thinking")).toMatchObject([
+      { text: "complete thinking" }, { text: "new thinking" },
+    ]);
+  });
+
   it("retains an ended replay while history is still behind, then converges by durable id", () => {
     const store = new WebviewStateStore();
     store.applyEvent({ type: "message_update", sessionId: "s1", assistantMessageId: "a1",
