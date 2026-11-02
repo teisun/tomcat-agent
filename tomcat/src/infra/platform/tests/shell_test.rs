@@ -5,6 +5,64 @@ use std::path::{Path, PathBuf};
 use super::{locate_git_bash, shell_path_to_native};
 
 #[test]
+fn git_probe_preserves_successful_output_and_nonzero_exit() {
+    for (exit, expected) in [(0, Some("fixture/git-core")), (7, None)] {
+        let mut command = std::process::Command::new("node");
+        command.args([
+            "-e",
+            &format!("process.stdout.write(' fixture/git-core\\n');process.exit({exit})"),
+        ]);
+        let output =
+            super::probe_git_exec_path(command, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(output.as_deref(), expected);
+    }
+}
+
+#[test]
+fn git_probe_deadline_reaps_the_process_and_its_pipe_holding_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let pids_path = dir.path().join("pids.json");
+    // The probe never completes. A test-only fail-safe bounds the red run of the
+    // old Command::output path; production must kill both processes well before it.
+    let script = format!(
+        r#"
+        const fs = require('node:fs');
+        const child = require('node:child_process').spawn(process.execPath, ['-e',
+            'setInterval(()=>{{}},1000);setTimeout(()=>process.exit(),8000)'], {{stdio:'inherit'}});
+        fs.writeFileSync({}, JSON.stringify([process.pid,child.pid]));
+        setInterval(()=>{{}},1000);setTimeout(()=>process.exit(),8000);
+    "#,
+        serde_json::to_string(&pids_path).unwrap()
+    );
+    let mut command = std::process::Command::new("node");
+    command.args(["-e", &script]);
+    let started = std::time::Instant::now();
+    let error = super::probe_git_exec_path(command, std::time::Duration::from_secs(3))
+        .expect_err("probe must time out, not wait for the fixture fail-safe");
+    assert!(error.contains("timed out"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    let pids: Vec<u32> = serde_json::from_slice(&std::fs::read(pids_path).unwrap()).unwrap();
+    assert_eq!(pids.len(), 2);
+    let status = std::process::Command::new("node")
+        .args([
+            "-e",
+            r#"
+        for (const pid of process.argv.slice(1)) {
+            try { process.kill(Number(pid), 0); throw Error('probe still alive: '+pid); }
+            catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
+    "#,
+        ])
+        .args(pids.iter().map(ToString::to_string))
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "both probe processes must be gone on return"
+    );
+}
+
+#[test]
 fn shell_path_to_native_maps_only_git_bash_drive_mounts() {
     for unchanged in ["/tmp/x", "/cdrom/x", "relative/x"] {
         assert_eq!(shell_path_to_native(unchanged), unchanged);

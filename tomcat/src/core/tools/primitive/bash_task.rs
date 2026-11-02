@@ -754,8 +754,6 @@ impl BashTaskRegistry {
         captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
     ) -> Result<BashTaskTicket, AppError> {
         let environment = self.environment_snapshot();
-        let shell =
-            crate::infra::platform::posix_shell_for(environment.as_deref(), cwd.resolved_path())?;
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -782,6 +780,22 @@ impl BashTaskRegistry {
         } else {
             None
         };
+
+        let shell =
+            crate::infra::platform::posix_shell_for(environment.as_deref(), cwd.resolved_path())
+                .inspect_err(|error| {
+                    if let (Some(guard), Some((scope, grant))) =
+                        (self.background_guard.as_ref(), bash_scope_grant)
+                    {
+                        guard.record_spawn_result(
+                            &audit_cmd,
+                            scope,
+                            grant,
+                            false,
+                            error.to_string(),
+                        );
+                    }
+                })?;
 
         let log_file = tokio::fs::OpenOptions::new()
             .create(true)

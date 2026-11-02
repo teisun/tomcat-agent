@@ -131,6 +131,9 @@
 - T17 / PATH 目录：同一红批次 `1793582522201-mj3ly8` 在真实临时 PATH 的首目录放同名文件夹、次目录放可执行文件，发现 resolver 选中了文件夹。`defaultFileExists` 在原权限检查之前要求 stat.isFile，保留 stat 跟随符号链接的既有安装方式；不更换发现优先级或增加定位进程。`1793582637511-eo7rjd` 的 resolver 13 项通过，含真实文件、POSIX 符号链接、目录跳过和 Windows 无执行位语义；Windows 平台运行仍另行补证。
 - T15 / 测试隔离：`1793582133871-2iktgd` 通过仅向子测试进程传入 `TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR=tools/agents`，稳定复现 package-install 权限用例读取预期 `.agents` 文件失败（原批次 HOME/temp 归因保留为当时观察，不据此认定同一个具体环境变量）。干扰来源有源码证据：`infra/config/tests/load_test.rs` 在进程内修改同名环境。该权限用例改用已有 `load_config_toml_file` 读取自己的固定夹具，不再无关地加载全进程覆盖；未串行化全库、未增加锁。`1793582387881-2mj5wv` 在相同注入下 1 passed / 0 failed。
 - T15 / 评审器等待：`1793581958528-mmm2sj` 完整等到单例通过（128.56s），不是已证明的死锁；十轮真实退避造成超 60 秒告警。仅对该测试启用 Tokio 虚拟时钟并新增恰好十次请求的断言，产品期限、重试额度、错误分类原样保留。`1793582387881-2mj5wv` 的 provider-binding 同模块六项共 3.62s 全部通过。原并发全库验证仍由 B2 的 T15 批次完成，不把定向结果冒充全门禁。
+- T13：后台 Bash 授权后才解析 shell，解析失败复用 record_spawn_result 记已授权但启动失败。Windows 两条 Git 探测入口共用 5 秒期限；同步入口用短生命周期线程运行已有 Tokio/ProcessTree 能力，超时终止整棵树并等待子进程回收，连同后代占着 stdout 的情形一起覆盖；不改选择规则、控制者环境或增加 Agent 标记。
+- T13 红→绿：`1793582387881-2mj5wv` 旧 output 路径直到 8 秒测试保险才退出，期限用例先失败；`1793582756127-qq2hg0` 两个探测用例通过，超时后父子 PID 均已消失、正常/非零退出结果不变。该平台批次为 62 passed / 1 failed：未修改的 local_socket 旧用例在 drop 后一次 connect 仍成功，根因未确认；`1793583022347-6wfzg7` 单独复跑通过，但不据此抹去整批失败，B2 继续核验。
+- Bash 原语模块 `1793583022347-6wfzg7` 为 162 passed；随后的 Clippy 指出新增审计代码应使用 inspect_err，已按建议等价修改，`1793583275839-uefi1y` 的 `cargo clippy -p tomcat --lib -- -D warnings` 通过。Windows 专属用例以相对 PATH 的 git.cmd 验证拒绝时不探测、允许后照常执行、探测失败有审计；本机未编译/运行该 cfg(windows) 用例，必须在推送前补齐，不代签授权顺序的 Windows 实测。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
