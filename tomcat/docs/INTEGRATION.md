@@ -7,7 +7,7 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 22:21 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-02 23:15 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -123,9 +123,10 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **准备状态**：用户执行标准 `/release-cli-ext`，源码基线 `12445089`。仅运行版本脚本一次：CLI `0.1.81 → 0.1.82`、EXT `0.1.97 → 0.1.98`，新 EXT pin CLI `0.1.82`；五个版本源/镜像的差异只有业务版本，无依赖变化。起手工作区干净，本地/远端目标 tag 未占用，develop/main/master 可快进同步；版本一致性与两个 tag guard 已通过。
 - **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.96` 为基线核对提交与相关差异，将 Unreleased 收入 `0.1.98`，补齐共享后台/ACP、凭据与代理升级提醒、恢复与引用修复、握手/Windows 探测安全边界、规划授权前置及 Unix 安装副本说明。注明 bundled CLI `0.1.82`；已发布历史条目不改，不为未发布的 `0.1.97` 虚构记录。版本与 CHANGELOG 必须同一提交。
 - **执行边界**：本地仅做版本镜像、tag guard、CHANGELOG 与差异检查，不额外运行产品测试、构建或安装，不重启在用服务。推送 develop 后仅 fast-forward 同步 main/master；先发布 CLI，确认四平台归档与 SHA256SUMS 就绪后才发布 EXT，沿用既有 GitHub 构建及四平台原生安装验收。
-- **发布结果**：准备中；release 提交、工作流与资产结果在执行后回填。当前不将本地版本更新表述为 GitHub 发布完成，不移动旧 tag 或替换已发布资产。
+- **发布结果（BLOCKED）**：release 提交 `3441b9e87931b0e83f338a4a76f0e791fd044c0e` 已推送并快进同步 develop/main/master。CLI run `41462040464` 成功，四平台归档与 SHA256SUMS 已公开，实际下载哈希均通过。EXT run `41464467206` 打包与 Windows 原生验收通过，但两种 macOS 和 Linux 的真实 `serve restart` 失败；EXT GitHub/Marketplace 发布均 skipped。两个 tag 保留，不能将 CLI 发布成功写成 Unix 运行验收通过。
+- **整改进行中**：用户已授权修复后以新 patch（拟 CLI `0.1.83` / EXT `0.1.99`）继续，不改旧 tag/资产。先修已确认的 readline 未处理错误与夹具超时常量漏导出，新增真实连接失败回归和 80 秒超时断言；固定 Linux 构建为验收使用的 Ubuntu 22.04，并按 runner/target 隔离缓存。保留隔离 HOME 的服务日志，复用现有两条 workflow_dispatch dry-run 取得证据后再正式发布；本地只做差异检查，不跑测试/构建。原生 CLI 重启底层根因尚未确认，不吞掉错误或放宽断言。
 - **市场与更新**：已查询 `PUBLISH_MARKETPLACE=true`，沿用现有 OIDC 发布；Marketplace 与 OpenVSX 的实际结果以本轮工作流为准，不改仓库变量、凭据或发布门禁。
-- **证据边界**：本轮不测 Cov%；旧 CI 和源码验收不代签新版本发布包。既有动态插件串会话、真实模型/个人设备未验等风险继续保留，发布不等于全量无风险验收。
+- **证据边界**：记录与原始失败见 `.agents/acceptance/release-0.1.82-0.1.98/{release.md,repair.md,ext-failed.log,native/}`。原提交三个 version-sync 和 main 普通 CI 已通过；develop 普通 CI `41461835254` 失败，待读失败日志，不称全量全绿。Linux 的 weak `GLIBC_2.39` 提示不是已证实的重启根因；CLI 构建原镜像实际为 Ubuntu 26.04.1。本轮不测 Cov%；既有动态插件串会话、真实模型/个人设备未验等风险继续保留。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 

@@ -259,6 +259,15 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: requests.length, models }, null, 2));
     }
   } finally {
+    if (fixture && options.production) {
+      // Preserve only this disposable fixture's service log before cleanup removes its HOME.
+      await fs.copyFile(
+        path.join(fixture.homePath, ".tomcat/agents/main/serve/serve.log"),
+        path.join(options.artifactsDir, "shared-service.log"),
+      ).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Could not retain shared-service log", error);
+      });
+    }
     try { await server?.close(); } finally {
       try { await fixture?.cleanup(); } finally {
         await fs.rm(installRoot, { force: true, recursive: true });

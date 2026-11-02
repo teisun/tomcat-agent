@@ -25,14 +25,15 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 async function fixture(options: {
-  stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean;
+  stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; absentEndpoint?: boolean;
   holdHello?: boolean; malformedHello?: boolean; handshakeError?: string;
   holdReady?: boolean; readyError?: string; oldBuild?: boolean; actionExitCode?: number;
 } = {}) {
   const root = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tc-connect-"));
   const endpoint = process.platform === "win32" ? String.raw`\\.\pipe\tc-connect-${randomUUID()}` : path.join(root, "serve.sock");
   const info: SharedServiceInfo = { service: "tomcat", running: true, protocolVersion: options.protocol ?? 1,
-    serverVersion: options.version ?? "0.1.80", instanceId: "instance", pid: process.pid, agentId: "main", endpoint };
+    serverVersion: options.version ?? "0.1.80", instanceId: "instance", pid: process.pid, agentId: "main",
+    endpoint: options.absentEndpoint ? `${endpoint}-gone` : endpoint };
   const received: Array<Record<string, unknown>> = [];
   const bytes: Buffer[] = [];
   let sawEnvironment!: () => void;
@@ -112,6 +113,15 @@ it("preserves management failure and stderr instead of reporting success", async
   await expect(runSharedServiceAction(f.connectOptions, "restart")).rejects.toMatchObject({ code: 7 });
   expect(f.connectOptions.onStderr).toHaveBeenCalledWith(Buffer.from("management failed\n"));
   expect(await f.calls()).toEqual([["serve", "restart"]]);
+});
+
+it("rejects a vanished discovered endpoint without an uncaught readline error or environment transmission", async () => {
+  const f = await fixture({ absentEndpoint: true });
+  await expect(connectSharedService(f.connectOptions)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(f.received).toHaveLength(0);
+  expect(f.receivedBytes()).toBe("");
+  expect(await f.calls()).toEqual([["--version"], ["serve", "start"]]);
+  expect(f.connectOptions.onStderr).not.toHaveBeenCalled();
 });
 
 it("uses CLI discovery then native IPC with the controller environment, never logging the envelope", async () => {

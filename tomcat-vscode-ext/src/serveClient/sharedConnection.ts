@@ -117,6 +117,8 @@ export const connectSharedService: SharedConnectionFactory = async (options) => 
         lines.close();
         if (error) reject(error); else resolve();
       };
+      // Readline re-emits input errors on its own emitter before the socket listener runs.
+      lines.on("error", finish);
       options.signal.addEventListener("abort", abort, { once: true });
       socket.once("error", finish);
       socket.once("end", end);
