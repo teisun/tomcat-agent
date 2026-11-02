@@ -61,6 +61,27 @@ function fixture(action: "retry" | "resume" = "retry") {
   return { provider, host, time, retry, resume, getMessages, restoreCheckpoint, emit, failed, projection, card, select };
 }
 
+it("keeps a version mismatch received while hidden when the webview mounts and becomes ready", async () => {
+  const f = fixture();
+  const failure = { kind: "version_mismatch" as const, detail: "same-version service build is outdated" };
+  vi.mocked(f.host.ensureInitialized).mockRejectedValue(new Error(failure.detail));
+  await f.provider.setServeConnectionState("failed", failure);
+  const view = {
+    visible: false, show() {},
+    onDidDispose: () => new vscode.Disposable(() => undefined),
+    onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+    webview: {
+      asWebviewUri: (uri: vscode.Uri) => uri, cspSource: "vscode-test-webview", html: "", options: {},
+      onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+      postMessage: vi.fn().mockResolvedValue(true),
+    },
+  };
+  f.provider.resolveWebviewView(view as unknown as vscode.WebviewView);
+  view.visible = true;
+  await f.provider.dispatchTestIntent({ type: "ready", messageId: "show-failed-view" });
+  expect(f.provider.currentState()).toMatchObject({ connectionStatus: "failed", connectionFailure: failure });
+});
+
 for (const action of ["retry", "resume"] as const) describe(`${action} countdown`, () => {
   it("waits 300000 ms, uses only the original router command, and never selects the background session", async () => {
     const f = fixture(action);

@@ -146,6 +146,7 @@
 - T17 / 共享插件绑定局部修复已转绿：SessionRuntime 持有构造时已交给 dispatcher 的同一个 `Arc<SessionManager>`，而不是只保存内部值的 clone 后释放原 Arc；因此弱引用与实际会话同寿命，不改 scope 共享或 VM 初始化。`1793587162521-afsa6t` 中第二会话 getCurrentSession 在构造后和第一会话关闭后均返回第二会话；停止中的真实 JS/fetch 续体也未晚写历史，后者未复现缺陷，仅保留回归。旧式 bare-ID 动态初始化仍按 BLOCKED 单独记录。
 - T3 / 语言夹具绿结果：`1793587162521-afsa6t` 中 Native 环境覆盖与所有 serve 断言同批通过，原 foreign-checkpoint 中文串扰未再出现；既有 ignored 项是 `resource_inventory_test::sync_timing_matrix`，不是功能失败。随后 `cargo clippy -j 1 -p tomcat --lib -- -D warnings` 退出 0；编译 jobs=1 仅限制编译调度，没有限制测试并发。
 - local_socket 旧失败的跟进：同一 325 项组合中 `local_socket_excludes_duplicate_listeners_and_recovers_stale_endpoint` 通过；原失败保留、根因仍未确认，不改产品或用串行化掩盖，B2 继续观察。
+- T17 / 未复现项的保留用例：真实 `run_command_stream` FIFO 中，先排 NewSession 再回复待决审批，原审批仍完成且新会话成功（`1793587162521-afsa6t`）；隐藏面板的版本冲突在挂载/ready 后仍保留分类（`1793586042918-2uhx22`）；无效 log.level 下 `serve status` / `session list` 均非零退出、未创建运行目录（`1793584488404-emb4oz`，CLI 1 passed）。仅保留这些测试，不增加新审批通道、不改隐藏面板恢复或 CLI 管理语义；CLI 同文件附带 rustfmt 排版。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）

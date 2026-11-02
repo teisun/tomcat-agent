@@ -57,6 +57,33 @@ fn cmd() -> Command {
     c
 }
 
+#[test]
+fn management_commands_fail_when_configuration_is_invalid() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [["serve", "status"], ["session", "list"]] {
+        let output = cmd()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("TOMCAT__STORAGE__WORK_DIR", home.path().join("work"))
+            .env("TOMCAT__LOG__LEVEL", "INVALID_LOG_LEVEL_SENTINEL")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{args:?} must not report success for invalid configuration: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("log.level"),
+            "{output:?}"
+        );
+        assert!(
+            !home.path().join("work").exists(),
+            "validation precedes runtime setup"
+        );
+    }
+}
+
 fn real_llm_api_key(test_name: &str) -> String {
     common::require_idatatlas_api_key(test_name)
 }
@@ -1302,18 +1329,28 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
 
 fn self_install_message(key: &str, entry: &Path) -> String {
     let catalog: Value = serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
-    catalog[key].as_str().unwrap().replace("{path}", &entry.display().to_string())
+    catalog[key]
+        .as_str()
+        .unwrap()
+        .replace("{path}", &entry.display().to_string())
 }
 
 #[test]
 fn test_self_install_without_config_or_with_broken_config_is_idempotent() {
     #[cfg(windows)]
-    let user_path = || windows_registry::CURRENT_USER.open("Environment")
-        .and_then(|key| key.get_string("Path")).ok();
+    let user_path = || {
+        windows_registry::CURRENT_USER
+            .open("Environment")
+            .and_then(|key| key.get_string("Path"))
+            .ok()
+    };
     #[cfg(windows)]
     let original_path = user_path();
     for configured in [false, true] {
-        let home = tempfile::Builder::new().prefix("self-install-中文 ").tempdir().unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("self-install-中文 ")
+            .tempdir()
+            .unwrap();
         let work = home.path().join(".tomcat");
         if configured {
             fs::create_dir_all(work.join("assets")).unwrap();
@@ -1321,29 +1358,62 @@ fn test_self_install_without_config_or_with_broken_config_is_idempotent() {
             fs::write(work.join("assets/.env"), "keep credentials unchanged").unwrap();
         }
         fs::write(home.path().join(".zshrc"), "keep shell configuration").unwrap();
-        let entry = home.path().join(".local").join("bin").join(format!("tomcat{}", std::env::consts::EXE_SUFFIX));
+        let entry = home
+            .path()
+            .join(".local")
+            .join("bin")
+            .join(format!("tomcat{}", std::env::consts::EXE_SUFFIX));
         for key in ["cli.selfInstall.updated", "cli.selfInstall.unchanged"] {
             let output = common::serve::isolated_serve_command(home.path())
-                .arg("self-install").current_dir(home.path()).output().unwrap();
+                .arg("self-install")
+                .current_dir(home.path())
+                .output()
+                .unwrap();
             assert!(output.status.success(), "{output:?}");
-            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), self_install_message(key, &entry));
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                self_install_message(key, &entry)
+            );
         }
         #[cfg(windows)]
         assert!(fs::read(&entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
         #[cfg(unix)]
-        assert_eq!(fs::read_link(&entry).unwrap(), tomcat::infra::canonicalize(common::serve::cargo_bin_path()).unwrap());
-        assert_eq!(fs::read_to_string(home.path().join(".zshrc")).unwrap(), "keep shell configuration");
+        assert_eq!(
+            fs::read_link(&entry).unwrap(),
+            tomcat::infra::canonicalize(common::serve::cargo_bin_path()).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join(".zshrc")).unwrap(),
+            "keep shell configuration"
+        );
         if configured {
-            assert_eq!(fs::read_to_string(work.join("tomcat.config.toml")).unwrap(), "[broken configuration");
-            assert_eq!(fs::read_to_string(work.join("assets/.env")).unwrap(), "keep credentials unchanged");
-            assert_eq!(fs::read_dir(&work).unwrap().count(), 2, "no runtime directories created");
+            assert_eq!(
+                fs::read_to_string(work.join("tomcat.config.toml")).unwrap(),
+                "[broken configuration"
+            );
+            assert_eq!(
+                fs::read_to_string(work.join("assets/.env")).unwrap(),
+                "keep credentials unchanged"
+            );
+            assert_eq!(
+                fs::read_dir(&work).unwrap().count(),
+                2,
+                "no runtime directories created"
+            );
             assert_eq!(fs::read_dir(work.join("assets")).unwrap().count(), 1);
         } else {
-            assert!(!work.exists(), "self-install must not bootstrap the work directory");
+            assert!(
+                !work.exists(),
+                "self-install must not bootstrap the work directory"
+            );
         }
     }
     #[cfg(windows)]
-    assert_eq!(user_path(), original_path, "self-install must not configure PATH");
+    assert_eq!(
+        user_path(),
+        original_path,
+        "self-install must not configure PATH"
+    );
 }
 
 #[test]
@@ -1351,13 +1421,25 @@ fn test_self_install_rejects_agent_and_relative_home_without_writes() {
     let home = tempfile::tempdir().unwrap();
     for (active, target_home, message) in [
         ("1", home.path().to_path_buf(), "cli.nestedGuard"),
-        ("0", PathBuf::from("relative-home"), "cli.selfInstall.invalidHome"),
+        (
+            "0",
+            PathBuf::from("relative-home"),
+            "cli.selfInstall.invalidHome",
+        ),
     ] {
         let output = common::serve::isolated_serve_command(home.path())
-            .env("TOMCAT_AGENT_ACTIVE", active).env("HOME", target_home)
-            .arg("self-install").current_dir(home.path()).output().unwrap();
+            .env("TOMCAT_AGENT_ACTIVE", active)
+            .env("HOME", target_home)
+            .arg("self-install")
+            .current_dir(home.path())
+            .output()
+            .unwrap();
         assert!(!output.status.success(), "{output:?}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains(&self_install_message(message, home.path())), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&self_install_message(message, home.path())),
+            "{output:?}"
+        );
         assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
     }
 }
@@ -1369,9 +1451,15 @@ fn test_self_install_reports_write_failure_without_changing_existing_file() {
     let bin = home.path().join(".local").join("bin");
     fs::write(&bin, "user-owned file").unwrap();
     let output = common::serve::isolated_serve_command(home.path())
-        .arg("self-install").current_dir(home.path()).output().unwrap();
+        .arg("self-install")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains(&bin.display().to_string()), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&bin.display().to_string()),
+        "{output:?}"
+    );
     assert_eq!(fs::read_to_string(&bin).unwrap(), "user-owned file");
     assert!(!home.path().join(".tomcat").exists());
 }
@@ -1385,9 +1473,15 @@ fn test_self_install_preserves_user_owned_regular_command() {
     let entry = bin.join("tomcat");
     fs::write(&entry, "user-owned executable").unwrap();
     let output = common::serve::isolated_serve_command(home.path())
-        .arg("self-install").current_dir(home.path()).output().unwrap();
+        .arg("self-install")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), self_install_message("cli.selfInstall.unchanged", &entry));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        self_install_message("cli.selfInstall.unchanged", &entry)
+    );
     assert_eq!(fs::read_to_string(entry).unwrap(), "user-owned executable");
 }
 

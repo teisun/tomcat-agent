@@ -1132,6 +1132,77 @@ async fn reads_and_approvals_do_not_wait_behind_another_connections_admission() 
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn queued_new_session_does_not_block_a_pending_approval_reply() {
+    use crate::core::tools::contract::confirmation::ConfirmDecision;
+    use crate::core::tools::primitive::PrimitiveOperation;
+    use std::time::Duration;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let (connection, output) = connect(&runtime);
+    new_shared(&connection, work.path(), "initial").await;
+    let id = connection.active_session_id().unwrap();
+    let slot = runtime.registry.get(&id).unwrap();
+    assert!(slot.mark_busy());
+    let provider = runtime.confirmation.provider_for_session(id.clone());
+    let mut approval = tokio::spawn(async move {
+        provider
+            .confirm_decision(
+                PrimitiveOperation::Write,
+                "pending write",
+                "test",
+                None,
+                None,
+            )
+            .await
+    });
+    let request = frame(&output, |frame| frame["subtype"] == "confirmation").await;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<ServeCommand>();
+    let commands = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver
+            .recv()
+            .await
+            .map(|command| (Ok::<_, crate::AppError>(command), receiver))
+    });
+    let connection_loop = tokio::spawn(super::super::stdin::run_command_stream(
+        connection.clone(),
+        Box::pin(commands),
+    ));
+    sender
+        .send(ServeCommand::NewSession {
+            id: Some("queued-new".into()),
+            params: NewSessionParams {
+                cwd: Some(work.path().to_string_lossy().into()),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    sender
+        .send(ServeCommand::ControlResponse {
+            request_id: request["requestId"].as_str().unwrap().into(),
+            session_id: Some(id),
+            payload: serde_json::json!({"decision":"allow_once"}),
+        })
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(3), &mut approval).await;
+    slot.mark_idle();
+    drop(sender);
+    tokio::time::timeout(Duration::from_secs(3), connection_loop)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    runtime.stop_all().await.unwrap();
+    assert!(
+        matches!(outcome, Ok(Ok(Ok(ConfirmDecision::AllowOnce)))),
+        "approval must finish through the real FIFO, without a new routing mechanism"
+    );
+    assert!(read_ndjson_lines(&output)
+        .iter()
+        .any(|frame| frame["id"] == "queued-new" && frame["success"] == true));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_controller() {
     use crate::core::tools::contract::confirmation::ConfirmDecision;
     use crate::core::tools::primitive::PrimitiveOperation;
