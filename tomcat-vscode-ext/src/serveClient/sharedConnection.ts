@@ -7,7 +7,7 @@ import type { Duplex } from "node:stream";
 const execFileAsync = promisify(execFile);
 const LOCAL_PROTOCOL_VERSION = 1;
 // service.rs: connect + hello (10s) + STOP_TIMEOUT (60s), plus 10s scheduling margin.
-const STOP_COMMAND_TIMEOUT_MS = 80_000;
+export const STOP_COMMAND_TIMEOUT_MS = 80_000;
 // stop (70s) + start probes/lock/readiness (up to 70s), plus 10s margin.
 const RESTART_COMMAND_TIMEOUT_MS = 150_000;
 

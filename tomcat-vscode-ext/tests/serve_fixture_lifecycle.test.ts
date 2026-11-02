@@ -53,6 +53,7 @@ describe("serve fixture resource ownership", () => {
       await expect(stat(path.join(fixture.homePath, ".tomcat"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally { await fixture.cleanup(); }
     expect(runCli).toHaveBeenCalledExactlyOnceWith("not-executed", ["serve", "stop"], expect.objectContaining({ env: fixture.env, cwd: fixture.workspacePath }));
+    expect(runCli).toHaveBeenLastCalledWith("not-executed", ["serve", "stop"], expect.objectContaining({ timeout: 80_000 }));
   });
 
   it("uses the same private home/cwd for initialization, configuration and shutdown", async () => {
