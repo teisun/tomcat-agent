@@ -1,21 +1,7 @@
+# Temporary acceptance-branch workflow; do not merge this narrowing into develop.
 name: ci
 
 on:
-  push:
-    branches:
-      - develop
-      - main
-    paths:
-      - "tomcat/**"
-      - "tomcat-vscode-ext/**"
-      - "scripts/dev-install.*"
-      - ".github/workflows/ci.yml"
-  pull_request:
-    paths:
-      - "tomcat/**"
-      - "tomcat-vscode-ext/**"
-      - "scripts/dev-install.*"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -26,164 +12,56 @@ env:
 
 jobs:
   rust:
-    name: rust gate-fast (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Windows ACP cancellation acceptance
+    runs-on: windows-latest
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-14]
-
     defaults:
       run:
-        # Windows runs Git Bash: the gate script and the bash tool under test both need it.
         shell: bash
         working-directory: tomcat
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+      - name: Record tested revision
+        run: git rev-parse HEAD
       - name: Setup Node for test fixtures
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-
+          components: clippy,rustfmt
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: tomcat -> target
-
+          cache-on-failure: true
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-
-      # search_files tests cover the ripgrep backend; without rg the tool uses a walker without context lines.
-      - name: Install ripgrep
-        run: |
-          case "$RUNNER_OS" in
-            Windows) choco install ripgrep --no-progress -y ;;
-            Linux) sudo apt-get update && sudo apt-get install -y ripgrep ;;
-            macOS) brew install ripgrep ;;
-          esac
-          rg --version
-
-      - name: Run gate-fast
+      - name: Check test formatting and types
         run: |
           set -o pipefail
-          bash scripts/run-integration-tests.sh gate-fast 2>&1 | tee "$RUNNER_TEMP/gate-fast.log"
-
-      # Raw job logs need repository admin rights; annotations are visible to every reader.
-      - name: Annotate failures
-        if: failure()
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/format.log"
+          cargo clippy --test acp_stdio_e2e -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy.log"
+      - name: Build current CLI
         run: |
-          failures=$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$RUNNER_TEMP/gate-fast.log" \
-            | awk '/panicked at/ { print; for (i = 0; i < 4 && (getline line) > 0; i++) print line; next }
-                   /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
-            | awk '!seen[$0]++' | cut -c1-600 | head -n 400)
-          # GitHub truncates each annotation to about 4 KB: emit consecutive parts instead.
-          part=0
-          while [ -n "$failures" ] && [ "$part" -lt 9 ]; do
-            chunk=$(printf '%s\n' "$failures" | awk '{ n += length($0) + 1; if (n > 3500 && NR > 1) exit; print }')
-            failures=$(printf '%s\n' "$failures" | tail -n +"$(( $(printf '%s\n' "$chunk" | wc -l) + 1 ))")
-            part=$((part + 1))
-            chunk=${chunk//'%'/%25}
-            echo "::error title=gate-fast failures (${{ matrix.os }}) part ${part}::${chunk//$'\n'/%0A}"
-          done
-
-      - name: Upload Rust gate log
+          set -o pipefail
+          cargo build --bin tomcat 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Run only the pending Windows case
+        run: |
+          set -o pipefail
+          bash scripts/run-integration-tests.sh integration-serial -E 'binary(acp_stdio_e2e) and test(=cancel_stops_background_work_before_a_backpressured_host_resumes_reading)' 2>&1 | tee "$RUNNER_TEMP/acp-cancel.log"
+      - name: Upload Windows acceptance logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rust-gate-${{ matrix.os }}-${{ github.sha }}
-          path: ${{ runner.temp }}/gate-fast.log
-          if-no-files-found: warn
-
-  extension:
-    name: extension gate:fast (windows)
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    defaults:
-      run:
-        working-directory: tomcat-vscode-ext
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          cache: npm
-          cache-dependency-path: |
-            tomcat-vscode-ext/package-lock.json
-            tomcat-vscode-ext/gui/package-lock.json
-          node-version: 22
-
-      - name: Install dependencies
-        run: |
-          npm ci
-          npm --prefix gui ci
-
-      - name: Run gate:fast
-        run: npm run gate:fast
-
-      - name: Test Windows development-install wrapper without installing
-        working-directory: .
-        run: node --test scripts/dev-install.test.mjs
-
-      - name: Test Windows proxy guard and bundled-binary build selection
-        run: npx vitest run --maxWorkers 4 tests/windows_system_proxy.test.ts tests/build_tomcat_binary.test.ts
-
-  shared-service-windows:
-    name: shared service OS proxy and real VS Code (windows)
-    runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      CARGO_BUILD_JOBS: 2
-      TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: ${{ github.workspace }}/.agents/shots/windows-system-proxy
-    defaults:
-      run:
-        working-directory: tomcat-vscode-ext
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            tomcat-vscode-ext/package-lock.json
-            tomcat-vscode-ext/gui/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tomcat -> target
-      - name: Install cargo-nextest for the acceptance process boundary
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-      - name: Install test dependencies
-        run: |
-          npm ci
-          npm --prefix gui ci
-      # A serial, opt-in wrapper snapshots/restores the actual user proxy registry.
-      # The ignored Rust controls must each execute one test, followed by a real
-      # VS Code task, GUI process exit, and non-starting probe of the same service.
-      - name: Verify system proxy and window lifecycle
-        shell: bash
-        run: node --import tsx scripts/run-windows-system-proxy.ts
-      - name: Upload proxy requests, GUI and lifecycle evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-shared-service-${{ github.sha }}
-          path: .agents/shots/windows-system-proxy
+          name: windows-acp-cancel-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/format.log
+            ${{ runner.temp }}/clippy.log
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/acp-cancel.log
           if-no-files-found: error
-          include-hidden-files: true
