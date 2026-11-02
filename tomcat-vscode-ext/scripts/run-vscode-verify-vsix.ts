@@ -107,15 +107,22 @@ async function inspectReleaseVsix(file: string) {
 }
 
 // Relocate only a disposable copy of the immutable, real 0.1.90 capture.
-async function seedUpgradeData(source: string, home: string, baseUrl: string) {
+export async function seedUpgradeData(source: string, home: string, baseUrl: string) {
   const info = JSON.parse(await fs.readFile(path.join(source, "fixture-info.json"), "utf8")) as { home: string; baseUrl: string; sessionId: string; planId: string };
+  // The macOS capture stores both /var/... and canonical /private/var/... paths.
+  // Replace the longer prefix first; otherwise /private leaks into the new HOME.
+  const sourceHomes = [`/private${info.home}`, info.home];
+  const destinationHome = home.replaceAll("\\", "/");
   async function copy(from: string, to: string): Promise<void> {
     await fs.mkdir(to, { recursive: true });
     for (const entry of await fs.readdir(from, { withFileTypes: true })) {
       if (entry.name === "fixture-info.json") continue;
       const input = path.join(from, entry.name); const output = path.join(to, entry.name);
       if (entry.isDirectory()) await copy(input, output);
-      else await fs.writeFile(output, (await fs.readFile(input, "utf8")).split(info.home).join(home).split(info.baseUrl).join(baseUrl));
+      else {
+        const text = sourceHomes.reduce((text, prefix) => text.split(prefix).join(destinationHome), await fs.readFile(input, "utf8"));
+        await fs.writeFile(output, text.split(info.baseUrl).join(baseUrl));
+      }
     }
   }
   await copy(source, path.join(home, ".tomcat"));

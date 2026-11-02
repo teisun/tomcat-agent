@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 23:15 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-02 23:39 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -118,8 +118,9 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **执行边界**：本地仅做版本镜像、tag guard、CHANGELOG 与差异检查，不额外运行产品测试、构建或安装，不重启在用服务。推送 develop 后仅 fast-forward 同步 main/master；先发布 CLI，确认四平台归档与 SHA256SUMS 就绪后才发布 EXT，沿用既有 GitHub 构建及四平台原生安装验收。
 - **发布结果（BLOCKED）**：release 提交 `3441b9e87931b0e83f338a4a76f0e791fd044c0e` 已推送并快进同步 develop/main/master。CLI run `41462040464` 成功，四平台归档与 SHA256SUMS 已公开，实际下载哈希均通过。EXT run `41464467206` 打包与 Windows 原生验收通过，但两种 macOS 和 Linux 的真实 `serve restart` 失败；EXT GitHub/Marketplace 发布均 skipped。两个 tag 保留，不能将 CLI 发布成功写成 Unix 运行验收通过。
 - **整改进行中**：用户已授权修复后以新 patch（拟 CLI `0.1.83` / EXT `0.1.99`）继续，不改旧 tag/资产。先修已确认的 readline 未处理错误与夹具超时常量漏导出，新增真实连接失败回归和 80 秒超时断言；固定 Linux 构建为验收使用的 Ubuntu 22.04，并按 runner/target 隔离缓存。保留隔离 HOME 的服务日志，复用现有两条 workflow_dispatch dry-run 取得证据后再正式发布；本地只做差异检查，不跑测试/构建。原生 CLI 重启底层根因尚未确认，不吞掉错误或放宽断言。
+- **首轮诊断**：保留远端并行修复 `2a1b6056`，本地未推送提交重放后为 `b9cf1f45`；未强推。EXT dry-run `41470577638` 使用原 CLI 资产：Windows 全过，Linux 冷启动/重启过但旧数据升级失败，macOS 两架构重启仍失败。Linux 已定位为夹具将 `/private/var/...` 替换成 `/private/tmp/...` 的搬迁错误；现只修复制数据，并加入工作目录/会话索引可访问、原件不变的回归。既有 release workflow 增加夹具定向检查；Rust 增加失败阶段日志但不改变返回值、身份校验或清理顺序。下一轮用同一源码提交的 CLI/EXT dry-run 包诊断，不正式发布。`b9cf1f45` 的 Windows 扩展 gate:fast 与真实 VS Code 代理/生命周期门禁已通过，其余 CI 尚在运行。
 - **市场与更新**：已查询 `PUBLISH_MARKETPLACE=true`，沿用现有 OIDC 发布；Marketplace 与 OpenVSX 的实际结果以本轮工作流为准，不改仓库变量、凭据或发布门禁。
-- **证据边界**：记录与原始失败见 `.agents/acceptance/release-0.1.82-0.1.98/{release.md,repair.md,ext-failed.log,native/}`。原提交三个 version-sync 和 main 普通 CI 已通过；develop 普通 CI `41461835254` 失败，待读失败日志，不称全量全绿。Linux 的 weak `GLIBC_2.39` 提示不是已证实的重启根因；CLI 构建原镜像实际为 Ubuntu 26.04.1。本轮不测 Cov%；既有动态插件串会话、真实模型/个人设备未验等风险继续保留。
+- **证据边界**：记录与原始失败见 `.agents/acceptance/release-0.1.82-0.1.98/{release.md,repair.md,ext-failed.log,native/}`。原提交三个 version-sync 和 main 普通 CI 已通过；develop 普通 CI `41461835254` 在 Windows 的 `connector_test.rs:96`（`real_tool_entries_preserve_progress_and_session_stop_isolation`）报 agent code execution is closed；同 SHA 的 main CI 通过，根因未定，不称全量全绿。Linux 的 weak `GLIBC_2.39` 提示不是已证实的重启根因；CLI 构建原镜像实际为 Ubuntu 26.04.1。本轮不测 Cov%；既有动态插件串会话、真实模型/个人设备未验等风险继续保留。
 
 ### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
 

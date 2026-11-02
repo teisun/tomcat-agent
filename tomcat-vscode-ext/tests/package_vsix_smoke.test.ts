@@ -24,7 +24,7 @@ import {
 } from "../scripts/package-vsix";
 import { extractVsixLikeCursor, readVsixEntry } from "../scripts/vsix-extractable";
 import { spawnCommand } from "../scripts/runCommand";
-import { parseProductionSource, validateReleaseMetadata } from "../scripts/run-vscode-verify-vsix";
+import { parseProductionSource, seedUpgradeData, validateReleaseMetadata } from "../scripts/run-vscode-verify-vsix";
 
 function writeU16(value: number): Buffer {
   const buffer = Buffer.alloc(2);
@@ -88,6 +88,26 @@ function makeStoredZip(fileName: string, content: Buffer): Buffer {
   ]);
   return Buffer.concat([local, central, eocd]);
 }
+
+it("relocates captured legacy data without retaining the macOS private prefix or changing the original", async () => {
+  const source = path.resolve(__dirname, "../../tomcat/tests/fixtures/data-dir-v0.1.90/cli-init");
+  const metadata = JSON.parse(await fs.readFile(path.join(source, "fixture-info.json"), "utf8"));
+  const session = `agents/main/sessions/${metadata.sessionId}.jsonl`;
+  const original = await fs.readFile(path.join(source, session), "utf8");
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "tc-upgrade-relocation-"));
+  try {
+    await fs.mkdir(path.join(home, "workspace"));
+    await seedUpgradeData(source, home, "http://127.0.0.1:43210");
+    const relocated = await fs.readFile(path.join(home, ".tomcat", session), "utf8");
+    const cwd = JSON.parse(relocated.split("\n")[0]).cwd;
+    expect(cwd).toBe(`${home.replaceAll("\\", "/")}/workspace`);
+    expect((await fs.stat(cwd)).isDirectory()).toBe(true);
+    const index = JSON.parse(await fs.readFile(path.join(home, ".tomcat/agents/main/sessions/sessions.json"), "utf8"));
+    expect(await fs.readFile(index.sessions[metadata.sessionId].sessionFile, "utf8")).toBe(relocated);
+    expect(await fs.readFile(path.join(home, ".tomcat/models.toml"), "utf8")).toContain("http://127.0.0.1:43210");
+    expect(await fs.readFile(path.join(source, session), "utf8")).toBe(original);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
 
 describe("VSIX packaging", () => {
   beforeAll(async () => {

@@ -93,6 +93,9 @@ jobs:
           npm ci
           npm --prefix gui ci
 
+      - name: Check release fixture lifecycle and legacy path relocation
+        run: npx vitest run --maxWorkers 4 tests/serve_fixture_lifecycle.test.ts tests/package_vsix_smoke.test.ts -t 'serve fixture resource ownership|relocates captured legacy data'
+
       - name: Build extension once
         run: npm run build
 

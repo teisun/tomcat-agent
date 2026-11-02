@@ -129,8 +129,8 @@ pub(crate) fn run(action: ServeSub, cfg: &AppConfig) -> Result<(), AppError> {
                 print_json(&serde_json::json!({"running":false, "stopped":stopped.is_some(), "instanceId":stopped}))
             }
             ServeSub::Restart => {
-                stop(cfg).await?;
-                print_json(&ensure_running(cfg).await?)
+                stop(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: stop phase failed"))?;
+                print_json(&ensure_running(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: start phase failed"))?)
             }
             ServeSub::Run { .. } => run_service(cfg).await,
         }
@@ -328,8 +328,14 @@ async fn open_management(
 }
 
 async fn stop(cfg: &AppConfig) -> Result<Option<String>, AppError> {
-    let Some((mut stream, info)) =
-        open_management(cfg, ConnectionHello::new(ConnectionProtocol::Stop)).await?
+    let Some((mut stream, info)) = open_management(
+        cfg,
+        ConnectionHello::new(ConnectionProtocol::Stop),
+    )
+    .await
+    .inspect_err(
+        |error| tracing::warn!(%error, "service stop: connection or identity handshake failed"),
+    )?
     else {
         return Ok(None);
     };
@@ -339,7 +345,10 @@ async fn stop(cfg: &AppConfig) -> Result<Option<String>, AppError> {
             AppError::Config(
                 "shared service shutdown timed out; task cleanup is not confirmed".into(),
             )
-        })??;
+        })?
+        .inspect_err(
+            |error| tracing::warn!(%error, "service stop: cleanup acknowledgement failed"),
+        )?;
     if result.get("stopped").and_then(|v| v.as_bool()) != Some(true) {
         return Err(AppError::Config(format!(
             "shared service cleanup failed: {result}"
@@ -412,7 +421,7 @@ async fn run_listener(
                 let stream = match accepted {
                     Ok(stream) => stream,
                     Err(e) if e.kind() == io::ErrorKind::PermissionDenied => { tracing::warn!(%e, "local peer rejected"); continue; }
-                    Err(e) => break Err(AppError::Io(e)),
+                    Err(e) => { tracing::warn!(%e, "local service accept failed"); break Err(AppError::Io(e)); }
                 };
                 let runtime = runtime.clone();
                 let info = info.clone();
