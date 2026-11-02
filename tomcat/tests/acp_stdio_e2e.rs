@@ -365,7 +365,22 @@ async fn cancel_stops_background_work_before_a_backpressured_host_resumes_readin
         cfg.serve.max_buffered_frames = 4096;
     });
     let info = fx.action("start");
-    let mut observer = NativeClient::connect(&info).await;
+    // This task-running native connection must supply its own Git/Node search path.
+    // Keep its home isolated and omit unrelated host variables and secrets.
+    let mut environment = json!({"HOME":fx.0.home_path,"USERPROFILE":fx.0.home_path});
+    for key in ["PATH", "PATHEXT", "SYSTEMROOT"] {
+        if let Ok(value) = std::env::var(key) {
+            environment[key] = value.into();
+        }
+    }
+    let (mut observer, hello) =
+        NativeClient::open_with_environment(&info, env!("CARGO_PKG_VERSION"), environment).await;
+    assert!(hello.get("error").is_none(), "{hello}");
+    assert_eq!(hello["instanceId"], info["instanceId"]);
+    observer.send(json!({"type":"control_request","requestId":"init","subtype":"initialize","payload":{}})).await;
+    observer
+        .until(|v| v["type"] == "control_response" && v["requestId"] == "init")
+        .await;
     let other = observer.new_session(&fx.0.workspace).await;
     let accepted = observer.request(json!({"type":"prompt","id":"other-work","sessionId":other,"text":"start the other writer"})).await;
     assert_eq!(accepted["success"], true);
