@@ -817,7 +817,7 @@ impl SessionManager {
         cwd: Option<String>,
         project_root: Option<String>,
     ) -> Result<SessionEntry, AppError> {
-        self.create_session_with_activation(session_key, cwd, project_root, true)
+        self.create_session_with_activation(session_key, cwd, project_root, true, None)
     }
 
     /// 创建可列出但不激活的会话。既不修改 `sessions.json.current`，也不修改进程内 pin。
@@ -837,7 +837,18 @@ impl SessionManager {
         cwd: Option<String>,
         project_root: Option<String>,
     ) -> Result<SessionEntry, AppError> {
-        self.create_session_with_activation(session_key, cwd, project_root, false)
+        self.create_session_with_activation(session_key, cwd, project_root, false, None)
+    }
+
+    /// Write the source once, as part of creation; loading never rewrites it.
+    pub fn create_session_with_origin(
+        &self,
+        session_key: &str,
+        cwd: Option<String>,
+        project_root: Option<String>,
+        origin: Option<crate::core::session::SessionOrigin>,
+    ) -> Result<SessionEntry, AppError> {
+        self.create_session_with_activation(session_key, cwd, project_root, true, origin)
     }
 
     fn create_session_with_activation(
@@ -846,11 +857,13 @@ impl SessionManager {
         cwd: Option<String>,
         project_root: Option<String>,
         activate: bool,
+        origin: Option<crate::core::session::SessionOrigin>,
     ) -> Result<SessionEntry, AppError> {
         let now = Utc::now().timestamp_millis();
         let session_id = format!("{}_{}", now, uuid_for_session());
         let path = self.transcript_path(&session_id);
         let header = SessionHeader {
+            origin,
             r#type: "session".to_string(),
             // v4 introduces marker-first `branch_summary` plus tail-appended
             // `branch_summary_text`; readers must fold the pair before treating it as a boundary.

@@ -6,6 +6,23 @@ import { en } from "../../../src/shared/i18n/en";
 
 afterEach(cleanup);
 describe("SessionBar settings entry", () => {
+  it("labels a host in the existing list and blocks deletion without blocking selection or pinning", () => {
+    const choose = vi.fn(); const remove = vi.fn(); const pin = vi.fn();
+    const session = { sessionId: "host", title: "Host task", origin: { kind: "acp" as const, clientName: "paperclip" }, updatedAt: Date.now(), busy: false, isCurrent: true, ownedByThisFrontend: false };
+    render(<SessionBar activeSessionId="host" sessions={[session]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={choose} onDeleteSession={remove} onSetPinned={pin} deleteSupported />);
+    expect(screen.getByTestId("session-select").textContent).toContain("paperclip");
+    fireEvent.click(screen.getByTestId("session-select"));
+    const trash = screen.getByRole("button", { name: en["session.delete"] });
+    expect(trash).toHaveProperty("disabled", true);
+    expect(trash.getAttribute("title")).toBe(en["session.readOnly"]);
+    fireEvent.click(trash);
+    expect(remove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: en["session.pin"] }));
+    expect(pin).toHaveBeenCalledWith("host", true);
+    fireEvent.click(screen.getByTestId("session-option"));
+    expect(choose).toHaveBeenCalledWith("host");
+  });
+
   it("keeps pinning and deletion open and recovers focus when an action removes its row", () => {
     const pin = vi.fn(); const remove = vi.fn(); const choose = vi.fn();
     const session = { sessionId: "s", title: "A session", updatedAt: Date.now(), busy: false, isCurrent: true, ownedByThisFrontend: true };

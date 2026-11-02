@@ -19,7 +19,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-pub(super) fn restrict_to_current_user(path: &Path) -> io::Result<()> {
+pub(super) fn current_user_acl() -> io::Result<Vec<u32>> {
     let token_user = current_token_user()?;
     // SAFETY: 缓冲区由 GetTokenInformation(TokenUser) 填充，开头就是 TOKEN_USER，且按 u64 对齐。
     let sid = unsafe { (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
@@ -37,6 +37,12 @@ pub(super) fn restrict_to_current_user(path: &Path) -> io::Result<()> {
     if unsafe { AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, sid) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(acl_buffer)
+}
+
+pub(super) fn restrict_to_current_user(path: &Path) -> io::Result<()> {
+    let mut acl_buffer = current_user_acl()?;
+    let acl = acl_buffer.as_mut_ptr().cast::<ACL>();
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: `wide` 以 NUL 结尾；只设置 DACL，属主、属组与 SACL 传 null 表示不改。
     let status = unsafe {
@@ -58,9 +64,42 @@ pub(super) fn restrict_to_current_user(path: &Path) -> io::Result<()> {
 
 /// 读取当前进程令牌的 TOKEN_USER（含 SID），缓冲区按 u64 对齐以容纳其中的指针。
 fn current_token_user() -> io::Result<Vec<u64>> {
+    // SAFETY: query of the current process pseudo-handle; it must not be closed.
+    token_user_for_process(unsafe { GetCurrentProcess() })
+}
+
+pub(super) fn verify_process_user(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Security::EqualSid;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: query-only access to the server PID supplied by the kernel.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: takes ownership of the successfully opened process handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let peer = token_user_for_process(process.as_raw_handle())?;
+    let own = current_token_user()?;
+    // SAFETY: both aligned TOKEN_USER buffers and their SID payloads remain live.
+    if unsafe {
+        EqualSid(
+            (*peer.as_ptr().cast::<TOKEN_USER>()).User.Sid,
+            (*own.as_ptr().cast::<TOKEN_USER>()).User.Sid,
+        )
+    } == 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "local service belongs to another user",
+        ));
+    }
+    Ok(())
+}
+
+fn token_user_for_process(process: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Vec<u64>> {
     let mut raw = std::ptr::null_mut();
-    // SAFETY: GetCurrentProcess 返回无需关闭的伪句柄；`raw` 是输出参数。
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+    // SAFETY: the caller keeps the process handle live; `raw` is an output parameter.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `raw` 是刚打开的令牌句柄，所有权只交给这里。

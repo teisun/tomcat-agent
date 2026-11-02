@@ -5,7 +5,9 @@
   <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md">简体中文</a>
 </p>
 
-Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 侧边栏中。
+Tomcat Agent Box 的 VS Code 侧边栏通过本机 IPC 直接连接每个 Agent 的共享服务，使用 `tomcat serve status` / `tomcat serve start` 发现或启动服务。多个窗口共用后台服务，但不共用所选会话或控制权。
+
+标准 ACP 宿主使用 `tomcat acp`。独立的 `tomcat serve --stdio` 保留给旧 Tomcat 协议客户端，不是扩展的默认连接路径，也不是 ACP 入口。
 
 ![Tomcat Agent Box screenshot](https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png)
 
@@ -48,6 +50,8 @@ Windows 上下载 `tomcat-vscode-ext-<版本>-win32-x64.vsix`，传入完整路�
 3. VS Code 会展开 `Secondary Side Bar` 并聚焦到 Tomcat Agent Box。
 
 你也可以自己打开 `Secondary Side Bar`，然后点击 Tomcat Agent Box 图标。
+
+开始对话前请打开项目文件夹。没有工作目录时，面板会提示先打开文件夹，不借用后台服务的目录。扩展先核对服务编号，再发送环境变量；收到 `ready` 后才发送会话请求。
 
 ## 首次设置
 
@@ -152,7 +156,7 @@ Chat、Plan 等技术术语和模型 ID 可以保留英文；给模型的工具�
 
 - `Tomcat: Focus Agent Box`
 - `Tomcat: Open Settings`
-- `Tomcat: Restart Serve`
+- `Tomcat: 重启共享服务（停止所有任务）`
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`
 
@@ -163,10 +167,11 @@ Chat、Plan 等技术术语和模型 ID 可以保留英文；给模型的工具�
 ```
 
 - `/reload` 同时重扫 Skill 和插件工具，不必重启会话。外部 CLI 或手工改资源后主动执行；不是配置热加载，也不是 MCP 重连。
+- **主输入框**的 `/restart` 直接调用既有宿主重启命令，**停止共享服务的所有任务**。选择只补全文本，发送精确的纯文本命令才执行，不调用模型、不进入消息队列。带参数、引用、附件或同名资源卡时沿用普通消息路由。现有输入禁用条件不变；断连等无法发送时用命令面板。历史/队列编辑器不展示该入口，也不依赖服务端斜杠目录。
 - `/install './带空格路径' agent` 与 `/uninstall 包名 agent` 自动同步资源。必须指定 `current-project`（`scope`）、`agent` 或 `global`；缺参数返回用法。
 - 卸载用 `tomcat packages` 列出的包名，不是工具名。手工放入、不在账本的资源，需手动删除本层 `plugins/` 或 `skills/` 下目录，再 `/reload`。
 - 菜单在开头、空格后或换行后触发，路径/URL 内不触发；句中隐藏 Terminal 组。只有开头的共享管理命令且纯文字才本地执行；附件、引用和未知文字仍发普通提示词。
-- 等回包时禁用发送和 Build，不追加虚假用户消息。旧 Serve 没有命令表时保持原输入行为。
+- 等资源命令回包时禁用发送和 Build，不追加虚假用户消息。旧 Serve 没有资源命令表时保持原有资源命令路由；本地 `/restart` 入口不依赖该表。
 
 ### 项目 Commands、Skills 与 Rules
 

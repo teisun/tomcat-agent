@@ -653,21 +653,45 @@ describe("Composer", () => {
     expect(onInterrupt).not.toHaveBeenCalled();
   });
 
-  it("hydrates a draft without treating it as a user edit", async () => {
+  it.each([false, true])("hydrates without a user edit and only focuses if the document owns focus (%s)", async documentFocused => {
     const { onDraftChange, ref } = renderComposer();
+    const input = screen.getByTestId("composer-input");
+    const focus = vi.spyOn(input, "focus");
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(documentFocused);
     onDraftChange.mockClear();
-
-    await act(async () => {
-      ref.current?.replaceDraft({
-        hasContent: true,
-        segments: [{ text: "restored B draft", type: "text" }],
-        text: "restored B draft",
+    try {
+      await act(async () => {
+        ref.current?.replaceDraft({
+          hasContent: true,
+          segments: [{ text: "restored B draft", type: "text" }],
+          text: "restored B draft",
+        });
+        await new Promise(resolve => window.requestAnimationFrame(resolve));
       });
-    });
+      expect(ref.current?.getDraft().text).toBe("restored B draft");
+      expect(input.textContent).toContain("restored B draft");
+      expect(onDraftChange).not.toHaveBeenCalled();
+      if (documentFocused) expect(focus).toHaveBeenCalled();
+      else expect(focus).not.toHaveBeenCalled();
+    } finally { hasFocus.mockRestore(); }
+  });
 
-    expect(ref.current?.getDraft().text).toBe("restored B draft");
-    expect(screen.getByTestId("composer-input").textContent).toContain("restored B draft");
-    expect(onDraftChange).not.toHaveBeenCalled();
+  it("submits distinct absolute targets with identical short labels after draft restoration", async () => {
+    const submitted = vi.fn();
+    const { ref } = renderComposer({ onSubmit: () => submitted(ref.current!.getDraft()) });
+    const paths = ["/projects/A/src/app.ts", "/projects/B/src/app.ts"];
+    await act(async () => {
+      ref.current?.insertReferences(paths.map((path) => ({ type: "reference", kind: "file", label: "app.ts", path })));
+    });
+    const draft = ref.current!.getDraft();
+    expect(draft.segments.filter((segment) => segment.type === "reference").map((segment) => segment.path)).toEqual(paths);
+    await act(async () => { ref.current?.replaceDraft(draft); });
+    const chips = screen.getAllByTestId("composer-reference-chip");
+    expect(chips.map((chip) => chip.textContent)).toEqual(["app.ts", "app.ts"]);
+    expect(chips.map((chip) => chip.getAttribute("title"))).toEqual(paths);
+    fireEvent.keyDown(screen.getByTestId("composer-input"), { key: "Enter" });
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(submitted).toHaveBeenCalledWith(draft);
   });
 
   it("inserts repeated selections with distinct occurrence identities", async () => {

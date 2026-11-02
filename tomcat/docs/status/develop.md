@@ -1,6 +1,73 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-20 09:48 +0800 | ACTIVE | develop | — |
+| Tomcat Agent | 2026-11-02 14:00 +0800 | DONE（仅本地合并，外部验收待补） | develop | - |
+
+### CURRENT INTEGRATION：共享后台与 ACP 接入审查后本地合并（2026-11-02）
+
+```text
+develop D=86081c31 ──────────────┐
+feature/shared-serve-acp S=2b76074a ─┴─> 本地 no-ff 合并
+  已测实现 + 分批补验                    ├─ 产品树与 S 完全相同
+                                       ├─ 仅回填 develop status / INTEGRATION
+                                       └─ 不推送、不安装、不重启正式服务
+```
+
+- **本轮结论**：按批准计划完成原 15 提交 / 385 路径的六组审查与有证据的局部修复；本机离线验收范围已由有效批次覆盖，执行本地合并。Windows、真实模型及对应新提交的 CI 仍未验证，见下方“推送前必须补齐”；不是发布许可，也不是“全平台无遗留阻塞”。源分支状态片段记录的是合并前状态，合并结果以本节为准。
+- **精确基线**：D=`86081c3121a183ffd1b65997998f88f7fd26f7e0`；最终 S=`2b76074a04bb4063c56d011ac95ca1660e8da92f`。预演与 `git merge --no-ff --no-commit S` 后的树均为 `458479f1bb1d41f54a2566a9f3cabedbe5636e2a`，`git diff --cached S` 为空，无冲突；D..M 为 396 文件 / +29488 −3982。合并提交前只再修改本文件并运行原 aggregate-status 脚本生成 `docs/INTEGRATION.md`，两者为说明性回填，最终树相对 S 的其余路径必须完全相同。
+- **修复边界**：Native 先核对服务编号再发送环境，仍直连且管理协议版本为 1；控制者关闭与 ACP 取消复用原停止入口；页面重建保留选择、迟到流式开头不重字、checkpoint 接管自动恢复；Windows Git 探测先授权、限期回收。另修已复现的 busy 遗留、SessionManager 弱引用、IPC/PATH 错误分类与测试设施问题，不加 relay、状态平台或插件初始化生命周期。逐项根因、失败→通过及独立提交见 [源分支审查记录](feature-shared-serve-acp.md#合并审查与验收本机离线验证完成待本地合并)。
+
+| 层 | 本轮有效证据与边界 |
+| --- | --- |
+| Rust B2/B4 | B2 完整库 3454 passed / 5 ignored；B4 `1793595769842-ex75gj` 的全目标 Clippy、parallel 384 / 27 skipped、serial 89 / 3 skipped 通过，库 3453 passed / 1 failed / 5 ignored。唯一新暴露的旧压缩夹具问题经重复句柄确定性复现，`9d48409e` 仅显式解锁；`1793597923702-qgd17f` 的所属模块 24 项、fmt 与 lib/tests Clippy 通过。原 B4 exit 1 保留，复用其未受影响步骤，不重复累计用例或声称整条命令一次全绿。 |
+| 扩展 B2/B4 | B2 `1793594442583-2fzg8u` 完整 gate:full exit 0：host 916、GUI 888、integration 271 / 1 skipped、安装态 24 / 6 条件 pending、verify:vsix 10。B4 `1793598458874-yr40gj` extension tsc 后 npm GUI lint 进程 SIGSEGV / exit 139，根因未确认；同源码、依赖及并发下 `1793598602816-a62zbn` 只补 GUI tsc 与完整单测，host 916 / GUI 888、exit 0。保留原崩溃，不据 swap 使用量断言 OOM。 |
+| 真实 VS Code / UI | B3 `1793595245110-u2j0ap`：Production 扩展自动换文档，仍是旁观 B、草稿/只读/焦点保持、真实 Bash 完成，1 passing / 26s。最终桌面/窄屏两组、空窗口两组及 B2 七组 PNG/ARIA/console 已读回，捕获范围 errors=[]；B2 错裁到 Explorer 的 cropped 图仅调试，视觉证据使用原始图。不冒充原生文件对话框实选或全宿主零告警。 |
+| 两份宿主集成包 | `1793587030689-y4z2d0`：Paperclip 46、Multica 23 个清单路径与哈希一致；四份 patch 在包中声明的精确隔离基线 `git apply --check` 通过。未在宿主仓运行套件或改部署；旧包的验收 SHA 不代签本次 S。 |
+
+- **复用条件已核对**：`9d48409e` 相对首轮待合并树只改一个测试和源 status；`2b76074a` 只订正文档引用并回填 B4。产品、依赖、分组及 UI 未变，B2/B3 和 B4 未受影响步骤继续有效；测试夹具的变化已补所属模块与 Clippy，不把旧夹具结果当新结果。所有原始失败、环境缺项与解释都保留。
+- **资料检查边界**：自动看板逐字汇总当前 develop 加 7 个 feature 分支。`git diff --check` 报告的看板四处行尾空格原样来自 `feature/transcript-rich-render` 的 status 第 264/268/269/278 行；保留原始失败，不修改他人分支或手工改生成结果。四份上游补丁与原样技能附件也保持字节；最终空白检查只精确排除这些保真资料及聚合看板，其余代码/说明仍检查，不关闭全局规则。
+- **版本与安全边界**：CLI `0.1.81`、扩展 `0.1.97`、bundled CLI `0.1.81`，未升版。只用隔离 HOME/profile；未安装、发布或停止/重启在用服务，未修改用户配置、代理和凭据，未移除 Agent 保护。保留源分支及其它 worktree；未推送、打标签或清理用户工作。Cov% 未测量。
+
+#### 推送前必须补齐 / 需单独决策
+
+| 项目 | 未完成原因与后续动作 |
+| --- | --- |
+| Windows 真机 | 未提供执行环境。补 Git 探测拒绝/允许/失败审计/超时回收、根 CMD 安装脚本与 Windows 侧用例；Mac 结果不代签。 |
+| real-llm | 默认必需 `IDATATLAS_OPENAI_API_KEY` 未配置，真实 API 层未运行。由用户在私有环境准备后补对应层，不输出密钥。 |
+| 新 SHA 的 CI | 本轮禁止推送，当前修复没有远端 CI 证据。获准推送后再核对对应提交的三平台和 Windows 系统代理 CI，不使用旧绿色记录或伪造 runner 环境。 |
+| 旧式动态插件串会话 | 已复现：第二会话动态发现会向第一会话追加消息；develop 已有同一机制。保留 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch`，需另定初始化会话归属，不擅自改生命周期；按获准计划不阻塞本地合并，未修复。 |
+| 其它保留风险 | local_socket 旧并发失败后在组合与完整库中通过，但根因未确认；Multica 上层 30 秒 / backend 65 秒取消预算差异未实测。原生文件选择、拖拽及既有 Windows 待验事项不由本轮代签。 |
+
+日志在 `~/.tomcat/agents/main/tool-results/bash-<task-id>.log`；本机视觉制品位于 `.agents/acceptance/shared-serve-review/` 与 `.agents/shots/shared-serve-review/`，不纳入 Git。临时回看服务已停止。下方保留 2026-10-22 的历史验收，**旧 SHA 的云端成功不代表本轮通过**。
+
+#### 此前接入验收（2026-10-22，仅历史记录）
+
+```text
+Paperclip / Multica → 标准 ACP → 共享 Tomcat 后台
+VS Code            → 原生连接 → 同项目实时只读旁观
+正式 HTTP          → llm.proxy / 系统代理（不读入口 shell 代理）
+```
+
+- **最终验收**：代码 `401b6f0cbd8be8478b5453815450f7ce6ada00e7` 的[同一轮 GitHub CI](https://github.com/teisun/tomcat-agent/actions/runs/39765237685)五项必需检查全部成功：macOS/Linux/Windows Rust、Windows扩展、Windows系统代理与真实窗口。下面保留各阶段原始记录；旧的待验/失败描述不是当前结论。文档收口不改产品、测试、依赖或CI配置，复用该代码修订的结果。
+- **云端实跑数**：macOS/Linux各为lib3424、并行集成379、串行86 PASS；Windows为lib3411、并行365、串行82 PASS；三平台fmt/严格all-target Clippy均通过。各平台原有lib5 ignored、集成27+3 skipped不计通过；两项系统代理专用用例由专项显式执行，均1 PASS。Windows扩展core803、GUI865 PASS。
+- **Windows实际证据**：win25-vs2026 / Node22.23.3 / VSCode1.106.0；13次实际代理请求，含Native/ACP模型、两次MCP tools/call与窗口模型请求，设置已逐值恢复。三条真实Job/受限ACP边界用例通过；真实窗口写文件并退出后，PID7200与instanceId `d1cc9b74-a5a9-4ff8-8b7c-f542c527ba18` 不变，禁止启动的Native重连成功。已读255×808 PNG、ARIA及console，任务/完成结果可见，窄栏省略与横向滚动保留，捕获范围内errors为空；不宣称全程宿主日志零错误，也不代表所有个人Windows环境。
+- **历史异常保留**：首轮生命周期用例曾在输出合法JSON后非零退出，原日志缺退出码，根因仍未证实；本轮该原用例在三平台均通过，增强诊断和原失败日志保留，不把补诊断说成已定位修复。不将宿主无关基线失败或未运行项目改记为通过。
+
+- **交付范围**：共享服务生命周期、标准 ACP、显式会话 cwd、原项目隔离、只读旁观、控制断开取消并等待真实子进程停止；ACP 问题放入普通回复，Native 保留提问面板。按复核计划修正慢读完整输出、协议/CLI 版本门槛、准入锁与迁移说明；未新增续跑/WebSocket 或按会话代理机制。
+- **首轮本机自动化验收完成（本次 CI 修复的相关复验另记）**：Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
+- **实际操作**：本地真正启动 Paperclip、Multica，以受控模型完成任务、取消、原会话续接及工作树清理；真实 `0.1.80` / 测试构建 `0.1.81` CLI 均跑宿主任务，真实 VS Code 版本提示、重启、恢复以及关窗后同一后台存活已留 PNG/ARIA/console/实例证据。另在 Multica `TOMC-10` 实际完成两轮 DeepSeek 问答，同会话、同评论线程继续；首轮 4 次工具尝试均被隔离权限拒绝，不声称零工具调用。授权两轮已用完，临时真实密钥已清除，测试配置已恢复。
+- **代理边界**：正式共享后台统一保存的 `llm.proxy` 或系统代理；仅窗口测试入口可显式写入隔离 `llm.proxy`，ACP 环境不转换，子进程环境原样保留。macOS 系统代理按用户要求仅只读打印 IP/端口，未改全局设置，不将它算作请求链路实测。
+- **提交与 CI**：`f6e627f6` 已推送 `feature/shared-serve-acp`，首轮 run `39709693529` 的 Linux Rust、Windows 扩展通过；macOS Rust、Windows Rust与 Windows 专项失败，未关闭门禁。当前补修 HTTP 测试 socket 模式、测试连接环境、Windows 管道关闭观测及 Node 启动链路；检查点清理复用原 CLI 的 30s 预算，ACP/管理关闭等待 60s，Multica 宽限 65s，超时仍失败并保留句柄。并发启动一次非零退出的原因尚待新增退出码/服务日志定位，不能算已解决。
+- **本批 CI 修复的本机证据**：Rust 定向库 251 PASS、ACP 两目标 26 PASS、共享服务 10 PASS / 2 ignored，strict all-target Clippy/fmt/diff check PASS；扩展启动器/代理相关 17 PASS及严格 TS 检查；Multica Tomcat 单测与显式当前 CLI 的真实注册 backend 执行/取消/续接通过（本地受控 HTTP 模型）。容量用例初版误读列表权限的失败、首次冷编译期代理用例超时、Go helper 等待不足均留档并定向复验。未再付费调用模型；完整 gate-fast 的同修订结果由下一轮 CI 补齐。
+- **第二轮 CI**：`fe1169b0` / run `39743687050` 已取得 macOS、Linux Rust 和 Windows 扩展成功；Windows 专项仍在启动服务时 Access denied，`proxy-requests.json=[]`，不是代理功能已测失败。改为两个 Rust 对照直接交给 nextest（不再包整条 Node 链），并实际查询 Job 标志；删除无效的自制 Node 包装及只测该包装的 4 个用例，保留系统代理/受限宿主/窗口退出断言。不改产品或 Multica Job 策略，下一修订仍需三平台云端验证。
+- **宿主本地提交**：Paperclip `1f010b165`、Multica `e12a45e59`，均仅 `feat/tomcat-agent` 本地分支，无远端推送；Multica 隔离 API/web/daemon 已用原环境管理器停止。Paperclip 首次清理因身份不符主动中止，重新确认真正启动器后已停止；四个所属端口均无监听，临时数据与证据保留，正式 Tomcat 后台未动。
+- **第二轮 Windows Rust 结论**：失败项缩到 Unix 导入未条件编译、模型 cwd 断言误查 JSON 转义、受限 Job 退出码假设三处；其余并行集成365 PASS、串行80 PASS。当前将导入移回 Unix 用例，cwd 比较解析后的请求文本，真实 Job 显式指定终止码77并精确断言，另一个关闭 Job 句柄用例保持原样。本轮新门禁结果仍待推送后取得，不把未跑的 Windows 分支算作本机通过。
+- **第三轮本机预检**：nextest 配置守卫6 PASS、Node→nextest 真实单用例1 PASS、官方 ACP 客户端/模型/cwd 用例1 PASS、两个受影响测试目标严格 Clippy、严格 TS、fmt/diff check、个人机器保护和 CI 接线检查通过；系统代理设置/恢复6 PASS仍有效。曾误用 crate 私有路径归一化入口的编译失败已改用既有公开 `normalize_path`，不为测试扩大产品 API。
+- **第三轮云端结果**：`1d9845dd` / run `39750873025`，macOS/Linux Rust和Windows扩展成功；Windows Rust集成365+82 PASS（cwd与真实Job均通过），但Clippy仍因两个Unix专用MCP夹具函数未条件编译而失败，已连同其Path导入收口为 `cfg(unix)`。Windows专项记录Job flags=`0x800`且关闭系统代理对照通过；开启对照被测试的 `NO_PROXY`/`no_proxy` 重名快照拒绝，未发代理请求、未执行GUI，不能计正向通过。
+- **第四轮修复与预检**：测试只发送合法环境并检查握手error；模型/cwd断言复用既有非标题请求筛选。扩展也补拒绝既有error的处理（先以真实socket用例证明旧版误报连接成功），Windows环境编码与Node实际子进程一致，保留排序后的首个大小写等价键及undefined删除语义；没有新协议字段、按会话代理或重试机制。Rust定向2 PASS、目标严格Clippy/fmt通过；扩展相关79 PASS，最终所属文件10 PASS/typecheck通过。真实Mac窗口1 PASS，PNG/ARIA/console已读，退出前后及禁止启动重连后同一PID/instanceId；Windows新分支仍待下一轮CI。
+- **第四轮云端结果**：`48fd1407` / run `39757922309` 的macOS/Linux Rust和Windows扩展通过。Windows真实系统代理开关对照均通过，Native/ACP模型与远程MCP共10次代理请求（含2次tools/call）；GUI因下载VS Code1.101.0、低于扩展要求的1.106.0而未加载。Windows Rust并行365 PASS；我将父模块Path导入限制为Unix时漏看了技能子模块的glob借用，导致Clippy/串行组编译失败，不能计串行通过。
+- **第五轮修复与本机预检**：两个下载入口改读扩展engines.vscode的最低版本，不改兼容性声明或显式程序路径覆盖；技能测试自己导入Path，Unix专属MCP函数仍按平台编译。启动器/系统代理包装29 PASS、严格TS及build通过；Rust所属技能3 PASS、严格Clippy/fmt通过。真正VS Code1.106.0完成任务及关窗后同实例验活1 PASS，299px侧栏PNG/ARIA/console已读；只是测试接线修复，产品、代理来源、协议和断言不变。同修订Windows最终状态与制品仍由CI给出，不以本机结果代签。
+- **执行边界**：Windows云端使用受控模型和假ACP宿主/直接协议，不安装Paperclip或Multica；两宿主只在本地实际启动验收及本地分支提交。未升版、合并主干或发布；真实模型授权已用完且未追加调用，本机系统代理未修改，原Tomcat后台未动。临时验收数据保留供复查，Cov%未测量。
+- **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
 
 ### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
 

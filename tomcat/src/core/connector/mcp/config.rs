@@ -17,6 +17,8 @@ use crate::AppConfig;
 pub enum McpConfigSource {
     Global,
     Project,
+    /// Ephemeral ACP configuration; never backed by an mcp.json file.
+    Session,
 }
 
 impl McpConfigSource {
@@ -24,6 +26,7 @@ impl McpConfigSource {
         match self {
             Self::Global => "Global",
             Self::Project => "Workspace",
+            Self::Session => "Session",
         }
     }
 
@@ -31,6 +34,7 @@ impl McpConfigSource {
         match self {
             Self::Global => "global",
             Self::Project => "workspace",
+            Self::Session => "session",
         }
     }
 }

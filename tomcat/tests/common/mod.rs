@@ -2,8 +2,10 @@
 //! 使用 Once 保证并行测试下只初始化一次，避免重复 init 导致 panic。
 
 #![allow(dead_code)]
+pub mod acp;
 
 pub mod serve;
+pub mod shared_serve;
 
 use base64::Engine as _;
 use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};

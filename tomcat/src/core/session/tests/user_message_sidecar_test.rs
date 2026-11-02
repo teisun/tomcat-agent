@@ -9,6 +9,7 @@ use crate::core::session::transcript::{
 fn header() -> SessionHeader {
     SessionHeader {
         r#type: "session".to_string(),
+        origin: None,
         version: Some(3),
         id: "sidecar-session".to_string(),
         timestamp: "2026-08-10T00:00:00.000Z".to_string(),

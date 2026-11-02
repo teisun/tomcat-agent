@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useId, useState } from "react";
 import { useT } from "../i18n/LocaleProvider";
 
 import { AttachmentStrip } from "./AttachmentStrip";
@@ -27,6 +27,8 @@ type MessageBubbleProps = {
   onRetry?: (messageId: string) => void;
   resolvePaths?: (paths: string[]) => Promise<PathResolution[]>;
   recoveryDisabled?: boolean;
+  recoveryDueAt?: number;
+  onCancelRecovery?: (errorId: string, dueAt: number) => void;
   onZoomImage?: (image: { alt: string; src: string }) => void;
 };
 
@@ -42,6 +44,8 @@ function MessageBubbleComponent({
   onRetry,
   resolvePaths,
   recoveryDisabled = false,
+  recoveryDueAt,
+  onCancelRecovery,
   onZoomImage,
 }: MessageBubbleProps) {
   const t = useT();
@@ -55,6 +59,17 @@ function MessageBubbleComponent({
     item.kind === "error" && item.recoveryAction && typeof onRecover === "function"
       ? item.recoveryAction
       : null;
+  const recoveryHintId = useId();
+  const [now, setNow] = useState(Date.now);
+  const deadline = recoveryAction ? recoveryDueAt : undefined;
+  useEffect(() => {
+    if (deadline === undefined) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [deadline]);
+  const seconds = deadline === undefined ? null : Math.max(0, Math.ceil((deadline - now) / 1_000));
+  const countdown = seconds === null ? null : `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
   const showHeader = item.kind === "error" && recoveryAction === null;
   const statusIcon =
     item.kind === "notice" ? "codicon-info" : item.kind === "warn" ? "codicon-warning" : null;
@@ -210,6 +225,8 @@ function MessageBubbleComponent({
               <button
                 className="tc-button tc-button--primary tc-message__recovery-button"
                 data-testid="recover-error-turn"
+                aria-label={t(recoveryAction === "retry" ? "common.retry" : "common.resume")}
+                aria-describedby={deadline === undefined ? undefined : recoveryHintId}
                 disabled={recoveryDisabled}
                 onClick={() => onRecover?.(item.id, recoveryAction)}
                 type="button"
@@ -219,7 +236,17 @@ function MessageBubbleComponent({
                   className={`codicon ${recoveryAction === "retry" ? "codicon-refresh" : "codicon-debug-continue"}`}
                 />
                 <span>{t(recoveryAction === "retry" ? "common.retry" : "common.resume")}</span>
+                {countdown !== null ? <span aria-hidden="true"> · <span className="tc-message__countdown" data-testid="error-recovery-countdown">{countdown}</span></span> : null}
               </button>
+              {deadline !== undefined ? (
+                <>
+                  <button className="tc-message__detail-button" data-testid="cancel-error-recovery" type="button"
+                    onClick={() => onCancelRecovery?.(item.id, deadline)}>{t("message.cancelAutoRetry")}</button>
+                  <p className="tc-message__recovery-hint" id={recoveryHintId}>
+                    {t(recoveryAction === "retry" ? "message.autoRetryHint" : "message.autoResumeHint")}
+                  </p>
+                </>
+              ) : null}
             </div>
           ) : null}
         </>
@@ -278,6 +305,8 @@ function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbl
     prev.onRecover === next.onRecover &&
     prev.onRetry === next.onRetry &&
     prev.recoveryDisabled === next.recoveryDisabled &&
+    prev.recoveryDueAt === next.recoveryDueAt &&
+    prev.onCancelRecovery === next.onCancelRecovery &&
     prev.onZoomImage === next.onZoomImage
   );
 }

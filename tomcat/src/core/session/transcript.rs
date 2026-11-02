@@ -129,10 +129,26 @@ pub struct TranscriptPage {
     pub next_cursor_offset: Option<u64>,
 }
 
+/// Durable creation source, not a writable role or a live controller identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionOrigin {
+    Acp {
+        #[serde(
+            rename = "clientName",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        client_name: Option<String>,
+    },
+}
+
 /// 首行：session header，与 pi-mono 格式一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHeader {
     pub r#type: String, // "session"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SessionOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     pub id: String,

@@ -245,6 +245,49 @@ describe("MessageBubble", () => {
     ).not.toBeNull();
   });
 
+  it.each(["retry", "resume"] as const)("displays %s countdown with a stable accessible name and host-owned cancellation", action => {
+    vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000);
+    const onRecover = vi.fn(), onCancelRecovery = vi.fn();
+    const item = { type: "message" as const, kind: "error" as const, id: "e-countdown", text: "Request failed", recoveryAction: action };
+    const deadline = Date.now() + 300_000;
+    const props = { item, onRecover, onCancelRecovery };
+    const view = render(<MessageBubble {...props} recoveryDueAt={deadline} />);
+    try {
+      const button = screen.getByRole("button", { name: translate("en", action === "retry" ? "common.retry" : "common.resume") });
+      expect(screen.getByTestId("error-recovery-countdown").textContent).toBe("05:00");
+      expect(button.getAttribute("aria-describedby")).toBeTruthy();
+      expect(view.container.querySelector("[aria-live]")).toBeNull();
+      act(() => { vi.advanceTimersByTime(28_000); });
+      expect(screen.getByTestId("error-recovery-countdown").textContent).toBe("04:32");
+      expect(button.getAttribute("aria-label")).toBe(translate("en", action === "retry" ? "common.retry" : "common.resume"));
+      fireEvent.click(button); expect(onRecover).toHaveBeenCalledExactlyOnceWith(item.id, action);
+      const cancel = screen.getByRole("button", { name: translate("en", "message.cancelAutoRetry") });
+      cancel.focus(); expect(document.activeElement).toBe(cancel);
+      fireEvent.click(cancel); expect(onCancelRecovery).toHaveBeenCalledExactlyOnceWith(item.id, deadline);
+      act(() => { vi.advanceTimersByTime(300_000); });
+      expect(screen.getByTestId("error-recovery-countdown").textContent).toBe("00:00");
+      expect(onRecover).toHaveBeenCalledTimes(1); // The webview must never start recovery itself.
+      view.rerender(<MessageBubble {...props} />);
+      expect(screen.queryByTestId("error-recovery-countdown")).toBeNull();
+      expect(screen.queryByTestId("cancel-error-recovery")).toBeNull();
+      expect(screen.getByTestId("recover-error-turn").textContent).toBe(translate("en", action === "retry" ? "common.retry" : "common.resume"));
+      expect(vi.getTimerCount()).toBe(0);
+      view.rerender(<MessageBubble {...props} recoveryDueAt={Date.now() + 10_000} />);
+      expect(screen.getByTestId("error-recovery-countdown").textContent).toBe("00:10");
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it("reconstructs the remaining time from the original deadline and clears its interval on unmount", () => {
+    vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000);
+    const props = { item: { type: "message" as const, kind: "error" as const, id: "e1", text: "Failed", recoveryAction: "retry" as const }, onRecover: vi.fn(), recoveryDueAt: Date.now() + 300_000 };
+    const first = render(<MessageBubble {...props} />);
+    first.unmount(); expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(28_000);
+    const second = render(<MessageBubble {...props} />);
+    try { expect(screen.getByTestId("error-recovery-countdown").textContent).toBe("04:32"); }
+    finally { second.unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); }
+  });
+
   it("renders pending user status", () => {
     render(
       <MessageBubble

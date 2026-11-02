@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { connectSharedService, runSharedServiceAction, type SharedConnection, type SharedConnectionFactory } from "./sharedConnection";
 
 import type {
   AskQuestionResult,
@@ -56,7 +56,7 @@ export interface TomcatMessengerOptions {
   extraArgs?: string[];
   requestTimeoutMs?: number;
   logger?: TomcatMessengerLogger;
-  spawnFactory?: typeof spawn;
+  connectFactory?: SharedConnectionFactory;
 }
 
 export interface SetDefaultModelResponse {
@@ -132,13 +132,11 @@ function createDisposable(callback: () => void): DisposableLike {
   };
 }
 
-type OwnedChild = {
-  child: ChildProcessWithoutNullStreams;
+type OwnedConnection = {
+  abort: AbortController;
   closed: Promise<void>;
-  exited: boolean;
-  stopping: boolean;
-  killTimer?: NodeJS.Timeout;
-  termTimer?: NodeJS.Timeout;
+  connection?: SharedConnection;
+  ready?: Promise<void>;
 };
 
 export class TomcatMessenger {
@@ -153,12 +151,11 @@ export class TomcatMessenger {
   private readonly pendingControl = new Map<string, PendingControl>();
   private readonly pendingResponses = new Map<string, PendingResponse>();
   private readonly stderrListeners = new Set<(chunk: string) => void>();
-  private child?: ChildProcessWithoutNullStreams;
-  // A child can exit/restart before its pipes close. Keep ownership until close.
-  private readonly ownedChildren = new Set<OwnedChild>();
+  private active?: OwnedConnection;
+  // Reconnecting does not erase old connections still waiting for server cleanup.
+  private readonly ownedConnections = new Set<OwnedConnection>();
   private disposalPromise?: Promise<void>;
-  private childAbort?: AbortController;
-  private childGeneration = 0;
+  private connectionGeneration = 0;
   private disposed = false;
   private stderrText = "";
   private stdoutBuffer = "";
@@ -166,99 +163,94 @@ export class TomcatMessenger {
   constructor(private readonly options: TomcatMessengerOptions) {}
 
   get isRunning(): boolean {
-    return this.child !== undefined && this.child.exitCode === null && !this.child.killed;
+    return this.active !== undefined && !this.active.abort.signal.aborted;
   }
 
   get pid(): number | undefined {
-    return this.child?.pid;
+    return this.active?.connection?.info.pid;
+  }
+
+  get cwd(): string | undefined {
+    return this.options.cwd;
   }
 
   get recentStderr(): string {
     return this.stderrText;
   }
 
-  start(): void {
+  start({ allowStart = true }: { allowStart?: boolean } = {}): Promise<void> {
     this.ensureNotDisposed();
-    if (this.isRunning) {
-      return;
-    }
-
-    const spawnFactory = this.options.spawnFactory ?? spawn;
-    const child = spawnFactory(
-      this.options.executable,
-      ["serve", "--stdio", ...(this.options.extraArgs ?? [])],
-      {
-        cwd: this.options.cwd,
-        env: {
-          ...process.env,
-          ...this.options.env,
-        },
-        stdio: "pipe",
-        windowsHide: true,
-      },
-    );
-
-    this.child = child;
-    this.observeChildClose(child);
-    const abortController = new AbortController();
-    const generation = ++this.childGeneration;
-    this.childAbort = abortController;
+    if (this.active) return this.active.ready!;
+    let resolveClosed!: () => void;
+    const owned: OwnedConnection = {
+      abort: new AbortController(),
+      closed: new Promise<void>((resolve) => { resolveClosed = resolve; }),
+    };
+    this.active = owned;
+    this.ownedConnections.add(owned);
+    this.connectionGeneration += 1;
     this.stderrText = "";
     this.stdoutBuffer = "";
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      if (this.child === child && this.childGeneration === generation) {
-        this.handleStdoutChunk(chunk);
-      }
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (this.child === child && this.childGeneration === generation) {
-        this.handleStderrChunk(chunk);
-      }
-    });
-    child.stdin.on("error", (error) => this.handleChildExit(child, {
-      code: child.exitCode,
-      error,
-      signal: child.signalCode,
-    }));
-    child.stdout.on("error", (error) => this.handleChildExit(child, {
-      code: child.exitCode,
-      error,
-      signal: child.signalCode,
-    }));
-    child.stderr.on("error", (error) => this.handleChildExit(child, {
-      code: child.exitCode,
-      error,
-      signal: child.signalCode,
-    }));
-    child.on("error", (error) => {
-      this.handleChildExit(child, {
-        code: child.exitCode,
-        error,
-        signal: child.signalCode,
+    const closed = () => {
+      this.ownedConnections.delete(owned);
+      resolveClosed();
+    };
+    owned.ready = Promise.resolve().then(() => {
+      owned.abort.signal.throwIfAborted();
+      return (this.options.connectFactory ?? connectSharedService)({
+        ...this.options,
+        allowStart,
+        signal: owned.abort.signal,
+        onStderr: (chunk) => { if (this.active === owned) this.handleStderrChunk(chunk); },
       });
+    }).then((connection) => {
+      owned.connection = connection;
+      const { socket } = connection;
+      socket.once("close", () => { closed(); this.handleConnectionExit(owned); });
+      socket.on("error", (error) => this.handleConnectionExit(owned, error));
+      // Decode at the byte-stream boundary, including split UTF-8 characters.
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        if (this.active === owned) this.handleStdoutChunk(chunk);
+      });
+      // Closing the local-handshake readline interface pauses its input. Merely
+      // attaching a data listener does not resume an explicitly paused socket.
+      socket.resume();
+      if (socket.destroyed || socket.readableEnded) throw new Error("Tomcat shared connection already closed");
+      if (this.active !== owned || owned.abort.signal.aborted) socket.end();
+    }).catch((error: unknown) => {
+      closed();
+      this.handleConnectionExit(owned, toError(error));
+      throw error;
     });
-    child.on("exit", (code, signal) => {
-      this.handleChildExit(child, { code, signal: signal ?? null });
-    });
+    // start() is also called by lifecycle notifications which do not await it.
+    // Errors still reject waiting requests and go through the normal onExit path.
+    void owned.ready.catch(() => undefined);
+    return owned.ready;
   }
 
-  restart(): void {
-    this.shutdown("TomcatMessenger restarting");
-    this.start();
+  restart(options?: { allowStart?: boolean }): Promise<void> {
+    this.shutdown("TomcatMessenger reconnecting");
+    return this.start(options);
   }
 
-  /**
-   * Stops the current child without immediately starting another one. Lifecycle
-   * recovery is owned by ServeConnectionSupervisor; callers should normally use
-   * that supervisor rather than calling this directly.
-   */
+  /** Disconnect only this window. Never send a service stop or signal its PID. */
   stop(): void {
-    this.shutdown("TomcatMessenger stopped");
+    this.shutdown("TomcatMessenger disconnected");
+  }
+
+  /** Explicit service administration; its command label explains the all-tasks impact. */
+  runServiceAction(action: "stop" | "restart"): Promise<void> {
+    this.ensureNotDisposed();
+    return runSharedServiceAction({
+      ...this.options,
+      signal: new AbortController().signal,
+      onStderr: (chunk) => this.handleStderrChunk(chunk),
+    }, action);
   }
 
   updateOptions(options: Partial<TomcatMessengerOptions>): void {
-    if (options.cwd !== undefined) {
+    if ("cwd" in options) {
       this.options.cwd = options.cwd;
     }
     if (options.env !== undefined) {
@@ -276,23 +268,19 @@ export class TomcatMessenger {
     if (options.requestTimeoutMs !== undefined) {
       this.options.requestTimeoutMs = options.requestTimeoutMs;
     }
-    if (options.spawnFactory !== undefined) {
-      this.options.spawnFactory = options.spawnFactory;
+    if (options.connectFactory !== undefined) {
+      this.options.connectFactory = options.connectFactory;
     }
   }
 
   dispose(): void {
-    this.disposeWithGrace(0);
-  }
-
-  private disposeWithGrace(graceMs: number): void {
-    if (this.disposed) {
-      return;
-    }
-
+    if (this.disposed) return;
     this.disposed = true;
-    this.shutdown("TomcatMessenger disposed", graceMs);
-    for (const owned of this.ownedChildren) this.terminateChild(owned, 500, graceMs);
+    this.shutdown("TomcatMessenger disposed");
+    for (const owned of this.ownedConnections) {
+      owned.abort.abort();
+      owned.connection?.socket.end();
+    }
     this.controlHandlers.clear();
     this.controlRequestListeners.clear();
     this.eventListeners.clear();
@@ -301,36 +289,19 @@ export class TomcatMessenger {
     this.stderrListeners.clear();
   }
 
-  /**
-   * Disables new work immediately, allows a short EOF grace period, then waits
-   * for every owned generation's process AND stdio close. The budget includes escalation.
-   * Repeated calls share the first call's promise/budget. Timeout is a failure,
-   * not permission for a fixture to delete a directory a child may still use.
-   */
+  /** Wait for EOF cleanup on every connection, without stopping the shared service. */
   disposeAsync({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
     if (this.disposalPromise) return this.disposalPromise;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
       return Promise.reject(new RangeError("disposeAsync timeoutMs must be a positive timer duration"));
     }
-    // Give EOF a short opportunity to settle checkpoint/title writes before a
-    // signal interrupts the process. Synchronous dispose retains its old timing.
-    this.disposeWithGrace(Math.min(500, timeoutMs / 4));
-    const pending = [...this.ownedChildren];
-    for (const owned of pending) this.terminateChild(owned, Math.min(1_000, timeoutMs / 2));
+    this.dispose();
+    const pending = [...this.ownedConnections];
     let timer: NodeJS.Timeout;
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
-        const remaining = [...this.ownedChildren];
-        const detail = remaining.map(({ child }) =>
-          `pid=${child.pid ?? "unknown"} exit=${child.exitCode} signal=${child.signalCode}`).join("; ");
-        // Release our pipes as a last resort, but still report the missed deadline.
-        for (const owned of remaining) {
-          this.signalChild(owned, "SIGKILL");
-          owned.child.stdin.destroy();
-          owned.child.stdout.destroy();
-          owned.child.stderr.destroy();
-        }
-        reject(new Error(`timed out closing tomcat serve after ${timeoutMs}ms: ${detail}`));
+        for (const owned of this.ownedConnections) owned.connection?.socket.destroy();
+        reject(new Error(`timed out closing Tomcat connections after ${timeoutMs}ms; service cleanup is unconfirmed`));
       }, timeoutMs);
     });
     this.disposalPromise = Promise.race([
@@ -340,54 +311,20 @@ export class TomcatMessenger {
     return this.disposalPromise;
   }
 
-  private observeChildClose(child: ChildProcessWithoutNullStreams): void {
-    let resolveClosed!: () => void;
-    const owned: OwnedChild = {
-      child,
-      closed: new Promise<void>((resolve) => { resolveClosed = resolve; }),
-      exited: false,
-      stopping: false,
-    };
-    this.ownedChildren.add(owned);
-    child.once("exit", () => { owned.exited = true; });
-    child.once("close", () => {
-      clearTimeout(owned.killTimer);
-      clearTimeout(owned.termTimer);
-      this.ownedChildren.delete(owned);
-      resolveClosed();
-    });
-  }
-
-  private signalChild(owned: OwnedChild, signal: NodeJS.Signals): void {
-    if (owned.exited || !this.ownedChildren.has(owned)) return;
-    try { owned.child.kill(signal); } catch (error) {
-      this.log("warn", `failed to signal tomcat ${signal}: ${toError(error).message}`);
-    }
-  }
-
-  private terminateChild(owned: OwnedChild, graceMs = 500, eofGraceMs = 0): void {
-    if (!this.ownedChildren.has(owned)) return;
-    if (!owned.stopping) {
-      owned.stopping = true;
-      try {
-        if (!owned.child.stdin.destroyed) owned.child.stdin.end();
-      } catch (error) {
-        this.log("warn", `failed to close tomcat stdin: ${toError(error).message}`);
-      }
-      if (eofGraceMs > 0) {
-        owned.termTimer = setTimeout(() => this.signalChild(owned, "SIGTERM"), eofGraceMs).unref();
-      } else {
-        this.signalChild(owned, "SIGTERM");
-      }
-    }
-    if (!this.ownedChildren.has(owned) || owned.exited) return;
-    clearTimeout(owned.killTimer);
-    owned.killTimer = setTimeout(() => this.signalChild(owned, "SIGKILL"), graceMs).unref();
-  }
-
   send(command: ServeCommand): void {
-    this.start();
-    this.writeCommand(command);
+    this.scheduleWrite(command);
+  }
+
+  private scheduleWrite(command: ServeCommand, stillPending: () => boolean = () => true): void {
+    // Requests may bootstrap a fresh messenger, but never resurrect a stopped
+    // service after a disconnect. Explicit lifecycle actions can opt in again.
+    void this.start({ allowStart: this.connectionGeneration === 0 });
+    const owned = this.active!;
+    const write = () => {
+      if (this.active === owned && !owned.abort.signal.aborted && stillPending()) this.writeCommand(command);
+    };
+    if (owned.connection) write();
+    else void owned.ready!.then(write).catch((error: unknown) => this.handleConnectionExit(owned, toError(error)));
   }
 
   request(command: RequestCommand, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
@@ -408,7 +345,7 @@ export class TomcatMessenger {
       });
 
       try {
-        this.send(withId);
+        this.scheduleWrite(withId, () => this.pendingResponses.get(withId.id)?.resolve === resolve);
       } catch (error) {
         clearTimeout(timeout);
         this.pendingResponses.delete(withId.id);
@@ -439,7 +376,7 @@ export class TomcatMessenger {
       });
 
       try {
-        this.send(command);
+        this.scheduleWrite(command, () => this.pendingControl.get(command.requestId)?.resolve === resolve);
       } catch (error) {
         clearTimeout(timeout);
         this.pendingControl.delete(command.requestId);
@@ -836,38 +773,25 @@ export class TomcatMessenger {
   }
 
   private writeCommand(command: ServeCommand): void {
-    const child = this.child;
-    if (!child || child.stdin.destroyed) {
-      throw new Error("tomcat serve process is not writable");
+    const socket = this.active?.connection?.socket;
+    if (!socket || socket.destroyed || socket.writableEnded) {
+      throw new Error("Tomcat shared connection is not writable");
     }
-
-    const line = `${JSON.stringify(command)}\n`;
-    child.stdin.write(line, "utf8");
+    socket.write(`${JSON.stringify(command)}\n`, "utf8");
   }
 
-  private shutdown(reason: string, eofGraceMs = 0): void {
+  private shutdown(reason: string): void {
     this.rejectPending(new Error(reason));
-
-    const child = this.child;
-    this.childAbort?.abort(reason);
-    for (const abort of this.activeControlRequests.values()) {
-      abort.abort(reason);
-    }
+    const owned = this.active;
+    this.active = undefined;
+    owned?.abort.abort(reason);
+    for (const abort of this.activeControlRequests.values()) abort.abort(reason);
     this.activeControlRequests.clear();
-    this.childAbort = undefined;
-    this.child = undefined;
     this.stdoutBuffer = "";
     this.stderrText = "";
-
-    if (!child) {
-      return;
-    }
-
-    // Keep close/error observers and continue draining old-generation output.
-    // Existing identity/generation checks prevent stale data reaching the UI.
-    for (const owned of this.ownedChildren) {
-      if (owned.child === child) this.terminateChild(owned, 1_000, eofGraceMs);
-    }
+    // Half-close: the server cancels this controller's work, then closes its
+    // writer. Keep draining until then; never kill the shared process.
+    owned?.connection?.socket.end();
   }
 
   private rejectPending(error: Error): void {
@@ -884,8 +808,8 @@ export class TomcatMessenger {
     }
   }
 
-  private handleStdoutChunk(chunk: Buffer): void {
-    this.stdoutBuffer += chunk.toString("utf8");
+  private handleStdoutChunk(chunk: string): void {
+    this.stdoutBuffer += chunk;
 
     while (true) {
       const newlineIndex = this.stdoutBuffer.indexOf("\n");
@@ -969,10 +893,10 @@ export class TomcatMessenger {
       if (handler) {
         const abort = new AbortController();
         this.activeControlRequests.set(frame.requestId, abort);
-        const parentSignal = this.childAbort?.signal;
+        const parentSignal = this.active?.abort.signal;
         const abortForChildExit = () => abort.abort();
         parentSignal?.addEventListener("abort", abortForChildExit, { once: true });
-        void this.runControlHandler(handler, frame, this.childGeneration, abort.signal)
+        void this.runControlHandler(handler, frame, this.connectionGeneration, abort.signal)
           .finally(() => {
             parentSignal?.removeEventListener("abort", abortForChildExit);
             if (this.activeControlRequests.get(frame.requestId) === abort) {
@@ -1012,7 +936,7 @@ export class TomcatMessenger {
     if (!signal) return;
     try {
       const result = await handler(frame, { generation, signal });
-      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
+      if (signal.aborted || generation !== this.connectionGeneration || !this.active) return;
       if (!result) {
         return;
       }
@@ -1032,48 +956,22 @@ export class TomcatMessenger {
         result.payload,
       );
     } catch (error) {
-      if (signal.aborted || generation !== this.childGeneration || !this.child) return;
+      if (signal.aborted || generation !== this.connectionGeneration || !this.active) return;
       this.emitFrameError(toError(error));
       this.sendControlCancel(frame.requestId, frame.sessionId, null);
     }
   }
 
-  private handleChildExit(
-    child: ChildProcessWithoutNullStreams,
-    event: { code: number | null; signal: NodeJS.Signals | null; error?: Error },
-  ): void {
-    if (this.child !== child) {
-      return;
-    }
-
-    const error =
-      event.error ??
-      new Error(
-        `tomcat serve exited (code=${String(event.code)}, signal=${String(event.signal)})`,
-      );
-
-    this.childAbort?.abort(error);
-    this.childAbort = undefined;
-    this.child = undefined;
+  private handleConnectionExit(owned: OwnedConnection, failure?: Error): void {
+    if (this.active !== owned) return;
+    const error = failure ?? new Error("Tomcat shared connection closed");
+    this.active = undefined;
+    owned.abort.abort(error);
     this.stdoutBuffer = "";
-
     this.rejectPending(error);
-
-    if (event.error) {
-      for (const owned of this.ownedChildren) {
-        if (owned.child === child) this.terminateChild(owned);
-      }
-    }
-
-    const payload: TomcatMessengerExit = {
-      code: event.code,
-      error: event.error,
-      signal: event.signal,
-      stderr: this.stderrText,
-    };
-    for (const listener of this.exitListeners) {
-      listener(payload);
-    }
+    if (failure) owned.connection?.socket.destroy();
+    const payload: TomcatMessengerExit = { code: null, signal: null, error, stderr: this.stderrText };
+    for (const listener of this.exitListeners) listener(payload);
   }
 
   private emitFrameError(error: Error): void {

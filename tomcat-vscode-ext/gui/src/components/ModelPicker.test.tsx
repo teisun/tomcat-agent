@@ -66,6 +66,24 @@ function viewportRect(left: number, top: number, width: number, height: number):
 }
 
 describe("ModelPicker", () => {
+  it("disables both triggers and closes configuration when the session becomes read-only", () => {
+    const props = { models: MODELS, selectedModelId: MODELS[0].id, onSelectModel: vi.fn(), legacyThinkingTriggerTestId: "thinking-level-select" };
+    const { rerender } = render(<ModelPicker {...props} />);
+    fireEvent.click(screen.getByTestId("thinking-level-select"));
+    expect(screen.getByTestId("thinking-level-dropdown")).toBeTruthy();
+    rerender(<ModelPicker {...props} disabled />);
+    for (const id of ["model-select", "thinking-level-select"]) {
+      expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
+      fireEvent.click(screen.getByTestId(id));
+    }
+    expect(screen.queryByTestId("model-dropdown")).toBeNull();
+    expect(screen.queryByTestId("thinking-level-dropdown")).toBeNull();
+    expect(props.onSelectModel).not.toHaveBeenCalled();
+    rerender(<ModelPicker {...props} />);
+    fireEvent.click(screen.getByTestId("thinking-level-select"));
+    expect(screen.getByTestId("thinking-level-dropdown")).toBeTruthy();
+  });
+
   function openConfig(row: HTMLElement) {
     fireEvent.mouseEnter(row);
     fireEvent.click(

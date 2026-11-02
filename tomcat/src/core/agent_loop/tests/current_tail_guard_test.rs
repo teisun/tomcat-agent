@@ -842,6 +842,7 @@ fn write_session_header(path: &Path) {
         path,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(1),
             id: "sid".to_string(),
             timestamp: "2026-05-30T16:00:00Z".to_string(),

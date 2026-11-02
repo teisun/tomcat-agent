@@ -1,31 +1,17 @@
 import * as path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { setupRealServeFixture } from "../scripts/realServeFixture";
 import type { LlmApi, ScriptedPart, FixtureSetup } from "../scripts/realServeFixture";
 export { serveFixtureEnvironment, spawnScriptedOpenAiStreamServer, sseDelta, sseFinish, sseDone, sseToolCall } from "../scripts/realServeFixture";
 export type { LlmApi, ScriptedPart, ScriptedResponse } from "../scripts/realServeFixture";
 
-import { beforeAll } from "vitest";
+import { beforeAll, inject } from "vitest";
 
-import { resolveCargoCommand } from "../scripts/resolveCargoCommand";
+import { buildTomcatBinary, builtTomcatBinary } from "../scripts/buildTomcatBinary";
 import type { ServeEvent } from "../src/serveClient/wire";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
 
-const execFileAsync = promisify(execFile);
-const repoRoot = path.resolve(__dirname, "..", "..");
-const tomcatRoot = path.resolve(repoRoot, "tomcat");
-const cargoTargetDir = process.env.CARGO_TARGET_DIR
-  ? path.resolve(process.env.CARGO_TARGET_DIR)
-  : path.resolve(tomcatRoot, "target");
-const tomcatBinary = path.resolve(
-  cargoTargetDir,
-  "debug",
-  process.platform === "win32" ? "tomcat.exe" : "tomcat",
-);
-
-let buildPromise: Promise<void> | undefined;
+let buildPromise: Promise<string> | undefined;
 
 export type PlanFileState = "completed" | "executing" | "pending" | "planning";
 
@@ -70,19 +56,13 @@ export function responsesCompleted(status = "completed"): ScriptedPart {
 }
 
 export async function ensureTomcatBinary(): Promise<string> {
-  buildPromise ??= execFileAsync(resolveCargoCommand(), ["build", "--quiet", "--bin", "tomcat"], {
-    cwd: tomcatRoot,
-    timeout: 120_000,
-    killSignal: "SIGKILL",
-  }).then(() => undefined).catch((error) => {
+  if (inject("tomcatBuilt")) return builtTomcatBinary();
+  // Standalone runs without the integration config still build, rather than trust a stale exe.
+  buildPromise ??= buildTomcatBinary().catch((error) => {
     buildPromise = undefined;
     throw error;
   });
-  await buildPromise;
-  if (!(await stat(tomcatBinary).then(() => true).catch(() => false))) {
-    throw new Error(`tomcat binary not found after build: ${tomcatBinary}`);
-  }
-  return tomcatBinary;
+  return buildPromise;
 }
 
 export function warmTomcatBinaryForSuite(timeoutMs = 120_000): void {

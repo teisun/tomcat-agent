@@ -491,7 +491,7 @@ async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_tu
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.global_services.primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 16 });
     ctx.session_runtime.message_append_sink = Arc::new(InjectAppendInvariantSink::new(
-        ctx.session_runtime.session.clone(),
+        ctx.session_runtime.session.as_ref().clone(),
     ));
 
     let system_text = "system prompt";
@@ -1917,6 +1917,7 @@ fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
         &path,
         &tomcat::core::session::transcript::SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "sid_err".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),

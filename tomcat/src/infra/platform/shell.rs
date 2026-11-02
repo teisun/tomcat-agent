@@ -13,6 +13,9 @@ use crate::infra::error::AppError;
 /// bash 工具依赖的 shell 是否需要用户另外安装（Windows 要装 Git for Windows；Unix 自带 `sh`）。
 pub const POSIX_SHELL_NEEDS_INSTALL: bool = cfg!(windows);
 
+#[cfg(windows)]
+const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 返回 bash 工具使用的 shell 程序。
 ///
 /// # Errors
@@ -28,17 +31,54 @@ pub fn posix_shell() -> Result<PathBuf, AppError> {
 /// * [`AppError::Primitive`] - 找不到 Git Bash（`bash.gitBashMissing`）。
 #[cfg(windows)]
 pub fn posix_shell() -> Result<PathBuf, AppError> {
-    static GIT_BASH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    static GIT_BASH: std::sync::OnceLock<Result<Option<PathBuf>, String>> =
+        std::sync::OnceLock::new();
     GIT_BASH
         .get_or_init(|| {
-            locate_git_bash(
-                git_exec_path().as_deref(),
+            let exec_path = git_exec_path()?;
+            Ok(locate_git_bash(
+                exec_path.as_deref(),
                 |key| std::env::var_os(key),
                 |path| path.is_file(),
-            )
+            ))
         })
         .clone()
+        .map_err(git_probe_error)?
         .ok_or_else(|| AppError::Primitive(crate::infra::i18n::tr("bash.gitBashMissing", &[])))
+}
+
+/// A shared-service child uses its controller's environment. In particular,
+/// Windows Git discovery cannot use the service-wide cached PATH result.
+pub fn posix_shell_for(
+    environment: Option<&super::EnvironmentSnapshot>,
+    cwd: &Path,
+) -> Result<PathBuf, AppError> {
+    let Some(environment) = environment else {
+        return posix_shell();
+    };
+    #[cfg(unix)]
+    {
+        let _ = (environment, cwd);
+        Ok(PathBuf::from("/bin/sh"))
+    }
+    #[cfg(windows)]
+    {
+        let exec_path =
+            if let Ok(git) = environment.resolve_program("git", cwd, &Default::default()) {
+                let mut command = std::process::Command::new(git);
+                environment.apply(&mut command);
+                command.current_dir(cwd).arg("--exec-path");
+                probe_git_exec_path(command, GIT_PROBE_TIMEOUT).map_err(git_probe_error)?
+            } else {
+                None
+            };
+        locate_git_bash(
+            exec_path.as_deref(),
+            |key| environment.get(key).map(Into::into),
+            |path| path.is_file(),
+        )
+        .ok_or_else(|| AppError::Primitive(crate::infra::i18n::tr("bash.gitBashMissing", &[])))
+    }
 }
 
 /// 把 POSIX shell 命令里的路径写法换成本机路径。
@@ -63,18 +103,78 @@ pub fn shell_path_to_native(path: &str) -> String {
     path.to_string()
 }
 
+#[cfg(any(windows, test))]
+fn probe_git_exec_path(
+    command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, String> {
+    // Shell lookup is synchronous, including callers already inside Tokio. Keep
+    // this short-lived reactor on its own thread instead of nesting runtimes.
+    std::thread::Builder::new()
+        .name("git-probe".into())
+        .spawn(move || -> std::io::Result<Option<String>> {
+            use tokio::io::AsyncReadExt;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let mut command = tokio::process::Command::from(command);
+                command
+                    .kill_on_drop(true)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                let Ok((mut child, tree)) = super::process::ProcessTree::spawn(&mut command) else {
+                    // Missing/unlaunchable Git still falls back to the standard directories.
+                    return Ok(None);
+                };
+                let mut stdout = child
+                    .stdout
+                    .take()
+                    .expect("probe stdout configured as piped");
+                let mut bytes = Vec::new();
+                let output = tokio::time::timeout(timeout, async {
+                    tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))
+                        .map(|(status, _)| status)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("git --exec-path timed out after {}ms", timeout.as_millis()),
+                    ))
+                });
+                match output {
+                    Ok(status) => Ok(status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&bytes).trim().to_owned())),
+                    Err(error) => {
+                        tree.kill()?;
+                        child.wait().await?;
+                        Err(error)
+                    }
+                }
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .join()
+        .map_err(|_| "git probe worker panicked".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(windows)]
-fn git_exec_path() -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("--exec-path")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+fn git_exec_path() -> Result<Option<String>, String> {
+    let mut command = std::process::Command::new("git");
+    command.arg("--exec-path");
+    probe_git_exec_path(command, GIT_PROBE_TIMEOUT)
+}
+
+#[cfg(windows)]
+fn git_probe_error(reason: String) -> AppError {
+    AppError::Primitive(format!(
+        "{}: {reason}",
+        crate::infra::i18n::tr("bash.gitBashMissing", &[])
+    ))
 }
 
 /// 纯函数：由 `git --exec-path` 的输出与标准安装目录推导 Git Bash。

@@ -16,7 +16,7 @@ use crate::core::permission::{
     is_url_like, GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionScope,
 };
 use crate::core::tools::contract::confirmation::ConfirmDecision;
-use crate::core::tools::primitive::PrimitiveOperation;
+use crate::core::tools::primitive::{PrimitiveExecutor, PrimitiveOperation};
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
 use crate::infra::platform::normalize_path;
@@ -48,7 +48,7 @@ impl DefaultPrimitiveExecutor {
             ));
         }
         let gate = &self.gate;
-        let normalized = normalize_path(path)?;
+        let normalized = normalize_path(&self.resolve_path(path).to_string_lossy())?;
         loop {
             let decision = gate.check(op, &normalized.to_string_lossy())?;
             match decision {

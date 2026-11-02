@@ -7,38 +7,154 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-10-12 19:25 +0800 | ACTIVE | develop | — |
+| Tomcat Agent | 2026-11-02 14:00 +0800 | DONE（仅本地合并，外部验收待补） | develop | - |
 
-### CURRENT INTEGRATION (2026-10-12)
+### CURRENT INTEGRATION：共享后台与 ACP 接入审查后本地合并（2026-11-02）
 
 ```text
-develop 4e1a4867 ──┐
-                   ├─ --no-ff fb731ed9：合入 feature/transcript-rich-render（157 个提交全部保留）
-feature 1bb87c1f ──┘
-  ├─ 23946252 / dc70bd70：只修测试
-  ├─ 9423494f / bfbf3bf8：状态文档 ──> 已推送 origin/develop
-  ├─ --no-ff ff6785f4：复核后补修 2 处附件清理问题（45687323 / 88bc4b30）
-  ├─ --no-ff 89c0c8e9：Bash 运行预览只保留 64KB 上限（72ac358f）
-  └─ --no-ff 3170407c：修测试锁死锁（6cfbddcf）──> gate-fast 通过
+develop D=86081c31 ──────────────┐
+feature/shared-serve-acp S=2b76074a ─┴─> 本地 no-ff 合并
+  已测实现 + 分批补验                    ├─ 产品树与 S 完全相同
+                                       ├─ 仅回填 develop status / INTEGRATION
+                                       └─ 不推送、不安装、不重启正式服务
 ```
 
-- **合了什么**：`feature/transcript-rich-render` 的全部内容，功能明细见 [功能分支状态](feature-transcript-rich-render.md)。合并没有文本冲突；之后 develop 上的 `23946252` 把 3 个大读取测试的造数据方式换成直接追加（原来每条都重写一次索引，单个测试跑 20 多分钟），`dc70bd70` 对齐 1 条提示词断言、并让锁竞争测试先拿锁再启动竞争者。这两个提交都只改测试。
-- **合并后验证（fb731ed9 + 两个测试修复）**：
-  - Rust：clippy 无警告；库测试 3242 个注册用例全部有结论，3237 通过、5 个本来就标记忽略、0 失败。第一次整跑有 2 个失败，又被太慢的大测试拖到中止；修好后按测试族补跑并逐个用例名对账，没有把原失败改写成通过。集成测试并行 378 通过 / 27 跳过，串行 35 通过；fmt 通过。
-  - 扩展：两侧 TypeScript 类型检查、core 752 个、GUI 826 个单测通过。功能分支上做过的真实模型、安装态、VSIX 与实屏验收仍然有效，因为合并后只改了 Rust 测试和文档。
-- **复核后补修（ff6785f4）**：复核验收期间的提交，找出 2 处必须改的代码问题：
-  1. 删除会话时，回收图片要把所有会话的 transcript 从头读一遍，而且全程握着全局附件锁；这期间粘贴图片、发送、生成缩略图都会被卡住。现在复用启动清理已有的“指纹缓存账本”，只重读变过的文件（`45687323`）。
-  2. 清理过期租约、缩略图、孤儿图片时，只要有一个文件删不掉，后面的文件就全都不处理了，而且下次还会卡在同一个文件上。现在跳过它继续删，最后仍把第一个错误报出来；但如果“正在使用的图片名单”读不全，仍然整轮放弃，避免误删（`88bc4b30`）。
-  - 验证：短分支上 `core::session` 314 通过 / 2 忽略、Serve 附件测试 22 通过、clippy 与 fmt 通过；新增测试已确认在旧代码上会失败。改动只在 Rust 会话模块，不碰协议和界面，扩展测试未重跑。
-- **门禁里发现并修好的 2 个老问题**（都不是这次附件改动引入的）：
-  1. Bash 测试 `failed_capture_is_reported_after_draining_the_pipe` 偶发超过 5 秒上限（单独重跑 20 次失败 3 次）。根因是运行预览 `RuntimePreview::trim` 超过 1000 行时逐字节删除，每删一个字节都重数一遍整个预览的换行，短行越多越慢。现在只保留 64KB 字节上限，超出时一次性从头部切掉多出的部分（`72ac358f`，合并 `89c0c8e9`）。去掉行数上限不影响用户看到的内容：webview 自己只显示最后 500 行 / 30000 字符，掉队补发也只发最后 8KB；完整输出仍在日志文件里。
-  2. 重跑门禁时 lib 阶段卡死不动。根因是测试里“HOME 锁”和“cwd 锁”两把锁被不同测试按相反顺序拿：`cmd_install` 先拿 cwd 锁、建 `ChatContext` 时再拿 HOME 锁，`cmd_restore` 先拿 HOME 锁再拿 cwd 锁，两者同时跑就互相等（`90132d52` 起就有，概率性出现）。现在两个入口共用同一把可重入锁，不再有“先拿哪把”的问题，并加了断言防止再拆开（`6cfbddcf`，合并 `3170407c`）。
-- **最终门禁（develop `3170407c`）gate-fast 通过（退出码 0）**：clippy 无警告；lib 3241 通过 / 5 忽略 / 0 失败；doctest 通过（该阶段 0 个用例，不算行为验证）；集成测试并行 378 通过 / 27 跳过、串行 35 通过。
-- **版本**：CLI 与内置 CLI 0.1.72、扩展 0.1.86；不发版、不打 tag。
-- **没有验证的**：Windows 上的运行（含进程树停止）和其它平台、原生“另存为”、首次原生项目信任弹窗、远程 OAuth 与全部供应商组合、用户原先那个失败会话的 Retry。console 里外层 VS Code 资源超时、以及故意构造的图片 404/403 负例仍在，不宣称零报错；`cargo audit` 的 3 条 unmaintained 警告（bincode、smartstring、yaml-rust）保留。
-- **看板说明**：`INTEGRATION.md` 里的各 feature 章节由脚本从各自分支末端读取，是合并前的快照（例如 transcript-rich-render 那一节仍写着“未交付”），当前事实以本节为准。验收截图和日志只保存在本机、不入库，需要的结论已写在这里。
+- **本轮结论**：按批准计划完成原 15 提交 / 385 路径的六组审查与有证据的局部修复；本机离线验收范围已由有效批次覆盖，执行本地合并。Windows、真实模型及对应新提交的 CI 仍未验证，见下方“推送前必须补齐”；不是发布许可，也不是“全平台无遗留阻塞”。源分支状态片段记录的是合并前状态，合并结果以本节为准。
+- **精确基线**：D=`86081c3121a183ffd1b65997998f88f7fd26f7e0`；最终 S=`2b76074a04bb4063c56d011ac95ca1660e8da92f`。预演与 `git merge --no-ff --no-commit S` 后的树均为 `458479f1bb1d41f54a2566a9f3cabedbe5636e2a`，`git diff --cached S` 为空，无冲突；D..M 为 396 文件 / +29488 −3982。合并提交前只再修改本文件并运行原 aggregate-status 脚本生成 `docs/INTEGRATION.md`，两者为说明性回填，最终树相对 S 的其余路径必须完全相同。
+- **修复边界**：Native 先核对服务编号再发送环境，仍直连且管理协议版本为 1；控制者关闭与 ACP 取消复用原停止入口；页面重建保留选择、迟到流式开头不重字、checkpoint 接管自动恢复；Windows Git 探测先授权、限期回收。另修已复现的 busy 遗留、SessionManager 弱引用、IPC/PATH 错误分类与测试设施问题，不加 relay、状态平台或插件初始化生命周期。逐项根因、失败→通过及独立提交见 [源分支审查记录](feature-shared-serve-acp.md#合并审查与验收本机离线验证完成待本地合并)。
+
+| 层 | 本轮有效证据与边界 |
+| --- | --- |
+| Rust B2/B4 | B2 完整库 3454 passed / 5 ignored；B4 `1793595769842-ex75gj` 的全目标 Clippy、parallel 384 / 27 skipped、serial 89 / 3 skipped 通过，库 3453 passed / 1 failed / 5 ignored。唯一新暴露的旧压缩夹具问题经重复句柄确定性复现，`9d48409e` 仅显式解锁；`1793597923702-qgd17f` 的所属模块 24 项、fmt 与 lib/tests Clippy 通过。原 B4 exit 1 保留，复用其未受影响步骤，不重复累计用例或声称整条命令一次全绿。 |
+| 扩展 B2/B4 | B2 `1793594442583-2fzg8u` 完整 gate:full exit 0：host 916、GUI 888、integration 271 / 1 skipped、安装态 24 / 6 条件 pending、verify:vsix 10。B4 `1793598458874-yr40gj` extension tsc 后 npm GUI lint 进程 SIGSEGV / exit 139，根因未确认；同源码、依赖及并发下 `1793598602816-a62zbn` 只补 GUI tsc 与完整单测，host 916 / GUI 888、exit 0。保留原崩溃，不据 swap 使用量断言 OOM。 |
+| 真实 VS Code / UI | B3 `1793595245110-u2j0ap`：Production 扩展自动换文档，仍是旁观 B、草稿/只读/焦点保持、真实 Bash 完成，1 passing / 26s。最终桌面/窄屏两组、空窗口两组及 B2 七组 PNG/ARIA/console 已读回，捕获范围 errors=[]；B2 错裁到 Explorer 的 cropped 图仅调试，视觉证据使用原始图。不冒充原生文件对话框实选或全宿主零告警。 |
+| 两份宿主集成包 | `1793587030689-y4z2d0`：Paperclip 46、Multica 23 个清单路径与哈希一致；四份 patch 在包中声明的精确隔离基线 `git apply --check` 通过。未在宿主仓运行套件或改部署；旧包的验收 SHA 不代签本次 S。 |
+
+- **复用条件已核对**：`9d48409e` 相对首轮待合并树只改一个测试和源 status；`2b76074a` 只订正文档引用并回填 B4。产品、依赖、分组及 UI 未变，B2/B3 和 B4 未受影响步骤继续有效；测试夹具的变化已补所属模块与 Clippy，不把旧夹具结果当新结果。所有原始失败、环境缺项与解释都保留。
+- **资料检查边界**：自动看板逐字汇总当前 develop 加 7 个 feature 分支。`git diff --check` 报告的看板四处行尾空格原样来自 `feature/transcript-rich-render` 的 status 第 264/268/269/278 行；保留原始失败，不修改他人分支或手工改生成结果。四份上游补丁与原样技能附件也保持字节；最终空白检查只精确排除这些保真资料及聚合看板，其余代码/说明仍检查，不关闭全局规则。
+- **版本与安全边界**：CLI `0.1.81`、扩展 `0.1.97`、bundled CLI `0.1.81`，未升版。只用隔离 HOME/profile；未安装、发布或停止/重启在用服务，未修改用户配置、代理和凭据，未移除 Agent 保护。保留源分支及其它 worktree；未推送、打标签或清理用户工作。Cov% 未测量。
+
+#### 推送前必须补齐 / 需单独决策
+
+| 项目 | 未完成原因与后续动作 |
+| --- | --- |
+| Windows 真机 | 未提供执行环境。补 Git 探测拒绝/允许/失败审计/超时回收、根 CMD 安装脚本与 Windows 侧用例；Mac 结果不代签。 |
+| real-llm | 默认必需 `IDATATLAS_OPENAI_API_KEY` 未配置，真实 API 层未运行。由用户在私有环境准备后补对应层，不输出密钥。 |
+| 新 SHA 的 CI | 本轮禁止推送，当前修复没有远端 CI 证据。获准推送后再核对对应提交的三平台和 Windows 系统代理 CI，不使用旧绿色记录或伪造 runner 环境。 |
+| 旧式动态插件串会话 | 已复现：第二会话动态发现会向第一会话追加消息；develop 已有同一机制。保留 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch`，需另定初始化会话归属，不擅自改生命周期；按获准计划不阻塞本地合并，未修复。 |
+| 其它保留风险 | local_socket 旧并发失败后在组合与完整库中通过，但根因未确认；Multica 上层 30 秒 / backend 65 秒取消预算差异未实测。原生文件选择、拖拽及既有 Windows 待验事项不由本轮代签。 |
+
+日志在 `~/.tomcat/agents/main/tool-results/bash-<task-id>.log`；本机视觉制品位于 `.agents/acceptance/shared-serve-review/` 与 `.agents/shots/shared-serve-review/`，不纳入 Git。临时回看服务已停止。下方保留 2026-10-22 的历史验收，**旧 SHA 的云端成功不代表本轮通过**。
+
+#### 此前接入验收（2026-10-22，仅历史记录）
+
+```text
+Paperclip / Multica → 标准 ACP → 共享 Tomcat 后台
+VS Code            → 原生连接 → 同项目实时只读旁观
+正式 HTTP          → llm.proxy / 系统代理（不读入口 shell 代理）
+```
+
+- **最终验收**：代码 `401b6f0cbd8be8478b5453815450f7ce6ada00e7` 的[同一轮 GitHub CI](https://github.com/teisun/tomcat-agent/actions/runs/39765237685)五项必需检查全部成功：macOS/Linux/Windows Rust、Windows扩展、Windows系统代理与真实窗口。下面保留各阶段原始记录；旧的待验/失败描述不是当前结论。文档收口不改产品、测试、依赖或CI配置，复用该代码修订的结果。
+- **云端实跑数**：macOS/Linux各为lib3424、并行集成379、串行86 PASS；Windows为lib3411、并行365、串行82 PASS；三平台fmt/严格all-target Clippy均通过。各平台原有lib5 ignored、集成27+3 skipped不计通过；两项系统代理专用用例由专项显式执行，均1 PASS。Windows扩展core803、GUI865 PASS。
+- **Windows实际证据**：win25-vs2026 / Node22.23.3 / VSCode1.106.0；13次实际代理请求，含Native/ACP模型、两次MCP tools/call与窗口模型请求，设置已逐值恢复。三条真实Job/受限ACP边界用例通过；真实窗口写文件并退出后，PID7200与instanceId `d1cc9b74-a5a9-4ff8-8b7c-f542c527ba18` 不变，禁止启动的Native重连成功。已读255×808 PNG、ARIA及console，任务/完成结果可见，窄栏省略与横向滚动保留，捕获范围内errors为空；不宣称全程宿主日志零错误，也不代表所有个人Windows环境。
+- **历史异常保留**：首轮生命周期用例曾在输出合法JSON后非零退出，原日志缺退出码，根因仍未证实；本轮该原用例在三平台均通过，增强诊断和原失败日志保留，不把补诊断说成已定位修复。不将宿主无关基线失败或未运行项目改记为通过。
+
+- **交付范围**：共享服务生命周期、标准 ACP、显式会话 cwd、原项目隔离、只读旁观、控制断开取消并等待真实子进程停止；ACP 问题放入普通回复，Native 保留提问面板。按复核计划修正慢读完整输出、协议/CLI 版本门槛、准入锁与迁移说明；未新增续跑/WebSocket 或按会话代理机制。
+- **首轮本机自动化验收完成（本次 CI 修复的相关复验另记）**：Rust gate-fast exit 0：lib 3422 PASS / 5 ignored，parallel integration 379 PASS / 27 skipped，serial integration 86 PASS / 3 skipped，fmt/严格 Clippy 通过；扩展 core 800、GUI 865、完整默认 devhost 43 PASS / 7 条件场景 pending。仍有效的扩展集成 236 PASS / 1 skipped 与宿主相关测试复用，不把跳过项计为通过。
+- **实际操作**：本地真正启动 Paperclip、Multica，以受控模型完成任务、取消、原会话续接及工作树清理；真实 `0.1.80` / 测试构建 `0.1.81` CLI 均跑宿主任务，真实 VS Code 版本提示、重启、恢复以及关窗后同一后台存活已留 PNG/ARIA/console/实例证据。另在 Multica `TOMC-10` 实际完成两轮 DeepSeek 问答，同会话、同评论线程继续；首轮 4 次工具尝试均被隔离权限拒绝，不声称零工具调用。授权两轮已用完，临时真实密钥已清除，测试配置已恢复。
+- **代理边界**：正式共享后台统一保存的 `llm.proxy` 或系统代理；仅窗口测试入口可显式写入隔离 `llm.proxy`，ACP 环境不转换，子进程环境原样保留。macOS 系统代理按用户要求仅只读打印 IP/端口，未改全局设置，不将它算作请求链路实测。
+- **提交与 CI**：`f6e627f6` 已推送 `feature/shared-serve-acp`，首轮 run `39709693529` 的 Linux Rust、Windows 扩展通过；macOS Rust、Windows Rust与 Windows 专项失败，未关闭门禁。当前补修 HTTP 测试 socket 模式、测试连接环境、Windows 管道关闭观测及 Node 启动链路；检查点清理复用原 CLI 的 30s 预算，ACP/管理关闭等待 60s，Multica 宽限 65s，超时仍失败并保留句柄。并发启动一次非零退出的原因尚待新增退出码/服务日志定位，不能算已解决。
+- **本批 CI 修复的本机证据**：Rust 定向库 251 PASS、ACP 两目标 26 PASS、共享服务 10 PASS / 2 ignored，strict all-target Clippy/fmt/diff check PASS；扩展启动器/代理相关 17 PASS及严格 TS 检查；Multica Tomcat 单测与显式当前 CLI 的真实注册 backend 执行/取消/续接通过（本地受控 HTTP 模型）。容量用例初版误读列表权限的失败、首次冷编译期代理用例超时、Go helper 等待不足均留档并定向复验。未再付费调用模型；完整 gate-fast 的同修订结果由下一轮 CI 补齐。
+- **第二轮 CI**：`fe1169b0` / run `39743687050` 已取得 macOS、Linux Rust 和 Windows 扩展成功；Windows 专项仍在启动服务时 Access denied，`proxy-requests.json=[]`，不是代理功能已测失败。改为两个 Rust 对照直接交给 nextest（不再包整条 Node 链），并实际查询 Job 标志；删除无效的自制 Node 包装及只测该包装的 4 个用例，保留系统代理/受限宿主/窗口退出断言。不改产品或 Multica Job 策略，下一修订仍需三平台云端验证。
+- **宿主本地提交**：Paperclip `1f010b165`、Multica `e12a45e59`，均仅 `feat/tomcat-agent` 本地分支，无远端推送；Multica 隔离 API/web/daemon 已用原环境管理器停止。Paperclip 首次清理因身份不符主动中止，重新确认真正启动器后已停止；四个所属端口均无监听，临时数据与证据保留，正式 Tomcat 后台未动。
+- **第二轮 Windows Rust 结论**：失败项缩到 Unix 导入未条件编译、模型 cwd 断言误查 JSON 转义、受限 Job 退出码假设三处；其余并行集成365 PASS、串行80 PASS。当前将导入移回 Unix 用例，cwd 比较解析后的请求文本，真实 Job 显式指定终止码77并精确断言，另一个关闭 Job 句柄用例保持原样。本轮新门禁结果仍待推送后取得，不把未跑的 Windows 分支算作本机通过。
+- **第三轮本机预检**：nextest 配置守卫6 PASS、Node→nextest 真实单用例1 PASS、官方 ACP 客户端/模型/cwd 用例1 PASS、两个受影响测试目标严格 Clippy、严格 TS、fmt/diff check、个人机器保护和 CI 接线检查通过；系统代理设置/恢复6 PASS仍有效。曾误用 crate 私有路径归一化入口的编译失败已改用既有公开 `normalize_path`，不为测试扩大产品 API。
+- **第三轮云端结果**：`1d9845dd` / run `39750873025`，macOS/Linux Rust和Windows扩展成功；Windows Rust集成365+82 PASS（cwd与真实Job均通过），但Clippy仍因两个Unix专用MCP夹具函数未条件编译而失败，已连同其Path导入收口为 `cfg(unix)`。Windows专项记录Job flags=`0x800`且关闭系统代理对照通过；开启对照被测试的 `NO_PROXY`/`no_proxy` 重名快照拒绝，未发代理请求、未执行GUI，不能计正向通过。
+- **第四轮修复与预检**：测试只发送合法环境并检查握手error；模型/cwd断言复用既有非标题请求筛选。扩展也补拒绝既有error的处理（先以真实socket用例证明旧版误报连接成功），Windows环境编码与Node实际子进程一致，保留排序后的首个大小写等价键及undefined删除语义；没有新协议字段、按会话代理或重试机制。Rust定向2 PASS、目标严格Clippy/fmt通过；扩展相关79 PASS，最终所属文件10 PASS/typecheck通过。真实Mac窗口1 PASS，PNG/ARIA/console已读，退出前后及禁止启动重连后同一PID/instanceId；Windows新分支仍待下一轮CI。
+- **第四轮云端结果**：`48fd1407` / run `39757922309` 的macOS/Linux Rust和Windows扩展通过。Windows真实系统代理开关对照均通过，Native/ACP模型与远程MCP共10次代理请求（含2次tools/call）；GUI因下载VS Code1.101.0、低于扩展要求的1.106.0而未加载。Windows Rust并行365 PASS；我将父模块Path导入限制为Unix时漏看了技能子模块的glob借用，导致Clippy/串行组编译失败，不能计串行通过。
+- **第五轮修复与本机预检**：两个下载入口改读扩展engines.vscode的最低版本，不改兼容性声明或显式程序路径覆盖；技能测试自己导入Path，Unix专属MCP函数仍按平台编译。启动器/系统代理包装29 PASS、严格TS及build通过；Rust所属技能3 PASS、严格Clippy/fmt通过。真正VS Code1.106.0完成任务及关窗后同实例验活1 PASS，299px侧栏PNG/ARIA/console已读；只是测试接线修复，产品、代理来源、协议和断言不变。同修订Windows最终状态与制品仍由CI给出，不以本机结果代签。
+- **执行边界**：Windows云端使用受控模型和假ACP宿主/直接协议，不安装Paperclip或Multica；两宿主只在本地实际启动验收及本地分支提交。未升版、合并主干或发布；真实模型授权已用完且未追加调用，本机系统代理未修改，原Tomcat后台未动。临时验收数据保留供复查，Cov%未测量。
+- **证据**：架构及迁移见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)，本机完整日志索引见 `.agents/acceptance/shared-serve-acp.md`；本地截图、临时脚本与凭据不纳入 Git。
+
+### CURRENT INTEGRATION：Windows 平台适配与 macOS 回归收口（2026-10-19）
+
+- **当前收口**：Windows 适配后的两项 macOS/Unix 回归与四项搜索测试的本地代理排除配置已提交为 `eb1dc2ac`；该提交未重跑测试或构建。用户现已启动标准发版，执行进展以 CURRENT RELEASE 为准。下方保留此前 Windows 交付与发布事实，不作为本轮修复的 Windows 原生验收证据。
+
+- **范围**：按 `windows_平台适配_d3cab8bc` 实施 win32-x64 插件与终端 CLI 一等交付，提交 `80e7cc18`；明细、根因与证据只维护在 [feature-windows-support.md](feature-windows-support.md)。
+- **版本**：版本脚本统一递增 CLI `0.1.77 → 0.1.78`、EXT `0.1.93 → 0.1.94`，新 EXT pin CLI `0.1.78`；版本一致性检查通过。
+- **本轮边界**：只推送 develop 与 `dry-run-cli-v0.1.78`、`dry-run-ext-v0.1.94` 两个演练标签；工作流的发布步骤只对正式 `cli-v*`/`ext-v*` 标签放行，演练不创建 GitHub Release、不上传 Marketplace/OpenVSX。正式发版需用户另行确认。
+- **验证**：本机 Windows（Git Bash）gate-fast 全绿，插件 lint 与集成测试 225 项通过。Cov% 未测量。
+- **演练结果（`afbec1ff`）**：release-cli run `39090243675` 成功（四平台归档，含 `x86_64-pc-windows-msvc`）；release-ext run `39090933463` 成功，含 win32-x64 原生安装验收。产物与证据 zip 需登录才能下载，本机未下载复核；同样的检查已用本机 release harness 在真实 VS Code 上跑过。windows-ci run `39090230175`：插件 job 与 version-sync 通过，**rust gate-fast（windows）失败**。原始日志需仓库管理员权限，因此给工作流加了失败注解，据此定位到 9 项只在 runner 上失败的用例：6 项是测试期望值用了 8.3 短名临时路径，2 项暴露私有文件权限缺陷（已改为整体替换 DACL），1 项是 runner 缺 ripgrep。明细见 [feature-windows-support.md](feature-windows-support.md)"CI 上才失败的用例"。修复后 windows-ci run `39097819025`（`bb8c618f`）rust 与插件两个 job 全部通过。
+- **正式发布**：develop 已快进同步 main/master。首次 `cli-v0.1.78` 打在带 `[skip ci]` 的文档提交 `800829a7` 上，GitHub 因此跳过了 tag 推送触发的工作流，也没有生成 Release；已删除这个 tag，改打在 `712b09c5` 上。
+  - **CLI 0.1.78 已发布**：release-cli run `39101877028` 成功，[GitHub Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.78) 含四平台归档（新增 `x86_64-pc-windows-msvc`）与 `SHA256SUMS`。
+  - **EXT 0.1.94 暂停**：用户决定先手动验收，`ext-v0.1.94` 未推送，Marketplace/OpenVSX 未上传。手动验收用本机包 `%USERPROFILE%\.tomcat\temp\windows-acceptance\manual\tomcat-vscode-ext-0.1.94-win32-x64.vsix`：同一提交本机编译的 `tomcat.exe`，与包内 `extension/bin/tomcat.exe` 的 SHA256 一致；正式包内置的是 CI 编译的那份。
+  - **本次恢复发布**：采用 CLI `0.1.79` / EXT `0.1.95`，不补打 `ext-v0.1.94`；新 EXT 必须等待 CLI 0.1.79 四平台资产就绪，标签提交不能带 `[skip ci]`。
+- **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
+- **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动纳入本轮 CLI `0.1.79` / EXT `0.1.95`；`ext-v0.1.94` 保持未发布。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
+
+### CURRENT RELEASE：CLI 0.1.80 / EXT 0.1.96
+
+- **准备状态**：用户执行标准 `/release-cli-ext`；在 `6c4cdec9` 上运行 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.79 → 0.1.80`、EXT `0.1.95 → 0.1.96`，新 EXT pin CLI `0.1.80`。五个版本源/镜像仅改变业务版本，无依赖变化；版本一致性、两个 tag guard 与差异检查通过。目标 tag 在起手时本地/远端均未占用，三个远端分支均为 develop 的祖先。
+- **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.95` 为基线核对提交和代码差异；`tomcat-vscode-ext/CHANGELOG.md` 新增 `0.1.96` 英文条目，记录 IP 中转站自动凭证槽修复、旧数字默认槽重新配置提醒及 bundled CLI `0.1.80`，历史条目不改。已与版本文件进入 release 提交 `845416e664ce55aff8304a3ad20f5882e7cdcc25`，提交后通过 `git show` 确认；五份实际发布 VSIX 的 `extension/changelog.md` 与该提交逐字节一致。
+- **执行边界**：release 提交已推送 develop，并以 fast-forward 同步 main/master；确认 CLI 四平台归档与 SHA256SUMS 就绪后才推 EXT 标签。既有 GitHub 构建、四平台原生安装验收和 Marketplace 发布流程已完成；本地未额外跑产品测试、构建或安装。收尾仅回填状态，不移动标签、不替换资产；Cov% 未测量。
+- **发布结果**：release 提交 `845416e664ce55aff8304a3ad20f5882e7cdcc25` 已推送三个分支，`cli-v0.1.80` / `ext-v0.1.96` 均指向它。CLI run `39193624244`、EXT run `39194347566` 成功；[CLI Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.80) 四份归档、[EXT Release](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.1.96) 五份 VSIX 及各自 SHA256SUMS 已公开。9 份实际下载包哈希通过；四平台原生安装验收通过，四个包内 CLI 与对应发布归档一致，纯包不含 CLI。三个分支的 release 提交 version-sync 均通过。
+- **市场与更新**：沿用 `PUBLISH_MARKETPLACE=true` 与 OIDC；Marketplace 四平台上传成功。首次匿名查询仍返回旧版，稍后新版本可见但部分平台尚未验证；截至 11:36 +0800，四平台 0.1.96 全部 Validated，商店记录的 SHA256 与 GitHub 下载包一致。原始查询保留，不重复上传；OpenVSX 步骤 skipped，不称已发布，未验证用户本机自动更新。
+- **证据边界**：完整本地记录见 `.agents/acceptance/release-0.1.80-0.1.96/release.md`。CLI 监控曾因本地 GitHub API TLS 握手超时退出，恢复监控后成功，未重跑工作流；包内核对首轮误用大写 CHANGELOG 路径，确认 VSCE 归一为小写后核对通过，未修改发布包。Node action/Ubuntu 镜像迁移、macOS runner 排队、VSCE 文件数及 Azure CLI 版本解析告警保留。CI 截图由工作流留存，本轮未逐张复阅；IP 修复此前模拟宿主 UI 证据不替代真实供应商认证。11:36 +0800 查询：main 普通 CI `39193581289` 已通过，develop `39193575381` 的 macOS/Ubuntu Rust 与 Windows 扩展已通过，Windows Rust 仍运行，不称所有分支全绿；历史 QuickJS 时间敏感问题不据单次通过宣称修复。
+
+### CURRENT INTEGRATION：三项整改（2026-10-16 晚，本次本地提交）
+
+- **提交边界**：本次将已检查的 121 个修改文件与 8 个新增源码/测试文件全部纳入，包含下方供应商分卡改动及两处 status。按用户明确要求，不运行测试、构建、打包或视觉验收；下方结果均为此前验收记录，不冒称本次重新通过。Cov% 未测量，提交信息省略覆盖率；未升级版本、未推送、未打标签或发布。
+
+- **范围**：按 `三项整改计划_6d1637f0` 实施。① 内置技能改由 `build.rs` 生成嵌入表，跳过 `node_modules` 与点文件，删除 `include_dir` 依赖；② 复核供应商分卡实现，修 4 处：混合主机卡以首个用户行为代表（标题、主机顺序、卡内添加地址），编辑表单中文"地址"，用户指南补辅助模型回落说明，续传文档 §4.2.3 去掉旧规则；③ 待答提问面板的选中项改为金色字母块加暖色行底，与悬停明显区分，并补高对比模式样式。验收完成时未提交，现随本次本地提交纳入；未升版本、未推送或发布。
+- **验收结论**：本机保留 18M 的 verify `node_modules` 时，嵌入表 19 项（等于 git 跟踪数），release 产物 16,490,436 字节（基线 16,490,556），二进制中无 Playwright 包字符串。Rust lib 3301 / 0 失败、integration（parallel 378 + serial 49）、严格 Clippy、release 构建通过。扩展侧 lint、GUI 854、core 774 通过；提问面板视觉脚本 9 场景通过，新增计算样式断言，且已反向验证（去掉新规则后断言失败）。改前/改后截图与日志见 `.agents/acceptance/remediation-20261016/acceptance.md`。
+- **计划外修复**：全量 lib 中，分卡计划新增的 `remote_models_test` 连续两次失败。原因是 `http_client_test` / `web_fetch` 的 4 条代理用例运行期间清空 `NO_PROXY`，把并发的本机 mock 请求截进 mock 代理；两模块同跑可 10/10 复现。现改为这 4 条用例只豁免 `127.0.0.1,localhost`，同跑 10 次 0 失败，生产代码未改。
+- **未验证**：提问面板截图来自模拟宿主，未在真实 VS Code 打包安装后复拍；未打包 VSIX；Windows/Linux 未验证。
+
+### CURRENT INTEGRATION：模型设置按供应商管理（2026-10-16 下午，本次本地提交）
+
+- **范围**：按 `供应商分卡模型设置_daf616fb` 实施，五项需求为：供应商卡片（一把 Key 一张卡，每行显示实际协议）、连接供应商对话框与首个配置成功即默认、内置目录刷新为 13 项、删除 Ultrafast（旧值按 Standard 读入，不改写文件）、`llm.title_model` 作为可指向任意已配型号的辅助模型。另含 Anthropic fast、思考请求通用规则、前缀绑定回退与 Chat Completions 只回传当前回合。老用户 models.toml 不迁移。验收完成时未提交，现随本次本地提交纳入；未升版本、未推送或发布。
+- **验收结论**：Rust 门禁全绿：严格 Clippy、lib 3300 项（0 失败，5 项 ignored）、doctest、integration（parallel 378 + serial 49）及 release 构建。扩展侧 lint、harness 类型检查、GUI 853、core 774、integration 218 + 打包烟测 13 通过。fake 安装 E2E 23 项、`verify:vsix` 10 项通过。真实 release 包在 macOS x64 / VS Code 1.106.0 下冷启动与 0.1.90 升级各 1 项通过，其中冷启动会在设置页改辅助模型，并断言标题请求只命中所选型号。宽 1440 / 窄 390 视觉 42 张：无禁用词、无越界变量名、无溢出、无 console error。用本机已有 Key 实拉型号列表：DeepSeek 2、MiMo 8、Moonshot 4 个，均 2xx，Key 未打印。完整记录见 `.agents/acceptance/vendor-model-settings/acceptance.md`。
+- **本轮回归已修**：删除内置 `utility-flash` 后，执行流夹具的回合标题请求抢占了脚本响应，现只把主模型指向夹具；门禁脚本中 Responses Key 映射仍是旧型号，已同步；设置页窄屏有三处问题已修：连接列表行被压扁、搜索框溢出、卡片菜单右侧被裁。视觉脚本的溢出检查改为同时覆盖对话框内部的横向滚动容器。
+- **既有风险**：`include_dir!` 会嵌入本地 gitignored 的 verify 技能 `node_modules`，本地 release 构建会因此膨胀，也会拖慢新工作目录的首次落盘。本轮构建期间暂时移开，之后已恢复，未在本计划内修；已由上方"三项整改"解决（改为 `build.rs` 生成嵌入表）。Windows/Linux 原生安装与真实付费对话未验证。
+
+### CURRENT INTEGRATION (2026-10-16)
+
+- **本次版本与提交**：使用 `scripts/release-version.mjs bump --all patch` 一次升级 CLI `0.1.74 → 0.1.75`、EXT `0.1.90 → 0.1.91`、内置 CLI `0.1.74 → 0.1.75`；前后版本一致性与版本文件空白检查通过，既有依赖修改保留。五项整改、拒写历史修复及相关源码/测试/旧数据夹具/文档随本次本地提交纳入。按用户要求，本次不重跑测试、不构建/打包/安装、不推送/打 tag/发布；下述测试及原生验收属于版本递增前的源码证据，不代表新版安装包已验证。Cov% 未测量，保留空值；QuickJS 未解决项继续保留。暂存检查发现旧版原始夹具 `cli-init/models.toml` 自带 EOF 空行；用夹具目录 `.gitattributes` 仅对该文件设置 `whitespace=-blank-at-eof`，保留原始字节，其余文件与其他空白检查不变。
+
+- **补充修复已验收**：拒写结果新增可选本地 `ChatMessage.is_error` 并在历史重载恢复；新失败显示 `Write failed`，旧记录缺状态显示中性调用文案，不改写历史、不按错误文字猜测、不把该元数据发送给模型。移除安装门禁的版本例外。`ask_question` 描述补 `During plan execution, ask only when necessary.`，生成工具目录已同步。
+- **本次补充证据**：Host 分批有效 765、GUI 849、相关集成 8 通过；lint、harness 类型检查、build、wire、严格 all-target Clippy、工具目录 2 项、旧数据兼容 1 项（生成器 1 项按设计 ignored）及 release 构建通过。新真实包冷启动/0.1.90 升级各 1 项通过，拒写前后重载断言、文件未写入与成功写入对照通过；拒写行实际宽窄尺寸为 1391×808 / 341×752。完整记录见 `.agents/acceptance/denied-history/acceptance.md`。Rust 全量本次仍有 QuickJS 失败，详见下表，不能称全绿。该验收完成时尚未提交或升级版本；后续本地提交与版本号以上条记录为准，仍未发布或覆盖本机 CLI。
+
+```text
+明确要求实施 -> start_plan -> PLAN 内确认 -> 同回合工作 / 提问 / 回答继续
+执行中改另一份计划 -> 保留原执行绑定；Stop -> pending
+旧配置 -> 忽略未知键并记录一次启动告警 -> 继续使用旧模型、会话、计划
+菜单内部连续管理 -> 保持展开；最终验收截图 -> 逐张交付
+```
+
+- **本轮范围**：按 `plan_agent_workflow_cli_agent_cli_serve_c46522fe` 实施五项整改；模型目录与供应商设置属于独立计划，未改。未同步/覆盖本地 CLI；整改与版本号随本次本地提交纳入，尚未发布。
+- **实现**：独立 `start_plan({plan_id?})` 复用授权与 build；PLAN 确认复用 review 面板，子 Agent 白名单不放开。执行期问答解除限制，恢复问答接当前回合取消信号；执行中绑定保护落在唯一刷新入口。当时菜单仅框外/Escape/触发器收起，删除弹窗暂停底层监听；2026-10-17 已补齐 Webview 失焦与选择会话后收起，管理操作仍保持展开。
+- **配置升级**：`serde_ignored` 收集未知路径，日志初始化后一次输出；删除三处旧键拒绝、init 特殊加载和 9 条专用翻译。已知非法值、工具参数、wire、session/trust 等严格校验保留。两份真实 ext-v0.1.90 数据夹具来自 `d00ebe08` 的 CLI 0.1.74，原字节不手改，仅在测试副本中重定位 HOME 与本地 HTTP 地址。
+- **中途证据**：计划开工首批 192 项、恢复取消 1 项、配置/提示/技能批次、SessionBar/App 93 项通过；两份旧目录升级回归、Serve robustness 14 项、门禁配置 6 项、工具目录 2 项通过。真实 Serve 同回合开工→写文件→提问→回答继续、普通/恢复 Stop，以及 Host 新旧四条用例均已通过；Host 原失败来自夹具答案遗漏 pickedRecommended，未放宽协议校验。
+- **最终验收进度**：Host 单测 762、GUI 844、wire 和版本一致性通过；分批有效 Rust lib 3266、剩余 integration 367+3 定向修复复验、serial 33，以及严格 Clippy、doc（0 项）、release 构建通过。macOS x64 / VS Code 1.106.0 的真实包冷启动和预置 0.1.90 数据升级行为通过，后者验证同 PID 开工→写文件→执行提问→继续及菜单连续管理。安装 E2E 复用 22 项成功结果，修正菜单持久展开后的测试交互并定向复验 1 项通过；完整 fake `verify:vsix` 10 项通过。20 张最终 PNG 及 ARIA/console 已逐一读取：19 份 console 无错误，完整 workbench 保留 E2E harness 查询 Marketplace 的 404。本机许可数据副本烟测亦通过：36 个模型、3 个近期非当前会话（含空会话与两份真实历史）、35 个引用图片 blob、203 份计划；握手/模型列表/会话切换与读取成功，源模型和抽样历史哈希不变，副本清理完成。受保护原始配置及凭证未读取，使用新隔离配置，不冒称验证了它们或所有历史。详见 `.agents/acceptance/agent-workflow-upgrade/acceptance.md`；不把拆跑记录冒充聚合 gate 退出 0。
+- **请求断言校正**：现有 OpenAI/Anthropic 适配器把 runtime tail 合入 wire system；本轮不移动 tail，也不承诺整个 wire 缓存前缀恒定。验证稳定 system 正文、tools、历史字节不变，仅 planner→executor 提醒变化，workspace 权限提醒不变（`core/llm/openai.rs::transport_messages` 及既有 provider 测试）。
+- **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-10-20，仅设计稿]** 共享 serve 与 Paperclip/Multica 标准 ACP 接入技术方案及架构索引随本次本地提交纳入，见 [shared-serve-and-acp-host-integration.md](../architecture/shared-serve-and-acp-host-integration.md)。已同步最新计划的控制/旁观身份、普通打开与当前消息补发、慢连接不取消任务和背压降级边界；WebSocket 与断线续跑仍为后续规划。文档检查通过：19 个 JSON 样例、74 个本地链接、34 处源码行号引用、表格/围栏/差异格式；28 项功能验收均为 PENDING，未实施、未跑产品测试或构建，Cov% 未测量。后续从本次提交创建 `feature/shared-serve-acp` 开发分支；本次不推送、不升版、不发布。
+- [✓] **[P1，2026-10-19]** IP 中转站自动凭证槽修复：GUI `envNameForRelaySlug` 与 Rust `env_name_for_provider` 仅在规范化名称以数字开头时添加 `PROVIDER_`，使报告地址派生为 `PROVIDER_114215206196_API_KEY`；provider、模型 ID、显式槽优先级与冲突编号规则保持不变。5 个生产/测试文件及两处 status 全部纳入本次本地提交。此前 GUI 35/35、Rust auth 7/7、CLI 5/5、隔离环境后的 admin 28/28，以及 GUI 类型检查、目标 Rust 格式检查通过；CLI 新用例实际保存并清缓存重读 `.env`，确认 keyPresent 与 AuthStore 取回 Key。桌面/窄屏共 4 套 PNG/ARIA/console 已读取，真实设置组件使用模拟宿主，不冒充后端持久化或完整 VS Code E2E。按用户要求本次不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。本地记录 `.agents/acceptance/ip-relay.md` 与临时脚本/截图按既有忽略规则保留，不强制纳入 Git。
+- [✓] **[P1，2026-10-19]** macOS/Unix 回归修复：`normalize_path` 只剥离本机分隔符，避免把合法反斜杠文件名指向另一个文件；私有原子写入保留创建时的 0600 保护，并在第一字节前按句柄补足被 umask 扣除的属主权限。此前两项用例均完成红→绿，平台模块 54/54、env_file 2/2、OAuth 7/7 通过；平台修复后的严格 Clippy 复验通过。
+- [✓] **[P1，2026-10-19]** 四项 hosted web-search 测试不再清空本地代理排除，`NO_PROXY`/`no_proxy` 均设为 `127.0.0.1,localhost,::1`；原第 4–7 项定向复测 4/4、显式 OpenAI 代理对照 1/1 通过，原断言与超时未放宽。上述记录来自本次提交前的实施验收，不代表重新跑过全量门禁；7 个源码/测试文件及两处 status 全部纳入。本地报告 `.agents/acceptance/windows-macos-regression/fixes.md` 与临时验收产物按既有全局忽略规则保留，不强制加入 Git。
+- [✓] **[P1，2026-10-17]** 会话菜单收起优化完成并纳入本次本地提交：`SessionBar` 展开期补非捕获 window blur 监听及对称清理，选择会话（含当前会话）立即关闭并归还触发按钮焦点；外部关闭不抢焦点，置顶／展开更多／删除确认与取消的连续管理不变。生产仅新增 5 行，不改 CLI、会话恢复、草稿、协议或样式。此前先在基线复现两处真实红框点击失焦但菜单仍开，修复后 GUI 聚焦 96/96、真实 Dev Host 菜单用例与既有管理用例各 1/1、lint、harness 类型检查和构建通过；两张全景 PNG／ARIA／console 已读取，capture-time 记录无 error/exception。首次宿主取证在状态采集阶段超时，删除测试中多余的双动画帧等待后通过，生产逻辑与断言未放宽。已交付不含 CLI 的 `tomcat-vscode-ext-0.1.92-session-menu-pure.vsix`（1,798,478 字节，SHA256 `27bc0aa4e596e78c0d86128e79a9c2686754b6b41a28d3ef27564888dbc59c93`），构建新鲜度、包完整性及入口文件字节一致性检查通过。上述均为此前实施／打包记录；本次按用户要求不跑测试、不构建，Cov% 未测量；不升版、不推送或发布。本地证据 `.agents/acceptance/session-menu-dismissal/` 与 VSIX 按既有忽略规则保留，不强制加入 Git。
+- [✓] **[P1，2026-10-17]** 会话重载恢复修复完成，用户已明确反馈「验收通过」。`SwitchSession` 的 live 分支用目标 scope 的无绑定 SessionManager 先保存磁盘 current，成功后才更新内存 active；未打开分支、运行中会话绑定、扩展与协议不变。源码及两条回归一并纳入本次提交。此前新增单测修复前准确失败、修复后通过；命令模块首轮 97 通过／6 失败，补本机 NO_PROXY 后同一二进制精确复验 6/6 通过，有效结果分批覆盖 103 项；真实多会话／进程重启 8/8 及 debug CLI 构建通过。全仓 fmt 仍有 17 个文件的既有差异，与 HEAD 比较确认无新增格式差异。上述均为此前实施验收记录，本次按用户要求不重跑测试、构建或视觉验收，Cov% 未测量；未升版、未推送或发布。完整本地记录见 `.agents/acceptance/session-reload-current.md`，按现有全局忽略规则不纳入 Git。
+- [✓] **[本机，2026-10-17]** 经用户明确授权，已正常卸载旧 `tomcat.tomcat-vscode-ext@0.1.86`，扩展列表仅剩新 `tomcat-agent.tomcat-vscode-ext@0.1.92`；另按用户要求在 `~/.profile` 给 NO_PROXY/no_proxy 补齐本机地址，保留原名单与代理地址，新 Bash 登录验证通过。仅记录本机操作，不将个人 shell 配置或自动卸载机制加入仓库；Agent 未重载用户主窗口。
+- [✓] **[P1，2026-10-17]** Models 页默认模型入口集中到顶部，与辅助模型共用 `ModelRolePicker`；移除模型行「设为默认」按钮，保留徽标／详情／编辑／删除。箭头改为可点击且不抢焦点的原生按钮，Tab／Shift+Tab 收起浮层；共享网格对齐标签，中英文词条和组件回归同步。此前设置模块 84 项、词条 4 项、两层 TypeScript 检查、GUI 构建，以及两场景宽窄屏共 10 组 PNG／ARIA／console 验收通过；浏览器使用测试 Bridge + 真实 Serve，不冒充完整扩展宿主 E2E。按用户要求，本次仅提交全部相关源码／测试与两处 status，不重跑测试、构建或视觉验收；Cov% 未测量，提交信息省略覆盖率。此前已生成纯插件 `tomcat-vscode-ext-0.1.92-pure.vsix`，本次不升版、不推送或发布。本地验收脚本、证据和 VSIX 按既有忽略规则保留，持久回归测试随源码提交；详见 `.agents/acceptance/vendor-model-settings/default-picker-acceptance.md`。
+- [✓] **[P1，2026-10-16]** 三项整改：内置技能不再嵌入本地 `node_modules`，供应商分卡复核修 4 处，提问选中项与悬停明显区分；另修全量 lib 中代理用例截流本机 mock 请求的竞态。Rust/扩展门禁与 9 场景视觉脚本通过；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/remediation-20261016/acceptance.md`。
+- [✓] **[P0/P1，2026-10-16]** 模型设置按供应商管理与内置目录更新：已完成实施、跨层门禁、真实包冷启动/升级验收与 42 张宽窄视觉截图验收，并实拉 3 家型号列表；本次纳入本地提交，尚未推送或发布，详见 `.agents/acceptance/vendor-model-settings/acceptance.md`。
+- **[P1，2026-10-16]** 五项整改与拒写历史补充修复收口，CLI/EXT/内置 CLI 版本统一递增并纳入本次本地提交；版本校验通过，按用户要求未重跑测试或构建。
+- [✓] **[P0/P1，2026-10-15]** 五项整改、分批门禁补缺、本机真实包安装、许可的个人数据读取烟测与 20 张视觉截图交付完成；已知问题与未验证边界保留如下。当时尚未提交或发布。
+- **[P0，代码已实现，原生首配链路已验收]** 模型元数据与凭证解析拆分；缺 Key 不阻断 serve 建会话，配置文件在用户保存时懒创建，运行期只刷新模型选择字段；压缩模型增加当前主模型兜底。@2026-10-14
+- **[P1，代码已实现，三平台发布验收带已知问题通过]** 面板内简洁引导、默认模型标记与快捷操作、关联保存回执、单行错误与就地重试已纳入；冷启动、协议、配置、GUI 和安装包测试源码及中英文文档一并提交。@2026-10-14
+- [✓] **[P1]** CLI 0.1.74 / EXT 0.1.90 远端发布完成；当时 EXT 三平台原生用例带 `Created` 已知显示问题通过。该缺陷已于 2026-10-16 在源码修复并纳入本次本地提交，旧 tag/资产不修改；历史发布验收不等同于当前完整单测/供应商实测。
 - [✓] **[P0/P1]** `tomcat` 多问题优化链路已在 `develop` 侧完成当前轮收口：GUI/webview 的 `max` reasoning 档位、pre-stream loading 指示、全量 shimmer 覆盖与 `Thinking` 文案已修复；`search_files` description 也已瘦身回归。Rust 侧把多模态从“Responses 独占”推进到“三家共用一套 `ChatMessageContentPart`，各 wire 自己翻 JSON”：新增 `FilesApiAdapter` 存储适配层，`OpenAiFilesRuntime` 改持 `Arc<dyn FilesApiAdapter>`，OpenAI Completions 已支持 inline 图片/PDF 与 uploaded `file_id`，Moonshot uploaded 图片走 `ms://...`，Anthropic Messages 已支持 inline / uploaded 图片与 PDF，并在 uploaded 引用时自动补 `anthropic-beta: files-api-2025-04-14`。内置/本地模型配置同步开启 `kimi-k3`、`kimi-k2.7-code` 与 Anthropic 全系 `files=true`。本地验证已补齐：catalog / openai provider / anthropic wire / adapter 单测通过；`serve_stdio_e2e` 新增 Moonshot `ms://` 与 Anthropic `source.type=file + beta header` 断言通过；live 结果为 **Kimi K3 成功**、**fcodex `/v1/files` 返回 404**、**Anthropic 实 key 返回 401 invalid x-api-key**，后两者已按真实结果记录。@2026-07-20
 - [✓] **[P0]** 推理档位 catalog-id / wire-name key 不一致已在 `feature/transcript-rich-render` 修复并待并入：`run_loop` 现与存盘/GetState 一样用 catalog `id` 查 `model-thinking.json`，中转站模型选 `xhigh` 不再被回退成默认 `high`；CLI `0.1.15` / 扩展 `0.1.18`。@2026-07-20
 - [✓] **[P0/P1]** 推理强度（reasoning effort）链路整改已在 `feature/transcript-rich-render` 收口并待并入 `develop`：这次不再靠“某家模型名字命中后写死映射/全局降级”硬扛，而是把**模型真正支持哪些档位**上收为 catalog 事实源。现在每个模型都可在 `builtin_models.toml` / `models.toml` 声明 `supported_reasoning_levels`；聊天框下拉按当前模型动态渲染（空列表退化为 `Thinking On/Off`），选中的档位写入 `model-thinking.json`，请求前只做一次 clamp，所以 `gpt-5.x` 的 `xhigh`、`glm/deepseek` 的 `max`、以及只支持 thinking 开关的 `mimo/kimi` 都各走各的真实协议，不再被一把梭硬折叠。与此同时，`ProviderCacheKey` 新增 `catalog_generation`，改 `thinking_format / model_name / capabilities` 后无需重启即可生效；保存模型时空 `thinking_format` 会按 API 自动物化成具体值，不再留下黑盒 `Auto`；现代 Claude `4.6/4.7/4.8` 改走 `anthropic-adaptive`（`thinking.type="adaptive" + output_config.effort`）；若 `openai/openai-responses` 线路被配成不会发 effort 的 format，保存后会回传非致命 warning。Rust focused/unit + serve 集成、GUI 单测与 targeted devhost Add Model E2E 已补齐。@2026-07-19
@@ -64,6 +180,22 @@ feature 1bb87c1f ──┘
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-10-20 ACP 技术方案**：仅记录拟议接口与实现边界，未修改现有 CLI、serve、扩展或宿主接口；不能将文档中的 access/origin、共享连接和 ACP 示例当作已交付协议。
+- **2026-10-19 IP 中转站**：无新增接口、配置键、存储格式或依赖；仅改变数字开头的自动默认槽名，严格校验 `^[A-Z_][A-Z0-9_]*$` 不变。旧数字 provider 若使用默认槽，须重新配置 Key 或把启动器注入变量改为 `PROVIDER_<规范化名称>_API_KEY`；合法显式槽不变，不新增自动迁移或旧名回退。
+- **2026-10-19 平台兼容修复**：无新增 API、配置键、存储格式或依赖；Unix 的反斜杠保留为文件名字符，Windows 的两种分隔符行为不变。私有写入沿用创建→设权限→写入→原子发布流程，Windows DACL 与普通文件写入逻辑不变；NO_PROXY 改动仅在四个测试环境夹具内，不修改用户系统代理。
+- **2026-10-17 会话菜单收起**：无新增生产接口／协议。新增关闭触发来自用户选择或页面失焦，不随会话快照更新触发；既有框外点击／Escape 等关闭行为保留，会话身份仍等宿主确认。删除弹窗沿用暂停关闭监听，置顶／删除管理和草稿保存流程不变。
+- **2026-10-17 会话恢复**：无新增接口或存储格式；仅补齐显式切换已打开会话时的 scope 级 current 持久化。写失败沿用 dispatcher 错误帧且不切内存 active，registry setter 仍只负责内存；不新增前端选中态。
+- **2026-10-17 默认模型入口调整**：无新增宿主／CLI／wire 接口。GUI 继续发送原有 `setDefaultModel` / `setUtilityModel`；宿主报告相应角色值才显示选择器，能力仅决定是否可写，已保存值仍以宿主快照为准。首次接入自动设默认、供应商分卡和用户配置存储不变。
+- Serve 新增 `list_remote_models`、`upsert_models`、`remove_provider` 与 `set_utility_model` 四个命令，各有对应 capability。`set_default_model` 增加 `onlyIfUnset`，返回 written/skipped，并声明 `set_default_model_if_unset`。`list_models` 增加 `utilityModelId`；模型视图增加 `keySource`，取值 saved / environment / null。wire 镜像与 schema 已同步。
+- `Speed` 只剩 Standard/Fast，`"ultrafast"` 作为 Standard 的 serde 别名读入，`model.speedApi` 已删除。Anthropic 选 Fast 时发 `speed: "fast"` 与 `fast-mode-2026-02-01` beta。Chat Completions 的续传名单与 `preserve_history` 已删除，统一只回传当前回合。
+- `llm.title_model` 改为字段级默认 `deepseek-v4-flash`；`context.compaction_model` 默认改为空，候选顺序为显式配置 → 会话当前模型 → 默认模型；init 不再写入压缩模型。
+- 历史 message 新增可选本地 `is_error`，映射到 Host/GUI 可缺省的 `isError`；缺省代表未知而非成功。发送到模型前剥离，Serve 命令/事件顶层结构不变。
+- 新增 `start_plan({plan_id?})`；`ask_question` 支持 executing，描述提示执行期仅必要时提问。`update_plan` 仍只改 todo，权限与 build 状态闸门不变。
+- 配置加载忽略未知/已删键并在日志就绪后告警，`load_config_for_init` 删除；旧连接字段不自动迁移。新增 `serde_ignored` 0.1.14。
+- 发版链路新增可选仓库变量 `PUBLISH_MARKETPLACE`（未设置时关闭）；GitHub `publish` 仍依赖完整 `build/verify`，市场 job 仅依赖已验收且已发 GitHub 的相同资产。历史显示问题的版本例外现已删除，所有当前安装门禁都必须恢复真实拒写状态。
+- 本轮新增 `LlmResolver::resolve_metadata`、`selected_model_id`、`model_ready`；`get_state.modelReady` 为可选布尔值，Host/GUI 仅在显式 `false` 时限制发送，兼容未提供该字段的旧 CLI。早期未提交实现的 `chatConfiguration` 已移除。
+- `list_models` 增加 `defaultModelId`；新增 `set_default_model` 命令/能力与 `TomcatMessenger.sendSetDefaultModel`；Settings 新增 `setDefaultModel` intent、创建模型的 `setAsDefault` 标志及关联 `modelSaveReceipt`，wire/schema 夹具随代码提交。
+- `DefaultLlmResolver::compaction_candidates` 依次尝试配置的压缩模型、默认模型、当前主模型并去重；`ServeConnectionSupervisor.reconnect()` 删除旧 setup 模式参数，新增 `summarizeServeFailure`；webview 新增 `connectionFailure` 和重试/查看日志 intent。
 - 推理强度 / 模型配置链路：Rust `ModelEntry` / `UserModelEntry` / `ModelView` / `ModelEntryInput` 现显式携带 `supported_reasoning_levels`，`UpsertModelResponse` 新增 `warnings`；webview state 新增 `availableModelReasoningLevels`，`Composer` 的 thinking 控件改为按模型动态渲染；`ProviderCacheKey` 新增 `catalog_generation` 以支持模型配置热生效；`thinking_format` 空值保存时会按 API 物化；Anthropic 新增 `anthropic-adaptive` 编码路径（`thinking.type=adaptive` + `output_config.effort`）。
 - plan 预览热更新链已从“`onDidChangeTextDocument` + 读旧缓冲”改为 **serve `plan.update` / `plan.todos` → `provider.handleServeEvent()` 桥接 → `PlanPreviewEditorProvider.refreshFromServeEvent(planId, pathHint)` 磁盘重读 → webview `state` 帧重发**；`PlanPreviewDomSnapshot` 新增 `contentScrollTop` / `topVisibleSourceLine`，`PlanPreviewDomAction` 新增 `setContentScrollTop` 供 E2E 锁“刷新不跳顶”。
 - transcript rich rendering 四次整改：前端新增 `splitTopLevelBlocks(markdown)` 与同步 `highlightToHtml(code, language)`；聊天富渲染链改为“父组件切顶层块 + 子块 `React.memo(raw)` + 同步 `hljs` + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 不再为 assistant 富渲染透传 `isStreaming`。Vite 产物新增独立 `dist/chunks/highlight.js` 分包以控制首屏成本。
@@ -83,7 +215,26 @@ feature 1bb87c1f ──┘
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
-- 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
+| 阻塞项 | 原因 | 后续处理 |
+| :--- | :--- | :--- |
+| 共享 serve / ACP 验收边界（2026-10-20） | 本次仅完成设计文档，计划尚未实施，T01–T28 全部待执行 | 后续在功能分支实施并验证两个宿主和 VS Code；文档校验不替代真实任务、停止、慢读及 UI 验收 |
+| IP 中转站验收边界（2026-10-19） | 此前 admin 首轮 26/28，两个删除 Key 用例继承本机 FCODEX_API_KEY/DEEPSEEK_API_KEY；仅对子进程移除这两个变量后 28/28，未修改凭证文件或断言 | 保留环境失败记录；浏览器使用模拟宿主，未访问报告 IP 或验证真实中转站认证；本次提交按要求不跑测试，不称全仓门禁通过 |
+| 会话菜单交付范围 | 已完成真实 Dev Host + fake Serve 的焦点／菜单验收并交付纯 VSIX；安装升级用例同步语义且类型检查通过 | Agent 未安装该 VSIX，不将源码宿主验证或用户请求提交等同于完整安装包／真实 CLI 验收；首次取证超时与后续通过记录均保留 |
+| 会话恢复范围 | 保留同 agent／项目 scope 级共享 current；用户已反馈本次修复验收通过 | 不承诺多个窗口各自独立恢复；尚未正式发布，不把用户验收反馈表述为 Agent 已采集主窗口截图／日志 |
+| 本轮既有格式与代理环境问题 | 全仓 fmt 的 17 个文件格式差异与 HEAD 一致；命令模块首轮 6 项本地 HTTP 测试受代理环境影响 | 不并入无关格式化；补本机 NO_PROXY 后同一二进制 6/6 复验通过，保留首轮失败，不冒称一次聚合全绿 |
+| 本次提交的验证边界 | 按用户要求不重新运行测试、构建或视觉验收；上方通过项属于此前实施验收，Cov% 未测量 | 本次仅做 diff／暂存范围／格式检查；不将旧结果表述为新一轮全量通过 |
+| 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
+| 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
+| Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
+| QuickJS 时间敏感失败仍未解决（2026-10-19） | 此前两项 20ms 超时保留；本次 main CI 的 `code_vm_polling_and_sibling_progress_cannot_renew_a_wrong_token_call` 再次失败于 `code_test.rs:125` 的 `!vm.is_finished()` 断言，lib 为 3345 passed / 1 failed / 5 ignored | 本次没有输出 20ms 超时，不能据此钉死同一根因；同 SHA 的 develop macOS 已通过，也不证明问题已修。保留原始日志与失败，不重复运行来掩盖结果 |
+| 本轮平台验收边界（2026-10-19） | 开发机专项验证为 Intel macOS；release-ext run `39180141401` 已通过 macOS ARM64/x64、Linux x64、Windows x64 四个平台的真实发布包原生安装验收 | 原生安装通过不替代完整 Rust 单测、所有 Linux 发行版或真实供应商验证；Windows Rust 普通 CI 与安装门禁分别记录 |
+| 本轮全量门禁记录（2026-10-19） | 平台修复后 gate-fast 原始结果为 lib 3342 passed / 4 failed / 5 ignored、parallel 376 passed / 3 failed、serial 50 passed；后续为定向隔离和复验 | 保留原始失败与后续通过记录，未重新执行完整门禁，不将定向 4/4 与代理对照通过写成全量全绿 |
+| 普通分支 CI（截至 2026-10-19 08:27 +0800） | develop `39179229183` 的 macOS/Ubuntu Rust 与 Windows 扩展通过；main `39179237764` 的 Ubuntu Rust/Windows 扩展通过、macOS Rust 失败；两边 Windows Rust 尚在运行 | 与已成功的 release 工作流分开，后续状态以对应 GitHub run 为准，不把尚未完成的作业写成通过 |
+| 历史安装包仍携带旧显示缺陷 | CLI 0.1.76 / EXT 0.1.92 正式三平台原生验收已通过拒写与重载后的状态断言；既有 CLI 0.1.74 / EXT 0.1.90 Release 不回写 | 使用新版本接收修复；旧无状态记录中性展示，不改写历史，不再使用旧版本已知问题豁免 |
+| 市场更新验收边界 | 0.1.92 真实 OIDC 三平台上传、公开 hash 和保留 profile 的 0.1.89 → 0.1.92 正常市场更新已验证 | 不把 `--update-extensions` 当作无人值守定时更新，也不把 CI 受控模型当作真人首配/付费模型验证；长期总验收边界保留 |
+| 既有验证边界 | 历史发布覆盖三目标原生受控模型链路，本轮仅 macOS x64；未覆盖所有 Linux 发行版、远程 OAuth、真实供应商组合；历史 `cargo audit` 的 bincode/smartstring/yaml-rust unmaintained 警告保留 | 不把 CI 的本地 HTTP fixture 当作真实外部模型认证证明 |
+
+- 历史 `real_mimo_web_search` slow 标记仅作性能观察，不把其旧 PASS 作为本轮复验。
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
 - 「同会话关内网后反复 403、新会话可恢复」现象已验收可接受（通网后摘要正常），根因未再钉死到 `previous_response_id`；临时诊断日志已移除，后续若复现再开文件日志排障。
 
@@ -204,6 +355,205 @@ feature 1bb87c1f ──┘
 ### 集成说明
 - 本轮以提示词/工具描述静态文本与拼装逻辑为主；验证走 focused lib/doc 测试与 `prompt_size_budget`（CHAT tool defs 25023 / SYS 6996），未跑全量 tarpaulin，Cov% 留空。
 - 云化方案 `cloud-scale-serving-01/` 为文档同步，尚未进入 Phase A 编码。
+
+---
+
+## feature-shared-serve-acp
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Tomcat Agent | 2026-11-02 13:54 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
+
+### DONE（已完成）
+
+- [✓] 将 write-plans 三文件原样纳入正式内置资产并显式登记；复用现有物化、发现、同名覆盖、禁用及权限机制，不依赖试验目录或归档评测工具。
+- [✓] planner 只保留 PLAN 身份和一句加载指引；常驻技能清单静态排除 write-plans，同轮开始执行后的下一请求不再推荐；迁走的提示词契约改由正式资产测试守护。
+- [✓] 计划评审器的重复写作模板换成读者检查，保留 UX、设计挑战、反过度设计及独立评审职责；同步技能和 planner 架构文档。
+
+- [✓] 修复临时 LLM 故障分类与重试额度按任务累计：`server_error`、`upstream_http2_stream_error`、`upstream_stream_read_error` 进入统一临时故障判定，账户/内容拒绝保持优先；每次逻辑模型请求独立计数，交互默认 4 次、无人值守临时故障和空答 10 次，均含首次。成功正文及已完成工具不因后续请求重试而重放。
+- [✓] 增加宿主拥有的五分钟自动 Retry/Resume，页面只展示会话级倒计时并提供取消；沿用原 RPC、错误卡与手动按钮，同 errorId 连续失败可重新恢复，后台会话不抢焦点。
+- [✓] 自动恢复复核 F1～F6 全部完成：补 Build 接管与外部执行取消，移出 Keep，恢复文件夹变化和历史加载原有边界；资格检查仅用于自动到期；单次请求及专用辅助函数逐字集中到 `request_retry.rs`，恢复无关文档。验收中的 `environment.rs` Clippy 修正仅为 `.or_else` → `.or` 等价改写，平台路径规则不变。
+
+- [✓] 修复 VS Code 多根工作区引用丢失所属项目地址的问题：文件、目录及选区保留完整路径，标签仍简短；`@` 搜索独立显示项目名与相对目录，避免同名文件混淆。产品逻辑只改引用构造与搜索展示两处，补齐草稿/发送/历史、Rust 真实读取和双根 Host 回归；Windows 实机验收未完成。
+
+- [✓] 修复 Windows/Linux Composer `+` 同时启用文件/文件夹选择导致只显示目录的问题：原生 QuickPick 先选类型，保留多选、分次追加及取消/异常时的草稿和操作收尾；补充英中文案、参数/回填回归与真实宿主菜单交互用例。
+- [✓] 已生成包含本次修复的纯插件包 `tomcat-vscode-ext-0.1.97-pure-composer-fix.vsix`（不含 CLI），构建、可解压性及包内代码与当前构建一致性检查通过；未自动安装或重启用户服务。
+- [✓] Windows shared serve／Native／ACP 修复与本机验收计划完成 12/12：修复中文 PATH 定位、共享服务子进程弹窗、按连接解析界面语言及回环模型请求误走代理；集成测试在用例前统一构建当前 CLI。
+- [✓] Windows 开发更新与重启整改计划完成 6/6：新增 `tomcat self-install`、仓库根 `scripts/dev-install.cmd` 和共享项目规则；主输入框 `/restart` 复用既有宿主重启链，stop／restart 外层期限改为 80／150 秒。
+- [✓] 本次一并纳入原已暂存的 HOME 修复：Windows `~\` 路径按控制连接的 HOME 展开；cwd 不因此获得额外权限，缺失 HOME 不回退到服务自身环境。
+- [✓] 项目版本脚本已将 CLI 升至 `0.1.81`、扩展升至 `0.1.97`，bundled CLI 同步为 `0.1.81`；当时版本一致性检查及版本脚本 19 项测试通过。
+- 更新双语 README、用户指南与共享服务架构文档，明确“更新磁盘文件”和“显式重启后台”是两步操作。
+
+### INTERFACE（接口与行为边界）
+
+- write-plans 仅通过 PLAN 临时提醒自动推荐，显式 `load_skill`、用户 `/skill` 清单和历史正文不变；不增加模式配置、加载状态、协议或评审器技能权限。包含此改动的新二进制在创建聊天上下文时物化内置技能；源码提交不代表当前运行环境已更新。
+
+- `AgentLoopConfig.max_attempts` 改为每次逻辑模型请求的额度，`max_tool_rounds` 仍归模型/工具循环；取消、压缩、附件降级、消息提交及工具执行的原有安全边界保留，重试不清零当前请求计数。
+- 宿主↔webview 新增会话投影 `errorRecovery: { errorId, dueAt }` 与 `cancelErrorRecovery` 意图；Retry/Resume RPC 不变。取消只停自动恢复，不清除错误卡或手动按钮；切换会话不停止等待，真实断连、关闭环境或宿主销毁会清理；等待不持久化。
+
+- 新文件系统引用的 `path` 保留扩展宿主 `uri.fsPath`（目录尾 `/` 契约不变），`label` 与搜索描述独立显示；会话 cwd、权限、重复 occurrence 及 wire 字段不变。旧相对路径不猜测迁移，旧歧义引用需重加；更新/重载扩展后新添加的引用才按修复后的规则生成。
+
+- Composer `pickContext` 先显示“添加文件 / 添加文件夹”，`buildAttachmentOpenDialogOptions(kind)` 只开启对应类型；两类需分次选择，继续复用原有附件/引用分类与 `composerWorkResult`。未改拖拽事件处理、只读判定或共享服务。
+- `tomcat self-install` 只安装当前可执行文件，复用既有平台安装函数；Windows 复制、macOS 软链接策略不变，不初始化配置、不改 PATH／凭据、不自动重启。保留 `TOMCAT_AGENT_ACTIVE` 嵌套保护。
+- `scripts/dev-install.cmd` 仅转交 `cargo run --release --bin tomcat -- self-install`，沿用 `CARGO_TARGET_DIR`；显式 `tomcat.path` 和 VSIX 内置 CLI 选择不受影响。
+- 主输入框精确纯文本 `/restart` 先清空并同步草稿，再调用 `restartSharedService`；停止所有共享任务，不调用模型、不入队。参数、引用、附件和同名资源卡沿用普通消息路由；输入禁用条件不变。
+- stop／restart 等待上限为 80／150 秒，version／status／start 仍为 35 秒；关窗与 Reload 仍只断开窗口，不停止后台。
+- LLM 仅在无显式代理、主地址与可选 fallback 都为回环时绕过自动代理；远端与显式代理语义保留。窗口语言按连接环境解析，服务生成的文本仍使用进程级语言，不承诺多窗口独立重译。
+- Rust serve wire 及安装／服务生命周期协议未改动；本次协议增量仅限上述宿主↔webview 的恢复投影与取消意图。
+
+### Windows 验证记录（此前结果，Mac 不机械重跑）
+
+- Windows 提交准备阶段按用户当时要求，不运行测试、构建、安装或视觉验收；提交准备仅审查 diff、文件范围、版本声明和 Git 空白检查。Cov% 未测量，不将用例通过率当作代码覆盖率。
+- 选择器修复此前验证：`npm run lint` 与相关 22 个测试文件的 470 项用例通过；随后构建/编译及纯 VSIX 内容检查通过。当时提交未重跑。
+- 隔离 Windows VS Code 1.143 + 真实 CLI 的 `assertWebviewPickContextFlow` 已验证真实点击 `+`、原生 QuickPick 和附件/引用回填；PNG/ARIA/console 已检查，无 Tomcat Webview 控制台错误。系统文件对话框仍由替身返回 URI 并校验互斥参数，不标作原生选择文件验收通过；测试模型图像能力警告与加载中的缩略图不作为图片预览验收。
+- 本地诊断及制品证据：`.agents/acceptance/composer-drag-probe/verification.md`、`gui-ru4M8V/` 和扩展目录下纯 VSIX，均不纳入 Git。原安装版 VS Code 更新锁、Windows fake-Serve 夹具 `spawn EFTYPE` 阻塞保留记录，后改用隔离副本和既有真实 CLI 夹具完成菜单/回填验证。
+- 第一项计划此前记录：Windows Rust 影响范围回归 717/717；Native／ACP 冷构建与三次预热每轮 8/8；真实 VS Code 旁观与关窗旅程各 1/1，PNG／ARIA／console 已读回。
+- 第二项计划此前记录：薄脚本 2/2；Rust 首批 184/187，修正三处测试缺陷后相关测试及帮助目录检查 7/7；host 807、GUI 877 项经分批检查与复验覆盖。原 gate 失败及 GUI 超时保留，不声称整条 gate 一次全绿。
+- 最终真实 VS Code 重启旅程及外层检查退出 0：实例 A 切换到 B，非标题模型请求保持 2 次，关窗后禁止自动拉起的 Native IPC 仍连接 B；四组最终 PNG／ARIA／console 已读回。
+- 详细本地证据：`.agents/acceptance/windows-shared-serve-report.md`、`.agents/acceptance/update-restart/report.md`；最终重启截图目录 `.agents/acceptance/update-restart/ui/gui-u7Ujzh/`。这些日志、截图和构建产物不纳入 Git，Mac 拉取代码不会自动获得本机证据文件。
+
+### macOS 联合验收（2026-10-23–25）
+
+- **请求级重试与自动恢复已在提交前完成验证**：最新扩展类型检查、宿主 900 项、GUI 888 项及 Provider/真实 Rust 服务集成 72 项通过；Rust 定向 394 通过 / 1 原有忽略，最终 `gate-fast` 严格 Clippy、库 3437 通过 / 5 忽略，集成 470 通过 / 30 跳过；无新增跳过，定向结果不与全量重复累计。doctest 为 0，不当作行为证据。
+- 此前真实 Dev Host 已验证生产五分钟等待、页面重建保留 deadline、取消后手动恢复及后台不抢焦点，中英文桌面/窄屏 PNG、ARIA、console 已读取。整改未改 GUI 渲染或真实计时，按批准计划不重跑五分钟场景；四个搬移函数前后 SHA-256 一致，最终差异检查通过。早期磁盘不足、构建锁等待与截图夹具失败及后续成功结果保留在本地 `.agents/acceptance/error-recovery.md`，截图和制品不纳入 Git；不冒充真实上游或 Windows 验收。本次提交遵照用户要求不再运行测试、构建或覆盖率，Cov% 保持未测量。
+
+- **多根引用修复本机验证完成**：macOS 13.7.8 / VS Code 1.143.1；扩展/GUI/启动器分批有效覆盖 1008 项（15+16+881+73+23），Rust 定向 3 项，真实 Host 6 项通过；构建、类型检查及格式检查通过。初始 Provider 两条旧路径期望、搜索测试断言与 Host 夹具问题修正后仅复跑受影响范围，不声称全仓一次全绿。当时提交按用户要求不重跑测试、构建或覆盖率，Cov% 继续未测量。
+- 多根 Host 的 7 组最终 PNG/ARIA/console 已逐项读取，侧栏实际宽度 941/389px；截图、ARIA 与发送数据分别确认项目可区分、短标签和完整目标。Host 使用测试后端，Rust 录制模型与真实 read 独立验证收到 B 完整引用、读取 `ONLY_B` 且 cwd/授权边界不变；不冒充模型自主选文件或原生鼠标拖拽验证。捕获期 console 无 error，宿主警告另列。仓库根本地产物 `.agents/acceptance/multi-root-references.md` 与 `.agents/shots/multi-root-references/gui-1zk4mf/` 不纳入 Git，Windows 不会自动获得这些产物；Windows 复验使用相同 npm Host 入口及 Rust 定向测试。
+
+```text
+8a5b7885 → 共用自动化 → 真实 VS Code 旁观 / 重启 / 关窗
+                              ↓
+                    Mac 制品 → 安装 / Dock / 项目连接 / 语言（已补证）
+                              → 正式重启 A→B → Reload / 全退出 / Dock 重开仍 B
+```
+
+- **本机自动化验收完成**：macOS 13.7.8 x86_64 / VS Code 1.139.0；Rust 定向 252 passed（3336 skipped 不计通过），扩展 gate:fast 两份 tsc + host 807 / GUI 877，四项真实服务 integration 修复后 11/11。
+- 本轮修复的是验收准备：新 CLI 首次启动无输出超过 fixture 15 秒预算；既有构建准备增加有 120 秒上限的只读 `--version`，失败原样抛出，不放大 init/产品超时。新增 3 条回归测试和定向 strict tsc 通过；保留原始 10/11 失败及诊断，不推测系统扫描原因。
+- 两条真实 VS Code 场景各 1 passing：同项目 ACP 实时只读旁观、跨项目隔离、Reload；真实写文件任务、菜单只补全、发送后后台 A→B、草稿清空，关窗后禁止自动启动的 Native IPC 仍连接 B。重启前后非标题模型请求为同样两次。
+- 6 组 PNG/ARIA/console 均已逐项读取；两条截图脚本先最大化面板，真实图片为桌面 1381×794、窄屏 331×738（workbench 为 1440×900 / 390×844）。捕获窗口无 Tomcat 业务错误；不据此声称 VS Code 全进程零告警。
+- 本轮没有改产品逻辑、依赖或版本；隔离自动化未改正式环境，未调用真实供应商。后续经用户明确授权，仅在正常 UI 中信任自建测试目录、切换语言并恢复 auto；未改日常代理，Agent 未执行正式安装或重启（由用户独立完成）。Windows 代码页 936、隐藏控制台、Job Object、EXE 替换在 Mac 为不适用。
+- 两份本地报告：`.agents/acceptance/macos/8a5b7885f212f4549043a9b26502e6a6e89f5b20/shared-serve-native-acp.md` 与同目录 `update-restart.md`。目录内保留原始日志、截图、失败、源码快照；这些制品不纳入 Git。
+- Mac release CLI 0.1.81 与内置同一 CLI 的 darwin-x64 VSIX 0.1.97 已构建校验，见 `artifacts/artifact-verification.json`。用户实际明确选择“纯插件 0.1.97 + 独立 CLI 0.1.81”，两者安装分别由 `manual-cli-install-20261023-232133.json` 和 `manual-pure-vsix-install-20261024-000233.json` 核对：软链/版本/哈希正确，纯包 251 个载荷文件及 manifest 与安装内容一致；不要求改装内置包。用户已确认 Dock 启动；新日志 process-path 指向独立 CLI 并 ready，后台 0.1.81 / PID 68026 / instanceId 66777c7a… 与退出前一致。
+- `manual-ui-acceptance.md` 补充实际生产窗口：中文/空格测试项目连接；auto 跟随英文宿主、保存中文、关闭重开仍中文、恢复 auto；四张原 PNG 已逐张读取。新窗口首次自动启动被 Agent 保护拒绝、随后连接已有后台的日志保留，未移除保护。该普通窗口未取得完整 DOM ARIA / webview console，不将截图补证冒充新的全套 UI 门禁；正式重启及保活证据见下条。
+
+- 用户明确回复“已重启”，`manual-official-restart.json` 记录正式服务 PID 68026 / 66777c7a… → PID 30430 / 5739b8b1…，版本 0.1.81，插件日志恢复 ready。新进程的可执行映射指向本轮交付 release，入口 SHA-256 与交付一致；不冒充手动重启瞬间的菜单/草稿截图。
+- `manual-window-liveness.json` 完成正式保活补证：独立 Terminal 在 Reload 后和 Code 进程为零、尚未重开时采到 B/PID 30430；中间用户从启动台打开，随后按指导退出并明确确认“已从 Dock 重开”，07:10:22 新 Code PID 68569、插件 process-path → 独立 CLI → ready，后台仍 B/PID 30430。自动脚本原 Dock 点击 -1728 失败保留，不宣称全程自动；重开前采样来自第一次脚本退出。Terminal 辅助功能按用户要求保持开启。
+
+
+### Windows 新修复同步与 Mac 合并检查（2026-10-24）
+
+- 已拉取 `e9d8db38`（文件选择器）及 `4cba7ec0`（忽略 Playwright 本地产物），在其上恢复四项 Mac 验收代码改动；仅状态文档存在冲突，双方修复记录与未验收边界均保留。
+- 合并后两份 TypeScript 检查通过；host 全部用例 808 + provider 流程 69 + 构建就绪 3，共 57 文件 / 880 项通过。原 Mac 验收的 Rust/共享服务检查未机械重跑，也不将其旧制品当成包含新选择器修复。
+- 当前源码构建成功；隔离 VS Code 的 `routes smart picker selections into attachments and context chips` 为 1 passing。两组 PNG/ARIA/console 已读取：原生 QuickPick 的文件/文件夹入口可见，图片及两种引用回填正确，捕获范围内没有运行时 error；VS Code feature/sandbox 警告及测试模型不支持图片的提示保留。
+- 本次使用既有 fake-Serve 与系统文件对话框替身，只证明真实扩展菜单交互及回填，不代签 Windows 原生对话框、真实模型或拖拽验收；未安装新插件或重启正式服务。详细证据：`.agents/acceptance/macos/merge-windows-4cba7ec0/report.md`。
+
+### write-plans 内置验证（2026-11-01，提交前已有结果）
+
+- 聚焦库测试 104 项、离线集成 9 项通过；期间删掉模板开头空行导致 3 项模式切换回归，恢复原空行后仅重跑受影响的 6 项库测试和 3 项端到端测试，均通过，不重复累计。
+- `cargo clippy --all-targets -- -D warnings`、受影响 Rust 格式及文档模板一致性检查通过；正式资产与原包逐字节一致，reviewer 仅替换原 11–26 行。doctest 命令成功但为 0 个用例，不作为行为证据。
+- 其余库测试批次为 3333 passed / 1 failed / 5 ignored；失败的 `package_install_manifest_authorizes_consumed_tree` 在加载配置时遇到其它测试的临时 HOME/temp 路径无效，未改源码单独重跑通过，保留原批次失败记录。
+- 既有 `prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout` 隔离运行超过 60 秒仍未完成，停止后记为未验证；完整库门禁不记全绿。详细任务退出码记录在本地 write-plans 内置计划的验收 evidence 中。
+- 本次提交遵照用户要求不重跑测试、构建或覆盖率，Cov% 保持未测量；归档 bench、真实模型评测、release 构建、安装和服务重启均不执行。技能工作流附件的原文末尾空行保留，不为 Git 空白提示改写已验收资产。
+
+### 合并审查与验收（本机离线验证完成，待本地合并）
+
+| 审查组 | 规范 / 调用链与结论 | 测试落点 |
+| --- | --- | --- |
+| ① serve / IPC / 所有权 | 架构 §4/9：CLI 预检检查对端系统账号（`infra/platform/local_socket.rs::connect`），Node 第二条连接尚未保护发送环境；`service.rs:468` 仅比产品版本，本轮不升版本，不能挡住同版本旧构建。补握手识别是计划修订阻塞。CloseSession、晚注册 Bash 按已有计划复现；writer 失败的 busy 遗留另待复现。 | `sharedConnection.test.ts`、`serve/tests/{service,commands,connection,session_job}_test.rs`、`serve_shared_e2e.rs` |
+| ② ACP / MCP / 规则 / 插件 | 架构 §1/4/9：ACP 复用 serve，取消清理受 writer 顺序影响按计划修；MCP 私有层及 AGENTS 规则权限已有对应回归。插件执行停止、共享 scope 第二上下文的 SessionManager 弱引用、动态初始化 bare ID 与会话绑定的关系需先构造复现，不直接引入新生命周期。 | `acp_stdio_e2e.rs`、`serve/tests/connection_test.rs`、`chat/tests/{context,resource_inventory}_test.rs` |
+| ③ 重试 / 技能 / 提示 | 架构 §4.1/注释规范：`empty_turn` 吞错误是从 develop 原样迁移的旧问题，本轮补警告但保持尽力写入；请求预算、取消、禁用和同名覆盖按已有契约。技能文档缺 Connection 优先级说明待文档任务修正。 | `agent_loop/tests/run_basic_test.rs`、`request_retry_test.rs`；现有 skill/prompts 测试 |
+| ④ 扩展 / GUI / 引用 | 架构 §4/单一状态源：页面重建和迟到开头按计划修；新增线索为空窗口未建立 scope、隐藏面板版本冲突仍给普通 Retry、IPC ENOENT 被归为缺 CLI；`webview_provider_flow.test.ts` 的 switchSession 字符串替身已与对象回执漂移，进入 UI 任务核对。多根路径与标签分离保持原实现。 | `webview_provider_flow.test.ts`、`dual_channel.test.ts`、`provider_error_recovery.test.ts`、`ServeConnectionSupervisor.test.ts`、真实安装态 harness |
+| ⑤ Windows / 安装 / 代理 / CI | 架构 §5/12：`shell.rs::posix_shell_for` 由连接 PATH 定位 Git；`environment.rs:96-113` 将相对 PATH 拼到任务 cwd，`bash_task.rs:756-770` 先执行探测才授权。这是反驳计划“Git 不受项目控制”的新代码证据，修订后才能按最小边界调整。探测期限、夹具预算、CI 接线仍保留；代理快照不扩围。管理命令校验失败退出成功和 PATH 目录误判另待复现。 | `platform/tests/shell_test.rs`、`primitive/tests/suite_test.rs`、`cli_tests.rs`、`resolveTomcatExecutable.test.ts`、现有 fixture/CI 测试 |
+| ⑥ 宿主包 / 版本 / 文档 | 架构 §6/文档对齐：包清单、路径与哈希只读核验对应，等待精确基线 apply 检查；CLI/扩展/bundled 镜像一致。Multica 上层 30 秒与适配器 65 秒边界仍是明确未实测风险，不把本次 Tomcat 侧通过等同宿主通过。 | 包内 `VALIDATION.md` 检查、隔离基线 `git apply --check`、`release-version.mjs check` |
+
+- 基线：源 `970b6bb53bfdcf718341aee7ce2e0843933a33c7`，fetch 后 develop 由 `383a7b97b19f0471048c10a30cab68255503bcf0` 快进到 `86081c3121a183ffd1b65997998f88f7fd26f7e0`；merge-base 为前者。预演合并树与源树均为 `61b5b670fe0eb336d2bebe5713bcf009b7b49265`，无需回合并。开始时工作区干净，develop 无其它 worktree 占用；不清理已有工作树。
+- 环境：Darwin x86_64，rustc 1.96.0、nextest 0.9.140、Node 23.11.0；扩展依赖与隔离 VS Code harness 存在，初始可用磁盘 16GiB。默认 real-llm 必需的 `IDATATLAS_OPENAI_API_KEY` 未配置，仅核对存在性；Windows 环境未确认。真实模型与平台验收不能记为通过。
+- 审查覆盖：按 `383a7b97..970b6bb5` 的 385 个变更路径分六组检查 serve/IPC/所有权、ACP/MCP/插件、重试/技能/提示、扩展/GUI、多平台/CI、宿主包/版本/文档；以架构分层、错误传播、测试布局、Rust 惯用法和注释规范为依据，长文件不机械拆分。
+- 已知修复仍按计划推进。额外审查线索须由主 Agent 复核或用例复现后归因：开始回合前 writer 失败导致 busy 遗留、审批回复被入队命令阻塞、插件停止与第二会话的弱引用存活、空窗口初始化及 IPC ENOENT 分类、Git 探测早于授权、CLI 管理命令失败返回成功、可执行路径误选目录。未复现项不冒充运行时结论，不因报告建议直接扩大设计。
+- 握手兼容需特别核对：精确包版本不能区分同版本号的不同构建；fake-Serve 安装态夹具也是 Native 握手消费者。保持现有直连，不恢复已撤销的 relay。
+- 文档已对齐：根与扩展双语 README 区分共享服务、ACP 与 legacy stdio；共享服务架构补 Native 的编号核对/环境/ready 顺序；技能文档补 Connection 高于基础库存的优先级；测试规范与脚本帮助改为实际 10 个 serial 目标，未改测试分组或并发模型。
+- 两份宿主包静态核验通过（`1793587030689-y4z2d0`）：Paperclip 46 个路径/19 个新增文件，Multica 23 个路径/8 个新增文件；清单路径唯一、与 FILES 对应、最终文件和新增载荷/patch/许可证哈希一致、四份 patch 头目标集合准确。分别在干净的精确基线 `2f6ad2226aec330251438c47cbc45fd92e0d3132`、`06835b8f50606ca3f8bebbb5d07ac8901f831e69` 隔离副本执行四次 `git apply --check` 均退出 0；未应用补丁、未在宿主仓跑测试，不用旧包记录代签当前 Tomcat。Multica 30/65 秒取消预算差异保留为未实测风险。
+- 本轮审查小修：先补 Story 8c/8d 与 E2E-CLI-103～105、E2E-VSCEXT-036～037 的契约（待后续实现验收）；更正 QueuedCommand 注释；empty_turn 写盘失败增加含回合/尝试/分类的 warn，不打印正文、不改变重试额度或结果。
+- T16 红→绿：任务 `1793572679889-arqsiq`（日志 `~/.tomcat/agents/main/tool-results/bash-1793572679889-arqsiq.log`）先得到 0 passed / 1 failed，失败原因是两次空答诊断写失败没有 warn。修后任务 `1793572948891-ydxnc6`（同目录对应 `.log`）执行 `cargo test -p tomcat --lib empty_turn -- --nocapture`：6 passed / 0 failed / 0 ignored；校验正常与诊断失败都恰好请求三次、最终正文 recovered、不泄露思考文本/响应 ID/载荷哨兵。紧接 `cargo clippy -p tomcat --lib -- -D warnings` 退出 0。仅定向结果，未执行全库/全门禁。
+- `node scripts/release-version.mjs check` 与本轮 `git diff --check` 通过；版本未修改。测试后只更新状态说明，未改变行为或夹具。
+- 用户已批准修订后的执行计划：Native 改用握手形状识别同版本旧构建，保持管理协议版本 1；Git 探测移到授权之后。恢复实施，不恢复 relay 或额外 Agent 标记。
+- session-cleanup 复现：`1793578183918-6esdvy` 四项库测试均先失败，分别暴露 CloseSession 超时仍成功、维护任务旧关闭路径直接 abort、断连追加消息留存、晚注册 Bash 漏停；真实进程用例 `1793578454531-aml9z0` 在收到 closed 后仍查到活动 shell。测试自建进程已回收，没有操作正式服务。
+- 修复仍收敛到原停止入口：CloseSession 先 stop_slot_work；停止结束清内存追加队列（不动历史），回合退出后补一次 Bash 扫描。`1793578796044-u1fb2m` 的 serve 模块批次为 247 passed / 1 failed；失败是新增模型请求断言把 EphemeralTail 工作区提醒误认成最后一条用户消息，已按 Normal 用户消息类型修正。`1793579618198-eio5wr` 定向复验全部四项关闭/断连/晚注册用例通过；同批服务握手用例共 11 passed / 0 failed。`cargo clippy -p tomcat --lib -- -D warnings`、当前 CLI 构建均退出 0，`cargo nextest run --test serve_shared_e2e` 为 12 passed / 2 skipped（原有受控系统代理专项，未运行、不计通过），含关闭和 EOF 之后本会话 shell 已退出、文件不再增长、另一会话仍继续工作的真实进程断言。产品未修改维护任务、FIFO 或 steering 的既有停止规则。
+- Native 扩展侧红→绿：`1793578883207-6o6hpp` 复现先发环境和同版本误导文案，3 failed / 1 passed；`1793578927379-eibfes` 新握手、失败分类与关闭回归 46 passed，两份 TypeScript 检查通过。`1793579245175-epovi3` 安装态假服务 transport/history/questions 4 passed；仅夹具协议验证，不代替真实 VS Code 视觉验收。Rust `1793579213705-y4249a` 先得到 4 failed / 3 passed；新代码在 `1793579618198-eio5wr` 转为 7 passed：第二阶段之前不建连接、非法/旧形状拒绝、原总握手期限、ACP/status/stop 格式不变。原 `service_test.rs` 移为 service 的私有子测试模块，未提高生产符号可见性。
+- 安全前提复核：instanceId 只由 `service.rs::run_service` 用 UUID v4 生成；常驻服务 stdout 为 null，日志 0600。Windows `local_socket.rs::private_pipe` 使用 `private_acl::current_user_acl` 的当前用户单条 ACE 并拒绝远程客户端；Unix accept 检查 peer UID。CLI `open_management` 先经 `local_socket::connect` 核对服务端账号才读取编号。Node 首条 hello 不含编号或环境，编号不匹配时环境 0 字节发送的断言覆盖全部接收字节。此证据不等于双账号攻击实测，也不防同账号恶意进程。
+- T11 红→绿：`1793579754418-6c7wi4` 复现 history 后迟到的 message_start 会把正文和 thinking 再追加一遍；`state.ts` 在开头复用 hasPersistedAssistant 跳过已落盘消息，不新增序号或完成表。`1793579798278-25d6ex` 的 dual_channel 17 项通过（同批三个文件共 163 项），新消息仍正常流式显示，断言在第二次 hydrate 之前检查；扩展与 GUI TypeScript 检查通过。
+- T12 红→绿：同一红批次复现 restoreCheckpoint 等待期间旧计时器仍对 s1 发 Retry；只把该意图加入现有接管集合。绿批次 provider_error_recovery 73 项通过：恢复进行中与失败后旧等待都不重试，s2 的计时仍按时执行，原计时/持久化机制不变。
+- T9 红→绿：同一红批次复现 ready 后把所选旁观会话 B 换回磁盘 A；`bootstrap` 只让仍存在、未退役的宿主选择优先，删除与服务重连仍回原默认路径。实现取刷新列表前的 `state.activeSessionId`，而不是计划写的 `initialized.sessionId`：后者是初始化回执（provider.ts::ensureInitialized），切换页面更新的是 state（::switchSessionView / stateStore.setActiveSession）。`webview_provider_flow` 73 项通过；顺带把 switchSession 替身对齐产品对象回执。
+- T10 安装态实测：`1793581140788-2ii5gr` 在隔离 HOME/profile 的真实 VS Code Production 扩展中通过（1 passed，33s）；自动探活确实销毁旧文档并重建，B、草稿、只读与编辑器焦点保留，恢复等待投影不变（旁观会话没有自动重试倒计时），真实 Bash 继续完成。Desktop 1440×900 / narrow 390×844 工作台，实际面板 1381×794 / 331×738；`.agents/acceptance/shared-serve-review/gui-Igyjaf/observer-{desktop,narrow}.{png,aria.txt,console.json}` 全部读回：无空白/重字/横向溢出，模式/模型/发送按钮为禁用；两份面板 console errors=[]（采集上下文范围，并非整段宿主日志）。
+- 安装态夹具调试记录：`1793580507670-q1kgz0`、`1793580637484-6y5orr` 发现 ACP 新建 B 自身会更新磁盘默认值，改由原控制路径先恢复 A 再旁观 B；`1793580735922-2ulsn5` 发现销毁旧 iframe 时只读 CDP 探测会失联，限定重试已知连接/上下文消失；`1793580915356-ux1ri2` 的断言误把忙且有草稿的 Send 当 Stop，按现有 Composer 规则核验实际显示的唯一按钮必须禁用，未改 UI 交互。最后一次代码编译和安装态验证通过；这些失败不计产品回归。`1793580422849-y4r84f` launch-env 23 项、harness tsc 与构建通过。
+- T14：真实服务夹具停服预算直接引用产品 `STOP_COMMAND_TIMEOUT_MS`，失败保留 HOME 的既有行为不变。CI push/PR 加上 `scripts/dev-install.*`，Windows extension job 接入根目录假 Cargo 的 CMD 测试及两个 tests/ 定向用例。`1793581416440-agmlv7` 本机 20 passed（fixture lifecycle 11 / proxy guard 6 / build selection 3），YAML 解析与根目录执行位置校验通过；`1793581683825-63z3cl` 的 CMD 两例在 macOS 全部 SKIP（0 passed），Windows 实机与 CI 实跑仍须推送前补证，不计为通过。未执行安装或代理修改。
+- T8 红→绿：`1793580960772-y1mvlx` 在真实 ACP stdout 停读、Native 独立旁观确认约 1 MiB 已排入输出之后取消，后台 PID 超过原测试期限仍存活；`1793581081555-ak4ezu` 修后同例 3.655s 通过，恢复读取前 PID 已退出且文件不再增长，另一会话持续写入；读取后既有正文完整、Cancelled 终态唯一、其后没有多余帧。早一轮 `1793580713517-6ppqu7` 是串行脚本模型被另一会话的定时等待堵住，非有效缺陷复现；改用既有 pause barrier 后得到上述有效红结果。
+- ACP 仅调整 prompt future 的等待：收到本轮取消就并行调用现有 finish_cancelled_turn；受理回执及 agent_idle 都由原 writer 排序，清理完成后才放终态并移除 pending；父 lifetime 取消交原断连清理。`1793581081555-ak4ezu` 的 ACP 库 7 passed、clippy -D warnings、CLI 构建通过，按 B1 跑 acp_stdio_e2e/acp_observer_e2e 共 27 passed / 0 skipped（125s），覆盖立即取消、后续回合、MCP、EOF、转发器崩溃与慢读完整性；未改帧格式或回放分页。
+- T17 / IPC ENOENT：`1793582522201-mj3ly8` 先复现连接端点不存在被归为 executable_missing、立即终止重试（该批两项预期失败，另一项为 PATH 目录，分别处置）。`ServeConnectionSupervisor::classifyFailure` 改按系统错误 code=ENOENT 且 syscall=spawn 判断缺可执行文件，不再匹配任意错误文案；临时 IPC 失联沿原策略重试且 allowStart=false，不自动重启服务。`1793582637511-eo7rjd` 中 supervisor 18 项与扩展 TypeScript 检查通过，真实缺 CLI 仍一次失败、版本冲突分类保持。
+- T17 / PATH 目录：同一红批次 `1793582522201-mj3ly8` 在真实临时 PATH 的首目录放同名文件夹、次目录放可执行文件，发现 resolver 选中了文件夹。`defaultFileExists` 在原权限检查之前要求 stat.isFile，保留 stat 跟随符号链接的既有安装方式；不更换发现优先级或增加定位进程。`1793582637511-eo7rjd` 的 resolver 13 项通过，含真实文件、POSIX 符号链接、目录跳过和 Windows 无执行位语义；Windows 平台运行仍另行补证。
+- T15 / 测试隔离：`1793582133871-2iktgd` 通过仅向子测试进程传入 `TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR=tools/agents`，稳定复现 package-install 权限用例读取预期 `.agents` 文件失败（原批次 HOME/temp 归因保留为当时观察，不据此认定同一个具体环境变量）。干扰来源有源码证据：`infra/config/tests/load_test.rs` 在进程内修改同名环境。该权限用例改用已有 `load_config_toml_file` 读取自己的固定夹具，不再无关地加载全进程覆盖；未串行化全库、未增加锁。`1793582387881-2mj5wv` 在相同注入下 1 passed / 0 failed。
+- T15 / 评审器等待：`1793581958528-mmm2sj` 完整等到单例通过（128.56s），不是已证明的死锁；十轮真实退避造成超 60 秒告警。仅对该测试启用 Tokio 虚拟时钟并新增恰好十次请求的断言，产品期限、重试额度、错误分类原样保留。`1793582387881-2mj5wv` 的 provider-binding 同模块六项共 3.62s 全部通过。原并发全库验证仍由 B2 的 T15 批次完成，不把定向结果冒充全门禁。
+- T13：后台 Bash 授权后才解析 shell，解析失败复用 record_spawn_result 记已授权但启动失败。Windows 两条 Git 探测入口共用 5 秒期限；同步入口用短生命周期线程运行已有 Tokio/ProcessTree 能力，超时终止整棵树并等待子进程回收，连同后代占着 stdout 的情形一起覆盖；不改选择规则、控制者环境或增加 Agent 标记。
+- T13 红→绿：`1793582387881-2mj5wv` 旧 output 路径直到 8 秒测试保险才退出，期限用例先失败；`1793582756127-qq2hg0` 两个探测用例通过，超时后父子 PID 均已消失、正常/非零退出结果不变。该平台批次为 62 passed / 1 failed：未修改的 local_socket 旧用例在 drop 后一次 connect 仍成功，根因未确认；`1793583022347-6wfzg7` 单独复跑通过，但不据此抹去整批失败，B2 继续核验。
+- Bash 原语模块 `1793583022347-6wfzg7` 为 162 passed；随后的 Clippy 指出新增审计代码应使用 inspect_err，已按建议等价修改，`1793583275839-uefi1y` 的 `cargo clippy -p tomcat --lib -- -D warnings` 通过。Windows 专属用例以相对 PATH 的 git.cmd 验证拒绝时不探测、允许后照常执行、探测失败有审计；本机未编译/运行该 cfg(windows) 用例，必须在推送前补齐，不代签授权顺序的 Windows 实测。
+- T17 / 新一轮复现：`1793584488404-emb4oz` 的三个库用例均先失败（0 passed / 3 failed）：ack 写失败后 busy 未释放；同一 scope 第二上下文插件 hostcall 返回 `SessionManager not configured`；第二会话执行旧式动态发现时，`INVENTORY_FROM_SECOND_SESSION` 被写入第一会话。前两项按局部修复处理，尚待绿结果；同批 CLI 管理命令测试 1 passed，覆盖 `serve status` 与 `session list`，无效 log.level 已由配置加载器拒绝且未创建运行目录，退出成功的线索未复现，未改 CLI 产品代码。
+- T17 / 动态发现归属：对照 develop，`context.rs` 已有 scope 缓存、pin_session、activate_session_plugins 的 bare load_plugin，dispatcher 已有 bare ID 回退首个 SessionManager 的路径；属于旧机制，不因本次复现擅自改变插件初始化/懒加载契约。失败断言原样保存到本地 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch`，未反转断言或加 ignore 来冒充修复；此诊断不纳入默认回归，问题仍未解决，见 BLOCKED。默认门禁通过也不能代签此问题。
+- T17 / 扩展补证：`1793584566135-ymcwib` 的控制往返与隐藏面板恢复两个文件共 81 passed，扩展 TypeScript 检查通过。隐藏期间收到同版本构建冲突，页面挂载和 ready 后仍保留 version_mismatch，未复现普通 Retry 覆盖。空窗口的全局初始化保留 sessionId=null、不猜服务 cwd；不能因此宣布聊天已建 scope，更不能简单让 initialize 拒绝而连带禁用全局设置，界面入口仍继续核对。
+- T17 / 空窗口：原断言先失败（`1793585791172-21ker4`），实际 detail 是内部码 `scope_requires_cwd`。provider 只把这个码映射成已本地化的 `bridge.workspaceRequired`，不猜 cwd、不创建会话、不改初始化或设置流程。`1793586042918-2uhx22` 的 provider / recovery / messenger 三文件 175 passed，`npm run lint`（扩展和 GUI）退出 0。
+- T3 / 夹具语言串扰：serve 组合批次出现五条英文断言失败；`1793586217650-qnyd85` 用 Native 握手与 foreign-checkpoint 两条测试稳定复现 1 passed / 1 failed。握手用例原来把全进程 locale 留在中文；改为父环境中文、连接环境英文，既证明连接环境覆盖有效，又不污染英文断言。只为它的环境修改使用既有 env_lock，不串行化全库、不改产品语言机制。
+- 本机验证前提记录：磁盘剩余 2.8 GiB，先经 `cargo clean -p tomcat --profile dev --dry-run` 预览，再仅清理 debug 包产物，释放后剩余 29 GiB；PATH 的在用 CLI 实际指向 `target/macos-acceptance-8a5b7885f212f4549043a9b26502e6a6e89f5b20/release/tomcat`，未触碰。随后 `1793586354655-a45eup` 在 rustc 编译 lib test 时 SIGSEGV（无 Rust 源码诊断），测试及后续 clippy 未运行，不计通过；正在以单编译任务重试，测试并发不变。
+- 格式门禁 `1793586746321-u3lgcz` 指出分支原有 10 个 Rust 文件未按 rustfmt 排版；只修换行与尾逗号，不改逻辑。第一次手工排版复检 `1793587030632-azmmwb` 还差一个 assert_eq 换行，已修；该次因 fmt 失败没有启动编译或测试。版本镜像复检 `1793586880023-meeigw` 通过：CLI 0.1.81、扩展 0.1.97、bundled CLI 0.1.81，未改版本。
+- 空窗口视觉补验：使用现有 `gui` 的 `npm run dev` 与已配置 Playwright，真实 React 页面接收与 provider 用例一致的 degraded 状态，正文取英文源 catalog；桌面 1440×900、窄屏 390×844 的 `.agents/shots/shared-serve-review/empty-workspace-{desktop,narrow}.{png,aria.txt,console.json}` 均已读回。提示完整可见、窄屏自然换行、无横向溢出；设置按钮可用，聊天/发送禁用，采集范围内 errors=[]。这是页面呈现补验，不冒充 VS Code 空窗口端到端；T10 的真实安装态另行验收。验后已停止自建 Vite，未操作正式服务。
+- T17 / busy 局部修复已转绿：回合任务尚未接管前，rearm/切活动会话/ack 任一准备失败，都取消本轮 token、关闭 steering 并 mark_idle；不启动模型或工具。`1793587162521-afsa6t` 的原失败用例通过，断言没有任务、busy 释放、队列关闭且后来控制者能重新进入；同批 serve/资源库存/platform 为 325 passed / 0 failed / 1 ignored（既有手动项，不计通过），264.34s。编译器 SIGSEGV 后单编译任务重试成功，原崩溃根因未确认；测试仍按原并发运行。Clippy 结果另记。
+- T17 / 共享插件绑定局部修复已转绿：SessionRuntime 持有构造时已交给 dispatcher 的同一个 `Arc<SessionManager>`，而不是只保存内部值的 clone 后释放原 Arc；因此弱引用与实际会话同寿命，不改 scope 共享或 VM 初始化。`1793587162521-afsa6t` 中第二会话 getCurrentSession 在构造后和第一会话关闭后均返回第二会话；停止中的真实 JS/fetch 续体也未晚写历史，后者未复现缺陷，仅保留回归。旧式 bare-ID 动态初始化仍按 BLOCKED 单独记录。
+- T3 / 语言夹具绿结果：`1793587162521-afsa6t` 中 Native 环境覆盖与所有 serve 断言同批通过，原 foreign-checkpoint 中文串扰未再出现；既有 ignored 项是 `resource_inventory_test::sync_timing_matrix`，不是功能失败。随后 `cargo clippy -j 1 -p tomcat --lib -- -D warnings` 退出 0；编译 jobs=1 仅限制编译调度，没有限制测试并发。
+- local_socket 旧失败的跟进：同一 325 项组合中 `local_socket_excludes_duplicate_listeners_and_recovers_stale_endpoint` 通过；原失败保留、根因仍未确认，不改产品或用串行化掩盖，B2 继续观察。
+- T17 / 未复现项的保留用例：真实 `run_command_stream` FIFO 中，先排 NewSession 再回复待决审批，原审批仍完成且新会话成功（`1793587162521-afsa6t`）；隐藏面板的版本冲突在挂载/ready 后仍保留分类（`1793586042918-2uhx22`）；无效 log.level 下 `serve status` / `session list` 均非零退出、未创建运行目录（`1793584488404-emb4oz`，CLI 1 passed）。仅保留这些测试，不增加新审批通道、不改隐藏面板恢复或 CLI 管理语义；CLI 同文件附带 rustfmt 排版。
+- 源分支实现与逐项提交已收口，开始 B2 正式门禁；仍未合并，不推送、不安装、不重启正式服务。Rust 与扩展验收共用测试 CLI，顺序执行以免编译覆盖正在被测试使用的二进制。
+
+- 合并前全差异复核：相对 develop 共 394 个变更路径，预演树仍等于源树。原始 `git diff --check develop..HEAD` 非零仅来自四份原始 patch 的上下文前缀（合法空格/Tab，不能格式化破坏补丁）与原样内置 workflow 末尾空行；明确排除这五份原始资料后检查通过，未全局关闭空白检查、未改哈希或增加豁免配置。原始资料由前述哈希与 patch apply 核验守护。此前注释写回丢失的门禁脚本执行位已在 `761f6051` 恢复，最终相对原分支没有文件模式变化。
+- B2 Rust 首轮（`1793588892574-uour5x`，S=`ce927ef8fdcd5f574a4ba5df4451436890fbde67`，tree=`623f1363a7f54a095bc7ad80e6149f0ed047e026`）exit 1，不能写成全门禁通过。lib 3454 passed / 5 既有 ignored（420.73s），doctest 编译通过但 0 用例，serial 89 passed / 3 skipped（267.667s），含完整 Native/ACP 边界；real-llm 因缺 IDATATLAS key 未运行。T15 两条和 local_socket 原失败在完整库内均通过，历史记录仍保留。
+- B2 发现本轮遗漏：全目标 Clippy 拒绝新断言中多余的 `.as_deref()`；parallel 组在编译时发现 `context_management_tests` 的注入 sink 仍要 SessionManager，而调用方 clone 已变成 Arc，未执行该组。沿同一调用形状搜索又找到 `cli_tests` 的对应 sink；三处仅修测试接线/等价惯用法，不改产品或断言含义。修后补全目标 Clippy、该 Native 用例与尚未运行的 parallel 组；源码/依赖/执行环境未变的完整库其余项和 serial 结果继续有效，不机械再跑整轮。
+
+- B2 补验第一步：三处测试修正后的工作树在 `1793591795013-au3690` 通过 `git diff --check`、`cargo fmt --check` 及 `cargo clippy --all-targets -- -D warnings`（exit 0）。这次检查包含测试目标，不是此前只检查产品库的 `--lib`；接下来补 Native 用例和 parallel 组，不预先记成通过。
+
+- Native 断言的 Clippy 修复仅去掉 `Option<&str>` 上无效的 `.as_deref()`，仍精确断言最后一条 Normal 用户消息是 B 的新指令，历史前缀不变；不弱化 T6。
+
+- B2 Rust 补验（`1793592276899-692cph`，S=`c0ab1f428e64ed27babd6f0b88b579a8b70b1061`，tree=`7042eaa72706b4ab445841780f2ef83e1ccbc8bb`）exit 0：Native 新控制者用例 1 passed，parallel 384 passed / 27 skipped（142.131s）；两处注入 sink 回归都执行并通过。结合前轮仍有效的 lib/serial 与全目标 Clippy，完成本机离线 Rust 范围，真实模型仍未运行。
+- B2 扩展首轮（`1793593147179-moayq4`，同一 S）exit 1：两份 tsc、host 916 / GUI 888、构建、integration 269 passed / 1 skipped、真实 VS Code 安装态 24 passing / 6 场景条件 pending 均通过；最后 verify:vsix 首场景 4 项超时，服务连接失败，未执行后续场景，不记完整扩展门禁通过。
+- verify:vsix 失败已最小复现（`1793594179340-qvpzap`，1 passed / 1 failed）：full-gate 的同步子进程等待堵住同进程的 Native 测试服务，子进程 `serve status` 等不到回复。仅将这个启动器改为异步等待，沿用跨平台 spawnCommand、输出与失败退出约定；不改产品、夹具服务归属或增加期限。新增真实 IPC 及子进程失败传播回归，待绿结果和原门禁路径复验。原失败截图缺失记录与宿主日志保留在 `.agents/acceptance/shared-serve-review/b2-c0ab1f42/`。
+
+- 启动器定向绿结果：`1793594285210-ekctw6` 的真实 IPC / 管理命令 / 非零退出与启动错误共 3 passed；`1793594406711-6pozlu` 的定向 strict tsc 退出 0。脚本不在 extension tsconfig 的 src 范围内，使用与 tsx 混合模块相容的 preserve/bundler、显式 Node 类型；先前两次推断命令分别因 TS6 的 ignoreConfig 要求及错误的模块/类型选项失败，未用改产品代码或放宽 strict 处理。启动器改变了整条门禁的等待方式，因此补跑原 `npm run gate:full` 入口，Rust 源码不变，不重跑 Rust 全门禁。
+
+- B2 扩展完整复验（`1793594442583-2fzg8u`，S=`a4b61eda331c828a26db6bace511d37ff758476f`，tree=`9338e453b089dd59803eda55bb8561c0a6be97fd`）`npm run gate:full` exit 0：两份 tsc、host 916、GUI 888、构建、integration 271 passed / 1 skipped、安装态 24 passing / 6 条件场景 pending、verify:vsix 五场景合计 10 passing。没有放宽期限、跳过原失败场景或改变默认选例；原来超时的四项现为 4 passing。慢握手重启中的 bootstrap 断连日志、VS Code 提案/账号/弃用告警均保留，不称全程零告警。
+- B3 最终安装态旁观复验（`1793595245110-u2j0ap`，同一 S）exit 0、1 passing / 26s：当前纯包 + 真实 CLI，自动探活重建页面后仍保留 B、草稿、只读与焦点，后台真实 Bash 完成；跨项目隔离、无重字、切回自有会话可写均通过。`.agents/acceptance/shared-serve-review/b3-a4b61eda/gui-7FxJcN/observer-{desktop,narrow}.{png,aria.txt,console.json}` 已逐项读回，实际面板为 1381×794 / 331×738：内容正常、长命令换行、底部操作不越界，两份捕获范围内 errors=[]。常规门禁的重建/场景替身不冒充此真实服务专项。
+- 证据复用核对：`c0ab1f42..a4b61eda` 仅门禁启动器、其已有测试文件、此 status 三个路径；Rust 产品/测试/依赖/分组不变，前述 Rust 分批结果有效。空窗口提示的两组页面 PNG/ARIA/console 对应 GUI/provider 源码也未变，继续有效。随后仅回填此状态文档，不使已测行为失效；版本未升级，正式服务未安装或重启，源分支与 develop 均未推送。
+
+- B4 首次待合并树与 `fe08633bfb180ae83b634112529bc7886a48b23d` 完全相同（tree=`4cd6c2d7f6e9b1db4228dad024084d35b0c6d358`）。`1793595769842-ex75gj` 的 Rust gate-fast exit 1：严格全目标 Clippy、doctest 编译、parallel 384/27 skipped、serial 89/3 skipped 通过；lib 3453 passed / 1 failed / 5 ignored，唯一失败为 `append_test::compaction_skips_a_busy_session_until_a_later_housekeeping_run`（期望 1，实际 0）。串联的扩展快门禁未执行。已核对该测试、压缩函数及配置锁函数与 develop 原基线逐字一致，不是本分支新回归；只撤销本任务尚未提交的合并，回源分支补测试，未改 develop 或他人工作。
+- 压缩夹具红→绿：`1793597540910-ed5llm` 保留一个 `File::try_clone` 重复句柄，确定性复现仅 drop 原句柄后仍未解锁（0 passed / 1 failed）。并行 fork 可以产生这种同一文件描述的继承窗口（`infra/platform/process.rs::spawn_service_process` 使用 pre_exec），但原批次未记录具体持有者，不能据此指认某一进程。仅在原测试中显式 `fs2::FileExt::unlock`，重复句柄保留至压缩断言之后；占用时为 0、释放后为 1 的原断言不变。`1793597923702-qgd17f`：fmt、append 模块 24 passed / 3.39s、`cargo clippy -j 1 -p tomcat --lib --tests -- -D warnings` 均 exit 0；未串行化、加等待或修改产品锁/压缩机制。
+- 本次补修只涉及上述测试及此状态文档；B4 的其余 3453 库用例、完整集成及此前扩展/UI 证据仍有效，按影响范围复用，不把原 Rust 命令 exit 1 写成 exit 0。最终源码 SHA 与提交树记入 develop status。
+- B4 扩展补验：`1793598458874-yr40gj` 在与 `9d48409e` 相同的待合并树 `43ec806ed95ccc8367b671da113072c5c8045972` 上执行 gate:fast；extension tsc 已通过，但 npm GUI lint 进程 SIGSEGV / exit 139，尚未运行单测。检查 Node 23.11.0/npm 10.9.2、磁盘剩余 8.5 GiB 和 swap 使用 7883.5 MiB，未找到源码诊断，崩溃根因未确认；不把资源观察写成已证明的 OOM。源码、依赖和并发不变，`1793598602816-a62zbn` 只补 `npm --prefix gui run lint && npm run test:unit`，exit 0：GUI tsc、host 916 / GUI 888 全通过。两条 gate:fast 原始失败均保留，各有效步骤与定向补验合并记账，不称单次完整入口全绿。回源只订正此文档的进程函数引用并回填结果，不使行为证据失效。
+- B2 视觉制品补读：`b2-async-gate/run-yY3gZu/gui-0AFbAi/` 五张原始全帧 PNG 与 `b2-async-gate/gui-eFrGHp/` 两张选择器 PNG，以及各自 ARIA/console 均已读回；进度/折叠/展开/切换/重载、QuickPick 与回填正常。自动 `*-cropped.png` 错裁到左侧 Explorer，不能当聊天视觉证据，保留为调试件并采用原始全帧图；未为此改变产品或重跑无关场景。`1793596077368-22hmlg` 核对七份捕获范围内 errors=[]，保留 VS Code sandbox/local-network-access 警告；不冒充全程监控或系统文件对话框实选。临时图片回看服务已停止。
+
+### BLOCKED（待验收与风险）
+
+| 项目 | 当前边界 | 下一步 |
+| :--- | :--- | :--- |
+| 旧式动态插件初始化串会话 | 本轮最小用例已失败，第二会话触发的动态发现会向第一会话追加消息；对照 develop 已有相同 bare-ID/default-session 机制，不算本次新增回归，但未修复 | 单独明确初始化应绑定触发会话还是禁止会话能力，再复用现有会话 VM 路径设计；保留失败日志与本地 repro patch。按获准计划，需设计的旧问题记录、不阻塞本地合并，不代签通过 |
+| 本轮整改与合并 | 本机离线 Rust、完整扩展门禁及最终真实旁观专项已通过，源分支待本地合并 | 核对合并树与已测树，跑 B4、汇总 develop 状态并本地提交；只改说明文档可复用行为证据 |
+| 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
+| 本轮 Windows 专项与 CI | 未提供 Windows 执行环境；本地新增提交未推送，旧 SHA 的 CI 不代签 | 推送前必须补齐 Git 探测授权/回收、根 CMD 安装脚本及 Windows 用例证据；推送后另核对对应 SHA 的 CI，不绕过 runner 保护 |
+| write-plans 完整库验收（本轮已补证） | B2 `1793588892574-uour5x` 并发完整库 3454 passed / 5 既有 ignored，两条原失败用例均通过；完整门禁仍因其它已列问题非零 | 保留原始失败和归因，不把库通过代签其它门禁或真实模型层 |
+| 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
+| 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
+| macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
+| Mac 已安装版本 | 纯插件 0.1.97、独立 CLI/serve 0.1.81、process-path 已核对；这是 8a5b7885 基线制品，不含后来选择器修复 | 保留被软链引用的 release 文件；源码合并不等于已安装插件更新 |
+| 选择器修复制品 | Windows 已生成含选择器修复的纯扩展 0.1.97，但不含 CLI、未自动安装；同版本号不证明包内容相同 | 安装修复包后核对实际版本、路径与内容；本次合并不自动安装或重启 |
+| Windows 原生文件选择 | 已修复互斥参数，宿主菜单与回填通过；系统文件对话框的实际选取仍未验收 | 安装本次纯插件包后验证普通文件可见并可添加，文件夹入口仍可用 |
+| 文件树拖拽无提示 | 根因未确认；CDP 鼠标探针未产生源头 dragstart，不能视为有效复现或成功验收；拖拽代码未改 | 在用户故障窗口捕获真实 dragstart、Shift 状态及 iframe dragover/drop，再按事件断点定位 |
+| Mac 正式保活（已补证） | 用户正式重启 A→B，Reload、全退出后重开前、最终用户 Dock 重开均仍 B；脚本与用户操作分开记账 | 不再要求重复操作；保留自动点击失败原件与组合回执 |
+| CI 与外部宿主 | 本机整改验收不代替本次提交的 GitHub Windows 系统代理 CI；本轮外部宿主为源码契约对照，不是完整宿主重验 | 推送后检查 CI；保留 Multica 上层 30 秒交接与 backend 65 秒清理预算不一致的未实测风险 |
+| 提交范围 | 本次本地提交 write-plans 默认内置、PLAN 短入口、常驻清单过滤及评审职责分离的全部相关代码、测试、文档和状态；不重跑测试，试验包与归档评测产物不纳入 | 不推送、不打标签、不发布；不安装或重启正式服务；既有 Windows 待验收事项保留 |
 
 ---
 
@@ -552,12 +902,12 @@ feature 1bb87c1f ──┘
 - 最新补充（2026-07-29 08:36）：工程规则审计确认 `.cursor/rules/engineering-standards.mdc:7` 的问题章节说明已按计划同步；明确排除 `:10` 的本地 todo 数量规则。Planner `ask_question`、`core_identity`、Plan/Code Reviewer、共享 64 轮预算和 `WebviewReference` wire 类型未被意外修改。
 - 最新补充（2026-07-28 16:10）：提交前补齐 `ServePlanEvent` union 收窄——`plan.explorer.started` 无 `planId`，webview `applyPlanEvent` 改为 `"planId" in event` 后再读；edit-display reload E2E `replays single-file and multi-file edit cards after a webview reload` 现已 `1 passing`。本轮 code review 根治项随此提交合入。
 - 最新补充（2026-07-28 09:38）：版本管理系统已完成并通过 code review。`release-versions.json` 成为 CLI `0.1.20`、扩展 `0.1.30` 与 bundled CLI `0.1.20` 的唯一来源，一条 Node 命令同步 Cargo/npm 必要镜像；PR/push CI 与 release guards 均只读阻止漂移。验证：Node `19/19`、guard `10/10`、extension integration `342 passed`、GUI `438/438`、Cargo locked release build、npm CI/compile/GUI build/VSIX 打包与包内版本断言全绿；完整扩展 `npm run build` 的 `gen:wire` 在当前 Agent 会话中仅因嵌套 Tomcat 安全保护拒绝启动，独立 compile/build/package 均已通过。
-- 最新补充（2026-07-28 16:05）：code review 根治项已用**本地源码二进制** `tomcat/target/debug/tomcat` 做最小真实链路复测，避免被系统已安装旧版 `tomcat 0.1.20` 污染。实测 prompt 走 `planning -> create_plan -> plan reviewer -> build -> update_plan -> code reviewer -> complete`：planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started(07:59:41.286) -> plan.code_review(pass)(08:04:59.605)` 为 `318.363s`。子 transcript `subagent-sessions/1785225410130_905ad1d4de2614c9-child-code_reviewer-1.jsonl` 清楚记录了 `auto_retry_start{attempt:2, error_message:\"LLM调用错误: 流式空闲超时: stream_timeout_sec=180s\"}` 与后续 `auto_retry_end{success:true}`，说明 `180s` 阈值不会把高推理 code review 直接判死，而是会在真正静默时打断第 1 次 stale 尝试并让第 2 次尝试收口。主 transcript 同时已实测包含 `plan.code_review.started{child_session_id, transcript_path}` 与 `plan.code_review{child_session_id, ...}`，可直接回跳子 transcript 排障；重复 review 块回落为 1 次 started + 1 次最终 pass。
+- 最新补充（2026-07-28 16:05）：code review 根治项已用**本地源码二进制** `tomcat/target/debug/tomcat` 做最小真实链路复测，避免被系统已安装旧版 `tomcat 0.1.20` 污染。实测 prompt 走 `planning -> create_plan -> plan reviewer -> build -> update_plan -> code reviewer -> complete`：planning `119.896s`，exec 总墙钟 `381.499s`，`plan.code_review.started(07:59:41.286) -> plan.code_review(pass)(08:04:59.605)` 为 `318.363s`。子 transcript `subagent-sessions/1785225410130_905ad1d4de2614c9-child-code_reviewer-1.jsonl` 清楚记录了 `auto_retry_start{attempt:2, error_message:\"LLM调用错误: 流式空闲超时: stream_timeout_sec=180s\"}` 与后续 `auto_retry_end{success:true}`，说明 `180s` 阈值不会把高推理 code review 直接判死，而是会在真正静默时打断第 1 次 stale 尝试并让第 2 次尝试收口。主 transcript 同时已实测包含 `plan.code_review.started{child_session_id, transcript_path}` 与 `plan.code_review{child_session_id, ...}`，可直接回跳子 transcript 排障；重复 review 块回落为 1 次 started + 1 次最终 pass。 
 - 最新补充（2026-07-28 02:43）：子 Agent 模型/Provider 绑定根治合入提交。根因是启动冻结 deepseek 客户端 + 会话 catalog id 分头传；现任何取 provider 必须经 resolver 配对进 `ResolvedCall`。验证：`cargo build` 绿；`cargo test --lib --tests --no-run` 全量可编译；`core::plan_runtime`（127）、`core::agent_loop`（213）、`core::llm::tests`（165）绿；`plan_e2e_with_mock_llm_tests` 14/14 绿（含 `h13_*`）；绑定专项 4+2+1 绿。既有无关 dead_code（`llm_code` / `OpenAiFilesClient::instance_id`）警告仍在，非本轮引入。
 - 最新补充（2026-07-27 21:11）：Agent 交付控制整改已合入本分支工作区并准备提交。核心是把“模式持久化 / 摘要不可伪造 / 未完成不得收工 / 复审非 pass 不收口 / 勘察可派 Explorer / 读写可批量”做成运行时硬约束，而不是再加一堆场景提示词。冒烟验收（A 离线复算 + C 小任务）额外修了 strict-schema 空壳字段与 reviewer catalog-id 串台两处线上缺陷。版本 CLI `0.1.20` / 扩展 `0.1.30`。验证：`cargo test --lib`（`2361 passed`）、plan mock/integration 套件绿、扩展 `npm run gate:full` 绿；`checkpoint_cli_e2e` 既有红测仍在。
 - 最新补充（2026-07-27 02:35）：为修复图片 acceptance 里脚本化 `llm_error` 场景偶发失效，fake-serve 把“一次性 prompt 脚本开关”从共享状态 JSON 拆到独立 sidecar 文件，避免被普通 `persistState()` 覆盖；随后本机重新验收：`npm run accept:image` 绿并产出 `15-retry-and-degrade-notices.png`，`npm run test:integration` 绿，`npm run gate:full` 绿。`cargo test` 仍稳定卡在既有无关红测 `tests/checkpoint_cli_e2e.rs::test_hangup_during_tool_run_allows_same_process_followup`（`child did not exit within 30s`），本轮未触碰该测试所依赖路径。
-- 最新补充（2026-07-27 01:40）：provider 流内终局错误整改已并入本分支：Rust 侧接通 `response.failed/LlmError -> Attempt Loop`，红字去重与 retry/degrade notice 前端同步收口；新增 `replay-turn-payload.py` 可用 transcript 对真 `/v1/responses` 重放，并在本机对 10:58 那轮真实复测拿到 `response.completed`。本轮还正式补上此前缺失的“provider reject”测试矩阵列：wire/unit、serve integration、fake-serve acceptance 与图片 acceptance 截图都已覆盖。
-- 最新补充（2026-07-26 18:06）：附件体验第二轮收口已完成：preview toolbar codicon + copy 对勾、PDF 真剪贴板 / PDF 方块 / history PDF 渲染、transcript `![...](path)` 本地图直渲与轻量放大、`/.cursor/rules` 与 `/.cursor/plans` 出库，以及 `SystemOutputConventions` 对 `![...](path)` 的第二次提示词—渲染耦合同步。验证：`npm run accept:image`、`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞，已单例复跑确认。
+- 最新补充（2026-07-27 01:40）：provider 流内终局错误整改已并入本分支：Rust 侧接通 `response.failed/LlmError -> Attempt Loop`，红字去重与 retry/degrade notice 前端同步收口；新增 `replay-turn-payload.py` 可用 transcript 对真 `/v1/responses` 重放，并在本机对 10:58 那轮真实复测拿到 `response.completed`。本轮还正式补上此前缺失的“provider reject”测试矩阵列：wire/unit、serve integration、fake-serve acceptance 与图片 acceptance 截图都已覆盖。 
+- 最新补充（2026-07-26 18:06）：附件体验第二轮收口已完成：preview toolbar codicon + copy 对勾、PDF 真剪贴板 / PDF 方块 / history PDF 渲染、transcript `![...](path)` 本地图直渲与轻量放大、`/.cursor/rules` 与 `/.cursor/plans` 出库，以及 `SystemOutputConventions` 对 `![...](path)` 的第二次提示词—渲染耦合同步。验证：`npm run accept:image`、`npm run gate:full`、`npm run test:integration` 全绿；`cargo test` 被独立红测 `checkpoint_cli_e2e::test_hangup_during_tool_run_allows_same_process_followup` 阻塞，已单例复跑确认。 
 - 最新补充（2026-07-26 10:44）：图片附件整改已合入本分支。草稿改扩展层、字节走 CAS；`accept:image` 22/22；内存 480MB→1.16MB；版本 CLI `0.1.18` / 扩展 `0.1.28`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
 - 最新补充（2026-07-24 21:04）：流式热路径三层发送（state/sessionView/sessionPatch）+ 攒发调度 + seq/resync 已落地；扩展 `0.1.27`；bench after 显示 patch 载荷/行渲染相对全量显著下降；`test:unit` / `test:integration` / `verify:vsix` 全绿；本机纯插件 `tomcat-vscode-ext-0.1.27.vsix`（制品不入库）。
 - 最新补充（2026-07-24 16:08）：Bash timeout→background 与子代理/ext host tracked execution 已落地；版本 CLI `0.1.17` / 扩展 `0.1.26`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
@@ -566,7 +916,7 @@ feature 1bb87c1f ──┘
 - 最新补充（2026-07-22 16:53）：Code Review 收口整改已合入本分支工作区并准备提交。Plan/Code Reviewer 全拆分、Verifier 收口 dormant、`plan.code_review` 富事件 + `ReviewRow` UI；验证：相关 Rust focused/lib 与扩展 `npm run lint` / `npm run test:unit` 全绿；纯插件 `tomcat-vscode-ext-0.1.24.vsix`。
 - 最新补充（2026-07-22 11:44）：折叠组 `GroupActivityTicker` + `ProgressRow` busy-turn 常显 + thinking `**...**` 最小换行整形已落地。验证：focused GUI `44 passed`、全量 `npm run test`（`42 files / 336 tests`）、`npm run lint`、targeted devhost E2E loading/streaming `2 passing`；验收包 `tomcat-vscode-ext-0.1.24.vsix`。
 - 最新补充（2026-07-22 06:19）：chat-completions `normalize_for_completions` 纯文本扁平化已修复并回归：目标 3 例 + multimodal/transport + `cargo test --lib core::llm`（`312 passed, 1 ignored`）全绿；真实 DeepSeek 冒烟 `chat_real_request_response_print --ignored` 通过。此前第三轮倒计时整改中记录的 3 条 OpenAI provider normalization 既有失败已消除。
-- 最新补充（2026-07-21 15:42）：长任务后台倒计时整改已落地。Rust 侧本次以受影响 focused suites 为 gate：`clamp_block_timeout_preserves_zero_and_bounds_wait_slices`、`background_ticket_keeps_fields_and_adds_next_hint`、`task_output_timeout_ms_cap_does_not_block_indefinitely`、`task_output_block_true_timeout_is_non_terminal_wait_slice`、`task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running`、`background_shell_prompt_mentions_finished_tag`、`task_output_schema_matches_long_wait_slice_contract`、`tool_update_uses_compact_minute_second_countdown_labels` 与 `cargo test --test prompt_size_budget` 全绿；扩展 `npm run test:unit` 与 `npm run lint` 全绿；`docs/tool-catalog.md` 已用 `gen-tool-catalog` 重生成。额外观察：本机直接跑整库 `cargo test --lib` 曾命中 3 条 OpenAI provider normalization 失败（`openai_provider_test.rs`，与 countdown / prompt / webview 改动无关）；该问题已在同分支后续提交修好。
+- 最新补充（2026-07-21 15:42）：长任务后台倒计时整改已落地。Rust 侧本次以受影响 focused suites 为 gate：`clamp_block_timeout_preserves_zero_and_bounds_wait_slices`、`background_ticket_keeps_fields_and_adds_next_hint`、`task_output_timeout_ms_cap_does_not_block_indefinitely`、`task_output_block_true_timeout_is_non_terminal_wait_slice`、`task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running`、`background_shell_prompt_mentions_finished_tag`、`task_output_schema_matches_long_wait_slice_contract`、`tool_update_uses_compact_minute_second_countdown_labels` 与 `cargo test --test prompt_size_budget` 全绿；扩展 `npm run test:unit` 与 `npm run lint` 全绿；`docs/tool-catalog.md` 已用 `gen-tool-catalog` 重生成。额外观察：本机直接跑整库 `cargo test --lib` 曾命中 3 条 OpenAI provider normalization 失败（`openai_provider_test.rs`，与 countdown / prompt / webview 改动无关）；该问题已在同分支后续提交修好。 
 - 最新补充（2026-07-21 07:34）：扩展验收版本已继续上调：`package.json` 现为 `0.1.21`，`SettingsPanel.test.ts` / `SettingsApp.test.tsx` 的 extension 版本断言已同步，根 `package-lock.json` 顶层包版本也已对齐；本机重新打包产物为 `tomcat-vscode-ext/tomcat-vscode-ext-0.1.21.vsix`。验证：`npm run test:unit:core -- src/ui/settings/SettingsPanel.test.ts`、`npm run test:unit:gui -- src/settings/SettingsApp.test.tsx`、`npm run lint`、`npm run package:vsix` 全绿。
 - 最新补充（2026-07-21 07:31）：loading dots 又按验收反馈做了一轮精修：共享 [`LoadingDots.tsx`](../../../tomcat-vscode-ext/gui/src/components/LoadingDots.tsx) 现在播放更慢的紧凑序列 `.` → `..` → `...` → `.`，第一个点不会再消失；同时 dots 本身也带 shimmer，因此纯占位 loading 位不需要依赖旁边文案就能表达活跃态。UI 合同仍保持为“**只有没有 shimmer 文本的 loading 位才显示 dots**”，所以 `ProgressRow` / `PlanFileCard` 继续复用共享 dots，而 `ThinkingBlock` / `ToolRow` 在 active 态只保留 shimmer 文本，不再并排追加 dots。验证：GUI targeted `65 passed`、`npm run lint` 全绿。
 - 最新补充（2026-07-21 06:54）：`Used N tools` 后的请求级 loading 语义已按用户指定收口：不再把等待态绑回 `ThinkingGroup` 组头，而是复用 `ProgressRow` 表达两段 gap。实现上 `ProgressRow` 现在只显示呼吸 `...`、不再显示可见 `Thinking`；`TranscriptView` 也不再把“live cluster 中出现过任意 thinking”误当成 active thinking，因此 tool 全完成但请求仍 busy 时，尾部会重新出现同一个 `ProgressRow`，直到新的 thinking / assistant 文本真正到来。扩展版本同步 bump 为 `0.1.20`，本机验收产物为 `tomcat-vscode-ext/tomcat-vscode-ext-0.1.20.vsix`。验证：`npm run test:unit:gui -- ProgressRow.test.tsx TranscriptView.test.tsx`（`17 passed`）、Settings 版本断言同步、`npm run lint`、targeted devhost E2E `keeps max reasoning and pre-stream loading states working in the webview` 与 `streams in the Tomcat webview` 全绿。host E2E 现已真实锁住「pre-stream 纯 dots、post-tool 复用同一 ProgressRow、`turn.summary_updated` 只改标题、下一段输出一来 dots 消失」四段式。

@@ -80,6 +80,7 @@ pub struct ScopeServices {
     pub agent_definition_dir: PathBuf,
     pub agent_trail_dir: PathBuf,
     pub cfg_path: PathBuf,
+    /// Effective session view; controller-private skills never enter scope_container.skill_set.
     pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
     pub skill_discovery_handle:
         Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::core::skill::SkillSet>>>>,
@@ -88,7 +89,11 @@ pub struct ScopeServices {
 type OpenAiFilesRuntimeSlot = Arc<Mutex<Option<(String, Arc<OpenAiFilesRuntime>)>>>;
 
 pub struct SessionRuntime {
-    pub session: SessionManager,
+    /// ACP-supplied connectors, replaced on control handoff and never cwd-cached.
+    pub session_mcp: RwLock<Option<Arc<crate::core::connector::mcp::manager::McpManager>>>,
+    pub connection_skill_dir: RwLock<Option<PathBuf>>,
+    /// Own the exact allocation borrowed by the shared dispatcher's weak session binding.
+    pub session: Arc<SessionManager>,
     pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,

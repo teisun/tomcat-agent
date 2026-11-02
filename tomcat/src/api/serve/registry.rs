@@ -6,8 +6,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use tokio::task::JoinHandle;
 
 use crate::core::llm::SystemPromptSnapshot;
@@ -27,7 +27,14 @@ pub struct SessionSlot {
     pub ctx: Arc<ChatContext>,
     pub mode: SessionMode,
     pub cwd: Option<String>,
+    /// Immutable header metadata. The transcript remains the durable source of truth.
+    pub origin: Option<crate::core::session::SessionOrigin>,
     pub busy: AtomicBool,
+    /// The sole writer identity; the runtime's admission lock serializes transfers.
+    pub(super) controller: Mutex<Option<uuid::Uuid>>,
+    /// Serializes current-message replay, fanout and changes of subscribers.
+    pub(super) message_replay: Mutex<super::event_pump::MessageReplay>,
+    pub(super) last_used: Mutex<std::time::Instant>,
     /// Admission is busy during maintenance, but no agent turn is running.
     pub(super) command_job: AtomicBool,
     /// A restart recovered an unanswered ask_question before the frontend
@@ -60,7 +67,11 @@ impl SessionSlot {
             ctx,
             mode,
             cwd,
+            origin: None,
             busy: AtomicBool::new(false),
+            controller: Mutex::new(None),
+            message_replay: Mutex::new(Default::default()),
+            last_used: Mutex::new(std::time::Instant::now()),
             command_job: AtomicBool::new(false),
             resume_pending_ask_question: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
@@ -91,7 +102,12 @@ impl SessionSlot {
     }
 
     pub fn mark_idle(&self) {
+        self.touch();
         self.busy.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) fn touch(&self) {
+        *self.last_used.lock() = std::time::Instant::now();
     }
 
     pub fn is_interrupted(&self) -> bool {
@@ -130,7 +146,7 @@ pub(super) struct SessionScope {
 }
 
 impl SessionScope {
-    fn from_slot(slot: &SessionSlot) -> Self {
+    pub(super) fn from_slot(slot: &SessionSlot) -> Self {
         Self {
             key: slot
                 .ctx
@@ -144,32 +160,32 @@ impl SessionScope {
     }
 }
 
-/// 进程内 `sessionId -> SessionSlot` 的注册表。
+#[derive(Default)]
+struct Slots {
+    by_id: HashMap<String, Arc<SessionSlot>>,
+    order: Vec<String>,
+}
+
+/// Service-wide identity and capacity; a connection's selected session lives on the connection.
 pub struct ChatContextRegistry {
-    slots: DashMap<String, Arc<SessionSlot>>,
-    order: Mutex<Vec<String>>,
-    active_session_id: RwLock<Option<String>>,
-    last_closed_scope: RwLock<Option<SessionScope>>,
+    slots: Mutex<Slots>,
     max_sessions: usize,
 }
 
 impl ChatContextRegistry {
     pub fn new(max_sessions: usize) -> Self {
         Self {
-            slots: DashMap::new(),
-            order: Mutex::new(Vec::new()),
-            active_session_id: RwLock::new(None),
-            last_closed_scope: RwLock::new(None),
+            slots: Mutex::new(Slots::default()),
             max_sessions,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.slots.len()
+        self.slots.lock().by_id.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.len() == 0
     }
 
     pub fn max_sessions(&self) -> usize {
@@ -177,81 +193,41 @@ impl ChatContextRegistry {
     }
 
     pub fn insert(&self, slot: Arc<SessionSlot>) -> Result<(), AppError> {
-        if self.len() >= self.max_sessions {
-            return Err(AppError::Config("too_many_sessions".to_string()));
+        let mut slots = self.slots.lock();
+        if slots.by_id.contains_key(&slot.session_id) {
+            return Err(AppError::Config("session_in_use".into()));
         }
-        let session_id = slot.session_id.clone();
-        self.slots.insert(session_id.clone(), slot);
-        self.order.lock().push(session_id.clone());
-        if self.active_session_id.read().is_none() {
-            *self.active_session_id.write() = Some(session_id);
+        if slots.by_id.len() >= self.max_sessions {
+            return Err(AppError::Config("too_many_sessions".into()));
         }
+        slots.order.push(slot.session_id.clone());
+        slots.by_id.insert(slot.session_id.clone(), slot);
         Ok(())
     }
 
     pub fn get(&self, session_id: &str) -> Option<Arc<SessionSlot>> {
-        self.slots
-            .get(session_id)
-            .map(|slot| Arc::clone(slot.value()))
-    }
-
-    pub fn resolve_session_id(&self, requested: Option<&str>) -> Result<String, AppError> {
-        if let Some(requested) = requested {
-            if self.slots.contains_key(requested) {
-                return Ok(requested.to_string());
-            }
-            return Err(AppError::Config("unknown_session".to_string()));
-        }
-        self.active_session_id
-            .read()
-            .clone()
-            .ok_or_else(|| AppError::Config("unknown_session".to_string()))
-    }
-
-    pub fn active_session_id(&self) -> Option<String> {
-        self.active_session_id.read().clone()
-    }
-
-    pub(super) fn current_scope(&self) -> Option<SessionScope> {
-        let active = self.active_session_id.read();
-        active
-            .as_deref()
-            .and_then(|id| self.get(id))
-            .map(|slot| SessionScope::from_slot(&slot))
-            .or_else(|| self.last_closed_scope.read().clone())
-    }
-
-    pub fn set_active_session(&self, session_id: &str) -> Result<(), AppError> {
-        if !self.slots.contains_key(session_id) {
-            return Err(AppError::Config("unknown_session".to_string()));
-        }
-        *self.active_session_id.write() = Some(session_id.to_string());
-        Ok(())
+        self.slots.lock().by_id.get(session_id).cloned()
     }
 
     pub fn remove(&self, session_id: &str) -> Option<Arc<SessionSlot>> {
-        let mut active = self.active_session_id.write();
-        let removed = self.slots.remove(session_id).map(|(_, slot)| slot);
-        if removed.is_some() {
-            self.order.lock().retain(|existing| existing != session_id);
-            if active.as_deref() == Some(session_id) {
-                *active = self.order.lock().first().cloned();
-                if active.is_none() {
-                    *self.last_closed_scope.write() =
-                        removed.as_ref().map(|slot| SessionScope::from_slot(slot));
-                }
-            }
-        }
-        removed
+        let mut slots = self.slots.lock();
+        let removed = slots.by_id.remove(session_id)?;
+        slots.order.retain(|id| id != session_id);
+        Some(removed)
+    }
+
+    pub(super) fn slots(&self) -> Vec<Arc<SessionSlot>> {
+        self.slots.lock().by_id.values().cloned().collect()
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {
-        let order = self.order.lock().clone();
-        order
-            .into_iter()
-            .filter_map(|session_id| {
-                self.get(&session_id).map(|slot| SessionSummary {
-                    session_id,
+        let slots = self.slots.lock();
+        slots
+            .order
+            .iter()
+            .filter_map(|id| {
+                slots.by_id.get(id).map(|slot| SessionSummary {
+                    session_id: id.clone(),
                     busy: slot.is_turn_running(),
                     interrupted: slot.is_interrupted(),
                 })

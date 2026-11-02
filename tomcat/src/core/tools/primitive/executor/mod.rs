@@ -138,6 +138,7 @@ const MAX_READ_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB
 /// **权限模型**：构造期强制注入 [`PermissionGate`]；路径 / bash / 审计来源
 /// 全部走 gate 三层决策。无 legacy fallback 通道。
 pub struct DefaultPrimitiveExecutor {
+    pub(super) session_cwd: Option<std::path::PathBuf>,
     pub(super) config: PrimitiveConfig,
     pub(super) confirmation: Arc<dyn UserConfirmationProvider>,
     pub(super) audit: Arc<dyn AuditRecorder>,
@@ -197,9 +198,15 @@ impl DefaultPrimitiveExecutor {
             bash_foreground_wait_ms: crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
             bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
             bash_persist_dir: None,
+            session_cwd: None,
             bash_task_registry: None,
             bash_ast: crate::core::permission::BashAstChecker::new(false, vec![], vec![]),
         }
+    }
+
+    pub fn with_session_cwd(mut self, cwd: std::path::PathBuf) -> Self {
+        self.session_cwd = Some(cwd);
+        self
     }
 
     /// T2-P0-016 PR-L：注入自定义 AST allow/deny（含 `enabled`）。生产路径后续由
@@ -278,6 +285,16 @@ impl DefaultPrimitiveExecutor {
 
 #[async_trait]
 impl PrimitiveExecutor for DefaultPrimitiveExecutor {
+    fn child_environment(&self) -> Option<Arc<crate::infra::platform::EnvironmentSnapshot>> {
+        self.bash_task_registry
+            .as_ref()
+            .and_then(|registry| registry.environment_snapshot())
+    }
+
+    fn resolve_path(&self, path: &str) -> std::path::PathBuf {
+        super::types::path_in_session(path, self.session_cwd.as_deref())
+    }
+
     async fn authorize_write_path(
         &self,
         path: &str,

@@ -1429,8 +1429,13 @@ impl PlanRuntime {
         *self.ask_question_panel.lock() = Some(panel);
     }
 
+    /// Remove interaction support when the controller cannot collect an answer.
+    pub fn detach_ask_question_panel(&self) {
+        *self.ask_question_panel.lock() = None;
+    }
+
     /// 取出当前注入的 panel（克隆 Arc）。`tool_exec.rs` 调 `ask_question::execute`
-    /// 前从此处取；未注入时返回 None，工具层会回写 `cancelled: true`。
+    /// 前从此处取；未注入时返回 None，由调用方处理不可交互的情况。
     pub fn ask_question_panel(&self) -> Option<Arc<dyn AskQuestionPanel>> {
         self.ask_question_panel.lock().clone()
     }

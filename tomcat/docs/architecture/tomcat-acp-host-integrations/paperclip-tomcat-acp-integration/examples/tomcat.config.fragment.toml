@@ -1,0 +1,14 @@
+# 仅供逐项合并，不是完整配置；不要覆盖已有 tomcat.config.toml。
+# 把路径替换为执行机器上的测试项目目录，并保留原有授权项。
+[workspace]
+workspace_roots = ["/srv/workspaces/example-project"]
+
+[llm]
+# 先在 models.toml 中配置对应条目；使用内置模型时换成其实际 ID。
+default_model = "company-model"
+# 仅当公司需要显式代理时设置；以下是不可用的示意地址，不要原样启用。
+# proxy = "http://proxy.example.invalid:8080"
+
+[primitive]
+# 这只让 Tomcat 请求批准；ACP 宿主仍可能自动批准，不等于人工审批。
+auto_confirm = false

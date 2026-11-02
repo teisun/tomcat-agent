@@ -21,9 +21,11 @@ pub(crate) fn build_bash_task_registry(
     confirmation: Arc<dyn UserConfirmationProvider>,
     audit: Arc<dyn AuditRecorder>,
     bash_ast: BashAstChecker,
+    session_cwd: Option<PathBuf>,
 ) -> Arc<BashTaskRegistry> {
     Arc::new(
         BashTaskRegistry::new(persist_dir)
+            .with_session_cwd(session_cwd)
             .with_foreground_wait_ms(bash_cfg.foreground_wait_ms)
             .with_background_guard(BackgroundBashGuard::new(
                 "__agent__",

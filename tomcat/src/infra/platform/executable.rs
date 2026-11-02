@@ -36,7 +36,7 @@ pub fn resolve_program(command: &str, child_path: Option<&OsStr>) -> PathBuf {
 }
 
 /// 纯函数版本：PATH、PATHEXT 与文件存在性都由调用方提供。
-fn find_executable_in(
+pub(super) fn find_executable_in(
     path: &OsStr,
     pathext: Option<&OsStr>,
     candidates: &[&str],

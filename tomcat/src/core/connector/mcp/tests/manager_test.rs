@@ -10,6 +10,8 @@ use crate::AppConfig;
 
 #[path = "naming_collision_test.rs"]
 mod naming_collision_tests;
+#[path = "session_test.rs"]
+mod session_tests;
 
 #[test]
 fn manager_uses_one_runtime_for_global_and_workspace_sources() {

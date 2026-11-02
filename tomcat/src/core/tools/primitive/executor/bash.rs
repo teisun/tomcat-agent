@@ -8,12 +8,12 @@ use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{GrantTrace, PermissionScope};
 use crate::core::tools::primitive::bash_task::ForegroundOutput;
 use crate::core::tools::primitive::{
-    BashExecutionState, BashNextAction, BashResult, BashTaskRegistry, PrimitiveOperation,
-    ResolvedCwd,
+    BashExecutionState, BashNextAction, BashResult, BashTaskRegistry, PrimitiveExecutor,
+    PrimitiveOperation, ResolvedCwd,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -70,18 +70,26 @@ async fn resolve_cwd(
     audit_cmd: &str,
     plugin_id: &str,
 ) -> Result<ResolvedCwd, AppError> {
-    let cwd = match ResolvedCwd::from_raw(cwd) {
+    let cwd = match ResolvedCwd::from_raw_in_environment(
+        cwd,
+        executor.session_cwd.as_deref(),
+        executor.child_environment().as_deref(),
+    ) {
         Ok(cwd) => cwd,
         Err(err) => {
             record_bash_failure(executor, audit_cmd, plugin_id, &err);
             return Err(err);
         }
     };
-    let Some(raw) = cwd.raw_input() else {
+    if cwd.raw_input().is_none() {
         return Ok(cwd);
-    };
+    }
     if let Err(err) = executor
-        .gate_check_path(PrimitiveOperation::Read, raw, plugin_id)
+        .gate_check_path(
+            PrimitiveOperation::Read,
+            &cwd.resolved_path().to_string_lossy(),
+            plugin_id,
+        )
         .await
         .map(|_| ())
     {
@@ -105,11 +113,11 @@ async fn preflight(
         .check(audit_cmd)
         .map_err(|e| AppError::Primitive(e.to_string()))?;
     for raw in crate::core::permission::bash_parser::extract_paths(audit_cmd) {
-        let candidate = if raw.starts_with("./") || raw.starts_with("../") {
-            cwd.join(&raw)
-        } else {
-            PathBuf::from(&raw)
-        };
+        let candidate = crate::core::tools::primitive::bash_task::resolve_preflight_path(
+            &raw,
+            cwd,
+            executor.child_environment().as_deref(),
+        )?;
         executor
             .gate_check_path(
                 PrimitiveOperation::Bash,

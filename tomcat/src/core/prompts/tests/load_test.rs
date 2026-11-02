@@ -1,9 +1,51 @@
 use crate::core::plan_runtime::{review::Finding, NextAction};
 use crate::core::prompts::{load, render, PromptKey};
 
+const WRITE_PLANS_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/skills/write-plans/SKILL.md"
+));
+const PLAN_WORKFLOW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/skills/write-plans/references/tomcat-plan-workflow.md"
+));
+const PLAN_STRUCTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/skills/write-plans/references/plan-structure.md"
+));
+
 #[test]
-fn planner_prompt_mentions_create_plan_and_ask_question() {
+fn planner_prompt_is_a_short_write_plans_entrypoint() {
     let s = load(PromptKey::PlannerReminder);
+    assert!(s
+        .trim_start()
+        .starts_with("<system_reminder kind=\"planner\">"));
+    assert!(s.trim_end().ends_with("</system_reminder>"));
+    assert!(s.contains("You are in PLAN mode."));
+    assert!(s.contains("NOT to execute it."));
+    assert!(s.contains(&format!(
+        "call `load_skill` with `name=\"{}\"`",
+        crate::core::skill::catalog::WRITE_PLANS_SKILL_NAME
+    )));
+    assert!(s.contains("Before planning or revising a plan"));
+    assert!(s.contains("unless its instructions are already in this conversation"));
+    for old_section in [
+        "Behavior contract",
+        "## Design and explanation standards",
+        "## Avoid over-design",
+        "## Plan structure",
+        "## Verification hints in plans",
+    ] {
+        assert!(
+            !s.contains(old_section),
+            "planner must not inline {old_section}"
+        );
+    }
+}
+
+#[test]
+fn write_plans_workflow_mentions_create_plan_and_ask_question() {
+    let s = PLAN_WORKFLOW;
     assert!(s.contains("create_plan"));
     assert!(s.contains("Call `start_plan` only when the user's latest message explicitly asks"));
     assert!(s.contains("never start merely because they asked to create or revise a plan"));
@@ -17,10 +59,10 @@ fn planner_prompt_mentions_create_plan_and_ask_question() {
 }
 
 #[test]
-fn plan_prompts_carry_anti_over_design_rules() {
-    let planner = load(PromptKey::PlannerReminder);
+fn write_plans_and_reviewer_carry_anti_over_design_rules() {
+    let planner = WRITE_PLANS_SKILL;
     let reviewer = load(PromptKey::ReviewerPlan);
-    for (name, text) in [("planner", planner), ("plan reviewer", reviewer)] {
+    for (name, text) in [("write-plans", planner), ("plan reviewer", reviewer)] {
         for rule in [
             "Keep the design elegant while strictly avoiding over-design.",
             "in functionality or in tests",
@@ -32,7 +74,7 @@ fn plan_prompts_carry_anti_over_design_rules() {
     assert!(planner.contains("## Avoid over-design"));
     assert!(reviewer.contains("TDD"));
     assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
-    for (name, text) in [("planner", planner), ("plan reviewer", reviewer)] {
+    for (name, text) in [("write-plans", planner), ("plan reviewer", reviewer)] {
         let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
         for rule in [
             "search the project for reusable code or infrastructure first",
@@ -89,9 +131,9 @@ fn verification_prompt_points_ui_changes_to_verify_skill() {
 }
 
 #[test]
-fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate() {
+fn verification_and_write_plans_keep_focused_and_acceptance_roles_separate() {
     let verification = load(PromptKey::SystemVerification);
-    let planner = load(PromptKey::PlannerReminder);
+    let planner = PLAN_STRUCTURE;
 
     assert!(
         verification.contains("Mid-work (including EXEC before final close-out): focused checks")
@@ -102,7 +144,11 @@ fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate()
 
     assert!(planner.contains("one final todo with `kind=acceptance`"));
     assert!(planner.contains("intermediate verification todos use `kind=work`"));
-    assert!(planner.contains("human-readable \"Acceptance\" section"));
+    assert!(planner.contains("at most one `kind=acceptance`"));
+    assert!(planner.contains("| `### Acceptance` | MUST |"));
+    assert!(planner.contains("observable overall completion conditions"));
+    assert!(planner.contains("expected impact radius"));
+    assert!(planner.contains("not\nto the number of todos"));
 }
 
 #[test]
@@ -143,6 +189,9 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
         ("planner", planner),
         ("executor", executor),
         ("plan review brief", plan_review_brief),
+        ("write-plans skill", WRITE_PLANS_SKILL),
+        ("plan workflow", PLAN_WORKFLOW),
+        ("plan structure", PLAN_STRUCTURE),
     ];
     for (name, text) in navigating_surfaces.iter().copied().chain([
         ("verify skill", VERIFY_SKILL),
@@ -204,57 +253,19 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
 }
 
 #[test]
-fn planner_prompt_carries_a_generic_plan_structure_section() {
-    let s = load(PromptKey::PlannerReminder);
-    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let section = s
-        .split_once("## Plan structure\n\n")
-        .expect("planner should have a Plan structure section")
-        .1
-        .split_once("\n\n## ")
-        .expect("Plan structure should end before the next section")
-        .0;
-
-    let expected = r#"- Explain problems and technical solutions in a way that is easy to read and understand:
-    - Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
-    - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
-    - Give each problem or feature requirement its own self-contained section; do not list all problems first and then present all solutions together. Use separate subsections in the following order:
-        - For a problem: "Problem symptoms", "Root cause and evidence", "Solution", and "Test case checklist".
-        - For a feature requirement: "Requirement background", "Solution", and "Test case checklist".
-        - For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.
-    - Each "Solution" section must:
-        - Include, at a minimum, subsections for the solution explanation (diagram plus text), a UI mockup (if applicable), and a key decisions checklist.
-        - If it includes UI changes, use an ASCII diagram to show the proposed UI.
-        - State each decision in one precise sentence, followed by small gray text identifying the specific files, symbols, or contracts involved, what changes from before to after, and the scope boundaries.
-    - Each "Test case checklist" section must:
-        - Describe the test case design in words.
-        - Provide the paths of the test files to add or modify.
-    - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
-    - When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat."#;
-    assert_eq!(
-        section, expected,
-        "plan structure must preserve the complete approved wording, subsection order, and nesting"
-    );
-    for obsolete in [
-        "\"Verification\"",
-        "Solution\" (meeting the requirements below)",
-        "secondary sub-line",
-        "Every Solution must contain",
-        "ASCII UI diagram showing the proposed result",
-    ] {
-        assert!(
-            !section.contains(obsolete),
-            "plan structure must not retain superseded wording: {obsolete}"
-        );
-    }
-    // Verification elsewhere still describes actual acceptance, not the case checklist.
-    assert!(s.contains("## Verification hints in plans"));
-    assert!(!normalized.contains("root cause (or governing constraint for new work)"));
-
-    assert!(!s.contains(
-        "Reason from first principles: an existing design may be overturned when it does not"
+fn write_plans_preserves_heading_and_reader_contracts() {
+    assert!(PLAN_STRUCTURE.contains(
+        "`MUST`: Format each problem or requirement section heading as `Issue N: Description` or `Requirement N: Description`."
     ));
-    assert!(s.contains("Reason from first principles: when planning or coding"));
+    assert!(PLAN_STRUCTURE.contains(
+        "Use the equivalent labels in the plan's language; always include both the label and the number."
+    ));
+    assert!(PLAN_STRUCTURE.contains("Do not invent a root cause for a new requirement."));
+    assert!(PLAN_STRUCTURE.contains("The following requirements apply to the plan document, not to chat replies or review reports."));
+    assert!(PLAN_STRUCTURE
+        .contains("The following six-column table is the only format for key decisions:"));
+    assert!(WRITE_PLANS_SKILL.contains("## Reader check:"));
+    assert!(WRITE_PLANS_SKILL.contains("does not require another model call or review workflow"));
 }
 
 #[test]
@@ -290,8 +301,8 @@ fn parallel_tools_gives_a_number_and_a_counter_example() {
 }
 
 #[test]
-fn planner_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
-    let planner = load(PromptKey::PlannerReminder);
+fn write_plans_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
+    let planner = PLAN_WORKFLOW;
     let executor = load(PromptKey::ExecutorReminderFmt);
 
     assert!(planner
@@ -313,9 +324,9 @@ fn planner_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
 
 #[test]
 fn dispatch_agent_is_described_rather_than_listed_bare() {
-    let planner = load(PromptKey::PlannerReminder);
+    let planner = PLAN_WORKFLOW;
     let executor = load(PromptKey::ExecutorReminderFmt);
-    for (label, text) in [("planner", planner), ("executor", executor)] {
+    for (label, text) in [("plan workflow", planner), ("executor", executor)] {
         assert!(
             text.contains("read-only explorer subagents"),
             "{label} 应说明 dispatch_agent 是什么，而不是把它塞进一串工具名里"
@@ -377,21 +388,26 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "workspace_roots",
     ];
 
-    fn collect_txt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("templates dir readable") {
+    fn collect_prompt_files(
+        dir: &std::path::Path,
+        extension: &str,
+        out: &mut Vec<std::path::PathBuf>,
+    ) {
+        for entry in std::fs::read_dir(dir).expect("prompt directory readable") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
-                collect_txt(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "txt") {
+                collect_prompt_files(&path, extension, out);
+            } else if path.extension().is_some_and(|ext| ext == extension) {
                 out.push(path);
             }
         }
     }
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core/prompts/templates");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
-    collect_txt(&root, &mut files);
-    assert!(!files.is_empty(), "should have found template files");
+    collect_prompt_files(&root.join("src/core/prompts/templates"), "txt", &mut files);
+    collect_prompt_files(&root.join("assets/skills/write-plans"), "md", &mut files);
+    assert!(!files.is_empty(), "should have found prompt files");
 
     let mut checked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for file in files {
@@ -543,32 +559,25 @@ fn negative_assertion_prompt_present() {
 }
 
 #[test]
-fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
-    let s = load(PromptKey::PlannerReminder);
+fn write_plans_preserves_decomposition_and_test_design() {
     const TODO_POLICY: &str = concat!(
         "6. Decompose thoroughly. For non-trivial work, break the work into one or more milestones,\n",
         "then precisely break each milestone down into detailed todos so nothing is missed and over-decomposition is avoided.\n",
         "However, for a simple, single-surface change, a flat linear todo list is sufficient."
     );
-
-    assert!(s.contains(TODO_POLICY));
-    assert!(!s.contains("Avoid over-decomposition"));
-    assert!(!s.contains("Err on the side"));
-    assert!(!s.contains("of more, smaller items"));
-    // engineering-standards #9：按独特风险分层的多视角测试。
-    assert!(s.contains("unit, integration, and E2E coverage"));
-    assert!(s.contains("where each layer catches a\n  distinct failure type"));
-    assert!(s.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(s.contains("Treat milestones as delivery boundaries"));
-    assert!(s.contains("Source commands from the user, project rules, manifests"));
-    // engineering-standards #6-8 在 planner 的重申锚点。
-    assert!(s.contains("first principles"));
-    assert!(s.contains("ASCII diagram"));
-    assert!(s.contains("Put user experience first"));
+    assert!(PLAN_WORKFLOW.contains(TODO_POLICY));
+    assert!(!PLAN_WORKFLOW.contains("Err on the side"));
+    assert!(!PLAN_WORKFLOW.contains("of more, smaller items"));
+    assert!(PLAN_STRUCTURE.contains("unit, integration, and E2E coverage"));
+    assert!(PLAN_STRUCTURE.contains("where each layer catches a\n  distinct failure type"));
+    assert!(PLAN_STRUCTURE.contains("Source commands from the user, project rules, manifests"));
+    assert!(PLAN_STRUCTURE.contains("first principles"));
+    assert!(PLAN_STRUCTURE.contains("ASCII diagram"));
+    assert!(PLAN_STRUCTURE.contains("Put user experience first"));
 }
 
-/// S6/S8 remain shared. Core identity keeps general explanation rules, while
-/// planner and plan reviewer carry plan-structure requirements; code reviewer remains scoped.
+/// S6/S8 remain shared. Core identity keeps general explanation rules;
+/// the write-plans skill owns plan structure, not the planner or reviewers.
 #[test]
 fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
@@ -586,7 +595,6 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
             identity.contains(sentence),
             "{label} 应逐字出现在 core_identity"
         );
-        assert!(planner.contains(sentence), "{label} 应逐字出现在 planner");
         assert!(
             reviewer_plan.contains(sentence),
             "{label} 应逐字出现在 reviewer_plan"
@@ -604,23 +612,22 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.",
     ];
     let complex_section_rule = "For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.";
+    for rule in common_explanation_rules
+        .into_iter()
+        .chain([complex_section_rule])
+    {
+        assert_eq!(
+            identity.matches(rule).count(),
+            1,
+            "core_identity must preserve each explanation rule exactly once: {rule}"
+        );
+    }
+
     for (label, text) in [
         ("core_identity", identity),
         ("planner", planner),
         ("plan reviewer", reviewer_plan),
     ] {
-        for rule in common_explanation_rules {
-            assert_eq!(
-                text.matches(rule).count(),
-                1,
-                "{label} must preserve each shared explanation rule exactly once: {rule}"
-            );
-        }
-        assert_eq!(
-            text.matches(complex_section_rule).count(),
-            1,
-            "{label} must preserve the shared complex-section rule exactly once"
-        );
         assert!(
             !text.contains("Do not explain problems or solutions using opaque jargon"),
             "{label} must not retain the removed jargon rule"
@@ -631,33 +638,22 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         );
     }
 
-    let planner_section = planner
-        .split_once("## Plan structure\n\n")
-        .expect("planner should have a Plan structure section")
-        .1
-        .split_once("\n\n## ")
-        .expect("Plan structure should end before the next section")
-        .0;
-    let reviewer_section = reviewer_plan
-        .split_once("- Explain problems and technical solutions")
-        .expect("plan reviewer should have explanation standards")
-        .1
-        .split_once("\n- Put user experience first:")
-        .expect("explanation standards should end before the UI principle")
-        .0;
-    assert_eq!(
-        format!("- Explain problems and technical solutions{reviewer_section}"),
-        planner_section,
-        "planner and plan reviewer must carry the same complete explanation block"
-    );
-    for (label, text) in [("planner", planner), ("plan reviewer", reviewer_plan)] {
-        for rule in planner_section.lines().map(str::trim) {
-            assert_eq!(
-                text.matches(rule).count(),
-                1,
-                "{label} must carry each explanation rule exactly once: {rule}"
-            );
-        }
+    assert!(reviewer_plan.contains("Check that a reader without the chat history can understand"));
+    assert!(reviewer_plan.contains(
+        "what will change, why this approach was chosen, and how completion will be verified"
+    ));
+    assert!(reviewer_plan.contains("without imposing a fixed document template"));
+    assert!(!reviewer_plan.contains("- Explain problems and technical solutions"));
+    assert!(reviewer_plan.contains("one final `kind=Acceptance` todo"));
+    for output_field in [
+        "<review>",
+        "findings:",
+        "summary:",
+        "changes_summary:",
+        "applied_changes:",
+        "</review>",
+    ] {
+        assert!(reviewer_plan.contains(output_field));
     }
 
     for plan_only in [
@@ -673,7 +669,12 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         "Provide the paths of the test files to add or modify.",
         "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.",
     ] {
-        for (label, text) in [("core_identity", identity), ("code reviewer", reviewer_code)] {
+        for (label, text) in [
+            ("core_identity", identity),
+            ("planner", planner),
+            ("plan reviewer", reviewer_plan),
+            ("code reviewer", reviewer_code),
+        ] {
             assert!(
                 !text.contains(plan_only),
                 "{label} must not carry plan-specific explanation rules: {plan_only}"
@@ -748,12 +749,15 @@ fn long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract() {
 }
 
 #[test]
-fn planner_and_system_verification_share_one_scoped_batch_per_target_contract() {
-    let planner = load(PromptKey::PlannerReminder);
+fn write_plans_and_system_verification_share_scoped_batches() {
+    let planner = PLAN_STRUCTURE
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let verification = load(PromptKey::SystemVerification);
 
-    assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(planner.contains("Treat milestones as delivery boundaries"));
+    assert!(planner.contains("verification batches are shared build/test boundaries"));
+    assert!(planner.contains("Milestones are delivery boundaries"));
     assert!(verification
         .contains("Do not schedule the same test family once per todo and again at the end"));
     assert!(verification

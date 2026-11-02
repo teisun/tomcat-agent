@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::connector::ConnectorRegistry;
+use crate::core::connector::mcp::manager::McpToolView;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
 use crate::core::session::manager::ContextState;
@@ -107,6 +107,7 @@ pub trait EphemeralTailProvider: Send + Sync {
 // ─── 配置与结果 ─────────────────────────────────────────────────────────────
 
 pub struct AgentLoopConfig {
+    /// 每次逻辑模型请求的尝试上限，含首次；压缩、空答与降级不重置额度。
     pub max_attempts: u32,
     /// 请求组装时置于消息列表之前的稳定 system prompt。
     ///
@@ -119,7 +120,7 @@ pub struct AgentLoopConfig {
     /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
     /// receive plan-writing capabilities merely to gain a transport retry budget.
     pub unattended_retry: bool,
-    /// 单次 Attempt 最大工具轮次。默认 `usize::MAX`（不限制）；
+    /// 单次 Reasoning Loop 最大工具轮次，网络重试不重置；默认 `usize::MAX`（不限制）；
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,
@@ -353,7 +354,7 @@ pub struct AgentLoop {
     pub(super) tool_registry: Option<Arc<dyn ToolRegistry>>,
     /// 连接器目录服务。仅供稳定内置元工具 `tool_search` / `tool_describe` /
     /// `tool_call` 查询和调用 deferred 工具；MCP 工具本身绝不注册到 ToolRegistry。
-    pub(super) connector_registry: Option<Arc<ConnectorRegistry>>,
+    pub(super) connector_tools: Option<Arc<McpToolView>>,
     /// `tool_run_code` 复用插件 QuickJS VM 的同一资源预算；未注入时该工具返回
     /// 明确错误，纯 AgentLoop 单测不必装配插件运行时。
     pub(super) plugin_engine_config: Option<crate::ext::PluginEngineConfig>,

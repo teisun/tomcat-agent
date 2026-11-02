@@ -1,6 +1,6 @@
 {
   "extension.description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "command.restartServe": "Tomcat: Restart Serve",
+  "command.restartServe": "Tomcat: Restart Shared Service (Stops All Tasks)",
   "command.newSession": "Tomcat: Start New Session",
   "command.listSessions": "Tomcat: List Sessions",
   "command.focus": "Tomcat: Focus Agent Box",
@@ -12,8 +12,8 @@
   "command.preview": "Preview",
   "command.markdown": "Markdown",
   "editor.planPreview": "Tomcat Plan Preview",
-  "config.path": "Path to the tomcat executable used to launch `tomcat serve --stdio`.",
-  "config.extraArgs": "Additional CLI arguments passed to `tomcat serve --stdio`.",
+  "config.path": "Path to the tomcat executable used to connect to and manage the shared service.",
+  "config.extraArgs": "Global CLI arguments passed before the shared service management command.",
   "config.defaultCwd": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder.",
   "config.controlsInset": "Distance in pixels from sidebar edges to the session bar and input box. Reload the window to apply.",
   "config.contentInset": "Distance in pixels from sidebar edges to replies, tool cards, todos and attachments. Set greater than Controls Inset to align input text with replies. Reload the window to apply.",

@@ -458,7 +458,7 @@ impl OpenAiResponsesProvider {
             entry,
             runtime,
             credential,
-            &super::ProviderRoute::new(runtime)?,
+            &super::ProviderRoute::new(runtime, entry.base_url.as_deref())?,
         )
     }
 

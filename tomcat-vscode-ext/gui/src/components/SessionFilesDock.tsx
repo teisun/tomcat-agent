@@ -6,7 +6,8 @@ import { DockSection } from "./DockSection";
 import { SessionFilesList } from "./SessionFilesList";
 import { UndoFilesConfirmDialog } from "./UndoFilesConfirmDialog";
 
-export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
+export function SessionFilesDock({ sessionId, files, busy, readOnly = false, onIntent }: {
+  readOnly?: boolean;
   sessionId: string; files?: SessionFilesView; busy: boolean; onIntent(intent: SessionFileIntent): void;
 }) {
   const t = useT();
@@ -29,7 +30,7 @@ export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
   if (!files?.files.length && !files?.error && !pending && !error) return null;
   const rows = files?.files ?? [];
   const eligible = rows.filter(file => file.restorable);
-  const disabled = busy || !!pending;
+  const disabled = readOnly || busy || !!pending;
   function refresh() { onIntent({ messageId: crypto.randomUUID(), type: "refreshSessionFiles", data: { sessionId } }); }
   function keep() {
     if (disabled || !rows.length || !sourceTurnId) return;
@@ -45,10 +46,10 @@ export function SessionFilesDock({ sessionId, files, busy, onIntent }: {
   return <>
     <DockSection title={t(pluralKey(locale, "files.count.other", rows.length), { count: rows.length })} label="files" testId="files-dock" toggleTestId="files-toggle" titleTestId="files-title"
       tooltip={files?.error ? t("files.refreshFailed", { scope: t("files.scope"), detail: files.error }) : t("files.scope")} onExpand={refresh}
-      actions={<><button type="button" data-testid="keep-all-files" disabled={disabled || !rows.length || !sourceTurnId} title={t("files.keepHint")} onClick={keep}>{t("files.keepAll")}</button>
-        <button type="button" data-testid="undo-all-files" disabled={disabled || !eligible.length} title={t(disabled ? "files.stopBeforeUndo" : !eligible.length ? "files.noneRestorable" : "files.undoHint")}
+      actions={<><button type="button" data-testid="keep-all-files" disabled={disabled || !rows.length || !sourceTurnId} title={t(readOnly ? "session.readOnly" : "files.keepHint")} onClick={keep}>{t("files.keepAll")}</button>
+        <button type="button" data-testid="undo-all-files" disabled={disabled || !eligible.length} title={t(readOnly ? "session.readOnly" : disabled ? "files.stopBeforeUndo" : !eligible.length ? "files.noneRestorable" : "files.undoHint")}
         onClick={() => setConfirmation({ files: eligible, skipped: rows.length - eligible.length })}>{t("files.undoAll")}</button></>}>
-      {sourceTurnId ? <SessionFilesList sessionId={sessionId} sourceTurnId={sourceTurnId} files={rows} busy={disabled} onIntent={onIntent} listRef={listRef}
+      {sourceTurnId ? <SessionFilesList sessionId={sessionId} sourceTurnId={sourceTurnId} files={rows} busy={busy || !!pending} readOnly={readOnly} onIntent={onIntent} listRef={listRef}
         onUndo={file => setConfirmation({ files: [file], skipped: 0 })} /> : null}
     </DockSection>
     {files?.error && !rows.length ? <div className="tc-session-dock__error" role="status">{t("files.loadFailed")} <button type="button" onClick={refresh}>{t("common.retry")}</button></div> : null}

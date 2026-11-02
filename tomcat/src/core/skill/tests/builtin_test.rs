@@ -247,6 +247,42 @@ async fn creator_assets_are_complete_loadable_and_reusable_across_projects() {
     }
 }
 
+#[tokio::test]
+async fn materialized_write_plans_skill_is_discovered_and_fully_loadable() {
+    let temp = tempfile::tempdir().expect("test temp directory");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+    materialize_builtin_skills(&cfg).expect("materialize write-plans");
+
+    let skills = discover(&cfg, &workspace);
+    let skill = skills
+        .resolve(crate::core::skill::catalog::WRITE_PLANS_SKILL_NAME)
+        .expect("discover the built-in planning skill");
+    assert_eq!(skill.source, SkillSource::Managed);
+    let body = load_skill_payload(&SkillFilePrimitive, "__test__", skill, None)
+        .await
+        .expect("load planning skill body");
+    assert!(body.contains("<skill name=\"write-plans\" location=\"SKILL.md\">"));
+    assert!(body.contains("references/tomcat-plan-workflow.md"));
+    assert!(body.contains("references/plan-structure.md"));
+    assert!(!body.contains("name: write-plans"));
+
+    for (file, expected) in [
+        ("references/tomcat-plan-workflow.md", "# Tomcat Plan Workflow"),
+        (
+            "references/plan-structure.md",
+            "`MUST`: Format each problem or requirement section heading as `Issue N: Description` or `Requirement N: Description`.",
+        ),
+    ] {
+        let payload = load_skill_payload(&SkillFilePrimitive, "__test__", skill, Some(file))
+            .await
+            .expect("load planning skill attachment");
+        assert!(payload.contains(expected), "missing content in {file}");
+    }
+}
+
 #[test]
 fn materialization_is_idempotent_and_refreshes_changed_managed_assets() {
     let temp = tempfile::tempdir().expect("test temp directory");

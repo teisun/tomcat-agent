@@ -643,7 +643,7 @@ impl DefaultLlmResolver {
         if let Some(route) = routes.get(key) {
             return Ok(route.clone());
         }
-        let route = Arc::new(ProviderRoute::new(runtime)?);
+        let route = Arc::new(ProviderRoute::new(runtime, key.base_url.as_deref())?);
         routes.insert(key.clone(), route.clone());
         Ok(route)
     }

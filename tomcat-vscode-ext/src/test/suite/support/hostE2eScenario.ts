@@ -11,7 +11,6 @@ import {
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
 } from "../../../constants";
-import { resolveUriToFileReference } from "../../../ui/webview/contextReferences";
 import type {
   ObservedEventFilter,
   TomcatExtensionApi,
@@ -3275,6 +3274,104 @@ export async function assertWebviewReviewProgressFlow(
   assert.ok(failed.html.includes("FAIL"));
 }
 
+/** Real extension + Chromium, fake backend; one production five-minute timer (no time override). */
+export async function assertAutomaticErrorRecoveryCountdown(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  // The ready notification precedes async bootstrap; await its existing workflow
+  // before creating the fixture session so late bootstrap cannot reselect session 1.
+  await api.__testing.sendWebviewIntent({ type: "ready", messageId: "recovery-bootstrap" });
+  await api.__testing.sendSettingsIntent({ type: "settings.ready", messageId: "recovery-settings-ready", data: { route: "general" } });
+  const setLanguage = async (language: "en" | "zh-CN") => {
+    await api.__testing.sendSettingsIntent({ type: "setUiLanguage", messageId: `recovery-language-${language}`, data: { language } });
+    await waitFor(() => api.__testing.getWebviewState().locale === language);
+  };
+  await setLanguage("en");
+  const retryId = await createFreshWebviewSession(api, "automatic-error-recovery-retry");
+  await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "auto-retry-prompt", data: { sessionId: retryId, text: "automatic error recovery countdown" } });
+  await waitForWebviewState(api, state => state.sessionViews[retryId]?.errorRecovery ?? undefined);
+  const deadline = api.__testing.getWebviewState().sessionViews[retryId].errorRecovery!.dueAt;
+  let chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const capture = async (name: string) => {
+    if (process.env.TOMCAT_E2E_SCREENSHOT !== "1") return;
+    const target = transcriptVisualArtifactPath(`error-recovery-${name}.png`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await chat.capture(target);
+  };
+  const maximize = "workbench.action.toggleMaximizedAuxiliaryBar";
+  let maximized = false;
+  try {
+    await api.__testing.executeCommand(maximize); maximized = true;
+    await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000, "Desktop evidence must capture a genuinely wide panel");
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "recover-error-turn" && /Retry.*0[45]:[0-5][0-9]/.test(b.name)), "Retry countdown must render");
+    assert.equal(await chat.evaluate(`document.querySelector('[data-testid="recover-error-turn"]').getAttribute('aria-label')`), en["common.retry"]);
+    await capture("retry-en-desktop");
+
+    // Destroy the actual browser document, rather than calling the host-only reload seam.
+    await chat.evaluate("globalThis.__recoveryDocumentMarker = true; setTimeout(() => location.reload(), 0); true");
+    await pause(300); chat.close();
+    chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "cancel-error-recovery"), "Countdown survives a real document reload");
+    assert.equal(await chat.evaluate("globalThis.__recoveryDocumentMarker"), undefined);
+    assert.equal(api.__testing.getWebviewState().sessionViews[retryId].errorRecovery?.dueAt, deadline);
+
+    const resumeId = await createFreshWebviewSession(api, "automatic-error-recovery-resume");
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "auto-resume-prompt", data: { sessionId: resumeId, text: "resume card showcase" } });
+    await waitForWebviewState(api, state => state.sessionViews[resumeId]?.errorRecovery ?? undefined);
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "recover-error-turn" && /Resume.*0[45]:[0-5][0-9]/.test(b.name)), "Resume countdown must render in English");
+    assert.equal(await chat.evaluate(`document.querySelector('[data-testid="recover-error-turn"]').getAttribute('aria-label')`), en["common.resume"]);
+    await capture("resume-en-desktop");
+    await setLanguage("zh-CN");
+    // A maximized 448px workbench leaves a ~390px chat frame after VS Code chrome.
+    // Never force a 390px root inside an unchanged 289px sidebar and crop the evidence.
+    await chat.setViewport(448, 844);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 320 && dom.viewport.width <= 390, "Narrow evidence must fit the actual visible panel");
+    await waitFor(() => chat.evaluate<boolean>(`document.documentElement.lang === 'zh-CN' && !!document.querySelector('[data-testid="error-recovery-countdown"]')`));
+    const fits = await chat.evaluate<boolean>(`(() => {
+      const actions = document.querySelector('[data-testid="error-recovery-actions"]');
+      const buttons = [...actions.querySelectorAll('button')];
+      return document.documentElement.scrollWidth <= innerWidth && actions.scrollWidth <= actions.clientWidth + 1
+        && buttons.every(button => { const r = button.getBoundingClientRect(); return r.x >= 0 && r.right <= innerWidth; });
+    })()`);
+    assert.equal(fits, true);
+    await capture("resume-zh-390");
+    await chat.click("cancel-error-recovery");
+    await waitFor(() => !api.__testing.getWebviewState().sessionViews[resumeId].errorRecovery);
+    await chat.waitForSnapshot(dom => !dom.buttons.some(b => b.testId === "cancel-error-recovery") && dom.buttons.some(b => b.testId === "recover-error-turn"), "Cancel retains manual Resume");
+    await capture("cancelled-zh-390");
+    await chat.focusAndPress("recover-error-turn", "Enter");
+    await waitFor(() => api.__testing.getWebviewState().sessionViews[resumeId].timeline.some(item => item.type === "message" && item.text.includes("same session Resume continued")));
+    await chat.setViewport(1440, 900);
+    await api.__testing.executeCommand(maximize); maximized = false;
+    await setLanguage("en");
+
+    const foregroundId = await createFreshWebviewSession(api, "automatic-error-recovery-foreground");
+    const editorPath = path.join(requireEnv(TEST_DEFAULT_CWD_ENV), "automatic-recovery-focus.txt");
+    await fs.writeFile(editorPath, "Automatic background recovery must not steal this editor.\n");
+    const document = await vscode.workspace.openTextDocument(editorPath);
+    await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+    await waitFor(() => chat.evaluate<boolean>("!document.hasFocus()"));
+    assert.ok(Date.now() < deadline, "Test setup must finish before the actual five-minute deadline");
+    await waitFor(() => api.__testing.getWebviewState().sessionViews[retryId].timeline.some(item => item.type === "message" && item.text.includes("same session retry succeeded")), Math.max(20_000, deadline - Date.now() + 20_000), "Production five-minute timer did not recover the background session");
+    // Assert focus before screenshots, which intentionally bring the test window forward.
+    assert.equal(api.__testing.getWebviewState().activeSessionId, foregroundId);
+    assert.equal(vscode.window.activeTextEditor?.document, document);
+    assert.equal(await chat.evaluate("document.hasFocus()"), false);
+    assert.equal(api.__testing.getWebviewState().sessionViews[retryId].errorRecovery, undefined);
+    await api.__testing.sendWebviewIntent({ type: "switchSession", messageId: "show-auto-success", data: { sessionId: retryId } });
+    await chat.waitForSnapshot(dom => dom.text.includes("same session retry succeeded"), "Recovered transcript is visible");
+    await api.__testing.executeCommand(maximize); maximized = true;
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000, "Success evidence must capture a genuinely wide panel");
+    await capture("success-en-desktop");
+  } finally {
+    await chat.setViewport(1440, 900);
+    if (maximized) await api.__testing.executeCommand(maximize);
+    chat.close();
+    await setLanguage("en");
+  }
+}
+
 export async function assertWebviewRetryRecoveryFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -4477,6 +4574,145 @@ export async function assertWebviewInstructionInvocationFlow(api: TomcatExtensio
   assert.ok(history.messageTexts.some(text=>text.includes("/host-review")));
 }
 
+export async function assertMultiRootContextReferences(api: TomcatExtensionApi): Promise<void> {
+  const first = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(first, "the disposable workspace must have a real first root");
+  assert.equal(vscode.workspace.workspaceFolders?.length, 1);
+  const second = vscode.Uri.file(await fs.mkdtemp(path.join(path.dirname(first.uri.fsPath), "webrtc-sdk-")));
+  const relativeDir = `multi-root-${Date.now().toString(36)}`;
+  const directories = [first.uri, second].map(root => path.join(root.fsPath, relativeDir));
+  const files = directories.map(dir => vscode.Uri.file(path.join(dir, "webrtc_patch.h")));
+  const driver = await WorkbenchFindDriver.connectFromEnvironment();
+  const artifacts = requireEnv("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
+  const measurements: Array<{ name: string; sidebarWidth: number }> = [];
+  let maximized = false;
+  let secondRootConfirmed = false;
+  async function updateSecondRoot(add: boolean): Promise<void> {
+    const index = vscode.workspace.workspaceFolders?.findIndex(folder => folder.uri.toString() === second.toString()) ?? -1;
+    if (!add && index < 0) return;
+    let observed = false;
+    const subscription = vscode.workspace.onDidChangeWorkspaceFolders(event => {
+      observed = (add ? event.added : event.removed).some(folder => folder.uri.toString() === second.toString());
+    });
+    try {
+      if (!add) assert.ok(index > 0, "never remove the first workspace root");
+      assert.ok(add
+        ? vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders!.length, 0, { uri: second, name: "webrtc-sdk" })
+        : vscode.workspace.updateWorkspaceFolders(index, 1));
+      await waitFor(() => observed, 20_000, "workspace-folder change event missing");
+    } finally { subscription.dispose(); }
+  }
+  async function capture(name: string, minimumWidth: number): Promise<void> {
+    const snapshot = await waitForWebviewDomSnapshot(api, snapshot => {
+      const surface = snapshot.composerControlMetrics["composer-surface"];
+      return surface && surface.left + surface.width + surface.right >= minimumWidth ? snapshot : undefined;
+    });
+    const surface = snapshot.composerControlMetrics["composer-surface"];
+    assert.ok(surface?.width > 0, "composer must be laid out");
+    measurements.push({ name, sidebarWidth: surface.left + surface.width + surface.right });
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") await captureWorkbenchArtifacts(path.join(artifacts, `${name}.png`));
+  }
+  try {
+    await updateSecondRoot(true);
+    secondRootConfirmed = true;
+    assert.deepEqual(vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath), [first.uri.fsPath, second.fsPath]);
+    await api.__testing.reloadWebview();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    api.__testing.clearObservedWebviewErrors();
+    const sessionId = await createFreshWebviewSession(api, "multi-root-context-references");
+    const originalCwd = (await api.__testing.getSessionState(sessionId)).cwd;
+    assert.ok(originalCwd);
+    assert.equal(await fs.realpath(originalCwd), await fs.realpath(first.uri.fsPath));
+    await clearComposerDraft(api, sessionId);
+    for (let index = 0; index < directories.length; index += 1) {
+      await fs.mkdir(directories[index]);
+      await writeCreatedMentionFixture(files[index].fsPath, `ONLY_${index === 0 ? "A" : "B"}\n`);
+    }
+    await fs.mkdir(artifacts, { recursive: true });
+    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    maximized = true;
+    await driver.setViewport(1000, 900);
+    await setComposerInputValue(api, "@webrtc_patch");
+    const dropdown = await waitForWebviewDomSnapshot(api, snapshot =>
+      files.every(file => snapshot.html.includes(`title="${file.fsPath}"`)) &&
+      snapshot.html.includes('data-testid="context-search-dropdown"') ? snapshot : undefined);
+    assert.equal((dropdown.html.match(/data-testid="context-search-option"/gu) ?? []).length, 2);
+    assert.ok(dropdown.html.includes(`${first.name}/${relativeDir}`));
+    assert.ok(dropdown.html.includes(`webrtc-sdk/${relativeDir}`));
+    await capture("multi-root-search-desktop", 600);
+    await driver.setViewport(448, 844);
+    await capture("multi-root-search-narrow", 300);
+    assert.ok(measurements[1].sidebarWidth < measurements[0].sidebarWidth, JSON.stringify(measurements));
+    // Choose by independently known fixture URI, never by the reference constructor.
+    const secondIndex = dropdown.html.indexOf(`title="${files[1].fsPath}"`) < dropdown.html.indexOf(`title="${files[0].fsPath}"`) ? 0 : 1;
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "context-search-option", index: secondIndex });
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.composerDraft?.segments.some(
+      segment => segment.type === "reference" && segment.path === files[1].fsPath) ? true : undefined);
+    // Opening an editor exits maximized chat. Restore the desktop first so VS Code
+    // does not squeeze and persist the ordinary sidebar down to 159px.
+    await driver.setViewport(1000, 900);
+    await waitForWebviewDomSnapshot(api, snapshot =>
+      snapshot.composerControlMetrics["composer-surface"]?.width > 600 ? snapshot : undefined);
+    const document = await vscode.workspace.openTextDocument(files[1]);
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    editor.selection = new vscode.Selection(0, 0, 0, document.lineAt(0).text.length);
+    await api.__testing.executeCommand(TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND);
+    // Intent injection exercises host drop handling; it is not a native mouse-drag test.
+    await api.__testing.sendWebviewIntent(buildWebviewIntent({ type: "resolveDrop", messageId: "multi-root-drop", data: {
+      sessionId, uris: files.map(file => file.toString()),
+    } }));
+    const draft = await waitForWebviewState(api, state => {
+      const refs = state.sessionViews[sessionId]?.composerDraft?.segments.filter(segment => segment.type === "reference");
+      return refs?.length === 4 ? refs : undefined;
+    });
+    const expectedPaths = [files[0].fsPath, files[1].fsPath, files[1].fsPath, files[1].fsPath].sort();
+    assert.deepEqual(draft.map(reference => reference.path).sort(), expectedPaths);
+    assert.ok(draft.some(reference => reference.kind === "selection" && reference.path === files[1].fsPath && reference.text === "ONLY_B"));
+    await api.__testing.reloadWebview();
+    await api.__testing.waitForWebviewReady();
+    const restored = await waitForWebviewDomSnapshot(api, snapshot =>
+      (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length === 4 ? snapshot : undefined);
+    await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    await driver.setViewport(448, 844);
+    assert.ok(restored.html.includes(`title="${files[1].fsPath}:1"`));
+    assert.ok(restored.html.includes(`aria-label="${files[1].fsPath}"`));
+    assert.deepEqual(api.__testing.getWebviewState().sessionViews[sessionId].composerDraft?.segments
+      .filter(segment => segment.type === "reference").map(reference => reference.path).sort(), expectedPaths);
+    await capture("multi-root-draft-narrow", 300);
+    await api.__testing.sendWebviewDomAction({ kind: "clickTestId", testId: "send-button" });
+    await waitForEvent(api, { sessionId, type: "agent_end" });
+    await api.__testing.reloadWebview();
+    await api.__testing.waitForWebviewReady();
+    const history = await waitForWebviewState(api, state => {
+      const message = state.sessionViews[sessionId]?.timeline.find(item => item.type === "message" && item.kind === "user");
+      return message?.type === "message" && message.segments?.some(segment => segment.type === "reference") ? message : undefined;
+    });
+    assert.deepEqual(history.segments?.filter(segment => segment.type === "reference").map(reference => reference.path).sort(), expectedPaths);
+    await waitForWebviewDomSnapshot(api, snapshot => snapshot.html.includes('data-testid="history-reference-chip"') ? snapshot : undefined);
+    await driver.setViewport(1000, 900);
+    await capture("multi-root-history-desktop", 600);
+    assert.equal((await api.__testing.getSessionState(sessionId)).cwd, originalCwd);
+    assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
+    await fs.writeFile(path.join(artifacts, "multi-root-evidence.json"), JSON.stringify({
+      platform: process.platform, vscodeVersion: vscode.version, roots: [first.uri.fsPath, second.fsPath],
+      cwd: originalCwd, expectedPaths, measurements, references: draft,
+      transport: "real extension host with fixture backend; real Rust read verified separately",
+    }, null, 2));
+  } finally {
+    await driver.setViewport(1200, 900);
+    if (maximized) await api.__testing.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+    driver.close();
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    // A rejected/timed-out addition must remain the primary failure, not be masked
+    // by a second update while VS Code still has an unconfirmed workspace.
+    if (secondRootConfirmed) await updateSecondRoot(false);
+    for (const file of files) await fs.rm(file.fsPath, { force: true });
+    for (const directory of directories) await fs.rmdir(directory).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await fs.rmdir(second.fsPath);
+  }
+}
+
 export async function assertWebviewSelectionReferenceFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -4490,7 +4726,7 @@ export async function assertWebviewSelectionReferenceFlow(
 
   const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
   const filePath = path.join(workspaceDir, "selection-context.ts");
-  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
+  const referencePath = vscode.Uri.file(filePath).fsPath;
   await fs.writeFile(
     filePath,
     [
@@ -4653,7 +4889,7 @@ export async function assertWebviewDraftForkPreservesReferenceFlow(
     `draft-fork-reference-${Date.now().toString(36)}.md`,
   );
   await fs.writeFile(filePath, "# draft fork reference\n", "utf8");
-  const referencePath = vscode.workspace.asRelativePath(vscode.Uri.file(filePath), false);
+  const referencePath = vscode.Uri.file(filePath).fsPath;
 
   try {
     await api.__testing.sendWebviewIntent(
@@ -4762,7 +4998,7 @@ export async function assertWebviewFileDropReferenceFlow(
   );
   assert.deepEqual(
     draft.map((segment) => segment.path).sort(),
-    [filePath, filePath, secondFilePath].map(file => vscode.workspace.asRelativePath(vscode.Uri.file(file), false)).sort(),
+    [filePath, filePath, secondFilePath].map(file => vscode.Uri.file(file).fsPath).sort(),
     "expected both dropped files to be preserved as composer references",
   );
   const rendered = await waitForWebviewDomSnapshot(
@@ -4833,9 +5069,7 @@ export async function assertWebviewAtMentionReferenceFlow(
     const filePath = path.join(scratchDir, `${stem}.ts`);
     // Node writes notify VS Code asynchronously: synchronize both file and directory fixtures.
     await writeCreatedMentionFixture(filePath, "export const atMentionTarget = true;\n");
-    const fileReference = await resolveUriToFileReference(
-      vscode.Uri.file(filePath),
-    );
+    const fileReference = { path: vscode.Uri.file(filePath).fsPath, label: path.basename(filePath) };
 
     await setComposerInputValue(api, `@${stem}`);
 
@@ -4990,9 +5224,7 @@ export async function assertWebviewAtMentionDirectoryAndWarningFlow(
   const dirPath = path.join(scratchDir, dirStem);
   await fs.mkdir(dirPath, { recursive: true });
   await writeCreatedMentionFixture(path.join(dirPath, "nested.txt"), "nested\n");
-  const dirReference = await resolveUriToFileReference(
-    vscode.Uri.file(dirPath),
-  );
+  const dirReference = { path: `${vscode.Uri.file(dirPath).fsPath}/`, label: `${path.basename(dirPath)}/` };
 
   await setComposerInputValue(api, `@${dirReference.label}`);
   await waitForContextSearchIntent(
@@ -5121,6 +5353,8 @@ const TINY_PNG_BASE64 =
 export async function assertWebviewPickContextFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
   const sessionId = await createFreshWebviewSession(
     api,
@@ -5144,20 +5378,32 @@ export async function assertWebviewPickContextFlow(
     baseline.composerDraft?.segments ?? []
   ).filter((segment) => segment.type === "reference").length;
 
-  api.__testing.setOpenDialogHandler(() => [
-    vscode.Uri.file(imagePath),
-    vscode.Uri.file(codePath),
-    vscode.Uri.file(folderPath),
-  ]);
+  const chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const workbench = await WorkbenchFindDriver.connectFromEnvironment();
+  const artifacts = requireEnv("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
+  api.__testing.setOpenDialogHandler(options => {
+    assert.notEqual(options.canSelectFiles, options.canSelectFolders, "native Windows/Linux dialogs must not combine files and folders");
+    assert.equal(options.canSelectMany, true);
+    return options.canSelectFolders
+      ? [vscode.Uri.file(folderPath)]
+      : [vscode.Uri.file(imagePath), vscode.Uri.file(codePath)];
+  });
 
   try {
-    await api.__testing.sendWebviewIntent(
-      buildWebviewIntent({
-        data: { sessionId },
-        messageId: "webview-pick-context",
-        type: "pickContext",
-      }),
-    );
+    for (const kind of ["files", "folders"] as const) {
+      await chat.click("attachment-add");
+      await workbench.waitForVisibleText(en["host.pickFiles"]);
+      await workbench.waitForVisibleText(en["host.pickFolders"]);
+      if (kind === "files") await captureWorkbenchArtifacts(path.join(artifacts, "context-picker-menu.png"));
+      if (kind === "folders") await vscode.commands.executeCommand("workbench.action.quickOpenSelectNext");
+      await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+      await waitForWebviewState(api, state => {
+        const view = state.sessionViews[sessionId];
+        const references = view?.composerDraft?.segments.filter(segment => segment.type === "reference");
+        return view?.pendingAttachments.length === baselineAttachmentCount + 1 &&
+          references?.length === baselineReferenceCount + (kind === "files" ? 1 : 2) ? view : undefined;
+      });
+    }
 
     const settled = await waitForWebviewState(
       api,
@@ -5222,7 +5468,11 @@ export async function assertWebviewPickContextFlow(
       rendered.html.includes('data-testid="composer-reference-chip"'),
       "expected picker references to render as visible composer chips",
     );
+    await chat.capture(path.join(artifacts, "context-picker-result.png"));
+    assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
   } finally {
+    chat.close();
+    workbench.close();
     api.__testing.setOpenDialogHandler(undefined);
   }
 }

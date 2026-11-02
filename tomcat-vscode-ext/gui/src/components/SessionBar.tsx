@@ -21,6 +21,7 @@ const CAP_PER_GROUP = 6;
 
 function formatSessionLabel(session: WebviewSessionTab, t: Translator): string {
   const meta: string[] = [];
+  if (session.origin) meta.push(session.origin.clientName?.trim() || t("session.acpClient"));
   if (session.isCurrent) {
     meta.push("*");
   }
@@ -38,6 +39,7 @@ export function SessionBar({
   connectionStatus,
   creating = false,
   creationDisabledReason,
+  onOpen,
   onOpenSettings,
   onSetPinned,
   onDeleteSession,
@@ -53,6 +55,7 @@ export function SessionBar({
   connectionStatus?: WebviewConnectionStatus;
   creating?: boolean;
   creationDisabledReason?: string;
+  onOpen?(): void;
   onOpenSettings(): void;
   onSetPinned?(sessionId: string, pinned: boolean): void;
   onDeleteSession?(sessionId: string): void;
@@ -166,7 +169,7 @@ export function SessionBar({
         className="tc-topbar__trigger"
         data-testid="session-select"
         disabled={!ready || creating}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => { if (!open) onOpen?.(); setOpen((value) => !value); }}
         type="button"
       >
         <span className="tc-topbar__trigger-label">{triggerLabel}</span>
@@ -220,6 +223,7 @@ export function SessionBar({
                     const pinLabel = t(session.isPinned ? "session.unpin" : "session.pin");
                     const busy = session.busy || (pendingQuestionCounts[session.sessionId] ?? 0) > 0;
                     const deleteReason = session.deleting ? t("session.delete.pending")
+                      : !session.ownedByThisFrontend ? t("session.readOnly")
                       : busy ? t("session.delete.busy")
                       : !deleteSupported ? t("session.delete.unavailable") : t("session.delete");
                     return (
@@ -257,7 +261,7 @@ export function SessionBar({
                         <span aria-hidden="true" className={`codicon ${session.isPinned ? "codicon-pinned" : "codicon-pin"}`} />
                       </button> : null}
                       {onDeleteSession ? <span title={deleteReason}><button className="tc-icon-button tc-session-row__action" type="button"
-                        aria-label={t("session.delete")} title={deleteReason} disabled={!deleteSupported || busy || session.deleting}
+                        aria-label={t("session.delete")} title={deleteReason} disabled={!deleteSupported || !session.ownedByThisFrontend || busy || session.deleting}
                         onClick={() => { deleteConfirmed.current = false; setDeleteTarget(session); }}>
                         <span aria-hidden="true" className="codicon codicon-trash" />
                       </button></span> : null}

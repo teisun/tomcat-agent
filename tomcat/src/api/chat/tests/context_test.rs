@@ -10,11 +10,83 @@ use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
 use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
 use crate::{AppConfig, ModelPrefsStore, ThinkingLevel};
 
+#[test]
+fn shared_configuration_ignores_starter_overrides_without_changing_standalone_defaults() {
+    const CHILD: &str = "TOMCAT_TEST_SHARED_CONFIG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // The saved-only switch and tracing subscriber are process-lifetime state.
+        // Use the existing test binary, not the parent process or a real user config.
+        let module = module_path!().split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::shared_configuration_ignores_starter_overrides_without_changing_standalone_defaults"), "--nocapture"])
+            .env(CHILD, "1")
+            .env("TOMCAT_REVIEWER_MAX_TURNS", "2")
+            .env("PI_PLUGIN_DISABLE", "1")
+            .env("PI_CHAT_SHOW_THINKING", "full")
+            .env("RUST_LOG", "debug")
+            .output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("SHARED_CONFIG_ASSERTIONS_PASSED"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("SAVED_ERROR_MARKER"), "{stderr}");
+        assert!(!stderr.contains("STARTER_INFO_MARKER"), "{stderr}");
+        return;
+    }
+    let thinking = crate::infra::config::ThinkingConfig {
+        show: crate::infra::config::ThinkingDisplay::Minimal,
+        ..Default::default()
+    };
+    assert_eq!(super::resolve_reviewer_max_turns(7), 2);
+    assert!(super::plugin_runtime_disabled_via_env());
+    assert_eq!(
+        super::resolve_initial_thinking_display(&thinking),
+        crate::infra::config::ThinkingDisplay::Full
+    );
+    crate::infra::config::use_saved_configuration_only();
+    assert_eq!(super::resolve_reviewer_max_turns(7), 7);
+    assert!(!super::plugin_runtime_disabled_via_env());
+    assert_eq!(
+        super::resolve_initial_thinking_display(&thinking),
+        thinking.show
+    );
+    let log = crate::infra::config::LogConfig {
+        file_enabled: false,
+        level: "error".into(),
+    };
+    crate::infra::logging::init_logging(&log, None).unwrap();
+    tracing::info!("STARTER_INFO_MARKER");
+    tracing::error!("SAVED_ERROR_MARKER");
+    println!("SHARED_CONFIG_ASSERTIONS_PASSED");
+}
+
 fn model_prefs(path: &std::path::Path) -> Arc<ModelPrefsStore> {
     Arc::new(
         ModelPrefsStore::load(path.join("model-thinking.json"), ThinkingLevel::Medium)
             .expect("model preferences"),
     )
+}
+
+#[test]
+#[serial(env_lock)]
+fn session_cwd_override_is_the_workspace_even_when_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir_in(root.path()).unwrap();
+    let cwd = project.path().to_path_buf();
+    project.close().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(root.path().join("data").to_string_lossy().into_owned());
+    let ctx = ChatContext::from_config_with_overrides(
+        cfg,
+        crate::api::chat::ChatContextOverrides::default()
+            .with_session_cwd_override(cwd.clone())
+            .suppress_cli_output(),
+    )
+    .unwrap();
+    assert_eq!(ctx.scope_services.agent_workspace_dir, cwd);
+    assert!(
+        !cwd.exists(),
+        "context construction must not recreate the deleted workspace"
+    );
 }
 
 #[test]
@@ -62,13 +134,13 @@ fn connector_registry_constructed_when_enabled() {
     let mut enabled = AppConfig::default();
     enabled.connector.enabled = true;
     enabled.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
-    assert!(connector_registry_for(&enabled, Some(temp.path()))
+    assert!(connector_registry_for(&enabled, Some(temp.path()), None)
         .expect("enabled connector registry")
         .is_some());
 
     let mut disabled = enabled.clone();
     disabled.connector.enabled = false;
-    assert!(connector_registry_for(&disabled, Some(temp.path()))
+    assert!(connector_registry_for(&disabled, Some(temp.path()), None)
         .expect("disabled connector registry")
         .is_none());
 }
@@ -85,7 +157,7 @@ async fn legacy_mcp_keys_do_not_disable_connectors() {
     )
     .unwrap();
 
-    assert!(connector_registry_for(&cfg, Some(temp.path()))
+    assert!(connector_registry_for(&cfg, Some(temp.path()), None)
         .expect("legacy MCP keys must not disable connectors")
         .is_some());
 }
@@ -100,7 +172,7 @@ fn malformed_mcp_json_disables_mcp_without_failing_chat() {
     std::fs::write(&path, r#"{"mcpServers":{"broken": "#).unwrap();
     let path = crate::infra::platform::canonicalize(&path).unwrap();
 
-    let error = match connector_registry_for(&cfg, Some(temp.path())) {
+    let error = match connector_registry_for(&cfg, Some(temp.path()), None) {
         Ok(_) => panic!("invalid JSON should isolate the MCP runtime"),
         Err(error) => error.to_string(),
     };

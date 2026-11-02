@@ -77,6 +77,55 @@ async fn run_emits_events_in_correct_order() {
     assert_eq!(observed, expected);
 }
 
+#[tokio::test]
+async fn retries_close_once_on_fatal_overflow_or_unknown_ceiling() {
+    use crate::infra::error::llm_stream_terminal_error;
+    for (prefix, last) in [
+        (1, llm_http_status_error("mock", 401, "unauthorized")),
+        (
+            1,
+            llm_http_status_error("mock", 400, "context length exceeded"),
+        ),
+        (
+            3,
+            llm_stream_terminal_error("mock", "opaque unknown failure", None),
+        ),
+    ] {
+        let mut streams = (0..prefix)
+            .map(|_| vec![Err(llm_http_status_error("mock", 503, "temporary"))])
+            .collect::<Vec<_>>();
+        streams.push(vec![Err(last)]);
+        let (provider, requests) = super::mocks::RecordingStreamLlmProvider::new(streams);
+        let bus = Arc::new(DefaultEventBus::new());
+        let ends = Arc::new(Mutex::new(Vec::new()));
+        let captured = ends.clone();
+        bus.on(
+            wire::WIRE_AUTO_RETRY_END,
+            Box::new(move |ctx: EventContext| {
+                captured.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+        let mut agent = AgentLoop::new(
+            test_binding(Arc::new(provider), "gpt-4"),
+            Arc::new(MockPrimitiveExecutor),
+            bus,
+            AgentLoopConfig {
+                unattended_retry: true,
+                retry_base_delay_ms: 0,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        );
+        assert!(agent.run(vec![ChatMessage::user("answer")]).await.is_err());
+        assert_eq!(requests.0.lock().unwrap().len(), prefix + 1);
+        let ends = ends.lock().unwrap();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0]["success"], false);
+        assert_eq!(ends[0]["attempt"], prefix + 1);
+    }
+}
+
 /// Fatal 401：chat_stream 直接返回 Err，run 立即终止并返回含 401 的错误。
 #[tokio::test]
 async fn run_fatal_401_terminates_immediately() {

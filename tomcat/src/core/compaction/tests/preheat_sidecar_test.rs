@@ -60,6 +60,7 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "preheat-sidecar".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
@@ -137,6 +138,7 @@ async fn preheat_background_computation_does_not_mutate_the_marker_transcript() 
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "marker-preheat".to_string(),
             timestamp: "2026-09-09T00:00:00.000Z".to_string(),
@@ -205,6 +207,7 @@ async fn preheat_starts_when_custom_rows_follow_the_latest_message() {
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "custom-tail-preheat".to_string(),
             timestamp: "2026-09-09T00:00:00.000Z".to_string(),
@@ -268,6 +271,7 @@ async fn aborting_preheat_persists_a_terminal_diagnostic() {
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "aborted-preheat".to_string(),
             timestamp: "2026-09-09T00:00:00.000Z".to_string(),

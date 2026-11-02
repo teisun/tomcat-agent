@@ -37,7 +37,7 @@ describe("serve fixture resource ownership", () => {
   });
 
   it("starts cold without init, persisted models, keys, or model overrides", async () => {
-    const initialize = vi.fn();
+    const runCli = vi.fn(async () => undefined);
     const parent = { TOMCAT__LLM__DEFAULT_MODEL: "live-model", OPENAI_API_KEY: "private" };
     const env = serveFixtureEnvironment("/fixture", parent, true);
     expect(parent.OPENAI_API_KEY).toBe("private");
@@ -45,22 +45,26 @@ describe("serve fixture resource ownership", () => {
     expect(env.TOMCAT__LLM__DEFAULT_MODEL).toBeUndefined();
     expect(env.TOMCAT__CONTEXT__COMPACTION_MODEL).toBeUndefined();
     const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
-      binary: "not-executed", coldStart: true, initialize,
+      binary: "not-executed", coldStart: true, runCli,
     });
     try {
-      expect(initialize).not.toHaveBeenCalled();
+      expect(runCli).not.toHaveBeenCalled();
       expect(fixture.env.OPENAI_API_KEY).toBeUndefined();
       await expect(stat(path.join(fixture.homePath, ".tomcat"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally { await fixture.cleanup(); }
+    expect(runCli).toHaveBeenCalledExactlyOnceWith("not-executed", ["serve", "stop"], expect.objectContaining({ env: fixture.env, cwd: fixture.workspacePath }));
   });
 
-  it("uses the same private home/cwd for initialization and runtime", async () => {
+  it("uses the same private home/cwd for initialization, configuration and shutdown", async () => {
+    const commands: string[][] = [];
     const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
       binary: "not-executed",
-      initialize: async (binary, env, cwd) => {
+      runCli: async (binary, args, { env, cwd }) => {
         expect(binary).toBe("not-executed");
         expect(cwd).toBe(path.join(env.HOME!, "workspace"));
-        await mkdir(path.join(env.HOME!, ".tomcat"));
+        commands.push(args);
+        if (args[0] === "init") await mkdir(path.join(env.HOME!, ".tomcat"));
+        if (args[0] === "serve") expect((await stat(env.HOME!)).isDirectory()).toBe(true);
       },
     });
     const home = fixture.homePath;
@@ -70,8 +74,16 @@ describe("serve fixture resource ownership", () => {
         .toContain('base_url = "http://127.0.0.1:1234"');
       expect(JSON.parse(await readFile(path.join(home, ".tomcat", "mcp.json"), "utf8")))
         .toEqual({ mcpServers: {} });
-    } finally { await fixture.cleanup(); }
+    } finally {
+      const closing = fixture.cleanup();
+      expect(fixture.cleanup()).toBe(closing);
+      await closing;
+    }
     await fixture.cleanup();
+    expect(commands).toEqual([
+      ["init"], ["model", "key", "set", "openai", "dummy-key"],
+      ["model", "default", "gpt-5.4"], ["serve", "stop"],
+    ]);
     await expect(stat(home)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -80,10 +92,13 @@ describe("serve fixture resource ownership", () => {
     let home = "";
     await expect(setupServeFixture("http://127.0.0.1:1234", "openai", {
       binary: "not-executed",
-      initialize: async (_binary, env) => {
+      runCli: async (_binary, args, { env }) => {
         home = env.HOME!;
-        await mkdir(path.join(home, ".tomcat"));
-        throw firstError;
+        if (args[0] === "init") {
+          await mkdir(path.join(home, ".tomcat"));
+          throw firstError;
+        }
+        expect(args).toEqual(["serve", "stop"]);
       },
     })).rejects.toBe(firstError);
     expect(home).not.toBe("");
@@ -91,12 +106,31 @@ describe("serve fixture resource ownership", () => {
   });
 
   it("also cleans if model setup fails after initialization", async () => {
+    const failure = new Error("model setup failed");
     let home = "";
     await expect(setupServeFixture("http://127.0.0.1:1234", "openai", {
       binary: "not-executed",
-      initialize: async (_binary, env) => { home = env.HOME!; },
-    })).rejects.toMatchObject({ code: "ENOENT" });
+      runCli: async (_binary, args, { env }) => {
+        home = env.HOME!;
+        if (args[0] === "init") await mkdir(path.join(home, ".tomcat"));
+        if (args[0] === "model") throw failure;
+      },
+    })).rejects.toBe(failure);
     await expect(stat(home)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains the private home when shutdown fails and allows explicit cleanup retry", async () => {
+    const failure = new Error("service has not stopped");
+    const runCli = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+    const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
+      binary: "not-executed", coldStart: true, runCli,
+    });
+    try {
+      await expect(fixture.cleanup()).rejects.toBe(failure);
+      expect((await stat(fixture.homePath)).isDirectory()).toBe(true);
+    } finally { await fixture.cleanup(); }
+    expect(runCli).toHaveBeenCalledTimes(2);
+    await expect(stat(fixture.homePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each(["/v1/chat/completions", "/v1/responses"])("does not consume agent responses for session/turn titles at %s", async (endpoint) => {

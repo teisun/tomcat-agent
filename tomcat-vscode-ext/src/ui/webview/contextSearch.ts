@@ -281,7 +281,12 @@ function collectOpenPaths(): Set<string> {
 
 function buildCachedCandidate(uri: vscode.Uri, isDirectory: boolean): CachedSearchCandidate {
   const reference = buildFileReference(uri, { isDirectory });
-  const displayPath = normalizePath(reference.path);
+  // Short presentation is independent of the complete filesystem target.
+  const relativePath = normalizePath(vscode.workspace.asRelativePath(
+    uri,
+    (vscode.workspace.workspaceFolders?.length ?? 0) > 1,
+  ));
+  const displayPath = isDirectory && !relativePath.endsWith("/") ? `${relativePath}/` : relativePath;
   return {
     displayPath,
     isDirectory,

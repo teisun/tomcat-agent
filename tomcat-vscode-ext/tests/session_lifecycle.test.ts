@@ -201,7 +201,7 @@ describe("session lifecycle integration", () => {
     }
   }, 30_000);
 
-  it("can restart after the serve child exits unexpectedly", async () => {
+  it("can explicitly restart after the shared service exits unexpectedly", async () => {
     const server = await spawnScriptedOpenAiStreamServer([
       {
         parts: [sseDelta("after restart"), sseFinish("stop"), sseDone()],
@@ -219,6 +219,9 @@ describe("session lifecycle integration", () => {
       process.kill(runtime.messenger.pid!, "SIGTERM");
       await exited;
 
+      // Reconnection only probes; a user-requested start is a separate action.
+      await expect(runtime.messenger.start({ allowStart: false })).rejects.toThrow("unavailable");
+      await runtime.messenger.start({ allowStart: true });
       const reinit = await initializeServe(runtime.messenger);
       const sessionId = reinit.sessionId!;
       const endEvents = collectUntil(

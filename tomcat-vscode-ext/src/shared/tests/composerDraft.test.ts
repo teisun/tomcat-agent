@@ -172,24 +172,27 @@ describe("ComposerDraftStore hydration", () => {
     expect(restored.segments).toEqual(draft.segments);
     expect(__testing.readFile(draftPath())).toContain('"schemaVersion":3');
   });
-  it("restores text, segments and attachment references from disk", async () => {
+  it("restores same-label absolute references and legacy relative paths without rebasing", async () => {
+    const paths = ["/projects/A/src/main.rs", "/projects/B/src/main.rs", "src/main.rs"];
     __testing.registerFile(
       draftPath(),
       JSON.stringify({
         attachments: [attachment()],
         schemaVersion: 2,
-        segments: [
-          { kind: "file", label: "main.rs", path: "/repo/main.rs", type: "reference" },
-        ],
+        segments: paths.map((path) => ({ kind: "file", label: "main.rs", path, type: "reference" })),
         text: "about @main.rs",
         updatedAt: Date.now(),
       }),
     );
 
-    const draft = await newStore().hydrate(SESSION);
+    const store = newStore();
+    const draft = await store.hydrate(SESSION);
 
     expect(draft.text).toBe("about @main.rs");
-    expect(draft.segments).toHaveLength(1);
+    expect(draft.segments.map((segment) => segment.type === "reference" && segment.path)).toEqual(paths);
+    await vi.runAllTimersAsync();
+    await store.flush();
+    expect((await newStore().hydrate(SESSION)).segments).toEqual(draft.segments);
     expect(draft.attachments[0]?.blobSha).toBe("a".repeat(64));
     expect(draft.attachments[0]?.sourcePath).toBeNull();
   });

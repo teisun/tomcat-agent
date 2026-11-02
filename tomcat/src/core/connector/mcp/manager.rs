@@ -20,9 +20,12 @@ mod connection;
 mod lifecycle;
 #[path = "login.rs"]
 mod login;
+#[path = "session.rs"]
+mod session;
 use connection::{ConnectionId, ServiceOwner};
 use lifecycle::ConnectionEvent;
 pub use lifecycle::{RecoveryStatus, ReloadReceipt};
+pub(crate) use session::{McpToolView, SessionMcpConfig};
 
 use crate::core::connector::mcp::config::{
     load_server_definitions, remove_global_server, remove_project_server, set_global_tool_enabled,
@@ -175,6 +178,7 @@ pub struct McpManager {
     oauth_store: OAuthTokenStore,
     oauth_cancellations: DashMap<String, Arc<CancellationToken>>,
     workspace_root: Option<std::path::PathBuf>,
+    environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
     self_weak: Weak<Self>,
     retirements: RwLock<BTreeMap<String, TaskTracker>>,
 }
@@ -291,9 +295,26 @@ impl McpManager {
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Arc<Self>, AppError> {
+        Self::new_with_environment(cfg, workspace_root, None)
+    }
+
+    pub(crate) fn new_with_environment(
+        cfg: &AppConfig,
+        workspace_root: Option<&std::path::Path>,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+    ) -> Result<Arc<Self>, AppError> {
+        let servers = load_server_definitions(cfg, workspace_root)?;
+        Self::from_servers(cfg, workspace_root, environment, servers)
+    }
+
+    fn from_servers(
+        cfg: &AppConfig,
+        workspace_root: Option<&std::path::Path>,
+        environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
+        servers: Vec<ConfiguredMcpServer>,
+    ) -> Result<Arc<Self>, AppError> {
         let runtime = cfg.connector.mcp;
         runtime.validate()?;
-        let servers = load_server_definitions(cfg, workspace_root)?;
         let overridden = overridden_config_keys(&servers);
         let project_trust = ProjectTrustStore::open(cfg)?;
         let project_root = workspace_root
@@ -335,6 +356,7 @@ impl McpManager {
             project_trust,
             oauth_store,
             workspace_root: workspace_root.map(std::path::Path::to_path_buf),
+            environment,
             oauth_cancellations: DashMap::new(),
         }))
     }
@@ -401,7 +423,12 @@ impl McpManager {
     }
 
     pub fn project_trusted_for(&self, server: &ConfiguredMcpServer) -> bool {
-        server.source == McpConfigSource::Global || self.project_trusted()
+        match server.source {
+            // These are supplied explicitly by local user configuration or the
+            // authenticated controller, not discovered in project files.
+            McpConfigSource::Global | McpConfigSource::Session => true,
+            McpConfigSource::Project => self.project_trusted(),
+        }
     }
 
     /// A user decision applies to all sources in this project; never revokes live work.
@@ -436,6 +463,11 @@ impl McpManager {
             .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))?;
         let removed = match server.source {
             McpConfigSource::Global => remove_global_server(cfg, &server.name)?,
+            McpConfigSource::Session => {
+                return Err(AppError::Config(
+                    "session MCP configuration is owned by its controlling connection".into(),
+                ))
+            }
             McpConfigSource::Project => {
                 let workspace_root = self
                     .workspace_root
@@ -493,6 +525,9 @@ impl McpManager {
             ))));
         }
         match server.source {
+            McpConfigSource::Session => Err(AppError::Config(
+                "session MCP configuration is owned by its controlling connection".into(),
+            )),
             McpConfigSource::Global => {
                 set_global_tool_enabled(cfg, &server.name, raw_name, enabled)
             }
@@ -524,6 +559,11 @@ impl McpManager {
             .configured_server(&key)
             .ok_or_else(|| AppError::Tool(tr("mcp.unknownServer", &[("id", identifier)])))?;
         match server.source {
+            McpConfigSource::Session => {
+                return Err(AppError::Config(
+                    "session MCP configuration is owned by its controlling connection".into(),
+                ))
+            }
             McpConfigSource::Global => set_global_tool_filter(cfg, &server.name, filter)?,
             McpConfigSource::Project => {
                 let workspace_root = self
@@ -651,7 +691,11 @@ impl McpManager {
                         .clone()
                         .or_else(|| tool_name_summary(&visible))
                         .unwrap_or_else(|| {
-                            format!("MCP connector configured from {config_origin} mcp.json.")
+                            if entry.server.source == McpConfigSource::Session {
+                                "MCP connector supplied by the controlling client.".into()
+                            } else {
+                                format!("MCP connector configured from {config_origin} mcp.json.")
+                            }
                         }),
                     tool_count: visible.len(),
                 })
@@ -721,6 +765,20 @@ impl McpManager {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<McpToolSearchMatch>, AppError> {
+        Ok(self
+            .search_scored(query, source)?
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, item)| item)
+            .collect())
+    }
+
+    fn search_scored(
+        &self,
+        query: &str,
+        source: Option<&str>,
+    ) -> Result<Vec<(usize, McpToolSearchMatch)>, AppError> {
         let query = query.trim();
         if query.is_empty() {
             return Err(AppError::Tool(tr("mcp.emptyQuery", &[])));
@@ -768,12 +826,7 @@ impl McpManager {
                 .cmp(left_score)
                 .then_with(|| left.name.cmp(&right.name))
         });
-        Ok(matches
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(_, item)| item)
-            .collect())
+        Ok(matches)
     }
 
     pub fn describe_many(&self, names: &[String]) -> McpToolDescribeMany {
@@ -814,6 +867,16 @@ impl McpManager {
     }
 
     pub fn reload_configuration(&self, cfg: &AppConfig) -> Result<Vec<String>, AppError> {
+        if self
+            .entries
+            .read()
+            .values()
+            .any(|entry| entry.server.source == McpConfigSource::Session)
+        {
+            return Err(AppError::Config(
+                "session MCP configuration is not loaded from disk".into(),
+            ));
+        }
         // Serialize the file snapshot with reconciliation. Never overwrite live
         // recovery/permission changes using an earlier clone of the entries map.
         let servers = load_server_definitions(cfg, self.workspace_root.as_deref())?;

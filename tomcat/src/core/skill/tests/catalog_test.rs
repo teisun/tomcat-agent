@@ -33,6 +33,32 @@ fn render_available_skills_hides_model_blocked_entries() {
 }
 
 #[test]
+fn render_available_skills_omits_write_plans_without_disabling_loading() {
+    use crate::core::skill::catalog::WRITE_PLANS_SKILL_NAME;
+
+    let set = SkillSet {
+        by_name: BTreeMap::from([
+            ("commit".into(), skill("commit", "Create a commit", false)),
+            (
+                WRITE_PLANS_SKILL_NAME.into(),
+                skill(WRITE_PLANS_SKILL_NAME, "Write a development plan", false),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let rendered = render_available_skills_block(&set, 512, 50);
+    assert!(rendered
+        .block
+        .contains("<skill name=\"commit\">Create a commit</skill>"));
+    assert!(!rendered.block.contains(WRITE_PLANS_SKILL_NAME));
+    assert!(set.resolve(WRITE_PLANS_SKILL_NAME).is_some());
+    assert!(set
+        .visible_skills()
+        .iter()
+        .any(|skill| skill.name == WRITE_PLANS_SKILL_NAME));
+}
+
+#[test]
 fn render_available_skills_falls_back_to_name_only_when_budget_tight() {
     let mut by_name = BTreeMap::new();
     by_name.insert(

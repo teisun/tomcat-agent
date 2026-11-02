@@ -5,6 +5,7 @@ use super::super::transcript::*;
 fn make_header(id: &str) -> SessionHeader {
     SessionHeader {
         r#type: "session".to_string(),
+        origin: None,
         version: Some(3),
         id: id.to_string(),
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),

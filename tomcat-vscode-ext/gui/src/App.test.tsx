@@ -49,6 +49,87 @@ function mount(initialState?: unknown, locale?: Locale) {
   };
 }
 
+describe("error recovery countdown projection", () => {
+  it("routes cancel and immediate recovery from only the matching error card, retaining manual recovery after cancel", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const session = snapshot.sessionViews.s1;
+    session.busy = false;
+    session.timeline = [
+      { type: "message", kind: "user", id: "original", text: "Original input" },
+      { type: "message", kind: "error", id: "old-error", text: "Earlier failure" },
+      { type: "message", kind: "error", id: "error-1", text: "Current failure", recoveryAction: "resume" },
+    ];
+    session.errorRecovery = { errorId: "error-1", dueAt: Date.now() + 300_000 };
+    await emitState({ channel: "state", content: snapshot, messageId: "scheduled" });
+    expect(screen.getAllByTestId("error-recovery-countdown")).toHaveLength(1);
+    fireEvent.click(screen.getByTestId("cancel-error-recovery"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "cancelErrorRecovery", data: { sessionId: "s1", ...session.errorRecovery } }));
+    await emitState({ channel: "sessionView", content: { sessionId: "s1", view: createSessionSnapshot({ ...session, errorRecovery: undefined }) }, messageId: "cancelled" });
+    expect(screen.queryByTestId("error-recovery-countdown")).toBeNull();
+    fireEvent.click(screen.getByTestId("recover-error-turn"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "recoverErrorTurn", data: { sessionId: "s1", errorId: "error-1", action: "resume" } }));
+    expect(screen.getByText("Current failure")).toBeTruthy();
+  });
+});
+
+describe("read-only session observation", () => {
+  it("locks write actions while busy and idle, keeps reading available, and restores a writable session", async () => {
+    const { postMessage } = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.messageQueueSupported = true;
+    snapshot.rewindSupported = true;
+    snapshot.sessionFilesSupported = true;
+    const host = snapshot.sessionViews.s1;
+    Object.assign(host, {
+      access: "observe", ownedByThisFrontend: false, busy: true,
+      origin: { kind: "acp", clientName: "paperclip" },
+      activePlan: { path: "/plan.md", planId: "plan-1", state: "pending" },
+      checkpoints: [{ id: "ck-1", kind: "turn_end", createdAt: "2026-10-20T00:00:00Z", changedFiles: ["/workspace/a.ts"], messageAnchor: "answer", label: null }],
+      timeline: [
+        { type: "message", id: "host-prompt", kind: "user", text: "host prompt", rewindEligible: true },
+        { type: "message", id: "answer", kind: "assistant", text: "already generated prefix" },
+        { type: "message", id: "host-followup", kind: "user", text: "host follow-up", rewindEligible: true },
+        { type: "tool", id: "plan-create", toolCallId: "call-plan", toolName: "create_plan", isError: false, status: "complete", summary: "created", planId: "plan-1", planPath: "/plan.md", planActivity: { kind: "create", stateAfter: "pending", title: "Host plan" } },
+      ],
+      sessionFiles: { sourceTurnId: "host-prompt", files: [{ path: "/workspace/a.ts", status: "modified", added: 1, removed: 1, restorable: true }] },
+    });
+    await emitState({ channel: "state", content: snapshot, messageId: "observing-busy" });
+    expect(screen.getByTestId("observer-notice").textContent).toBe(translate("en", "session.readOnlyFrom", { source: "paperclip" }));
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    expect(screen.getByTestId("composer-input").getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("stop-button"));
+    host.busy = false;
+    host.composerDraft = { text: "saved draft", segments: [{ type: "text", text: "saved draft" }] };
+    await emitState({ channel: "state", content: snapshot, messageId: "observing-idle" });
+    expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    for (const id of ["send-button", "attachment-add", "mode-select", "model-select", "checkpoint-marker-button", "build-plan", "keep-all-files", "undo-all-files"]) {
+      expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
+      fireEvent.click(screen.getByTestId(id));
+    }
+    fireEvent.click(screen.getByText("host prompt"));
+    expect(screen.queryByTestId("edit-user-message")).toBeNull();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "must not edit" } }); });
+    expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    expect(postMessage.mock.calls.some(([m]) => ["prompt", "interrupt", "setModel", "setPlanMode", "restoreCheckpoint", "buildPlan", "keepSessionFiles", "restoreSessionFiles"].includes(m.type))).toBe(false);
+    fireEvent.click(screen.getByTestId("files-toggle"));
+    expect(screen.getByTestId("undo-file")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("session-file-diff"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openSessionFileDiff" }));
+    expect(screen.getByTestId("new-session-button")).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "listSessions" }));
+    fireEvent.click(screen.getByTestId("session-select"));
+    snapshot.activeSessionId = "s2";
+    snapshot.sessionViews.s2.access = "control";
+    await emitState({ channel: "state", content: snapshot, messageId: "own-session" });
+    expect(screen.queryByTestId("observer-notice")).toBeNull();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("true");
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", false);
+  });
+});
+
 describe("chat locale continuity", () => {
   it("switches chrome without changing the current session, draft or technical terms", async () => {
     const f = mount(undefined, "en");
@@ -309,6 +390,24 @@ describe("inline user-message editing in App", () => {
 });
 
 describe("inline model configuration", () => {
+  it("offers the shared-service restart with its consequence instead of retry on version mismatch", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const detail = translate("en", "bridge.serviceVersionMismatch", { running: "0.1.81", client: "0.1.82" });
+    await emitState({ channel: "state", content: {
+      ...snapshot, ready: false, connectionStatus: "failed",
+      connectionFailure: { kind: "version_mismatch", detail },
+    }, messageId: "version-mismatch" });
+    expect(screen.getByRole("alert").textContent).toBe(detail);
+    expect(screen.queryByTestId("retry-connection")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: translate("en", "host.action.restartSharedService") }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "restartSharedService" }));
+    fireEvent.click(screen.getByTestId("view-connection-logs"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "viewConnectionLogs" }));
+    await emitState({ channel: "state", content: snapshot, messageId: "restart-recovered" });
+    expect(screen.queryByTestId("restart-shared-service")).toBeNull();
+  });
+
   it("shows an actionable failure without a spinner or a misleading setup card", async () => {
     const { postMessage } = mount();
     const snapshot = approvalDraftSnapshot("s1");
@@ -376,11 +475,83 @@ describe("shared slash submission and command waiting", () => {
     Object.assign(snapshot.sessionViews.s1, session);
     snapshot.slashCommands = slashCommands;
     await emitState({channel:"state",content:snapshot,messageId:"slash-ready"});
+    return snapshot;
   };
   const submit = async (text:string) => {
     await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>text}}); });
     fireEvent.click(screen.getByTestId("send-button"));
   };
+  it("offers restart only as text completion until Send is clicked", async () => {
+    const { postMessage } = mount(undefined, "en"); await ready();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "/" } }); });
+    const group = screen.getByRole("group", { name: translate("en", "slash.terminal") });
+    const option = within(group).getByRole("option", { name: /\/restart/ });
+    expect(option.textContent).toContain(translate("en", "host.action.restartSharedService"));
+    await act(async () => { fireEvent.mouseDown(option); fireEvent.click(option); });
+    expect(screen.getByTestId("composer-input").textContent).toBe("/restart ");
+    expect(postMessage.mock.calls.some(([m]) => ["restartSharedService", "prompt", "runSlashCommand"].includes(m.type))).toBe(false);
+  });
+  it.each(["/restart", "/restart "])("syncs the cleared draft before one host restart: %s", async (text) => {
+    const { postMessage } = mount(); await ready(); await submit(text);
+    const messages = postMessage.mock.calls.map(([m]) => m);
+    expect(messages.filter(m => m.type === "restartSharedService")).toHaveLength(1);
+    expect(messages[messages.findIndex(m => m.type === "restartSharedService") - 1]).toMatchObject({type:"syncComposerDraft", data:{sessionId:"s1", text:"", segments:[]}});
+    expect(messages.some(m => ["prompt", "runSlashCommand", "queueAction"].includes(m.type))).toBe(false);
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+    await ready();
+    expect(screen.getByTestId("composer-input").textContent).toBe("");
+  });
+  it("restarts directly while busy instead of queueing a prompt", async () => {
+    const { postMessage } = mount();
+    const snapshot = await ready({busy:true}); snapshot.messageQueueSupported = true;
+    await emitState({channel:"state",content:snapshot,messageId:"busy-restart"});
+    await submit("/restart");
+    expect(postMessage.mock.calls.filter(([m]) => m.type === "restartSharedService")).toHaveLength(1);
+    expect(postMessage.mock.calls.some(([m]) => ["prompt", "runSlashCommand", "queueAction"].includes(m.type))).toBe(false);
+  });
+  it.each(["/restart now", "/restart.txt"])("keeps non-exact restart text on the ordinary route: %s", async text => {
+    const { postMessage } = mount(); await ready(); await submit(text);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"prompt",data:expect.objectContaining({text})}));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  const restartResources: Array<[string, Partial<WebviewSessionSnapshot>]> = [
+    ["reference", {composerDraft:{text:"/restart app.ts",segments:[{type:"text",text:"/restart "},{type:"reference",kind:"file",label:"app.ts",path:"app.ts"}]}}],
+    ["instruction", {composerDraft:{text:"/restart",segments:[{type:"instruction",kind:"command",label:"/restart",resourceId:"command:.cursor/commands/restart.md"}]}}],
+    ["attachment", {composerDraft:{text:"/restart",segments:[{type:"text",text:"/restart"}]},pendingAttachments:[{id:"image",label:"image.png",blobSha:"a".repeat(64),filename:"image.png",kind:"image",mimeType:"image/png",bytes:10}]}],
+  ];
+  it.each(restartResources)("does not steal restart with %s", async (_name, session) => {
+    const { postMessage } = mount(); await ready(session);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "prompt")).toBe(true);
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("keeps restart disabled during attachment preparation", async () => {
+    const { postMessage } = mount(); await ready();
+    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), {clipboardData:{getData:()=>"/restart"}}); });
+    fireEvent.click(screen.getByTestId("attachment-add"));
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("send-button"));
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("does not bypass missing model credentials for restart", async () => {
+    const { postMessage } = mount(); await ready({modelReady:false}); await submit("/restart");
+    expect(screen.getByTestId("send-button")).toHaveProperty("disabled", true);
+    expect(postMessage.mock.calls.some(([m]) => m.type === "restartSharedService")).toBe(false);
+  });
+  it("does not offer the local restart command in the history editor", async () => {
+    mount(undefined, "en");
+    const snapshot = await ready({timeline:[{type:"message",id:"old",kind:"user",text:"Edit me",rewindEligible:true}]});
+    snapshot.rewindSupported = true;
+    await emitState({channel:"state",content:snapshot,messageId:"history-menu"});
+    fireEvent.click(screen.getByText("Edit me"));
+    const editor = screen.getByTestId("edit-composer-input");
+    await act(async () => { fireEvent.keyDown(editor, {key:"a",ctrlKey:true}); });
+    await act(async () => { fireEvent.paste(editor, {clipboardData:{getData:()=>"/"}}); });
+    expect(editor.textContent).toBe("/");
+    const menu = screen.getByTestId("slash-command-menu");
+    expect(within(menu).getByText("/reload")).toBeTruthy();
+    expect(within(menu).queryByText("/restart")).toBeNull();
+  });
   it.each(["/reload", "/install './folder with space' agent"])("routes plain leading command without a transcript user message: %s", async (text) => {
     const {postMessage} = mount(); await ready(); await submit(text);
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({type:"runSlashCommand", data:{sessionId:"s1",text}}));
@@ -428,6 +599,8 @@ type StateTestSession = Partial<WebviewSessionSnapshot> &
 
 function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
   return {
+    access: fixture.access,
+    origin: fixture.origin,
     activePlan: fixture.activePlan ?? null,
     agentMode: fixture.agentMode ?? "chat",
     busy: fixture.busy ?? false,
@@ -435,6 +608,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     checkpoints: fixture.checkpoints,
     composerDraft: fixture.composerDraft,
     messageQueue: fixture.messageQueue,
+    errorRecovery: fixture.errorRecovery,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,
@@ -2467,6 +2641,7 @@ describe("Tomcat webview App", () => {
     expect(document.activeElement).toBe(screen.getByTestId("approval-option-q-draft-yes"));
 
     const persisted = first.getPersistedState();
+    expect(Object.keys(persisted as object)).toEqual(["approvalAnswers"]);
     first.unmount();
     mount(persisted);
     await emitState({
@@ -2477,6 +2652,43 @@ describe("Tomcat webview App", () => {
     expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe(
       "true",
     );
+  });
+
+  it("does not persist unchanged answer drafts on state, sessionView or sessionPatch frames", async () => {
+    const { vscodeApi, getPersistedState } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({ channel: "state", content: snapshot, messageId: "initial-answers" });
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    const writes = vi.mocked(vscodeApi.setState!).mock.calls.length;
+    const saved = getPersistedState();
+    for (let index = 0; index < 3; index += 1) {
+      await emitState({ channel: "state", content: snapshot, messageId: `state-${index}` });
+      await emitState({ channel: "sessionView", content: { sessionId: "s1", view: snapshot.sessionViews.s1 }, messageId: `view-${index}` });
+      await emitState({ channel: "sessionPatch", content: { sessionId: "s1", seq: 1, ops: [] }, messageId: `patch-${index}` });
+    }
+    expect(vscodeApi.setState).toHaveBeenCalledTimes(writes);
+    expect(getPersistedState()).toBe(saved);
+    // Resolving the question really changes the answers, so it must still save.
+    snapshot.sessionViews.s1.timeline = [];
+    await emitState({ channel: "state", content: snapshot, messageId: "question-resolved" });
+    expect(vscodeApi.setState).toHaveBeenCalledTimes(writes + 1);
+    expect(getPersistedState()).toEqual({ approvalAnswers: {} });
+  });
+
+  it("replaces a legacy full snapshot on mount while restoring its answer draft", async () => {
+    const first = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({ channel: "state", content: snapshot, messageId: "legacy-question" });
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    const answersOnly = first.getPersistedState() as { approvalAnswers: unknown };
+    first.unmount();
+    const restored = mount({ ...snapshot, ...answersOnly });
+    expect(restored.vscodeApi.setState).toHaveBeenCalledTimes(1);
+    expect(restored.getPersistedState()).toEqual(answersOnly);
+    expect(Object.keys(restored.getPersistedState() as object)).toEqual(["approvalAnswers"]);
+    await emitState({ channel: "state", content: snapshot, messageId: "legacy-replayed" });
+    expect(screen.getByTestId("approval-option-q-draft-yes").getAttribute("aria-checked")).toBe("true");
+    expect(restored.vscodeApi.setState).toHaveBeenCalledTimes(1);
   });
 
   it("submits the prompt on Enter without Shift", async () => {

@@ -381,6 +381,9 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  errorRecovery?: { errorId: string; dueAt: number };
+  access?: import("../../serveClient/sessionRouter").SessionAccess;
+  origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
   messageQueue?: WebviewMessageQueue;
   sessionFiles?: SessionFilesView;
@@ -407,6 +410,7 @@ export interface WebviewSessionSnapshot {
 }
 
 export interface WebviewSessionTab {
+  origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;
   isPinned?: boolean;
   deleting?: boolean;
   busy: boolean;
@@ -501,6 +505,8 @@ export type WebviewSessionPatchOp =
     };
 
 export type HostEventFrameContent =
+  | { type: "ping" }
+  | { type: "__test.pause_liveness"; enabled: boolean }
   | { type: "composerSubmissionResult"; sessionId: string; userMessageId: string; accepted: boolean }
   | SessionFilesResult
   | MessageEditEvent
@@ -626,6 +632,8 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | { messageId: string; type: "cancelErrorRecovery"; data: { sessionId: string; errorId: string; dueAt: number } }
+  | { messageId: string; type: "pong" }
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | { messageId: string; type: "queueAction"; data: {
@@ -842,6 +850,7 @@ export type WebviewIntent =
       };
     }
   | { messageId: string; type: "retryConnection" }
+  | { messageId: string; type: "restartSharedService" }
   | { messageId: string; type: "viewConnectionLogs" }
   | {
       messageId: string;
@@ -1214,6 +1223,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
 
   switch (value.type) {
     case "ready":
+    case "pong":
     case "listSessions":
       return true;
     case "webviewError":
@@ -1321,6 +1331,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
     case "retryConnection":
+    case "restartSharedService":
     case "viewConnectionLogs":
       return true;
     case "openSettings":
@@ -1426,6 +1437,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (value.data.sessionId === undefined || value.data.sessionId === null || isString(value.data.sessionId));
     case "compact":
       return isRecord(value.data) && isString(value.data.sessionId);
+    case "cancelErrorRecovery":
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.errorId)
+        && typeof value.data.dueAt === "number" && Number.isFinite(value.data.dueAt);
     case "recoverErrorTurn":
       return (
         isRecord(value.data) &&

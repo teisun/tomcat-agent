@@ -208,6 +208,61 @@ Rust core -> ToolDisplay::File -> 持久化 / state.ts
 
 ---
 
+### 3.2 webview 存活与重建
+
+```text
+扩展宿主（任务、会话、输入草稿继续存在）      webview 文档
+  每 5 秒发 ping -----------------------> main.tsx 模块监听
+  收到 pong 清零 <----------------------- 不依赖 React
+  隐藏时清零、不探测；开发模式不启动
+  连续 3 个 ping 未回应，下一跳判定失联
+    ├─ 距上次自动重建不足 60 秒：通知 + [重新加载面板]
+    └─ 否则：自动走同一个重建流程
+             context key=true -> 移除视图 -> onDidDispose（上限 5 秒）
+             finally key=false -> 新文档 -> ready -> 现有 bootstrap + 全量状态
+             focus({ preserveFocus: true })：不抢编辑器焦点
+```
+
+**问题与边界。** React 异常已有 `WebviewErrorBoundary`；这里处理的是 Chromium 渲染进程消失或文档不再回应的情况。只给同一个 `tomcat.chatView` 换文档，不重启扩展宿主、不断开任务连接、不改变 `retainContextWhenHidden`。探活约需 15–20 秒，再加新页面加载时间，不承诺修复 Chromium 本身的缺陷。
+
+**实现决策。** `src/ui/webview/provider.ts` 内联一个计数器和 interval，生命周期跟随 view；`pong` 是唯一存活信号，`postMessage` 返回成功不代表文档回应，拒绝或一直挂起也不会阻塞探测。判死立即停表，当前 view 销毁时清掉引用和 ready，并使旧代的待完成握手失效。`package.json` 的 `when: !tomcat.chatView.rebuilding` 控制临时移除，`extension.ts` 激活时复位该 key。重建失败也在 `finally` 中复位，显示失败提示；不让视图永久隐藏，不增加第二套恢复协议。
+
+**焦点边界。** 真实崩溃验收发现，`gui/src/components/Composer.tsx:replaceDraft` 原先恢复非空草稿时无条件 `focus("end")`，会抵消宿主的 `preserveFocus`。现在仅在 `document.hasFocus()` 时恢复输入焦点；`ApprovalCard.tsx` 恢复“其他”答案输入框时也遵守同一条件。面板已有焦点时保留原体验，编辑器持有焦点时只恢复内容。没有新增恢复标志或跨进程字段。`gui/src/components/Composer.test.tsx` 和 `gui/src/components/ApprovalCard.test.tsx` 覆盖两种焦点归属，installed E2E 同时检查 `document.hasFocus()`，不只检查 VS Code 的 activeTextEditor。
+
+正常恢复不弹通知；短时间内反复失联才使用现有 VS Code 通知样式：
+
+```text
+[!] Tomcat 面板反复失去响应，任务仍在后台运行。
+                                      [重新加载面板]
+```
+
+`gui/src/main.tsx` 在 React 树外回应 ping，所以错误回退页仍算存活。测试事件 `__test.pause_liveness` 只暂停回应，在 `#root` 留下 `data-tomcat-liveness-paused`；重建后标记自然消失。产品流程不会发送这个测试事件。
+
+**参考证据与取舍。** 本地 VS Code 的 `src/vs/workbench/contrib/webviewView/browser/webviewViewPane.ts` 中，`dispose` 发出销毁事件，`activate` 创建新的 overlay，并从 memento 恢复小型 GUI 状态；`src/vs/workbench/browser/parts/views/viewPaneContainer.ts` 的 `MoveViews.run` 把用户移动位置交给 view descriptor 管理。Cline 的 `apps/vscode/src/core/controller/ui/subscribeToPartialMessage.ts:sendPartialMessageEvent` 明确不等待 webview 投递，避免坏页面阻塞任务。Continue 的 `gui/src/redux/store.ts:saveSubsetFilters` 则把持久化范围限制到所需的界面状态。这里复用现有任务连接、状态重发和视图生命周期，不照搬它们的状态管理框架。
+
+**测试。** `src/ui/webview/tests/provider_liveness.test.ts` 覆盖未 ready 时探测、隐藏/开发模式、pong 清零、挂起/拒绝的投递、销毁、旧 view 消息、重建顺序、超时/抛错复位、防循环与手动按钮。`gui/src/main.test.tsx` 覆盖正常及错误回退时的回应；`tests/manifest_contract.test.ts` 守住 when 条件。`e2e-harness/src/test/installed.test.ts` 用已安装 VSIX 验证真正换文档，保留运行中的任务、提问选项和输入草稿，并继续完成原来的回答。VS Code 1.143.1 的首轮实测：销毁回调 32ms，暂停回应后约 16.2 秒恢复；这不是所有机器上的延迟保证。
+
+**推翻条件。** VS Code 提供可靠的 webview 崩溃事件或原生自动恢复后，删掉轮询而非叠加新探测层。若实际日志证明窗口失焦/最小化导致误重建，再将窗口焦点纳入条件；目前不预先增加这套状态。升级 VS Code 后若移除/恢复会丢位置或抢焦点，先停用自动恢复，保留通知按钮，再重新验证宿主行为。
+
+### 3.3 setState 只存提问卡片草稿
+
+```text
+state / sessionView / sessionPatch -> 更新屏幕上的会话，不写 setState
+提问选项或自定义回答变动          -> approvalAnswers 改变 -> 写 setState
+首次挂载                         -> 读出旧答案，再写小对象覆盖旧存档
+新文档 ready                     -> 会话由宿主重发，输入草稿由 draftStore 恢复
+```
+
+**问题与解决。** 原来的 `persistGuiState` 在六处把整份会话快照和答案草稿一起存入 VS Code，但挂载时只读答案。`gui/src/App.tsx` 现在只有一个依赖 `[vscodeApi, approvalAnswers]` 的 effect，写入 `{ approvalAnswers }`。现有 `pruneApprovalAnswers` 在内容未变时保留引用，因此流式帧不触发存档；题目结束时清理答案仍会触发保存。没有额外比较器、迁移标志、缓存或后台写入服务。
+
+首次 effect 会覆盖旧格式，但先通过原来的校验读取合法答案。保存从同步回调移到 React 提交之后，接受几毫秒的时间差；崩溃恢复仍以宿主给出的题目是否已解决为准。没有待回答草稿时存档应低于 1KB；用户输入的答案本身可以更大。此处降低的是重复序列化、跨进程传输和临时分配，不代表常驻内存必然下降某个百分比，也不回收 SQLite 已有空闲页。
+
+**参考与推翻条件。** Continue 的 `saveSubsetFilters` 只列出 `session.id/lastSessionId/title/mode` 等字段，没有把历史列入此白名单；VS Code 的 `webviewViewPane.ts:activate` 用 `onDidUpdateState` 更新小型 memento。会话权威状态继续留在已有宿主/后端路径。只有出现“脱离宿主也要恢复完整会话”的真实需求，才重新讨论完整快照持久化。
+
+**测试。** `gui/src/App.test.tsx` 守住答案往返恢复、保存对象只有 `approvalAnswers`、重复三类帧不增加写次数、旧格式挂载即覆盖，以及题目结束时清理答案。真实 VS Code 验收在关窗落盘后只读查询 `memento/webviewView.tomcat.chatView`，检查该项而非整个数据库文件的大小。
+
+---
+
 ## 4. 时间线模型：为什么 thinking / tool / approval 都是一等项
 
 > 专业：`state.ts` 把 webview transcript 建模为 `WebviewTimelineItem[]`，而不是“消息气泡里嵌杂所有附属状态”。这样历史回放与实时流式能落到同一套渲染语义。

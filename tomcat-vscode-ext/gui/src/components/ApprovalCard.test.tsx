@@ -188,6 +188,19 @@ describe("ApprovalCard", () => {
     expect(screen.getByTestId("approval-option-q1-q1-a").getAttribute("aria-checked")).toBe("true");
   });
 
+  it.each([false, true])("restores a custom answer without taking focus from another document (%s)", documentFocused => {
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(documentFocused);
+    try {
+      render(<ApprovalCard item={buildItem([buildQuestion("q1", "Where?")])}
+        draft={{ q1: { optionId: "__custom__", customText: "Saved answer" } }}
+        onAnswer={vi.fn()} onDraftChange={vi.fn()} presentation="pending" />);
+      const input = screen.getByTestId("approval-custom-q1");
+      expect(input).toHaveProperty("value", "Saved answer");
+      if (documentFocused) expect(document.activeElement).toBe(input);
+      else expect(document.activeElement).not.toBe(input);
+    } finally { hasFocus.mockRestore(); }
+  });
+
   it("retains Other text across pages and submits the full ordered batch once", () => {
     const onAnswer = vi.fn();
     render(
@@ -197,6 +210,7 @@ describe("ApprovalCard", () => {
         presentation="pending"
       />,
     );
+    screen.getByTestId("approval-option-q1-__custom__").focus();
     fireEvent.click(screen.getByTestId("approval-option-q1-__custom__"));
     expect(document.activeElement).toBe(screen.getByTestId("approval-custom-q1"));
     fireEvent.change(screen.getByTestId("approval-custom-q1"), { target: { value: "  My answer  " } });

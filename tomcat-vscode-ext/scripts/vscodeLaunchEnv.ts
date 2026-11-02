@@ -16,6 +16,25 @@ export function cleanVsCodeGuiEnvironment(env: NodeJS.ProcessEnv): NodeJS.Proces
   return clean;
 }
 
+/** Opt-in input conversion for the VS Code test launcher, never the product or ACP. */
+export function windowTestProxy(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.TOMCAT_E2E_LLM_PROXY !== undefined) return env.TOMCAT_E2E_LLM_PROXY;
+  const name = env.TOMCAT_E2E_WINDOW_PROXY_ENV;
+  if (name === undefined) return undefined;
+  if (!/^(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy)$/.test(name)) {
+    throw new Error("TOMCAT_E2E_WINDOW_PROXY_ENV must select one HTTP_PROXY, HTTPS_PROXY or ALL_PROXY alias");
+  }
+  return env[name]; // No fallback or NO_PROXY emulation; an absent value keeps the default fixture.
+}
+
+/** Use the extension's declared minimum, as the packaged-extension runner does. */
+export async function minimumVsCodeVersion(): Promise<string> {
+  const manifest = JSON.parse(await fs.readFile(path.resolve(__dirname, "../package.json"), "utf8"));
+  const version = manifest.engines.vscode.replace(/^\^/, "");
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) throw new Error(`Cannot resolve minimum VS Code version: ${version}`);
+  return version;
+}
+
 let guiLaunchActive = false;
 
 export async function withVsCodeGuiEnvironment<T>(
@@ -38,7 +57,7 @@ export async function withVsCodeGuiEnvironment<T>(
   }
 }
 
-async function reserveCapturePort(): Promise<number> {
+export async function reserveLoopbackPort(): Promise<number> {
   const server = net.createServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -70,7 +89,7 @@ export async function runVsCodeGuiTests<T extends GuiOptions>(
   // store. password-store=basic alone does not prevent macOS keychain dialogs.
   if (!launchArgs.includes("--use-inmemory-secretstorage")) launchArgs.push("--use-inmemory-secretstorage");
   const existingPort = launchArgs.find((arg) => arg.startsWith("--remote-debugging-port="));
-  const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveCapturePort();
+  const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveLoopbackPort();
   if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) throw new Error("Invalid VS Code capture port");
   if (!existingPort) launchArgs.push(`--remote-debugging-port=${cdpPort}`);
   const root = env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(os.tmpdir(), "tomcat-vscode-runs");

@@ -219,6 +219,7 @@ fn large_user_turn(label: &str) -> ChatMessage {
 
 #[derive(Default)]
 struct RecordingAppendSink {
+    fail_custom_entries: bool,
     next_id: Mutex<u32>,
     messages: Mutex<Vec<serde_json::Value>>,
     custom_entries: Mutex<Vec<serde_json::Value>>,
@@ -234,6 +235,11 @@ impl MessageAppendSink for RecordingAppendSink {
 
     fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
         self.custom_entries.lock().unwrap().push(extra);
+        if self.fail_custom_entries {
+            return Err(AppError::Io(std::io::Error::other(
+                "diagnostic sink unavailable",
+            )));
+        }
         Ok(())
     }
 
@@ -397,6 +403,53 @@ async fn run_retries_on_429_then_succeeds() {
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
+}
+
+#[tokio::test]
+async fn run_observed_gateway_codes_get_the_full_unattended_budget() {
+    for code in [
+        "server_error",
+        "upstream_http2_stream_error",
+        "upstream_stream_read_error",
+    ] {
+        let mut streams = (0..4)
+            .map(|_| {
+                vec![
+                    Ok(StreamEvent::LlmError {
+                        reason: format!("error:{code}"),
+                        message: "temporary upstream failure".into(),
+                        code: Some(code.into()),
+                    }),
+                    Ok(StreamEvent::FinishReason {
+                        reason: format!("error:{code}"),
+                    }),
+                ]
+            })
+            .collect::<Vec<_>>();
+        streams.push(ok_text_stream("recovered"));
+        let (provider, requests) = RecordingStreamLlmProvider::new(streams);
+        let mut agent = AgentLoop::new(
+            test_binding(Arc::new(provider), "gpt-4"),
+            Arc::new(MockPrimitiveExecutor),
+            Arc::new(DefaultEventBus::new()),
+            AgentLoopConfig {
+                unattended_retry: true,
+                retry_base_delay_ms: 0,
+                ..Default::default()
+            },
+            CancellationToken::new(),
+        );
+        let result = agent
+            .run(vec![ChatMessage::user("continue")])
+            .await
+            .unwrap();
+        assert_eq!(result.final_text, "recovered", "{code}");
+        assert_eq!(
+            requests.0.lock().unwrap().len(),
+            5,
+            "{code} must pass the unknown-error ceiling"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1145,12 +1198,144 @@ async fn guard_runs_before_first_request_of_a_turn() {
 
 #[test]
 fn retry_delay_uses_jitter_window_and_cap() {
-    let min_delay = super::super::run::compute_retry_delay_ms(500, 2, 0);
-    let max_delay = super::super::run::compute_retry_delay_ms(500, 2, 40);
-    let capped = super::super::run::compute_retry_delay_ms(500, 20, 40);
+    let min_delay = super::super::request_retry::compute_retry_delay_ms(500, 2, 0);
+    let max_delay = super::super::request_retry::compute_retry_delay_ms(500, 2, 40);
+    let capped = super::super::request_retry::compute_retry_delay_ms(500, 20, 40);
     assert_eq!(min_delay, 400, "attempt=2 最小 jitter 应为 base 的 80%");
     assert_eq!(max_delay, 600, "attempt=2 最大 jitter 应为 base 的 120%");
     assert_eq!(capped, 8_000, "指数退避应被上限 cap 到 8s");
+}
+
+#[tokio::test]
+async fn run_each_model_request_gets_an_independent_retry_budget() {
+    let transient = || vec![Err(llm_http_status_error("mock", 503, "temporary"))];
+    let tools = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "before ".into(),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("once".into()),
+            name: Some("read".into()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.into()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        transient(),
+        tools,
+        transient(),
+        ok_text_stream("after"),
+    ]);
+    let bus = Arc::new(DefaultEventBus::new());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    for name in [
+        wire::WIRE_AUTO_RETRY_START,
+        wire::WIRE_AUTO_RETRY_END,
+        wire::WIRE_TOOL_EXECUTION_START,
+        wire::WIRE_TURN_START,
+    ] {
+        let events = events.clone();
+        bus.on(
+            name,
+            Box::new(move |ctx: EventContext| {
+                events.lock().unwrap().push((name, ctx.payload));
+                Ok(())
+            }),
+        );
+    }
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        bus,
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let result = agent.run(vec![ChatMessage::user("read")]).await.unwrap();
+    assert_eq!(result.final_text, "before after");
+    let requests = requests.0.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for request in &requests[2..] {
+        let tools: Vec<_> = request
+            .messages
+            .iter()
+            .filter(|m| m.tool_call_id.is_some())
+            .collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].text_content(), Some("content:/a"));
+    }
+    let events = events.lock().unwrap();
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|(name, _)| *name == wire::WIRE_AUTO_RETRY_START)
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert!(starts
+        .iter()
+        .all(|(_, p)| p["attempt"] == 2 && p["maxAttempts"] == 2));
+    let ends: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| *name == wire::WIRE_AUTO_RETRY_END)
+        .collect();
+    assert_eq!(ends.len(), 2);
+    assert!(ends
+        .iter()
+        .all(|(_, (_, p))| p["success"] == true && p["attempt"] == 2));
+    let tool = events
+        .iter()
+        .position(|(name, _)| *name == wire::WIRE_TOOL_EXECUTION_START)
+        .unwrap();
+    assert!(
+        ends[0].0 < tool && tool < ends[1].0,
+        "request recovery completes before executing tools"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(n, _)| *n == wire::WIRE_TOOL_EXECUTION_START)
+            .count(),
+        1
+    );
+    assert_eq!(
+        sink.messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn run_empty_reply_and_transport_failure_share_the_same_request_budget() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        thinking_only_empty_stream(),
+        vec![Err(llm_http_status_error("mock", 503, "temporary"))],
+        ok_text_stream("must not be requested"),
+    ]);
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    assert!(agent.run(vec![ChatMessage::user("answer")]).await.is_err());
+    assert_eq!(requests.0.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1788,6 +1973,27 @@ async fn run_empty_messages_fails_before_calling_the_llm() {
 
 #[tokio::test]
 async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
+    assert_empty_turn_retry(false).await;
+}
+
+#[tokio::test]
+async fn empty_turn_diagnostic_failure_warns_without_changing_retry() {
+    assert_empty_turn_retry(true).await;
+}
+
+async fn assert_empty_turn_retry(fail_custom_entries: bool) {
+    let log_dir = tempfile::tempdir().unwrap();
+    let log_path = log_dir.path().join("warnings.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || log.try_clone().unwrap())
+        .finish();
+    // Keep callsite registration live while other tests use their own subscriber.
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let (provider, requests) = RecordingStreamLlmProvider::new(vec![
         thinking_only_empty_stream(),
         hidden_empty_stream("resp_empty_2"),
@@ -1806,7 +2012,10 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
             }),
         );
     }
-    let sink = Arc::new(RecordingAppendSink::default());
+    let sink = Arc::new(RecordingAppendSink {
+        fail_custom_entries,
+        ..Default::default()
+    });
     let mut loop_ = AgentLoop::new(
         test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -1879,6 +2088,19 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
     assert_eq!(retry_ends.len(), 1);
     assert_eq!(retry_ends[0]["success"].as_bool(), Some(true));
     assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(3));
+    let logs = std::fs::read_to_string(log_path).unwrap();
+    assert_eq!(
+        logs.matches("empty_turn diagnostic write failed").count(),
+        if fail_custom_entries { 2 } else { 0 },
+        "diagnostic failures must be visible: {logs}"
+    );
+    assert!(!logs.contains("reasoning without a visible answer"));
+    assert!(!logs.contains("resp_empty_2"));
+    assert!(!logs.contains("opaque"));
+    if fail_custom_entries {
+        assert!(logs.contains("diagnostic sink unavailable"));
+        assert!(logs.contains("failure_kind=\"thinking_only\""));
+    }
 }
 
 #[tokio::test]

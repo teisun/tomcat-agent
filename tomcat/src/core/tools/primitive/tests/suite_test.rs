@@ -96,6 +96,55 @@ impl Drop for HomeEnvGuard {
     }
 }
 
+#[test]
+fn bash_preflight_and_cwd_expand_the_controllers_home_without_granting_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let environment = crate::infra::platform::EnvironmentSnapshot::from_values(
+        [("HOME".into(), home.path().to_string_lossy().into_owned())].into(),
+    )
+    .unwrap();
+    let cwd =
+        ResolvedCwd::from_raw_in_environment(Some("~"), Some(workspace.path()), Some(&environment))
+            .unwrap();
+    assert_eq!(
+        cwd.resolved_path(),
+        crate::infra::platform::canonicalize(home.path()).unwrap()
+    );
+    let child = home.path().join("controller-home-child");
+    std::fs::create_dir(&child).unwrap();
+    let native_home_path = format!("~{}controller-home-child", std::path::MAIN_SEPARATOR);
+    let cwd = ResolvedCwd::from_raw_in_environment(
+        Some(&native_home_path),
+        Some(workspace.path()),
+        Some(&environment),
+    )
+    .unwrap();
+    assert_eq!(
+        cwd.resolved_path(),
+        crate::infra::platform::canonicalize(&child).unwrap()
+    );
+    let candidate = super::super::bash_task::resolve_preflight_path(
+        "~/marker",
+        workspace.path(),
+        Some(&environment),
+    )
+    .unwrap();
+    // A nonexistent target can retain macOS's lexical /var alias; compare its location.
+    assert_eq!(
+        crate::infra::platform::canonicalize(candidate.parent().unwrap()).unwrap(),
+        crate::infra::platform::canonicalize(home.path()).unwrap()
+    );
+    assert_eq!(candidate.file_name().unwrap(), "marker");
+    assert!(matches!(
+        make_gate(workspace.path())
+            .check(PrimitiveOperation::Bash, &candidate.to_string_lossy())
+            .unwrap(),
+        crate::core::permission::PermissionDecision::NeedConfirm { .. }
+    ));
+    assert!(!home.path().join("marker").exists());
+}
+
 #[tokio::test]
 async fn read_file_success() {
     let dir = std::env::temp_dir().join("tomcat_exec_read");
@@ -437,6 +486,118 @@ impl AuditRecorder for DenyAuditRecorder {
     fn record_tool_call(&self, _entry: ToolAuditEntry) {}
     fn record_hostcall(&self, _entry: crate::infra::HostcallAuditEntry) {}
     fn record_plugin_lifecycle(&self, _entry: crate::infra::PluginLifecycleAuditEntry) {}
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn git_probe_runs_only_after_bash_permission_and_audits_startup_failure() {
+    use crate::core::permission::BashAstChecker;
+    use crate::core::tools::primitive::bash_task::BackgroundBashGuard;
+    use crate::infra::platform::{posix_shell, EnvironmentSnapshot};
+    let installed = posix_shell().expect("Windows tests require Git for Windows");
+    let git_root = installed.parent().unwrap().parent().unwrap();
+    for (allowed, missing) in [(false, false), (true, false), (true, true)] {
+        let dir = tempfile::Builder::new()
+            .prefix("tomcat shell probe 空格 ")
+            .tempdir()
+            .unwrap();
+        std::fs::create_dir(dir.path().join("probe-bin")).unwrap();
+        std::fs::write(
+            dir.path().join("probe-bin/git.cmd"),
+            "@echo off\r\n>probe-ran echo probed\r\ntype git-exec-path.txt\r\n",
+        )
+        .unwrap();
+        let root = if missing {
+            dir.path().join("missing-git")
+        } else {
+            git_root.to_path_buf()
+        };
+        std::fs::write(
+            dir.path().join("git-exec-path.txt"),
+            root.join("mingw64/libexec/git-core")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut values: std::collections::BTreeMap<_, _> = std::env::vars()
+            .filter(|(key, _)| {
+                !["PATH", "PROGRAMFILES", "LOCALAPPDATA"]
+                    .contains(&key.to_ascii_uppercase().as_str())
+            })
+            .collect();
+        values.insert(
+            "PATH".into(),
+            format!("probe-bin;{}", std::env::var("PATH").unwrap_or_default()),
+        );
+        let environment = Arc::new(EnvironmentSnapshot::from_values(values).unwrap());
+        let audit = Arc::new(Mutex::new(Vec::new()));
+        let gate = DefaultPermissionGate::new(
+            GateConfig {
+                agent_definition_dir: dir.path().to_path_buf(),
+                workspace_roots: vec![],
+                agent_trail_readonly_dirs: vec![],
+                user_path_rules: vec![],
+                user_bash_forbidden: if allowed { vec![] } else { vec![".*".into()] },
+                user_bash_approval: vec![],
+                auto_confirm: false,
+            },
+            SessionGrants::new(),
+        )
+        .into_arc();
+        let registry = BashTaskRegistry::new(dir.path().join("logs")).with_background_guard(
+            BackgroundBashGuard::new(
+                "probe-test",
+                gate,
+                Arc::new(AllowAllConfirmation),
+                Arc::new(DenyAuditRecorder(audit.clone())),
+                BashAstChecker::default(),
+            ),
+        );
+        registry.set_environment(Some(environment));
+        let result = registry
+            .spawn_tracked(
+                "printf allowed > actual.txt".into(),
+                Some(dir.path().to_path_buf()),
+                false,
+            )
+            .await;
+        if !allowed {
+            assert!(matches!(result, Err(AppError::Permission(_))));
+            assert!(
+                !dir.path().join("probe-ran").exists(),
+                "denial must precede even git discovery"
+            );
+        } else if missing {
+            assert!(matches!(result, Err(AppError::Primitive(_))));
+            assert!(dir.path().join("probe-ran").exists());
+            assert!(!dir.path().join("actual.txt").exists());
+        } else {
+            let ticket = result.unwrap();
+            registry.wait_for_finish(&ticket.task_id).await.unwrap();
+            assert!(dir.path().join("probe-ran").exists());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("actual.txt")).unwrap(),
+                "allowed"
+            );
+        }
+        let entries = audit.lock().unwrap();
+        let entry = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.operation == AuditPrimitiveOp::Bash)
+            .unwrap();
+        assert_eq!(entry.user_approved, allowed);
+        assert_eq!(entry.success, allowed && !missing);
+        if missing {
+            assert!(entry
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains(&crate::infra::i18n::tr("bash.gitBashMissing", &[])));
+            assert!(entry.permission_scope.is_some());
+            assert!(registry.list().is_empty());
+        }
+    }
 }
 
 #[tokio::test]
@@ -1105,6 +1266,29 @@ async fn search_files_url_like_returns_non_permission_error() {
 }
 
 #[tokio::test]
+async fn session_cwd_is_not_a_permission_grant() {
+    let authorized = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("value.txt"), "not granted").unwrap();
+    let gate = make_gate(authorized.path());
+    let before = gate.effective_roots();
+    let exec = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        gate.clone(),
+    )
+    .with_session_cwd(workspace.path().to_owned());
+    assert!(matches!(
+        exec.read_file("value.txt", "p1").await,
+        Err(AppError::Permission(_))
+    ));
+    let after = gate.effective_roots();
+    assert_eq!(before.read_write, after.read_write);
+    assert_eq!(before.read_only, after.read_only);
+}
+
+#[tokio::test]
 async fn build_bash_task_registry_applies_wait_policy_and_guard() {
     let dir = tempfile::tempdir().unwrap();
     let bash_cfg = crate::infra::config::ToolsBashConfig {
@@ -1131,6 +1315,7 @@ async fn build_bash_task_registry_applies_wait_policy_and_guard() {
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
         crate::core::permission::BashAstChecker::default(),
+        None,
     );
     assert_eq!(registry.foreground_wait_ms(), 9_000);
 
@@ -1262,6 +1447,7 @@ async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
         crate::core::permission::BashAstChecker::default(),
+        None,
     );
     let exec = DefaultPrimitiveExecutor::new(
         temp_primitive_config(dir.path()),

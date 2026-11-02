@@ -64,7 +64,7 @@ impl AgentLoop {
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
-            connector_registry: None,
+            connector_tools: None,
             plugin_engine_config: None,
             config,
             steering_queue: Arc::new(Mutex::new(super::SteeringInbox::default())),
@@ -115,10 +115,20 @@ impl AgentLoop {
     /// 注入连接器目录；deferred MCP 工具只能经稳定的 `tool_*` 内置元工具触达，
     /// 不再被逐个注册进 ToolRegistry / prompt 前缀。
     pub fn with_connector_registry(
-        mut self,
+        self,
         registry: Arc<crate::core::connector::ConnectorRegistry>,
     ) -> Self {
-        self.connector_registry = Some(registry);
+        self.with_connector_tools(crate::core::connector::mcp::manager::McpToolView::new(
+            registry.mcp_manager(),
+            None,
+        ))
+    }
+
+    pub(crate) fn with_connector_tools(
+        mut self,
+        tools: Arc<crate::core::connector::mcp::manager::McpToolView>,
+    ) -> Self {
+        self.connector_tools = Some(tools);
         self
     }
 
@@ -240,7 +250,7 @@ impl AgentLoop {
             web_search_runtime: None,
             todos_runtime: None,
             tool_registry: None,
-            connector_registry: None,
+            connector_tools: None,
             plugin_engine_config: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),

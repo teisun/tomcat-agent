@@ -1,0 +1,11 @@
+# 合并到执行账号的 ~/.tomcat/models.toml；不要覆盖其他模型。
+# 所有地址、模型名和能力都须按公司网关实际能力调整；不是可直连的服务配置。
+[[models]]
+id = "company-model"
+model_name = "replace-with-upstream-model-name"
+api = "openai" # OpenAI Chat Completions；其他协议需改为真实支持的类型。
+provider = "company"
+api_key_env = "COMPANY_API_KEY"
+base_url = "https://model-gateway.example.invalid/v1"
+capabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }
+# 不在这里填 Key。先配置模型，再用 tomcat model key set company 交互式保存。

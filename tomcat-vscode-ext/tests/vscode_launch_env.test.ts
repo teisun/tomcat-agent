@@ -5,7 +5,7 @@ import * as vm from "node:vm";
 import { Writable } from "node:stream";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanVsCodeGuiEnvironment, GUI_MODE_KEYS, runVsCodeGuiTests, withVsCodeGuiEnvironment } from "../scripts/vscodeLaunchEnv";
+import { cleanVsCodeGuiEnvironment, GUI_MODE_KEYS, minimumVsCodeVersion, runVsCodeGuiTests, withVsCodeGuiEnvironment } from "../scripts/vscodeLaunchEnv";
 
 const owned: string[] = [];
 async function temp() {
@@ -26,6 +26,29 @@ function assertClean(supplied: NodeJS.ProcessEnv) {
 }
 
 describe("VS Code GUI launch environment", () => {
+  it.each(["run-vscode-devhost", "run-windows-system-proxy"])(
+    "%s downloads the extension's declared minimum, not an obsolete hardcoded version", async name => {
+      const file = path.resolve(__dirname, `../scripts/${name}.ts`);
+      const source = ts.createSourceFile(file, await fs.readFile(file, "utf8"), ts.ScriptTarget.Latest, true);
+      const calls: ts.CallExpression[] = [];
+      const visit = (node: ts.Node) => {
+        if (ts.isCallExpression(node) && node.expression.getText(source) === "downloadAndUnzipVSCode") calls.push(node);
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+      expect(calls).toHaveLength(1);
+      const download = vi.fn(async (_options: { version: string }) => "fake-vscode");
+      const code = ts.transpileModule(`(async () => ${calls[0].getText(source)})()`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      expect(await vm.runInNewContext(code, { downloadAndUnzipVSCode: download, minimumVsCodeVersion })).toBe("fake-vscode");
+      expect(download).toHaveBeenCalledOnce();
+      const manifest = JSON.parse(await fs.readFile(path.resolve(__dirname, "../package.json"), "utf8"));
+      const version = download.mock.calls[0][0].version;
+      expect([version, `^${version}`]).toContain(manifest.engines.vscode);
+    },
+  );
+
   it.each([[false, false], [true, false], [false, true], [true, true]])(
     "cleans parent=%s and supplied=%s without changing ordinary settings", async (parent, supplied) => {
       for (const key of GUI_MODE_KEYS) vi.stubEnv(key, parent ? "polluted" : undefined);
@@ -69,7 +92,7 @@ describe("VS Code GUI launch environment", () => {
           .toEqual(["--use-inmemory-secretstorage"]);
         if (port) expect(supplied).toBe(port);
         return 0;
-      }, { launchArgs, extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } });
+      }, { launchArgs, extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } as NodeJS.ProcessEnv });
       expect(launchArgs).toEqual(before);
     }
   });
@@ -165,13 +188,13 @@ describe("VS Code GUI launch environment", () => {
       // Evaluate the real launch expression, not a duplicate of its options.
       const locals = {
         path, process: { env }, runVsCodeGuiTests, runTests, testEnv: env, workspacePath: root,
-        resolveVsCodeExecutable: () => "fake-vscode",
+        resolveVsCodeExecutable: () => "fake-vscode", vscodeExecutablePath: "fake-vscode", artifacts: undefined,
         options: { harnessRoot: root, harnessTestsPath: "fake-test", testEnv: env, workspacePath: root, artifactsDir: root },
         fixture: { env, workspaceDir: root }, extensionTestsEnv: env, harnessRoot: root,
         extensionDevelopmentPath: root, extensionTestsPath: "fake-test", harnessTestsPath: "fake-test",
         extensionRoot: root, userDataDir: path.join(root, "profile"), extensionsDir: root,
-        workspaceDir: root, screenshotsDir: root, reportPath: path.join(root, "report.json"),
-        artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345,
+        workspaceDir: root, workspaceFile: path.join(root, "profile", "host.code-workspace"), screenshotsDir: root, reportPath: path.join(root, "report.json"),
+        artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345, realObservation: false,
       };
       const code = ts.transpileModule(`${calls[0].getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
       await vm.runInNewContext(code, locals);
@@ -180,7 +203,8 @@ describe("VS Code GUI launch environment", () => {
       expect(runTests.mock.calls[0][0].launchArgs.filter((arg: string) => arg === "--use-inmemory-secretstorage"))
         .toEqual(["--use-inmemory-secretstorage"]);
       if (name === "devhost") {
-        expect(runTests.mock.calls[0][0].launchArgs).toContain(root);
+        expect(runTests.mock.calls[0][0].launchArgs).toContain(locals.workspaceFile);
+        expect(runTests.mock.calls[0][0].launchArgs).not.toContain(root);
         expect(runTests.mock.calls[0][0].launchArgs).not.toContain(path.dirname(root));
       }
     },

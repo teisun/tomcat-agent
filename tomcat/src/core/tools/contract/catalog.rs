@@ -574,21 +574,29 @@ pub fn builtin_tool_surface_with_policies(
     allow_load_skill: bool,
     allow_connector_tools: bool,
 ) -> BuiltinToolSurface {
-    builtin_tool_surface_with_policies_and_install(allow_load_skill, allow_connector_tools, true)
+    builtin_tool_surface_with_policies_and_install(
+        allow_load_skill,
+        allow_connector_tools,
+        true,
+        true,
+    )
 }
 
 /// Builds a session-aware tool surface. Package installation is omitted while a
 /// session is planning, so the model cannot propose a write-only operation that
-/// the runtime will reject. The execution guard remains authoritative.
+/// the runtime will reject. Questions are omitted when the controller cannot
+/// collect an answer. Execution guards remain authoritative.
 pub fn builtin_tool_surface_with_policies_and_install(
     allow_load_skill: bool,
     allow_connector_tools: bool,
     allow_package_install: bool,
+    allow_ask_question: bool,
 ) -> BuiltinToolSurface {
     let entries = BUILTIN_TOOL_CATALOG
         .iter()
         .filter(|entry| allow_load_skill || entry.name != "load_skill")
         .filter(|entry| allow_package_install || entry.name != "package_install")
+        .filter(|entry| allow_ask_question || entry.name != "ask_question")
         .filter(|entry| {
             allow_connector_tools
                 || !matches!(
@@ -998,7 +1006,7 @@ fn bash_parameters() -> Value {
             },
             "cwd": {
                 "type": "string",
-                "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd."
+                "description": "Optional working directory. Empty or omitted uses the session working directory; relative paths are resolved from it. Use an absolute path or `~/...` to override; shell vars like `$HOME` are NOT expanded here."
             },
             "foreground_wait_ms": {
                 "type": "integer",

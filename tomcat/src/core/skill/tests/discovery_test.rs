@@ -311,6 +311,46 @@ fn discovery_failed_distinguishes_single_file_and_root_failure() {
     assert!(set.discovery_failed());
 }
 
+#[test]
+fn connection_skills_reuse_precedence_limits_and_disabled_names_without_changing_base() {
+    use crate::core::skill::discovery::discover_with_connection;
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let private = temp.path().join("host");
+    let mut cfg = base_config(&temp.path().join("work"));
+    write_skill(
+        &project.join(".agents/skills/shared/SKILL.md"),
+        "shared",
+        "project",
+    );
+    write_skill(&private.join("shared/SKILL.md"), "shared", "host");
+    write_skill(&private.join("only-host/SKILL.md"), "only-host", "private");
+    let base = discover(&cfg, &project);
+    let effective = discover_with_connection(&cfg, &project, Some(&private));
+    assert_eq!(effective.by_name["shared"].source, SkillSource::Connection);
+    assert_eq!(effective.by_name["shared"].description, "host");
+    assert!(effective.by_name.contains_key("only-host"));
+    assert!(effective
+        .warnings
+        .iter()
+        .any(|w| w == "skill_shadowed:shared by connection"));
+    assert_eq!(discover(&cfg, &project), base);
+    cfg.skills.disabled.push("only-host".into());
+    assert!(!discover_with_connection(&cfg, &project, Some(&private))
+        .by_name
+        .contains_key("only-host"));
+    cfg.skills.disabled.clear();
+    cfg.skills.max_skills = 1;
+    let bounded = discover_with_connection(&cfg, &project, Some(&private));
+    assert_eq!(bounded.by_name.len(), 1);
+    assert!(bounded
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("skills_discovery_truncated:")));
+    cfg.skills.enabled = false;
+    assert!(discover_with_connection(&cfg, &project, Some(&private)).is_empty());
+}
+
 fn base_config(work_dir: &Path) -> AppConfig {
     let mut cfg = AppConfig::default();
     cfg.agent.id = "spike".to_string();

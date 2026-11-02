@@ -700,7 +700,8 @@ async fn package_install_manifest_authorizes_consumed_tree() {
             .into_arc();
             let backend = ChatPackageInstallBackend {
                 ctx: PackageInstallContext::new(
-                    load_config(Some(&config_path)).unwrap(),
+                    // This fixture tests source permissions, not process-wide env overlays.
+                    load_config_toml_file(&config_path).unwrap(),
                     dir.path().to_path_buf(),
                     Some(dir.path().to_path_buf()),
                     Arc::new(AllowAllConfirmation),

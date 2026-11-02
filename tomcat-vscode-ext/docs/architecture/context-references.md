@@ -148,7 +148,7 @@ selection:
   {
     type: "reference",
     kind: "selection",
-    path,       // 工作区内用相对路径，工作区外回退绝对路径
+    path,       // 完整文件系统路径（uri.fsPath），不依赖会话 cwd
     label,      // 例：app.ts:12-18
     lineStart,
     lineEnd,
@@ -159,12 +159,14 @@ file:
   {
     type: "reference",
     kind: "file",
-    path,       // 工作区内用相对路径，工作区外回退绝对路径
+    path,       // 完整文件系统路径（uri.fsPath），不依赖会话 cwd
     label       // 文件名（目录保留尾部 /）
   }
 ```
 
 具体构造逻辑见 [`../../src/ui/webview/contextReferences.ts`](../../src/ui/webview/contextReferences.ts)。
+
+**定位地址与显示名称分离**：同一 VS Code 工作区可以包含多个独立项目；工作区名称不是磁盘父目录。新引用在选区、文件选择、拖入和 `@` 入口统一保留完整文件系统路径，短 label 只负责展示，目录仍保留尾部 `/`。不随编辑器切换会话 cwd，也不自动扩大访问权限。草稿/历史沿用原结构；旧相对路径原样保留，无法确定归属的旧引用需用户重新添加，不猜测迁移。
 
 ### 4.2 消息 segments
 
@@ -192,7 +194,7 @@ type Segment =
   {
     "type": "input_reference",
     "ref_kind": "selection",
-    "path": "src/app.ts",
+    "path": "/project/src/app.ts",
     "label": "app.ts:3-5",
     "line_start": 3,
     "line_end": 5,
@@ -253,7 +255,8 @@ Composer.tsx
 ```text
 入口 A: "+"
   Composer.tsx -> pickContext
-               -> provider.ts showOpenDialog(任意文件/文件夹)
+               -> provider.ts showQuickPick(添加文件 / 添加文件夹)
+               -> showOpenDialog(仅文件或仅文件夹，可多选)
                -> classifyPickedUri(uri)
 
 入口 B: Shift 拖拽
@@ -271,7 +274,7 @@ attachment -> readPendingAttachment(...) -> pendingAttachments[] -> postState()
 
 这带来三个直接结果：
 
-1. `+` 现在是**可靠主入口**。它能选任意文件/文件夹，也能处理工作区外文件，因为 `showOpenDialog` 在 host 侧能拿到绝对路径。
+1. `+` 提供**文件和文件夹两个明确入口**，也能处理工作区外文件，因为 `showOpenDialog` 在 host 侧能拿到绝对路径。Windows/Linux 不支持在同一原生对话框混选文件与文件夹；同时设置 `canSelectFiles` 和 `canSelectFolders` 为 `true` 会只显示文件夹（VS Code `OpenDialogOptions` 的 API 契约）。先用原生 QuickPick 选类型，再传互斥的选框参数，避免把普通文件隐藏。两类均可多选、分次追加到同一草稿；取消任一步都会完成原有 `composerWorkResult`，不清空草稿、不留下等待中的附件操作。
 2. 拖图片不再变成“废引用”。拖拽和 `+` 复用同一分类器后，图片/PDF 会走附件通道，代码/目录走上下文通道。
 3. 附件限制不会再误伤普通文件引用。非图片/非 PDF 文件现在根本不进 `parse_attachment_part`，而是走 `ServeContentSegment -> ContextReference`。
 
@@ -456,7 +459,7 @@ hover title  = path:lineStart-lineEnd
 
 ```text
 label = app.ts:12-18
-title = src/app.ts:12-18
+title = /project/src/app.ts:12-18
 ```
 
 这样做的原因很简单：
@@ -470,8 +473,8 @@ title = src/app.ts:12-18
 
 ```text
 chip label  -> 一律用文件名（目录保留尾部 /）
-工作区内    -> hover / path 用相对路径
-工作区外    -> hover / path 回落到绝对路径
+hover / path -> 工作区内外均保留完整文件系统路径
+@ 次文案    -> 单根显示相对父目录，多根显示项目名/相对父目录
 ```
 
 ### 9.3 大选区护栏
@@ -493,7 +496,7 @@ chip label  -> 一律用文件名（目录保留尾部 /）
 1. `protocol.test.ts`：`segments` / `resolveDrop` / `insertReference` 结构校验；
 2. `state.test.ts` / `dual_channel.test.ts`：历史消息中的 `input_reference` 回放成 segments；
 3. `provider.test.ts`：`classifyPickedUri`、`pickContext` 选框参数、图片/PDF/目录/普通文件分流；
-4. `webview_provider_flow.test.ts`：prompt `segments` 透传、`pickContext` 混选分流、drop 归一、manifest 合同；
+4. `webview_provider_flow.test.ts`：prompt `segments` 透传、文件/文件夹分次选择与附件分流、取消/异常后草稿保留和操作收尾、drop 归一、manifest 合同；
 5. `Composer.test.tsx`：引用插入去重、拖拽 URI 解析、`Shift` hint 三态、editor drop 抑制双处理；
 5. `MessageBubble.test.tsx` / `ReferenceChip.test.tsx`：历史 chip 渲染与 hover title；
 6. `App.test.tsx`：`insertReference` 事件进入 composer，reference-only prompt 可发送。
@@ -503,7 +506,7 @@ chip label  -> 一律用文件名（目录保留尾部 /）
 已新增两条真实宿主链路：
 
 1. **选区命令链路**：真实编辑器选区 -> `tomcat.addSelectionToChat` -> webview chip -> 点击发送 -> reload 后历史回放仍是 chip；
-2. **文件入口链路**：`showOpenDialog` stub 驱动 `pickContext` -> 图片进附件、代码/文件夹进 chip；
+2. **文件入口链路**：点击真实 `+` -> 原生 QuickPick 分别选文件/文件夹 -> `showOpenDialog` stub 校验互斥参数并返回所选 URI -> 图片进附件、代码/文件夹进 chip；截图记录原生菜单与 Composer 结果。该测试不替代 Windows 系统文件对话框的实际选择验收；
 3. **文件拖拽链路**：`resolveDrop` 意图 -> 图片进附件、文件/目录进 chip，并验证重复 drop 不双插。
 
 ### 10.3 验收命令

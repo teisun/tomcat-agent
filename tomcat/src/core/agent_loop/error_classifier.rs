@@ -1,19 +1,17 @@
 //! # Agent Loop 错误分类与 L3 上下文溢出回收
 //!
-//! 本模块承担两类职责（均为 `AgentLoop` 的 **Attempt Loop** 内部逻辑）：
+//! 本模块承担两类职责（均为 `AgentLoop` 的单请求重试内部逻辑）：
 //!
 //! 1. [`classify_error`]：把 LLM 返回的 [`AppError`] 映射为
-//!    [`LoopError::Retryable`] 或 [`LoopError::Fatal`]，供第二层循环决定
+//!    [`LoopError::Retryable`] 或 [`LoopError::Fatal`]，供 Request Retry 决定
 //!    "指数退避重试"或"立即终止"。
-//! 2. [`handle_overflow_retry`]：当 Attempt Loop 捕获 `Retryable(context_overflow)`
+//! 2. [`handle_overflow_retry`]：当 Request Retry 捕获 `Retryable(context_overflow)`
 //!    时，对 `context_state` 做一次 L3 强制截断（`force_drop_oldest_after_confirmed_overflow`）并
 //!    直接截断工作消息列表，发送 `ContextOverflowTrimStart/End` 事件，更新压缩计数，
 //!    供下一轮 Attempt 重试。
 //!
-//! 历史：原 `classify_error` 位于 `convert.rs`；L3 trim 逻辑内联在 `run.rs` 的
-//! `run_attempt_loop` 中（约 90 行）。T2-P0-001 将两者聚合到本文件，一方面为 T2-P0-003
-//! `ToolLoopGuard` / T2-P0-002 Compaction prompt 预留一个明确的"错误与回收"领域入口，
-//! 另一方面让 `run.rs` 的 Attempt Loop 只关心"调度与收尾判定"。
+//! 当前调度与收尾判定由 `request_retry::run_request` 持有；
+//! 该函数原先在 `run.rs::run_attempt_loop` 包住整个工具循环，现已移到单请求边界。
 
 use tracing::info;
 
@@ -135,7 +133,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
     }
 }
 
-/// L3 强制截断，仅在 `Retryable` 分支内由 Attempt Loop 调用。
+/// L3 强制截断，仅在 `Retryable` 分支内由 Request Retry 调用。
 ///
 /// ## 行为约定
 ///
@@ -155,7 +153,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
 ///
 /// - `err: &str` 仅用于 `attempt_loop_retryable` 诊断日志的 `snippet` 字段（200 字符截断）。
 /// - **不**在本函数内更新 `last_err` 或判断 `attempt == max_attempts` —— 那两个决定仍由
-///   `run_attempt_loop` 持有，避免 retry 控制流所有权扩散。
+///   `request_retry::run_request` 持有，避免 retry 控制流所有权扩散。
 /// - 事件通过 `agent.emit_event(...)`（`pub(super)`）发射；时序严格保持
 ///   `ContextOverflowTrimStart` → （trim/collapse） → `ContextOverflowTrimEnd` 各一次。
 pub(super) async fn handle_overflow_retry(

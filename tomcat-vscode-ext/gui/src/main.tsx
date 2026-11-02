@@ -21,6 +21,21 @@ const vscodeApi: VsCodeApiLike =
     setState() {},
   };
 
+// A document can still answer while React is showing its error fallback.
+// Keep this listener outside the component tree and independent of ready/state.
+let livenessPausedForTest = false;
+window.addEventListener("message", (event: MessageEvent<unknown>) => {
+  if (!event.data || typeof event.data !== "object") return;
+  const frame = event.data as { channel?: unknown; content?: { type?: unknown; enabled?: unknown } };
+  if (frame.channel !== "event") return;
+  if (frame.content?.type === "__test.pause_liveness" && typeof frame.content.enabled === "boolean") {
+    livenessPausedForTest = frame.content.enabled;
+    document.getElementById("root")?.toggleAttribute("data-tomcat-liveness-paused", livenessPausedForTest);
+  } else if (frame.content?.type === "ping" && !livenessPausedForTest) {
+    vscodeApi.postMessage({ type: "pong", messageId: `pong-${Date.now()}` });
+  }
+});
+
 const root = document.getElementById("root");
 if (!root) {
   throw new Error("Tomcat webview root element was not found");

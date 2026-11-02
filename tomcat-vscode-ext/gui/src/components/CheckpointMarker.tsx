@@ -4,9 +4,11 @@ import { useT } from "../i18n/LocaleProvider";
 import type { WebviewCheckpointMarker } from "../types";
 
 function CheckpointMarkerComponent({
+  disabled = false,
   item,
   onRestore,
 }: {
+  disabled?: boolean;
   item: WebviewCheckpointMarker;
   onRestore(checkpoint: WebviewCheckpointMarker): void;
 }) {
@@ -21,6 +23,8 @@ function CheckpointMarkerComponent({
       <button
         className="tc-checkpoint-marker__button"
         data-testid="checkpoint-marker-button"
+        disabled={disabled}
+        title={disabled ? t("session.readOnly") : undefined}
         onClick={() => onRestore(item)}
         type="button"
       >
@@ -42,7 +46,7 @@ function areCheckpointMarkerPropsEqual(
   previous: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
   next: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
 ): boolean {
-  return previous.item === next.item && previous.onRestore === next.onRestore;
+  return previous.item === next.item && previous.disabled === next.disabled && previous.onRestore === next.onRestore;
 }
 
 export const CheckpointMarker = memo(

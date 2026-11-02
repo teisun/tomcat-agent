@@ -13,6 +13,7 @@ import type {
   RestoreCheckpointPayload,
   SessionCheckpointListPayload,
   SessionHistoryPayload,
+  SessionOpenResult,
 } from "../src/serveClient/sessionRouter";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
@@ -22,6 +23,8 @@ import { mergeSessionViewSnapshot, reconcileStateSnapshot } from "../gui/src/sta
 import { applySessionPatchFrame } from "../gui/src/statePatch";
 import { getLocale, setLocale } from "../src/shared/i18n";
 import { en } from "../src/shared/i18n/en";
+import { recoveryClock } from "../src/ui/webview/tests/errorRecoveryClock";
+import type { ErrorRecoveryClock } from "../src/ui/webview/errorRecovery";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -30,6 +33,7 @@ const __testing = (
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
+      setQuickPickHandler(handler: ((items: vscode.QuickPickItem[]) => vscode.QuickPickItem | undefined) | undefined): void;
       setOpenDialogHandler(
         handler: ((options: unknown) => vscode.Uri[] | Promise<vscode.Uri[] | undefined> | undefined) | undefined,
       ): void;
@@ -59,6 +63,7 @@ type MutableSessionState = {
 };
 
 type BuildProviderOptions = {
+  errorRecoveryClock?: ErrorRecoveryClock;
   sessionPinStorage?: Pick<vscode.Memento, "get" | "update">;
   messageQueueSupported?: boolean;
   getMessagesImpl?: (
@@ -296,6 +301,7 @@ function deferred<T>() {
 
 function buildProvider(options: BuildProviderOptions = {}) {
   __testing.reset();
+  __testing.setQuickPickHandler(items => items[0]);
 
   const sessionState: MutableSessionState = {
     busy: false,
@@ -439,13 +445,14 @@ function buildProvider(options: BuildProviderOptions = {}) {
         warnings: [],
       } satisfies RestoreCheckpointPayload;
     },
-    async switchSession(sessionId: string) {
-      return sessionId;
+    async switchSession(sessionId: string): Promise<SessionOpenResult> {
+      return { sessionId, access: "control", origin: null };
     },
   };
   const openSettings = options.openSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
+    extensionMode: vscode.ExtensionMode.Development,
     extensionUri: vscode.Uri.file("/extension"),
     getDefaultCwd: () => "/workspace",
     ide: {
@@ -462,10 +469,11 @@ function buildProvider(options: BuildProviderOptions = {}) {
     openSettings,
     sessionRouter: sessionRouter as never,
     sessionPinStorage: options.sessionPinStorage,
+    errorRecoveryClock: options.errorRecoveryClock,
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState };
+  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState, sessionRouter };
 }
 
 type BroadcastInternals = {
@@ -482,6 +490,7 @@ async function prepareBroadcastProvider(options: BuildProviderOptions = {}) {
   await provider.dispatchTestIntent({ messageId: "prime-broadcast", type: "ready" });
   const postedFrames: HostToWebviewFrame[] = [];
   provider.resolveWebviewView({
+    onDidDispose: () => new vscode.Disposable(() => undefined),
     onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
     show() {}, visible: true,
     webview: {
@@ -526,6 +535,69 @@ function replayFrames(frames: HostToWebviewFrame[]): WebviewStateSnapshot {
 const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
+  it.each(["present", "deleted", "reconnected"])("rebuilds the selected observation or falls back when %s", async phase => {
+    let ids = ["session-1", "session-2"];
+    const { provider, sessionRouter } = buildProvider({
+      listSessionsImpl: async () => ({ scope: "disk", activeSessionId: "session-1",
+        sessions: ids.map(sessionId => ({ sessionId, isCurrent: sessionId === "session-1", busy: false, updatedAt: 1 })),
+      }),
+    });
+    const create = vi.spyOn(sessionRouter, "newSession");
+    vi.spyOn(sessionRouter, "switchSession").mockImplementation(async sessionId => ({
+      sessionId, access: sessionId === "session-2" ? "observe" : "control",
+      origin: sessionId === "session-2" ? { kind: "acp", clientName: "test-host" } : null,
+    }));
+    try {
+      await provider.dispatchTestIntent({ type: "ready", messageId: "first-ready" });
+      expect(provider.currentState().activeSessionId).toBe("session-1");
+      await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "draft-b",
+        data: { sessionId: "session-2", text: "keep this draft", segments: [] },
+      });
+      await provider.flushDrafts();
+      await provider.dispatchTestIntent({ type: "switchSession", messageId: "select-b", data: { sessionId: "session-2" } });
+      const before = provider.currentState().sessionViews["session-2"];
+      expect(provider.currentState().activeSessionId).toBe("session-2");
+      expect(before.access).toBe("observe");
+      expect(before.composerDraft.text).toBe("keep this draft");
+      if (phase === "deleted") ids = ["session-1"];
+      if (phase === "reconnected") provider.prepareForServeReconnect();
+      await provider.dispatchTestIntent({ type: "ready", messageId: "replacement-ready" });
+      const state = provider.currentState();
+      expect(state.activeSessionId).toBe(phase === "present" ? "session-2" : "session-1");
+      expect(create).not.toHaveBeenCalled();
+      if (phase === "present") {
+        expect(state.sessionViews["session-2"]).toMatchObject({ access: before.access, origin: before.origin,
+          ownedByThisFrontend: false, composerDraft: before.composerDraft,
+        });
+        expect(state.sessionViews["session-2"].errorRecovery).toEqual(before.errorRecovery);
+      }
+    } finally { provider.dispose(); vi.restoreAllMocks(); }
+  });
+
+  it("projects host countdown identically in full and session frames and calls only the existing retry route", async () => {
+    const time = recoveryClock();
+    const historyMessages = [
+      { type: "message", id: "u1", message: { role: "user", content: "original", superseded: true, turn_failed: true } },
+      { type: "error", id: "e1", summary: "HTTP 403", detail: "Forbidden" },
+    ];
+    const retry = vi.fn();
+    const { provider, internals, postedFrames, messenger } = await prepareBroadcastProvider({ historyMessages, errorRecoveryClock: time.clock, retryImpl: retry });
+    try {
+      await internals.handleServeEvent({ type: "agent_end", sessionId: "session-1", messages: [], error: "HTTP 403" });
+      await internals.handleServeEvent({ type: "agent_idle", sessionId: "session-1", outcome: "failed" });
+      await internals.postState(); await internals.postSessionView("session-1");
+      const expected = { errorId: "e1", dueAt: time.clock.now() + 300_000 };
+      const full = postedFrames.filter(f => f.channel === "state").at(-1)!;
+      const single = postedFrames.filter(f => f.channel === "sessionView").at(-1)!;
+      expect(full.channel === "state" && full.content.sessionViews["session-1"].errorRecovery).toEqual(expected);
+      expect(single.channel === "sessionView" && single.content.view.errorRecovery).toEqual(expected);
+      time.advance(300_000); await new Promise(resolve => setTimeout(resolve, 30));
+      expect(retry).toHaveBeenCalledExactlyOnceWith("session-1", "u1");
+      expect(messenger.requestCalls.filter(c => c.type === "prompt")).toHaveLength(0);
+      expect(replayFrames(postedFrames).sessionViews["session-1"].errorRecovery).toBeUndefined();
+    } finally { provider.dispose(); }
+  });
+
   it.each([
     { messageQueueSupported: false, busy: false },
     { messageQueueSupported: true, busy: false },
@@ -925,18 +997,23 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("routes mixed picker selections into attachments and references", async () => {
+  it("routes separate file and folder picks into the existing attachment and reference channels", async () => {
     const { provider } = buildProvider();
     __testing.registerFile("/workspace/diagram.png", "png-bytes");
     __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
     __testing.registerDirectory("/workspace/src/folder");
     __testing.registerFile("/outside/log.txt", "outside-log");
-    __testing.setOpenDialogHandler(() => [
-      vscode.Uri.file("/workspace/diagram.png"),
-      vscode.Uri.file("/workspace/src/app.ts"),
-      vscode.Uri.file("/workspace/src/folder"),
-      vscode.Uri.file("/outside/log.txt"),
-    ]);
+    const openDialog = vi.fn((options: unknown) => {
+      const { canSelectFiles, canSelectFolders, canSelectMany } = options as vscode.OpenDialogOptions;
+      expect(canSelectFiles).not.toBe(canSelectFolders);
+      expect(canSelectMany).toBe(true);
+      return canSelectFolders ? [vscode.Uri.file("/workspace/src/folder")] : [
+        vscode.Uri.file("/workspace/diagram.png"),
+        vscode.Uri.file("/workspace/src/app.ts"),
+        vscode.Uri.file("/outside/log.txt"),
+      ];
+    });
+    __testing.setOpenDialogHandler(openDialog);
 
     await provider.dispatchTestIntent({
       messageId: "ready-pick-context",
@@ -947,6 +1024,10 @@ describe("webview provider integration", () => {
       messageId: "pick-context-1",
       type: "pickContext",
     });
+    __testing.setQuickPickHandler(items => items[1]);
+    await provider.dispatchTestIntent({ messageId: "pick-folders-1", type: "pickContext" });
+    expect(openDialog.mock.calls.map(([options]) => (options as vscode.OpenDialogOptions).canSelectFiles)).toEqual([true, false]);
+
 
     expect(
       provider.currentState().sessionViews["session-1"]?.composerDraft?.segments,
@@ -954,20 +1035,20 @@ describe("webview provider integration", () => {
       {
         kind: "file",
         label: "app.ts",
-        path: "src/app.ts",
+        path: "/workspace/src/app.ts",
         type: "reference",
         occurrenceId: expect.any(String),
       },
       {
         kind: "file",
-        label: "folder/",
-        path: "src/folder/",
+        label: "log.txt",
+        path: "/outside/log.txt",
         type: "reference",
       },
       {
         kind: "file",
-        label: "log.txt",
-        path: "/outside/log.txt",
+        label: "folder/",
+        path: "/workspace/src/folder/",
         type: "reference",
       },
     ]);
@@ -1001,6 +1082,24 @@ describe("webview provider integration", () => {
     });
 
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([]);
+    provider.dispose();
+  });
+
+  it.each(["type", "dialog", "error"])("settles picker work and preserves the draft on %s cancellation/failure", async (stage) => {
+    const { provider } = buildProvider();
+    const postEvent = vi.spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent").mockResolvedValue(undefined);
+    await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "existing-draft", data: { sessionId: "session-1", text: "keep me", segments: [{ type: "text", text: "keep me" }] } });
+    const before = provider.currentState().sessionViews["session-1"]?.composerDraft;
+    if (stage === "type") __testing.setQuickPickHandler(() => undefined);
+    const openDialog = vi.fn(() => {
+      if (stage === "error") throw new Error("picker unavailable");
+      return undefined;
+    });
+    __testing.setOpenDialogHandler(openDialog);
+    await provider.dispatchTestIntent({ type: "pickContext", messageId: "cancel-pick", data: { sessionId: "session-1", operationId: "pick-work" } });
+    expect(openDialog).toHaveBeenCalledTimes(stage === "type" ? 0 : 1);
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toEqual(before);
+    expect(postEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "composerWorkResult", operationId: "pick-work", sessionId: "session-1", success: stage !== "error" }));
     provider.dispose();
   });
 
@@ -1064,9 +1163,15 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("shapes @ search references like dropped file references and preserves them in prompt segments", async () => {
+  it("shapes multi-root @ search references like dropped file references and preserves their targets in prompt segments", async () => {
     const { messenger, provider } = buildProvider();
-    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
+      { uri: vscode.Uri.file("/workspace"), name: "Remote" },
+      { uri: vscode.Uri.file("/webrtc-sdk"), name: "WebRTC" },
+    ];
+    const target = "/webrtc-sdk/src/app.ts";
+    __testing.registerFile("/workspace/src/app.ts", "ONLY_A");
+    __testing.registerFile(target, "ONLY_B");
 
     const postEventSpy = vi
       .spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent")
@@ -1085,14 +1190,17 @@ describe("webview provider integration", () => {
     const searchEvent = postEventSpy.mock.calls
       .map(([content]) => content)
       .find((content) => content.type === "contextSearchResult");
-    const searchReference = (searchEvent as {
+    const matches = (searchEvent as {
       matches: Array<{ reference: Record<string, unknown> }>;
-    }).matches[0]?.reference;
+    }).matches;
+    expect(matches.map((match) => match.reference.path).sort()).toEqual([target, "/workspace/src/app.ts"].sort());
+    const searchReference = matches.find((match) => match.reference.path === target)?.reference;
+    expect(searchReference).toMatchObject({ path: target, label: "app.ts" });
 
     await provider.dispatchTestIntent({
       data: {
         sessionId: "session-1",
-        uris: [vscode.Uri.file("/workspace/src/app.ts").toString()],
+        uris: [vscode.Uri.file(target).toString()],
       },
       messageId: "drop-shape-1",
       type: "resolveDrop",
@@ -1169,14 +1277,14 @@ describe("webview provider integration", () => {
       {
         kind: "file",
         label: "app.ts",
-        path: "src/app.ts",
+        path: "/workspace/src/app.ts",
         type: "reference",
         occurrenceId: expect.any(String),
       },
       {
         kind: "file",
         label: "folder/",
-        path: "src/folder/",
+        path: "/workspace/src/folder/",
         type: "reference",
       },
     ]);

@@ -27,6 +27,7 @@ pub(super) struct ConnectAttempt {
     pub id: ConnectionId,
     pub manager: Weak<McpManager>,
     pub workspace_root: Option<PathBuf>,
+    pub environment: Option<Arc<crate::infra::platform::EnvironmentSnapshot>>,
     pub oauth_store: OAuthTokenStore,
     pub cancel: CancellationToken,
     pub cleanup: TaskTracker,
@@ -42,6 +43,11 @@ impl ConnectAttempt {
         let cancel = self.cancel.clone();
         let store = self.oauth_store.clone();
         Arc::new(move |expected, updated| {
+            if server.source == crate::core::connector::mcp::config::McpConfigSource::Session {
+                // ACP supplies authentication for this connection, not a durable
+                // Tomcat account. Never save a session's private credentials.
+                return Ok(false);
+            }
             let Some(manager) = manager.upgrade() else {
                 return Ok(false);
             };
@@ -123,6 +129,7 @@ impl ConnectedServer {
                 .await?
         } else {
             StdioTransport::new(attempt.workspace_root.as_deref())
+                .with_environment(attempt.environment.clone())
                 .connect_cancellable(server, attempt.cancel.clone(), attempt.cleanup.clone())
                 .await?
         };

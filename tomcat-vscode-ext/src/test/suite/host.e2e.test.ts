@@ -2,6 +2,10 @@ import * as assert from "node:assert/strict";
 import * as path from "node:path";
 import { captureWorkbenchArtifacts } from "./support/workbenchFindDriver";
 import { en } from "../../shared/i18n/en";
+import { assertSharedObservationFlow } from "./support/sharedObservationScenario";
+import { assertExternalHostObservation } from "./support/externalHostObservationScenario";
+import { assertVersionMismatchRecovery } from "./support/versionMismatchScenario";
+import { assertSharedServiceLifecycle } from "./support/windowsSharedServiceScenario";
 
 import {
   assertPlanPreviewCustomEditorFlow,
@@ -25,12 +29,14 @@ import {
   assertWebviewReviewProgressFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
   assertWebviewAtMentionReferenceFlow,
+  assertMultiRootContextReferences,
   assertWebviewDraftForkPreservesReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
   assertWebviewRecoveryRejectionFlow,
   assertWebviewResumeCardFlow,
   assertWebviewRetryRecoveryFlow,
+  assertAutomaticErrorRecoveryCountdown,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
@@ -50,6 +56,26 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
+  (process.env.TOMCAT_E2E_SHARED_LIFECYCLE === "1" ? test : test.skip)("shared service lifecycle: real task before window exit", async function () {
+    this.timeout(120_000);
+    await assertSharedServiceLifecycle(getTomcatExtensionApi);
+  });
+
+  (process.env.TOMCAT_E2E_VERSION_MISMATCH === "1" ? test : test.skip)("shared service version mismatch: explicit restart and recovery", async function () {
+    this.timeout(120_000);
+    await assertVersionMismatchRecovery(getTomcatExtensionApi);
+  });
+
+  (process.env.TOMCAT_E2E_EXTERNAL_OBSERVATION ? test : test.skip)("external host observation: existing host session and project boundary", async function () {
+    this.timeout(90_000);
+    await assertExternalHostObservation(getTomcatExtensionApi);
+  });
+
+  (process.env.TOMCAT_E2E_REAL_OBSERVATION === "1" ? test : test.skip)("shared service observation: project-scoped, live and read-only", async function () {
+    this.timeout(180_000);
+    await assertSharedObservationFlow(getTomcatExtensionApi);
+  });
+
   teardown(async function () {
     const directory = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
     if (this.currentTest?.state !== "failed" || !directory) return;
@@ -175,6 +201,11 @@ suite("Tomcat host E2E", () => {
     await assertWebviewReviewProgressFlow(api);
   });
 
+  test("automatic error recovery countdown", async function () {
+    this.timeout(360_000);
+    await assertAutomaticErrorRecoveryCountdown(await getTomcatExtensionApi());
+  });
+
   test("copy-forwards a failed same-session retry while preserving the failed chapter", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewRetryRecoveryFlow(api);
@@ -253,6 +284,11 @@ suite("Tomcat host E2E", () => {
   test("lazy loads a giant historical tool group without rendering half a group", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewGiantGroupLazyLoadFlow(api);
+  });
+
+  test("preserves file targets across multi-root context references", async function () {
+    this.timeout(120_000);
+    await assertMultiRootContextReferences(await getTomcatExtensionApi());
   });
 
   test("adds editor selections to the webview composer and rehydrates them from history", async () => {

@@ -14,10 +14,31 @@ use crate::api::chat::panels::{
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::{AppError, EventListenerId};
 
+use super::controller_route::{ControlRecipient, ControllerRoute};
 use super::types::{ControlFrame, OutFrame};
 use super::writer::WriterHandle;
 
+/// Interaction support follows the current controller, not the session's origin.
+pub(super) fn bind_panel_for_controller(
+    state: &super::ServeState,
+    ctx: &crate::api::chat::ChatContext,
+    session_id: &str,
+) {
+    let runtime = &ctx.session_runtime.plan_runtime;
+    if state.is_acp() {
+        // Context construction installs a terminal panel by default: actively remove it.
+        runtime.detach_ask_question_panel();
+    } else {
+        runtime.attach_ask_question_panel(
+            state
+                .ask_question
+                .panel_for_session(ctx.global_services.event_bus.clone(), session_id),
+        );
+    }
+}
+
 struct PendingQuestion {
+    recipient: ControlRecipient,
     response_event: String,
     session_id: String,
     tool_call_id: Option<String>,
@@ -26,16 +47,26 @@ struct PendingQuestion {
 
 #[derive(Clone)]
 pub struct ServeAskQuestionBridge {
-    writer: WriterHandle,
+    route: ControllerRoute,
     pending: Arc<DashMap<String, PendingQuestion>>,
 }
 
 impl ServeAskQuestionBridge {
     pub fn new(writer: WriterHandle) -> Self {
+        Self::with_route(ControllerRoute::Direct(writer))
+    }
+
+    pub(super) fn with_route(route: ControllerRoute) -> Self {
         Self {
-            writer,
+            route,
             pending: Arc::new(DashMap::new()),
         }
+    }
+
+    pub(super) fn owns_pending(&self, request_id: &str, connection_id: uuid::Uuid) -> bool {
+        self.pending
+            .get(request_id)
+            .is_some_and(|p| p.recipient.connection_id == connection_id)
     }
 
     pub fn has_pending_session(&self, session_id: &str) -> bool {
@@ -61,7 +92,7 @@ impl ServeAskQuestionBridge {
         session_id: String,
         event_bus: Arc<dyn EventBus>,
     ) -> EventListenerId {
-        let writer = self.writer.clone();
+        let route = self.route.clone();
         let pending = Arc::clone(&self.pending);
         let callback_bus = event_bus.clone();
         event_bus.on(
@@ -88,9 +119,22 @@ impl ServeAskQuestionBridge {
                     );
                     return Ok(());
                 }
+                let Some(recipient) = route.recipient(&session_id) else {
+                    let response = serde_json::to_value(AskQuestionWireResponse {
+                        request_id: request.request_id.clone(),
+                        result: AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected),
+                    })?;
+                    callback_bus.emit_sync(
+                        &request.response_event,
+                        EventContext::new(request.response_event.clone(), response)
+                            .with_session_id(session_id.clone()),
+                    )?;
+                    return Ok(());
+                };
                 pending.insert(
                     request.request_id.clone(),
                     PendingQuestion {
+                        recipient: recipient.clone(),
                         response_event: request.response_event.clone(),
                         session_id: session_id.clone(),
                         tool_call_id: request.tool_call_id.clone(),
@@ -103,13 +147,21 @@ impl ServeAskQuestionBridge {
                     Some(session_id.clone()),
                     ctx.payload.clone(),
                 ));
-                let _ = writer.send(frame);
+                let _ = recipient.writer.send(frame);
                 Ok(())
             }),
         )
     }
 
     pub fn handle_control_response(&self, frame: &ControlFrame) -> Result<bool, AppError> {
+        self.handle_control_response_from(frame, uuid::Uuid::nil())
+    }
+
+    pub(super) fn handle_control_response_from(
+        &self,
+        frame: &ControlFrame,
+        connection_id: uuid::Uuid,
+    ) -> Result<bool, AppError> {
         let ControlFrame::ControlResponse {
             request_id,
             session_id,
@@ -126,9 +178,10 @@ impl ServeAskQuestionBridge {
             );
             return Ok(false);
         };
-        if session_id
-            .as_deref()
-            .is_some_and(|id| id != entry.session_id)
+        if entry.recipient.connection_id != connection_id
+            || session_id
+                .as_deref()
+                .is_some_and(|id| id != entry.session_id)
         {
             tracing::warn!(
                 request_id = request_id,
@@ -178,6 +231,14 @@ impl ServeAskQuestionBridge {
     }
 
     pub fn handle_control_cancel(&self, frame: &ControlFrame) -> Result<bool, AppError> {
+        self.handle_control_cancel_from(frame, uuid::Uuid::nil())
+    }
+
+    pub(super) fn handle_control_cancel_from(
+        &self,
+        frame: &ControlFrame,
+        connection_id: uuid::Uuid,
+    ) -> Result<bool, AppError> {
         let ControlFrame::ControlCancel {
             request_id,
             session_id,
@@ -193,9 +254,10 @@ impl ServeAskQuestionBridge {
             );
             return Ok(false);
         };
-        if session_id
-            .as_deref()
-            .is_some_and(|id| id != entry.session_id)
+        if entry.recipient.connection_id != connection_id
+            || session_id
+                .as_deref()
+                .is_some_and(|id| id != entry.session_id)
         {
             tracing::warn!(
                 request_id,
@@ -237,11 +299,17 @@ impl ServeAskQuestionBridge {
             .map(|entry| entry.key().clone())
             .collect();
         for request_id in &request_ids {
-            let _ = self.writer.send(OutFrame::Control(ControlFrame::cancel(
-                request_id.clone(),
-                Some(session_id.to_string()),
-                serde_json::json!({ "outcome": "interrupted", "reason": reason }),
-            )));
+            let Some(pending) = self.pending.get(request_id) else {
+                continue;
+            };
+            let _ = pending
+                .recipient
+                .writer
+                .send(OutFrame::Control(ControlFrame::cancel(
+                    request_id.clone(),
+                    Some(session_id.to_string()),
+                    serde_json::json!({ "outcome": "interrupted", "reason": reason }),
+                )));
         }
         self.finalize_session(session_id, AskQuestionOutcome::Interrupted)
     }

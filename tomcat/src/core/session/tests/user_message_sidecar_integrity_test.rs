@@ -16,6 +16,7 @@ fn valid_header_with_malformed_data_record_is_rebuilt() {
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "integrity".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
@@ -65,6 +66,7 @@ fn branch_summary_append_rebuilds_sidecar_once_then_preserves_next_fingerprint_h
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: "fingerprint".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),

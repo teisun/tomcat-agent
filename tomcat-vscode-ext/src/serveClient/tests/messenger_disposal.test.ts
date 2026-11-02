@@ -1,197 +1,140 @@
-import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TomcatMessenger } from "../TomcatMessenger";
-import { createSpawnFactory, FakeChildProcess } from "./fakes";
+import type { SharedConnection, SharedConnectionFactory } from "../sharedConnection";
+import { createConnectionFactory, FakeConnection, FAKE_SERVICE } from "./fakes";
 
-function fixture(child = new FakeChildProcess()) {
-  const messenger = new TomcatMessenger({ executable: "fake", spawnFactory: createSpawnFactory(child) });
-  messenger.start();
-  return { child, messenger };
+async function fixture(socket = new FakeConnection()) {
+  const connectFactory = vi.fn(createConnectionFactory(socket));
+  const messenger = new TomcatMessenger({ executable: "fake", connectFactory });
+  await messenger.start();
+  return { socket, messenger, connectFactory };
 }
 
 afterEach(() => vi.useRealTimers());
 
-describe("TomcatMessenger awaited disposal", () => {
-  it("spawns serve without allocating a visible Windows console", async () => {
-    const child = new FakeChildProcess();
-    const spawnFactory = vi.fn(createSpawnFactory(child)) as unknown as typeof spawn;
-    const messenger = new TomcatMessenger({ executable: "tomcat", extraArgs: ["--x"], spawnFactory });
-    messenger.start();
-    expect(spawnFactory).toHaveBeenCalledWith(
-      "tomcat",
-      ["serve", "--stdio", "--x"],
-      expect.objectContaining({ stdio: "pipe", windowsHide: true }),
-    );
-    await messenger.disposeAsync();
-  });
-
+describe("TomcatMessenger shared connection disposal", () => {
   it("is idempotent without starting an unused messenger", async () => {
-    const spawnFactory = vi.fn();
-    const messenger = new TomcatMessenger({ executable: "unused", spawnFactory });
+    const connectFactory = vi.fn();
+    const messenger = new TomcatMessenger({ executable: "unused", connectFactory });
     const first = messenger.disposeAsync();
     expect(messenger.disposeAsync()).toBe(first);
     messenger.dispose();
     await first;
-    expect(spawnFactory).not.toHaveBeenCalled();
+    expect(connectFactory).not.toHaveBeenCalled();
   });
 
-  it("waits for close, not just exit or killed", async () => {
-    vi.useFakeTimers();
-    const child = new FakeChildProcess();
-    child.autoClose = false;
-    const { messenger } = fixture(child);
+  it("half-closes and waits for the peer, without stopping the service", async () => {
+    const socket = new FakeConnection();
+    socket.autoClose = false;
+    const { messenger } = await fixture(socket);
+    const management = vi.spyOn(messenger, "runServiceAction");
     const exited = vi.fn();
     messenger.onExit(exited);
     const closed = vi.fn();
     const disposal = messenger.disposeAsync().then(closed);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(child.killed).toBe(true);
-    expect(child.exitCode).toBe(0);
+    await Promise.resolve();
+    expect(socket.writableEnded).toBe(true);
+    expect(socket.destroyed).toBe(false);
     expect(closed).not.toHaveBeenCalled();
-    expect(exited).not.toHaveBeenCalled(); // intentional disposal is not reconnect-worthy
-    child.emitStderr("late drain");
-    child.close();
+    socket.close();
     await disposal;
     expect(closed).toHaveBeenCalledOnce();
+    expect(exited).not.toHaveBeenCalled();
+    expect(management).not.toHaveBeenCalled();
   });
 
-  it("retains an externally exited child until its pipes close", async () => {
-    const { child, messenger } = fixture();
-    child.autoClose = false;
-    child.exitCode = 0;
-    child.emit("exit", 0, null);
-    expect(messenger.isRunning).toBe(false);
-    let closed = false;
-    const disposal = messenger.disposeAsync().then(() => { closed = true; });
-    await Promise.resolve();
-    expect(closed).toBe(false);
-    child.close();
-    await disposal;
-  });
-
-  it("waits for prior restarted generations without stale events changing the current one", async () => {
-    const first = new FakeChildProcess();
+  it("retains old generations until close and ignores their late frames", async () => {
+    const first = new FakeConnection();
     first.autoClose = false;
-    const second = new FakeChildProcess();
-    const spawnFactory = vi.fn()
-      .mockReturnValueOnce(first)
-      .mockReturnValueOnce(second) as unknown as typeof spawn;
-    const messenger = new TomcatMessenger({ executable: "fake", spawnFactory });
-    messenger.start();
-    messenger.restart();
-    expect(messenger.isRunning).toBe(true);
-    first.emit("error", new Error("late old error"));
+    const second = new FakeConnection();
+    const connections = [first, second];
+    const connectFactory: SharedConnectionFactory = options => createConnectionFactory(connections.shift()!)(options);
+    const messenger = new TomcatMessenger({ executable: "fake", connectFactory });
+    const events = vi.fn();
+    messenger.onEvent(events);
+    await messenger.start();
+    await messenger.restart();
     first.emitStdout('{"type":"agent_idle","sessionId":"old"}\n');
     expect(messenger.isRunning).toBe(true);
-    const disposal = messenger.disposeAsync();
-    let done = false;
-    void disposal.then(() => { done = true; });
+    const completed = vi.fn();
+    const disposal = messenger.disposeAsync().then(completed);
     await Promise.resolve();
-    expect(done).toBe(false);
+    expect(completed).not.toHaveBeenCalled();
     first.close();
     await disposal;
-    expect(messenger.isRunning).toBe(false);
+    expect(events).not.toHaveBeenCalled();
   });
 
-  it("rejects pending work immediately but still waits for an errored child's close", async () => {
-    const child = new FakeChildProcess();
-    child.autoClose = false;
-    const { messenger } = fixture(child);
+  it("rejects pending requests once on a socket error", async () => {
+    const { socket, messenger } = await fixture();
     const pending = expect(messenger.request({ type: "get_state" })).rejects.toThrow("pipe broke");
     const exited = vi.fn();
     messenger.onExit(exited);
-    child.fail(new Error("pipe broke"));
+    socket.fail(new Error("pipe broke"));
     await pending;
+    await messenger.disposeAsync();
     expect(exited).toHaveBeenCalledOnce();
-    expect(child.signals).toContain("SIGTERM");
-    const disposal = messenger.disposeAsync();
-    child.close();
-    await disposal;
+    expect(messenger.isRunning).toBe(false);
   });
 
-  it("also awaits a prior synchronous stop/dispose", async () => {
-    const child = new FakeChildProcess();
-    child.autoClose = false;
-    const { messenger } = fixture(child);
+  it("also awaits a previous synchronous stop/dispose", async () => {
+    const socket = new FakeConnection();
+    socket.autoClose = false;
+    const { messenger } = await fixture(socket);
     messenger.stop();
     messenger.dispose();
     const disposal = messenger.disposeAsync();
     expect(messenger.disposeAsync({ timeoutMs: 1 })).toBe(disposal);
-    child.close();
+    socket.close();
     await disposal;
-    expect(child.signals).toEqual(["SIGTERM"]);
   });
 
-  it("escalates even when killed=true only means SIGTERM was sent", async () => {
+  it("reports unconfirmed cleanup on timeout instead of killing the service", async () => {
     vi.useFakeTimers();
-    const child = new FakeChildProcess();
-    child.kill = (signal) => {
-      child.signals.push(signal);
-      child.killed = true;
-      if (signal === "SIGKILL") {
-        child.signalCode = signal;
-        child.emit("exit", null, signal);
-        child.close();
-      }
-      return true;
-    };
-    const { messenger } = fixture(child);
-    const disposal = messenger.disposeAsync({ timeoutMs: 100 });
-    await vi.advanceTimersByTimeAsync(50);
-    await disposal;
-    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("rejects on the total deadline when exit never produces close", async () => {
-    vi.useFakeTimers();
-    const child = new FakeChildProcess();
-    child.autoClose = false;
-    const { messenger } = fixture(child);
-    const failure = expect(messenger.disposeAsync({ timeoutMs: 100 }))
-      .rejects.toThrow("timed out closing tomcat serve after 100ms: pid=4242");
+    const socket = new FakeConnection();
+    socket.autoClose = false;
+    const { messenger } = await fixture(socket);
+    const management = vi.spyOn(messenger, "runServiceAction");
+    const failure = expect(messenger.disposeAsync({ timeoutMs: 100 })).rejects.toThrow("service cleanup is unconfirmed");
     await vi.advanceTimersByTimeAsync(100);
     await failure;
-    child.close();
+    expect(socket.destroyed).toBe(true);
+    expect(management).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("lets EOF settle the child without sending termination signals", async () => {
-    vi.useFakeTimers();
-    const { child, messenger } = fixture();
-    const disposal = messenger.disposeAsync({ timeoutMs: 2_000 });
-    expect(child.signals).toEqual([]);
-    child.exitCode = 0;
-    child.emit("exit", 0, null);
-    child.close();
+  it("closes a connection that finishes opening after disposal", async () => {
+    const socket = new FakeConnection();
+    let connected!: (connection: SharedConnection) => void;
+    const connectFactory = vi.fn(() => new Promise<SharedConnection>(resolve => { connected = resolve; }));
+    const messenger = new TomcatMessenger({ executable: "fake", connectFactory });
+    const starting = messenger.start();
+    await Promise.resolve();
+    const disposal = messenger.disposeAsync();
+    connected({ socket, info: FAKE_SERVICE });
+    await starting;
     await disposal;
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(child.signals).toEqual([]);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(socket.destroyed).toBe(true);
   });
 
-  it("validates the timeout without disposing the messenger", async () => {
-    const { messenger } = fixture();
-    for (const timeoutMs of [0, -1, NaN, Infinity]) {
-      await expect(messenger.disposeAsync({ timeoutMs })).rejects.toThrow(RangeError);
-    }
-    expect(messenger.isRunning).toBe(true);
+  it("does not send requests whose deadline expired while connecting", async () => {
+    vi.useFakeTimers();
+    const socket = new FakeConnection();
+    let connected!: (connection: SharedConnection) => void;
+    const messenger = new TomcatMessenger({ executable: "fake", connectFactory: () => new Promise(resolve => { connected = resolve; }) });
+    const failure = expect(messenger.request({ id: "old", type: "prompt", text: "do not run" }, 50)).rejects.toThrow("Timed out");
+    await vi.advanceTimersByTimeAsync(50);
+    await failure;
+    connected({ socket, info: FAKE_SERVICE });
+    await messenger.start();
+    expect(socket.readStdin()).toBe("");
     await messenger.disposeAsync();
   });
 
-  it("waits for a real owned Node process and its stdio to close", async () => {
-    let child: ReturnType<typeof spawn> | undefined;
-    const messenger = new TomcatMessenger({
-      executable: process.execPath,
-      spawnFactory: ((_exe, _args, options) => {
-        child = spawn(process.execPath, ["-e", "process.stdin.resume()"], options ?? {});
-        return child;
-      }) as typeof spawn,
-    });
-    messenger.start();
-    await messenger.disposeAsync({ timeoutMs: 2_000 });
-    expect(child?.exitCode !== null || child?.signalCode !== null).toBe(true);
-    expect(child?.stdout?.destroyed).toBe(true);
-    expect(child?.stderr?.destroyed).toBe(true);
+  it("validates timeout without disposing a healthy connection", async () => {
+    const { messenger } = await fixture();
+    for (const timeoutMs of [0, -1, NaN, Infinity]) await expect(messenger.disposeAsync({ timeoutMs })).rejects.toThrow(RangeError);
+    expect(messenger.isRunning).toBe(true);
+    await messenger.disposeAsync();
   });
 });

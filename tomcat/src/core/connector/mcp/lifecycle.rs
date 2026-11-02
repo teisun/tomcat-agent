@@ -283,6 +283,7 @@ impl McpManager {
                 },
                 manager: self.self_weak.clone(),
                 workspace_root: self.workspace_root.clone(),
+                environment: self.environment.clone(),
                 oauth_store: self.oauth_store.clone(),
                 cancel: run.cancel.child_token(),
                 cleanup: run.cleanup.clone(),

@@ -396,6 +396,18 @@
 
 ---
 
+### 共享服务补充（Story 8c / 8d）
+
+所有进程使用隔离 HOME/profile；本机受控模型证明生命周期，不替代真实 API 或 Windows 实机验收。下列新增场景在实现与验收前均为待验证。
+
+| 编号 | 验收 | 测试入口 | 用户意图 | 操作序列 | 必须断言 |
+| --- | --- | --- | --- | --- | --- |
+| E2E-CLI-103 | 分层自动 | `src/api/serve/tests/service_test.rs`、`tests/serve_shared_e2e.rs`；扩展 `src/serveClient/tests/sharedConnection.test.ts` | 敏感环境只交给核对过的服务 | CLI 预检 → 无环境 hello → 核对服务编号 → 环境 → ready；另测错误编号、坏 JSON、超时、非法环境及旧 hello | 核对失败时收到的全部字节不含 environment 或哨兵值；正常环境按连接生效；失败不创建 Native 连接；客户端须等待 ready |
+| E2E-CLI-104 | 自动 | `tests/serve_shared_e2e.rs`、`src/api/serve/tests/{commands,connection,session_job}_test.rs` | 关闭会话真的停掉该会话工作 | 控制者启动后台写文件 → CloseSession；另测停止失败、旁观者关闭、断连后接手及晚注册任务 | closed 必须晚于实际退出；失败保留 slot/控制者；另一会话不受影响；旧 follow-up 不作为新控制者输入续跑；成功停止不遗留进程 |
+| E2E-CLI-105 | 自动 | `tests/acp_stdio_e2e.rs` | 宿主停读时仍能取消后台工作 | 真实 ACP/serve + 脚本模型形成 stdout 背压 → 停读 → session/cancel → 检查进程 → 恢复读取 | 恢复读取前后台进程已退出且文件停止增长；恢复后输出完整、唯一 Cancelled 终态在最后；另一会话不受影响 |
+| E2E-VSCEXT-036 | 自动（真实安装态宿主） | `e2e-harness/src/test/installed.test.ts`；分层回归 `tests/webview_provider_flow.test.ts` | 页面重建不换会话 | 磁盘 current=A、宿主旁观 B → 替换页面文档并 ready；另测删除 B、服务重连 | B 有效时会话、只读、草稿、deadline、焦点不变且不新建；B 删除或重连时回退 A；桌面及约 390px 的 PNG/ARIA/console 读回 |
+| E2E-VSCEXT-037 | 分层自动 | `src/ui/webview/tests/dual_channel.test.ts`、`provider_error_recovery.test.ts` | 历史不重字，手动恢复不被自动重试抢跑 | hydrate X → start(X) → text/thinking delta；新 Y 正常流式；恢复 checkpoint 期间推进假时钟越过 deadline | 再次 hydrate 前 X 正文/thinking 不变，Y 正常；checkpoint 进行中或失败后旧计时器不重试，其它会话等待不受影响 |
+
 ## Story 8b — 长生命周期 VM 与有状态插件（5 条）
 
 > 主验收入口为 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs` 与 `src/ext/plugin/tests/suite_test.rs`。

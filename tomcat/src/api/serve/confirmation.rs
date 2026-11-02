@@ -14,6 +14,7 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::AppError;
 
+use super::controller_route::{ControlRecipient, ControllerRoute};
 use super::types::{ControlFrame, OutFrame};
 use super::writer::WriterHandle;
 
@@ -30,13 +31,15 @@ struct ConfirmationRequest {
 }
 
 struct PendingConfirmation {
+    recipient: ControlRecipient,
     session_id: String,
     response: oneshot::Sender<ConfirmDecision>,
 }
 
 #[derive(Clone)]
 pub struct ServeConfirmationBridge {
-    writer: WriterHandle,
+    route: ControllerRoute,
+    config_path: PathBuf,
     pending: Arc<DashMap<String, PendingConfirmation>>,
 }
 
@@ -49,17 +52,28 @@ impl Drop for ConfirmationWaitGuard {
     fn drop(&mut self) {
         if let Some((_, pending)) = self.bridge.pending.remove(&self.request_id) {
             self.bridge
-                .send_cancel(&self.request_id, &pending.session_id, "cancelled");
+                .send_cancel(&self.request_id, &pending, "cancelled");
         }
     }
 }
 
 impl ServeConfirmationBridge {
-    pub fn new(writer: WriterHandle) -> Self {
+    pub fn new(writer: WriterHandle, config_path: PathBuf) -> Self {
+        Self::with_route(ControllerRoute::Direct(writer), config_path)
+    }
+
+    pub(super) fn with_route(route: ControllerRoute, config_path: PathBuf) -> Self {
         Self {
-            writer,
+            route,
+            config_path,
             pending: Arc::new(DashMap::new()),
         }
+    }
+
+    pub(super) fn owns_pending(&self, request_id: &str, connection_id: uuid::Uuid) -> bool {
+        self.pending
+            .get(request_id)
+            .is_some_and(|p| p.recipient.connection_id == connection_id)
     }
 
     pub fn has_pending_session(&self, session_id: &str) -> bool {
@@ -86,6 +100,9 @@ impl ServeConfirmationBridge {
         plugin_id: &str,
         suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
+        let Some(recipient) = self.route.recipient(session_id) else {
+            return Ok(ConfirmDecision::Deny);
+        };
         let request_id = format!(
             "confirm-{session_id}-{}",
             NEXT_CONFIRMATION_ID.fetch_add(1, Ordering::Relaxed)
@@ -94,6 +111,7 @@ impl ServeConfirmationBridge {
         self.pending.insert(
             request_id.clone(),
             PendingConfirmation {
+                recipient: recipient.clone(),
                 session_id: session_id.to_string(),
                 response: sender,
             },
@@ -117,12 +135,14 @@ impl ServeConfirmationBridge {
                 &[("name", "confirmation"), ("detail", &error.to_string())],
             ))
         })?;
-        self.writer.send(OutFrame::Control(ControlFrame::request(
-            request_id.clone(),
-            "confirmation",
-            Some(session_id.to_string()),
-            payload,
-        )))?;
+        recipient
+            .writer
+            .send(OutFrame::Control(ControlFrame::request(
+                request_id.clone(),
+                "confirmation",
+                Some(session_id.to_string()),
+                payload,
+            )))?;
         receiver.await.map_err(|_| {
             AppError::Permission(crate::infra::i18n::tr(
                 "serve.confirmationDisconnected",
@@ -132,6 +152,14 @@ impl ServeConfirmationBridge {
     }
 
     pub fn handle_control_response(&self, frame: &ControlFrame) -> Result<bool, AppError> {
+        self.handle_control_response_from(frame, uuid::Uuid::nil())
+    }
+
+    pub(super) fn handle_control_response_from(
+        &self,
+        frame: &ControlFrame,
+        connection_id: uuid::Uuid,
+    ) -> Result<bool, AppError> {
         let ControlFrame::ControlResponse {
             request_id,
             session_id,
@@ -143,7 +171,9 @@ impl ServeConfirmationBridge {
         let Some(entry) = self.pending.get(request_id) else {
             return Ok(false);
         };
-        if session_id.as_deref() != Some(entry.session_id.as_str()) {
+        if entry.recipient.connection_id != connection_id
+            || session_id.as_deref() != Some(entry.session_id.as_str())
+        {
             tracing::warn!(request_id, response_session_id = ?session_id, pending_session_id = %entry.session_id, "dropping confirmation response routed to the wrong session");
             return Ok(false);
         }
@@ -168,6 +198,14 @@ impl ServeConfirmationBridge {
     }
 
     pub fn handle_control_cancel(&self, frame: &ControlFrame) -> Result<bool, AppError> {
+        self.handle_control_cancel_from(frame, uuid::Uuid::nil())
+    }
+
+    pub(super) fn handle_control_cancel_from(
+        &self,
+        frame: &ControlFrame,
+        connection_id: uuid::Uuid,
+    ) -> Result<bool, AppError> {
         let ControlFrame::ControlCancel {
             request_id,
             session_id,
@@ -179,7 +217,9 @@ impl ServeConfirmationBridge {
         let Some(entry) = self.pending.get(request_id) else {
             return Ok(false);
         };
-        if session_id.as_deref() != Some(entry.session_id.as_str()) {
+        if entry.recipient.connection_id != connection_id
+            || session_id.as_deref() != Some(entry.session_id.as_str())
+        {
             return Ok(false);
         }
         drop(entry);
@@ -189,12 +229,15 @@ impl ServeConfirmationBridge {
         Ok(true)
     }
 
-    fn send_cancel(&self, request_id: &str, session_id: &str, reason: &str) {
-        let _ = self.writer.send(OutFrame::Control(ControlFrame::cancel(
-            request_id.to_string(),
-            Some(session_id.to_string()),
-            serde_json::json!({ "reason": reason }),
-        )));
+    fn send_cancel(&self, request_id: &str, pending: &PendingConfirmation, reason: &str) {
+        let _ = pending
+            .recipient
+            .writer
+            .send(OutFrame::Control(ControlFrame::cancel(
+                request_id.to_string(),
+                Some(pending.session_id.clone()),
+                serde_json::json!({ "reason": reason }),
+            )));
     }
 
     pub fn cancel_live_session(&self, session_id: &str, reason: &str) -> usize {
@@ -206,7 +249,7 @@ impl ServeConfirmationBridge {
             .collect::<Vec<_>>();
         for request_id in &request_ids {
             if let Some((_, pending)) = self.pending.remove(request_id) {
-                self.send_cancel(request_id, session_id, reason);
+                self.send_cancel(request_id, &pending, reason);
                 let _ = pending.response.send(ConfirmDecision::Deny);
             }
         }
@@ -257,6 +300,12 @@ impl UserConfirmationProvider for ServeConfirmationProvider {
             ConfirmDecision::AllowAndPersistRoot { ref root }
                 if suggested_root.as_deref() == Some(root.as_path()) =>
             {
+                // Persist only after native ownership and the offered root were
+                // validated. A transport must not grant a root from a stale reply.
+                crate::infra::config::append_workspace_root_to_disk(
+                    &self.bridge.config_path,
+                    root.to_string_lossy().into_owned(),
+                )?;
                 Ok(decision)
             }
             ConfirmDecision::AllowAndPersistRoot { .. } => Ok(ConfirmDecision::Deny),

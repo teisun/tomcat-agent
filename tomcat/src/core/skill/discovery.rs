@@ -29,7 +29,28 @@ pub fn skill_roots(
     ])
 }
 
+/// Explicit host roots are absolute and readable; this does not grant tool access.
+pub(crate) fn validate_connection_root(root: &Path) -> Result<(), AppError> {
+    if !root.is_absolute() || std::fs::read_dir(root).is_err() {
+        return Err(AppError::Config(format!(
+            "skills directory must be an absolute readable directory: {}",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
 pub fn discover(cfg: &AppConfig, agent_workspace_dir: &Path) -> SkillSet {
+    discover_with_connection(cfg, agent_workspace_dir, None)
+}
+
+/// Scan a controller's optional root first, without adding it to shared configuration.
+/// Parsing, limits, disabled names and shadow diagnostics remain the ordinary workflow.
+pub fn discover_with_connection(
+    cfg: &AppConfig,
+    agent_workspace_dir: &Path,
+    connection_root: Option<&Path>,
+) -> SkillSet {
     if !cfg.skills.enabled {
         return SkillSet::default();
     }
@@ -43,12 +64,16 @@ pub fn discover(cfg: &AppConfig, agent_workspace_dir: &Path) -> SkillSet {
         .filter(|name| !name.is_empty())
         .collect::<HashSet<_>>();
 
-    let Ok(roots) = skill_roots(cfg, agent_workspace_dir) else {
+    let Ok(mut roots) = skill_roots(cfg, agent_workspace_dir) else {
         skill_set
             .warnings
             .push("skills_discovery_roots_failed".to_string());
         return skill_set;
     };
+
+    if let Some(root) = connection_root {
+        roots.insert(0, (SkillSource::Connection, root.to_path_buf()));
+    }
 
     let mut scanned_candidates = 0usize;
     let mut hit_limit = false;

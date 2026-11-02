@@ -14,6 +14,7 @@ import {
   readPlanMetadata,
 } from "../provider";
 import type { FileDiffLine, HostToWebviewFrame, WebviewToolDisplayFile } from "../protocol";
+import { isWebviewIntent } from "../protocol";
 import type { WebviewStateStore } from "../state";
 import { setLocale, translate } from "../../../shared/i18n";
 
@@ -36,6 +37,39 @@ const __testing = (
 
 const remoteErrorDetail = "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>";
 const remoteErrorSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
+
+it("explains an empty window's missing workspace without inventing a session", async () => {
+  __testing.reset();
+  setLocale("en");
+  const reportBootstrapFailure = vi.fn();
+  const provider = new TomcatWebviewViewProvider({
+    extensionUri: vscode.Uri.file("/workspace/extension"),
+    extensionMode: vscode.ExtensionMode.Development,
+    getDefaultCwd: () => undefined,
+    ide: {} as never,
+    initialize: async () => ({ attachmentRoot: null, capabilities: [], protocolVersion: 2, sessionId: null, serverVersion: "0.1.81" }),
+    messenger: { onEvent: () => ({ dispose() {} }) } as never,
+    sessionRouter: {} as never,
+    reportBootstrapFailure,
+  });
+  const host = provider as any;
+  const logging = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(host, "refreshModels").mockResolvedValue(undefined);
+  vi.spyOn(host.sessionPool, "refresh").mockRejectedValue(new Error("scope_requires_cwd"));
+  try {
+    await provider.dispatchTestIntent({ type: "ready", messageId: "empty-window" });
+    const detail = translate("en", "bridge.workspaceRequired");
+    expect(provider.currentState()).toMatchObject({
+      activeSessionId: null,
+      connectionStatus: "degraded",
+      connectionFailure: { kind: "bootstrap", detail },
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(expect.objectContaining({ message: detail }));
+  } finally {
+    provider.dispose();
+    logging.mockRestore();
+  }
+});
 
 describe("Host message queue integration", () => {
   function setup() {
@@ -291,12 +325,12 @@ goal: Home-expanded plan
 });
 
 describe("attachment picker options", () => {
-  it("allows any file or folder and updates the action label", () => {
-    expect(buildAttachmentOpenDialogOptions()).toEqual({
-      canSelectFiles: true,
-      canSelectFolders: true,
+  it.each(["files", "folders"] as const)("selects only %s, including on Windows/Linux", (kind) => {
+    expect(buildAttachmentOpenDialogOptions(kind)).toEqual({
+      canSelectFiles: kind === "files",
+      canSelectFolders: kind === "folders",
       canSelectMany: true,
-      openLabel: "Add to Tomcat",
+      openLabel: translate("en", "host.addToTomcat"),
     });
   });
 });
@@ -379,6 +413,7 @@ describe("draft fork delivery", () => {
     postMessage: ReturnType<typeof vi.fn>,
   ): void {
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,
@@ -398,6 +433,8 @@ describe("draft fork delivery", () => {
     try {
       const postMessage = vi.fn().mockRejectedValue(new Error("bridge down"));
       const provider = new TomcatWebviewViewProvider({
+        // This fixture advances every timer to test fork retries, not heartbeat.
+        extensionMode: vscode.ExtensionMode.Development,
         extensionUri: vscode.Uri.file("/workspace/extension"),
         getDefaultCwd: () => "/workspace",
         ide: {} as never,
@@ -1019,6 +1056,7 @@ function buildSearchProvider(): {
   });
 
   provider.resolveWebviewView({
+    onDidDispose: () => new vscode.Disposable(() => undefined),
     onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
     show() {},
     visible: true,
@@ -1065,7 +1103,7 @@ describe("context search intent handling", () => {
             reference: {
               kind: "file",
               label: "app.ts",
-              path: "src/app.ts",
+              path: "/workspace/src/app.ts",
               type: "reference",
             },
           },
@@ -1146,7 +1184,7 @@ describe("context search intent handling", () => {
             reference: {
               kind: "file",
               label: "new.ts",
-              path: "src/new.ts",
+              path: "/workspace/src/new.ts",
               type: "reference",
             },
           },
@@ -2595,7 +2633,7 @@ describe("draft fork provider transaction", () => {
       switchSession: vi.fn(async () => {
         order.push("switch");
         if (failAt === "switch") throw new Error("switch failed");
-        return "target-1";
+        return { sessionId: "target-1", access: "control" as const, origin: null };
       }),
     };
     const provider = new TomcatWebviewViewProvider({
@@ -2724,6 +2762,24 @@ describe("serve connection readiness", () => {
     });
   }
 
+  it("validates the restart intent and invokes the existing restart owner without waiting for initialize", async () => {
+    const initialize = vi.fn(async () => ({}));
+    const provider = createProvider(initialize);
+    const restartServe = vi.fn().mockResolvedValue(undefined);
+    const reconnectServe = vi.fn();
+    Object.assign((provider as any).deps, { restartServe, reconnectServe });
+    const intent = { type: "restartSharedService", messageId: "restart-shared" } as const;
+    expect(isWebviewIntent(intent)).toBe(true);
+    await provider.dispatchTestIntent(intent);
+    expect(restartServe).toHaveBeenCalledOnce();
+    expect(reconnectServe).not.toHaveBeenCalled();
+    expect(initialize).not.toHaveBeenCalled();
+    // Failed restart state belongs to the supervisor, as with inline reconnect.
+    restartServe.mockRejectedValueOnce(new Error("restart failed"));
+    await expect(provider.dispatchTestIntent({ ...intent, messageId: "restart-failed" })).resolves.toBeUndefined();
+    provider.dispose();
+  });
+
   it("does not mark serve ready merely because the webview DOM announces ready", async () => {
     const provider = createProvider(async () => {
       throw new Error("serve handshake failed");
@@ -2764,10 +2820,27 @@ describe("serve connection readiness", () => {
     // though there was never an earlier successful handshake.
     (provider as any).deps.initialize = async () => ({ capabilities: [], sessionId: "s1", attachmentRoot: null });
     const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
+    provider.prepareForServeReconnect();
     await provider.setServeConnectionState("ready");
     await provider.refreshAfterServeRestart();
     expect(bootstrap).toHaveBeenCalledOnce();
     expect(provider.currentState().connectionFailure).toBeUndefined();
+    provider.dispose();
+  });
+
+  it("keeps the live prefix received during initialization when readiness arrives later", async () => {
+    const provider = createProvider(async () => ({ sessionId: "host" }));
+    const store = (provider as unknown as { stateStore: WebviewStateStore }).stateStore;
+    provider.prepareForServeReconnect();
+    store.applyEvent({
+      type: "message_update", sessionId: "host", assistantMessageId: "m-live",
+      assistantMessageEvent: null, message: { role: "assistant", content: "already generating" },
+    });
+    await provider.setServeConnectionState("ready");
+    await provider.refreshAfterServeRestart();
+    expect(provider.currentState().sessionViews.host.timeline).toContainEqual(expect.objectContaining({
+      type: "message", id: "m-live", text: "already generating",
+    }));
     provider.dispose();
   });
 
@@ -2799,6 +2872,7 @@ describe("serve connection readiness", () => {
     const provider = createProvider(initialize);
     const bootstrap = vi.spyOn(provider as any, "bootstrap").mockResolvedValue(undefined);
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,
@@ -2882,6 +2956,7 @@ describe("serve connection readiness", () => {
     const provider = createProvider(async () => ({ sessionId: "s1" }));
     (provider as any).deps.reportBootstrapFailure = reportBootstrapFailure;
     provider.resolveWebviewView({
+      onDidDispose: () => new vscode.Disposable(() => undefined),
       onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
       show() {},
       visible: true,

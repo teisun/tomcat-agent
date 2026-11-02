@@ -37,7 +37,9 @@ pub(crate) fn load_config_with_ignored_keys(
     // 若 TOML 文件存在且声明了对应 key，则在 layered.build 之前 unset env，
     // 防止 shell 中误设的 `TOMCAT__SECURITY__*` / `TOMCAT__LLM__API_KEY*`
     // 静默覆盖磁盘配置造成提权。
-    sanitize_sensitive_env(config_path);
+    if !super::saved_configuration_only() {
+        sanitize_sensitive_env(config_path);
+    }
     warn_removed_ask_question_timeout(config_path);
     merge_config_sources(config_path)
 }
@@ -58,11 +60,13 @@ pub(super) fn merge_config_sources(
             builder = builder.add_source(::config::File::from(p));
         }
     }
-    builder = builder.add_source(
-        ::config::Environment::with_prefix(ENV_PREFIX)
-            .separator("__")
-            .try_parsing(true),
-    );
+    if !super::saved_configuration_only() {
+        builder = builder.add_source(
+            ::config::Environment::with_prefix(ENV_PREFIX)
+                .separator("__")
+                .try_parsing(true),
+        );
+    }
     let layered = builder
         .build()
         .map_err(|e| AppError::Config(e.to_string()))?;

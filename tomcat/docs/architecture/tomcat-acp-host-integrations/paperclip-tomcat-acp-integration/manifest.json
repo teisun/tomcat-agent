@@ -1,0 +1,380 @@
+{
+  "tomcat_code_revision": "401b6f0cbd8be8478b5453815450f7ce6ada00e7",
+  "host": {
+    "name": "paperclip",
+    "base_revision": "2f6ad2226aec330251438c47cbc45fd92e0d3132",
+    "integration_revision": "1f010b1655b85ec4cfcf4ca45114e8fa899a601c",
+    "files": [
+      {
+        "path": "cli/package.json",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "c5c836b8697f30eba0caa0ce0d4cf61233c54f7acd21ce177bfe69dcd60ef5af"
+      },
+      {
+        "path": "cli/src/adapters/registry.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "eeaaa0fff39470b50ad683089e708bef0aa950182af4e0c6e02b109d839505e6"
+      },
+      {
+        "path": "packages/adapter-utils/src/acpx-engine/constants.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "b831f472a91b9f3c42a325a1da9c835a7a79f478ea65c76a3bf0979d32f18458"
+      },
+      {
+        "path": "packages/adapter-utils/src/acpx-engine/execute.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "645d9987562a77847e031f46ff8a1e9b3d0e990e5c9bac5129d69adf3c2bf9ad"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/package.json",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/package.json",
+        "sha256_after_integration": "5be548789bc14c3a690e18b93f42598261e14f6c7e0fcc346b28abdb709a7d4d"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/cli/index.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/cli/index.ts",
+        "sha256_after_integration": "a24c5ce3c5409aef8aeb51a334151a535285de8cf67a5e52cb0839fbfdd49636"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/index.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/index.ts",
+        "sha256_after_integration": "e21a44cdbb192ff3bc1db31a6ffa184ebb571e1e6c992cfbd7ed0d84636471a5"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/acp.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/server/acp.ts",
+        "sha256_after_integration": "35de07e0604e93e2afb3c4ded8974056b64887d7525c422898a590133e32e437"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/config-schema.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/server/config-schema.ts",
+        "sha256_after_integration": "0a075c0a7715df1a287244aa3c11809a02c6eb784f119f42bae4492cdee6abe5"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/execute.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/server/execute.test.ts",
+        "sha256_after_integration": "bda3b877de286019edbe1a978dade7f65c069881267516e1742d108becf9ca10"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/fixtures/resume-agent.mjs",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/server/fixtures/resume-agent.mjs",
+        "sha256_after_integration": "27cf49859f62f52c171308750dd3916da67e161951b9cb425f0a5d93c0d26abf"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/index.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/server/index.ts",
+        "sha256_after_integration": "e29a61cda3139a5df9878d8f8ea53c10ae76345250744fffbe37e90baa48ad8b"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/resume.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/server/resume.test.ts",
+        "sha256_after_integration": "5c2f966983625a1ee542b0c0024e2f825ddba6e3e9a1c58938f7e4be13272401"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/skills.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/server/skills.test.ts",
+        "sha256_after_integration": "6c383fea49116687bb9d1a26cdf6ca944dd8ec69f5f244fb7a7d73fb67935cda"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/skills.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/server/skills.ts",
+        "sha256_after_integration": "0bb319cd31364be4032ed14bcbc136d61249f1cbb4b6682fcea133a28e7e0b11"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/test.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/server/test.test.ts",
+        "sha256_after_integration": "c0bdc30b1c4544a910f8d2c2cabd3758cd799a17362a366a3bad9996bcb979c5"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/server/test.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/server/test.ts",
+        "sha256_after_integration": "dccad5b6b86ac9e53e9b75fd3a3a954d6a60d856c6d816d65a5f74ebbc3c03f0"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/ui/index.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/src/ui/index.test.ts",
+        "sha256_after_integration": "4cfafdc60caea60e8e65e39f115562ada5845e0a243fad77c5d0e8d9a0e14f37"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/src/ui/index.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/src/ui/index.ts",
+        "sha256_after_integration": "3d412599ef4980ae7bef1e38b3cd8d047c195dd8a54e42661755b15ec900ae1d"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/tsconfig.json",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/packages/adapters/tomcat-local/tsconfig.json",
+        "sha256_after_integration": "d03f9c0a3c567b1e98c710d2e0544182ab0bac5f7c0bd2100834d2240ff0acae"
+      },
+      {
+        "path": "packages/adapters/tomcat-local/vitest.config.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/packages/adapters/tomcat-local/vitest.config.ts",
+        "sha256_after_integration": "2d4ac4b984c9b3891a9eabb63b9b5c9e6164b291453e8071055a56d68d67bfda"
+      },
+      {
+        "path": "packages/shared/src/constants.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "c7b946d56252954f6beb0e8e56ad776b8a1dd4313d24edf2a9049ff7015a7548"
+      },
+      {
+        "path": "pnpm-lock.yaml",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "f515aa39dcb11b79f2bb9cfdd24718c472c4e8a7b827dbc1d10f8a2bdd389d92"
+      },
+      {
+        "path": "scripts/run-vitest-stable.mjs",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "0eed6ac3f5beae826c3d3dbb1b05f4f145ee0ae12262ff9cc38a41bb8c2da1aa"
+      },
+      {
+        "path": "server/package.json",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "8394a69d1eaf8c823ed28a7cef2a0384ff254eddb463257b5325f21a99061688"
+      },
+      {
+        "path": "server/src/adapters/builtin-adapter-types.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "93dccc2526c2a43bd877979be6361d6462972fafcdd21433c0134cc2f2f0bbb6"
+      },
+      {
+        "path": "server/src/adapters/registry.test.ts",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "ffd4afc32a68531a492dc5cce6748510d137294d6549b93c6105a61368b43e5c"
+      },
+      {
+        "path": "server/src/adapters/registry.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "4bb41e455b175f6e05d95e1138859d8d7e3389f5678c6197f245326089bbb352"
+      },
+      {
+        "path": "server/src/services/agent-identity.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "df97e48f3fd7a51c5f9664a5144d5853ad02596008ba8693c2dd75ea38752cc0"
+      },
+      {
+        "path": "server/src/services/conversation-continuation.test.ts",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "bc0be1fb94a6b1f3338a78ef544a3d8dead668d1a348fce8e82b3ec2bdbd6858"
+      },
+      {
+        "path": "server/src/services/conversation-continuation.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "1ea746289a5c1e141fb09f5f2d075132ed06001e7c69fc10e3d76120093d7a31"
+      },
+      {
+        "path": "tsconfig.json",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "141e54b8e83f222efa225c143434bcaf1b6e5afb1bbceb6efdb77e4e84c892b1"
+      },
+      {
+        "path": "ui/package.json",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "b6837db1e69b5328dc9c649ed2c811f6196de8d13636dcb536b51b81a2b23931"
+      },
+      {
+        "path": "ui/src/adapters/adapter-display-registry.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "bdba4eaee9c8e0580d6ef2b68ec6c5862a7c738625bc2b53842abdbc76a68d7a"
+      },
+      {
+        "path": "ui/src/adapters/registry.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "08f8520ab8cf25ac5e12b7aa8433befa7501a2ae2309f5d33ff328daa1f9aed9"
+      },
+      {
+        "path": "ui/src/adapters/tomcat-local/index.test.ts",
+        "status": "A",
+        "group": "tests",
+        "delivery": "tests/new-files/ui/src/adapters/tomcat-local/index.test.ts",
+        "sha256_after_integration": "b17bb5278185053b730d1994a37a3161d0b11f64378efbd61a15952827b889f3"
+      },
+      {
+        "path": "ui/src/adapters/tomcat-local/index.ts",
+        "status": "A",
+        "group": "runtime",
+        "delivery": "new-files/ui/src/adapters/tomcat-local/index.ts",
+        "sha256_after_integration": "a068e8fde63ce683cde77548f2aa08f0b0bb6b298f4771c7369863acc1f9e8bc"
+      },
+      {
+        "path": "ui/src/adapters/use-adapter-capabilities.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "f5307f443e652bd21c26f696a07281af9246076535c46f71f83c52b737569dbf"
+      },
+      {
+        "path": "ui/src/components/RuntimeTestCard.tsx",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "7354f6428ca7c4c8d0e998c24c75d8574cbb35363c964a523f24e671eae2ed33"
+      },
+      {
+        "path": "ui/src/components/TaskChatThread.test.tsx",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "15412db33559f8d9310419c0444ddbb4d30e5edb828b924f3edddcd17e7496ed"
+      },
+      {
+        "path": "ui/src/components/TaskChatThread.tsx",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "37ea0d142b11310a2414d185d2745ad421218c9d6d738315cbfa6707ddfd11dd"
+      },
+      {
+        "path": "ui/src/components/new-agent/NewAgentSetup.tsx",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "fe33f56fab955c7b31e8cd0db56e2311e54f233b530e2d3c14d04420fd673730"
+      },
+      {
+        "path": "ui/src/components/task-chat/composer-run-settings.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "71fee870f73c425a6fd6e9fea32967dd8c945a3be362af64575a07f93e318dc7"
+      },
+      {
+        "path": "ui/src/lib/agent-setup-fields.ts",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "a822eee27c187d8ff87c2c205cdef5c123bd5c1ad040dae3a8d27c7e898385b2"
+      },
+      {
+        "path": "ui/src/pages/NewAgent.test.tsx",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "459bfd92baf7be29e9720accb8eccc3407cd1bcf8b74a1b4a6d82ec9046adc05"
+      },
+      {
+        "path": "vitest.config.ts",
+        "status": "M",
+        "group": "tests",
+        "delivery": "tests/existing-files.patch",
+        "sha256_after_integration": "269cee1ab1af9a430b8e4684ba19aa658f067de0c446ec52dd7f8925f6e90ec8"
+      }
+    ],
+    "patches": [
+      {
+        "path": "existing-files.patch",
+        "sha256": "a3365447397b79f7ace375db9ec9ffdaa9d09aea6d5e5444a857816ee868eb1f",
+        "target_paths": [
+          "cli/package.json",
+          "cli/src/adapters/registry.ts",
+          "packages/adapter-utils/src/acpx-engine/constants.ts",
+          "packages/adapter-utils/src/acpx-engine/execute.ts",
+          "packages/shared/src/constants.ts",
+          "pnpm-lock.yaml",
+          "server/package.json",
+          "server/src/adapters/builtin-adapter-types.ts",
+          "server/src/adapters/registry.ts",
+          "server/src/services/agent-identity.ts",
+          "server/src/services/conversation-continuation.ts",
+          "tsconfig.json",
+          "ui/package.json",
+          "ui/src/adapters/adapter-display-registry.ts",
+          "ui/src/adapters/registry.ts",
+          "ui/src/adapters/use-adapter-capabilities.ts",
+          "ui/src/components/RuntimeTestCard.tsx",
+          "ui/src/components/TaskChatThread.tsx",
+          "ui/src/components/new-agent/NewAgentSetup.tsx",
+          "ui/src/components/task-chat/composer-run-settings.ts",
+          "ui/src/lib/agent-setup-fields.ts"
+        ]
+      },
+      {
+        "path": "tests/existing-files.patch",
+        "sha256": "e450c25137dd3877802df5f77e92e7201fc7aff5706df5d9b0bc7efd58b5747b",
+        "target_paths": [
+          "scripts/run-vitest-stable.mjs",
+          "server/src/adapters/registry.test.ts",
+          "server/src/services/conversation-continuation.test.ts",
+          "ui/src/components/TaskChatThread.test.tsx",
+          "ui/src/pages/NewAgent.test.tsx",
+          "vitest.config.ts"
+        ]
+      }
+    ],
+    "licenses": [
+      {
+        "path": "LICENSE",
+        "sha256": "7f8a27f0979bded50e240caa8c8c29f3088ddf87032cb83e5a9732bff91d18b4"
+      }
+    ],
+    "package": "paperclip-tomcat-acp-integration"
+  }
+}

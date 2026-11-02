@@ -1,5 +1,34 @@
 use super::*;
 
+#[test]
+fn shared_configuration_keeps_search_deadline_and_hint_independent_of_starter() {
+    const CHILD: &str = "TOMCAT_TEST_SHARED_SEARCH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::shared_configuration_keeps_search_deadline_and_hint_independent_of_starter"), "--nocapture"])
+            .env(CHILD, "1").env(SEARCH_FALLBACK_DEADLINE_ENV, "1")
+            .output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("SHARED_SEARCH_ASSERTIONS_PASSED"));
+        return;
+    }
+    assert_eq!(fallback_deadline(), Duration::from_millis(1));
+    let mut standalone = Vec::new();
+    fallback_timeout_warning(&mut standalone, fallback_deadline());
+    assert!(standalone[0].contains(SEARCH_FALLBACK_DEADLINE_ENV));
+    crate::infra::config::use_saved_configuration_only();
+    assert_eq!(
+        fallback_deadline(),
+        Duration::from_secs(SEARCH_FALLBACK_TIMEOUT_SECS)
+    );
+    let mut shared = Vec::new();
+    fallback_timeout_warning(&mut shared, fallback_deadline());
+    assert!(!shared[0].contains(SEARCH_FALLBACK_DEADLINE_ENV));
+    assert!(shared[0].contains("Narrow path"));
+    println!("SHARED_SEARCH_ASSERTIONS_PASSED");
+}
+
 fn hit(path: &str, line: u64, col: u64, text: &str) -> String {
     format!("{path}\u{1f}{line}\u{1f}{col}\u{1f}{text}")
 }

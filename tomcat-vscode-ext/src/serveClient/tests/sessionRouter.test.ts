@@ -2,6 +2,39 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SessionRouter } from "../sessionRouter";
 
+describe("SessionRouter session access", () => {
+  it("preserves a project-boundary refusal instead of reporting a malformed state or history", async () => {
+    const refused = { success: false, error: "unknown_session" };
+    const messenger = { request: vi.fn().mockResolvedValue(refused), sendGetMessages: vi.fn().mockResolvedValue(refused) };
+    const router = new SessionRouter(messenger as never, () => undefined);
+    await expect(router.getState("foreign")).rejects.toThrow("unknown_session");
+    await expect(router.getMessages("foreign")).rejects.toThrow("unknown_session");
+  });
+
+  it("keeps the server's access and origin through ordinary open and disk listing", async () => {
+    const origin = { kind: "acp", clientName: "paperclip" };
+    const messenger = { request: vi.fn().mockResolvedValue({ success: true, sessionId: "host", payload: { access: "observe", origin } }) };
+    const router = new SessionRouter(messenger as never, () => "/workspace");
+    await expect(router.switchSession("host")).resolves.toEqual({ sessionId: "host", access: "observe", origin });
+    messenger.request.mockResolvedValueOnce({ success: true, payload: { sessionKey: "project-A", sessions: [{ sessionId: "host", access: "observe", origin }] } });
+    expect((await router.listSessions("disk")).sessions[0]).toMatchObject({ sessionId: "host", access: "observe", origin });
+    expect(messenger.request).toHaveBeenLastCalledWith({ type: "list_sessions", scope: "disk" });
+    // Display provenance must not be used to guess access.
+    messenger.request.mockResolvedValueOnce({ success: true, sessionId: "host", payload: { access: "control", origin } });
+    expect((await router.switchSession("host")).access).toBe("control");
+  });
+
+  it("preserves private stdio compatibility but rejects malformed access and failed opens", async () => {
+    const messenger = { request: vi.fn().mockResolvedValue({ success: true, sessionId: "old", payload: {} }) };
+    const router = new SessionRouter(messenger as never, () => undefined);
+    await expect(router.switchSession("old")).resolves.toEqual({ sessionId: "old", access: "control", origin: null });
+    messenger.request.mockResolvedValueOnce({ success: true, sessionId: "old", payload: { access: false } });
+    await expect(router.switchSession("old")).rejects.toThrow("Invalid session access");
+    messenger.request.mockResolvedValueOnce({ success: false, error: "unknown_session" });
+    await expect(router.switchSession("other-project")).rejects.toThrow("unknown_session");
+  });
+});
+
 describe("SessionRouter model readiness", () => {
   it("passes booleans through and leaves legacy or malformed values undefined", async () => {
     const messenger = { request: vi.fn() };

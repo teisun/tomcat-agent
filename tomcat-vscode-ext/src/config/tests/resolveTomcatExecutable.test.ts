@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { TEST_PATH_ENV } from "../../constants";
 import { resolveTomcatExecutable } from "../resolveTomcatExecutable";
@@ -57,13 +57,9 @@ describe("resolveTomcatExecutable", () => {
   it("falls through to PATH discovery when the bundled executable is absent", async () => {
     const resolved = await resolveTomcatExecutable({
       bundledPath: "/extension/bin/tomcat",
-      commandRunner: async (command) => {
-        if (command === "which") {
-          return "/usr/local/bin/tomcat\n";
-        }
-        throw new Error("unexpected command");
-      },
-      fileExists: async () => false,
+      commandRunner: async () => { throw new Error("unexpected command"); },
+      env: { PATH: "/missing:/usr/local/bin" },
+      fileExists: async (candidate) => candidate === "/usr/local/bin/tomcat",
       platform: "darwin",
     });
 
@@ -77,9 +73,6 @@ describe("resolveTomcatExecutable", () => {
   it("falls back to a login shell lookup when the process path misses tomcat", async () => {
     const resolved = await resolveTomcatExecutable({
       commandRunner: async (command, args) => {
-        if (command === "which") {
-          throw new Error("not found");
-        }
         if (args[1] === "command -v tomcat") {
           return "/opt/homebrew/bin/tomcat\n";
         }
@@ -132,6 +125,55 @@ describe("resolveTomcatExecutable", () => {
     });
   });
 
+  it("finds a real executable in a non-ASCII PATH directory without a locator process", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-path-"));
+    const directory = path.join(root, "tomcat 汤姆猫");
+    const executable = path.join(directory, process.platform === "win32" ? "tomcat.exe" : "tomcat");
+    const commandRunner = vi.fn(async () => { throw new Error("must not spawn a locator"); });
+    try {
+      await fs.mkdir(directory);
+      await fs.writeFile(executable, "fixture", { mode: 0o755 });
+      const resolved = await resolveTomcatExecutable({
+        env: { PATH: [path.join(root, "missing"), `"${directory}"`].join(path.delimiter) },
+        commandRunner,
+      });
+      expect(resolved).toEqual({ executable, found: true, source: "process-path" });
+      expect(commandRunner).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("keeps executable symlinks usable on POSIX", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-symlink-"));
+    const executable = path.join(root, "tomcat");
+    try {
+      await fs.writeFile(path.join(root, "target"), "fixture", { mode: 0o755 });
+      await fs.symlink("target", executable);
+      expect(await resolveTomcatExecutable({ env: { PATH: root } })).toEqual({
+        executable, found: true, source: "process-path",
+      });
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("skips a PATH directory named tomcat and keeps looking for a regular executable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-directory-"));
+    const name = process.platform === "win32" ? "tomcat.exe" : "tomcat";
+    const decoy = path.join(root, "first", name);
+    const executable = path.join(root, "second", name);
+    const commandRunner = vi.fn(async () => { throw new Error("must not spawn a locator"); });
+    try {
+      await fs.mkdir(decoy, { recursive: true });
+      await fs.mkdir(path.dirname(executable));
+      await fs.writeFile(executable, "fixture", { mode: 0o755 });
+      const resolved = await resolveTomcatExecutable({
+        env: { PATH: [path.dirname(decoy), path.dirname(executable)].join(path.delimiter) }, commandRunner,
+      });
+      expect(resolved).toEqual({ executable, found: true, source: "process-path" });
+      expect(commandRunner).not.toHaveBeenCalled();
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   describe("on win32", () => {
     it("accepts a bundled tomcat.exe without the POSIX execute bit", async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-resolve-"));
@@ -147,27 +189,20 @@ describe("resolveTomcatExecutable", () => {
       }
     });
 
-    it("finds tomcat with where.exe and skips the POSIX login-shell lookup", async () => {
-      const commands: string[] = [];
+    it("scans PATH in order and skips the POSIX login-shell lookup", async () => {
+      const commandRunner = vi.fn(async () => { throw new Error("unexpected command"); });
+      const installed = "C:\\Users\\tester\\.local\\bin\\tomcat.exe";
+      const checked: string[] = [];
       const resolved = await resolveTomcatExecutable({
-        commandRunner: async (command, args) => {
-          commands.push(`${command} ${args.join(" ")}`);
-          if (command === "where.exe") {
-            return "C:\\Users\\tester\\.local\\bin\\tomcat.exe\r\nC:\\other\\tomcat.exe\r\n";
-          }
-          throw new Error("unexpected command");
-        },
-        env: { USERPROFILE: "C:\\Users\\tester" },
-        fileExists: async () => false,
+        commandRunner,
+        env: { PATH: '; "C:\\missing dir" ;C:\\Users\\tester\\.local\\bin;C:\\other', USERPROFILE: "C:\\Users\\tester" },
+        fileExists: async (candidate) => { checked.push(candidate); return candidate === installed; },
         platform: "win32",
       });
 
-      expect(resolved).toEqual({
-        executable: "C:\\Users\\tester\\.local\\bin\\tomcat.exe",
-        found: true,
-        source: "process-path",
-      });
-      expect(commands).toEqual(["where.exe tomcat"]);
+      expect(resolved).toEqual({ executable: installed, found: true, source: "process-path" });
+      expect(checked).toEqual(["C:\\missing dir\\tomcat.exe", installed]);
+      expect(commandRunner).not.toHaveBeenCalled();
     });
 
     it("falls back to tomcat.exe under USERPROFILE when PATH misses", async () => {
@@ -176,7 +211,7 @@ describe("resolveTomcatExecutable", () => {
         commandRunner: async () => {
           throw new Error("not found");
         },
-        env: { USERPROFILE: "C:\\Users\\tester" },
+        env: { PATH: "C:\\missing;C:\\also-missing", USERPROFILE: "C:\\Users\\tester" },
         fileExists: async (targetPath) => targetPath === installed,
         platform: "win32",
       });

@@ -27,7 +27,8 @@
 - [`infrastructure-layer.md`](./infrastructure-layer.md)
 - [`interaction-layer.md`](./interaction-layer.md)
 - [`agent-server-and-ui-gateway.md`](./agent-server-and-ui-gateway.md)：把 CLI 能力暴露给 VSCode / 桌面 GUI 的进程边界（Agent Server / Gateway / stdio）方案。
-- [`shared-serve-and-acp-host-integration.md`](./shared-serve-and-acp-host-integration.md)：共享 serve、Paperclip/Multica 标准 ACP 适配器与 VS Code 实时旁观的技术方案（设计稿，未实施）；控制连接断开取消任务，WebSocket 与断线续跑留到后续。
+- [`shared-serve-and-acp-host-integration.md`](./shared-serve-and-acp-host-integration.md)：共享 serve、Paperclip/Multica 标准 ACP 适配器与 VS Code 实时旁观的技术方案与实施记录；控制连接断开取消任务，WebSocket 与断线续跑留到后续。
+- [`tomcat-acp-host-integrations/`](./tomcat-acp-host-integrations/)：公司二开宿主的独立迁移资料包入口；Paperclip 与 Multica 各自独立，不互相依赖。
 - [`security.md`](./security.md)
 - [`permission-system.md`](./permission-system.md)
 - [`audit-log.md`](./audit-log.md)

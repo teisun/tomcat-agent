@@ -8,6 +8,19 @@ use crate::core::tools::contract::confirmation::ConfirmDecision;
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ServeConfig;
 
+fn test_bridge(
+    writer: crate::api::serve::writer::WriterHandle,
+) -> (tempfile::TempDir, ServeConfirmationBridge) {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&crate::AppConfig::default()).unwrap(),
+    )
+    .unwrap();
+    (temp, ServeConfirmationBridge::new(writer, config_path))
+}
+
 async fn confirmation_request_id(
     buffer: &crate::api::serve::test_support::SharedWriterBuffer,
 ) -> String {
@@ -28,7 +41,7 @@ async fn confirmation_request_id(
 #[tokio::test]
 async fn serve_confirmation_dropped_wait_retracts_request_and_rejects_late_reply() {
     let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
-    let bridge = ServeConfirmationBridge::new(writer);
+    let (_temp, bridge) = test_bridge(writer);
     let provider = bridge.provider_for_session("drop-session");
     let request = tokio::spawn(async move {
         provider
@@ -54,25 +67,34 @@ async fn serve_confirmation_dropped_wait_retracts_request_and_rejects_late_reply
         .handle_control_response(&ControlFrame::response(
             request_id,
             Some("drop-session".into()),
-            serde_json::json!({"decision":"allow_once"}),
+            serde_json::json!({"decision":"allow_and_persist_root", "root":_temp.path()}),
         ))
         .unwrap());
+    assert!(
+        crate::load_config_toml_file(&_temp.path().join("config.toml"))
+            .unwrap()
+            .workspace
+            .workspace_roots
+            .is_empty()
+    );
     assert_eq!(bridge.cancel_live_session("drop-session", "cleanup"), 0);
 }
 
 #[tokio::test]
 async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decision() {
     let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
-    let bridge = ServeConfirmationBridge::new(writer);
+    let (_temp, bridge) = test_bridge(writer);
+    let root = _temp.path().to_path_buf();
+    let requested_root = root.clone();
     let provider = bridge.provider_for_session("confirmation-session");
     let request = tokio::spawn(async move {
         provider
             .confirm_decision(
                 PrimitiveOperation::Read,
-                "Read package source\n路径: /tmp/source/SKILL.md",
+                "Read package source",
                 "package_install_source",
-                Some(PathBuf::from("/tmp/source/SKILL.md")),
-                Some(PathBuf::from("/tmp/source")),
+                Some(requested_root.join("SKILL.md")),
+                Some(requested_root),
             )
             .await
     });
@@ -91,15 +113,18 @@ async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decisio
             Some("confirmation-session".to_string()),
             serde_json::json!({
                 "decision": "allow_and_persist_root",
-                "root": "/tmp/source"
+                "root": root
             }),
         ))
         .unwrap());
     assert_eq!(
         request.await.unwrap().unwrap(),
-        ConfirmDecision::AllowAndPersistRoot {
-            root: PathBuf::from("/tmp/source")
-        }
+        ConfirmDecision::AllowAndPersistRoot { root: root.clone() }
+    );
+    let config = crate::load_config_toml_file(&_temp.path().join("config.toml")).unwrap();
+    assert_eq!(
+        config.workspace.workspace_roots,
+        vec![root.to_string_lossy().into_owned()]
     );
     assert!(!read_ndjson_lines(&buffer)
         .iter()
@@ -109,7 +134,7 @@ async fn serve_confirmation_rejects_wrong_session_and_round_trips_scoped_decisio
 #[tokio::test]
 async fn serve_confirmation_rejects_missing_session_without_consuming_request() {
     let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
-    let bridge = ServeConfirmationBridge::new(writer);
+    let (_temp, bridge) = test_bridge(writer);
     let provider = bridge.provider_for_session("confirmation-session");
     let request = tokio::spawn(async move {
         provider
@@ -140,9 +165,42 @@ async fn serve_confirmation_rejects_missing_session_without_consuming_request() 
 }
 
 #[tokio::test]
+async fn serve_confirmation_persistence_failure_does_not_return_permission() {
+    let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
+    let (temp, bridge) = test_bridge(writer);
+    let root = temp.path().to_path_buf();
+    let requested_root = root.clone();
+    let provider = bridge.provider_for_session("persist-failed");
+    let request = tokio::spawn(async move {
+        provider
+            .confirm_decision(
+                PrimitiveOperation::Write,
+                "write",
+                "p1",
+                Some(requested_root.join("file")),
+                Some(requested_root),
+            )
+            .await
+    });
+    let request_id = confirmation_request_id(&buffer).await;
+    std::fs::write(temp.path().join("config.toml"), "invalid = [").unwrap();
+    assert!(bridge
+        .handle_control_response(&ControlFrame::response(
+            request_id,
+            Some("persist-failed".into()),
+            serde_json::json!({"decision":"allow_and_persist_root", "root":root})
+        ))
+        .unwrap());
+    assert!(
+        request.await.unwrap().is_err(),
+        "failed save must not silently become allow_once"
+    );
+}
+
+#[tokio::test]
 async fn serve_confirmation_denies_persisted_root_that_differs_from_request() {
     let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
-    let bridge = ServeConfirmationBridge::new(writer);
+    let (_temp, bridge) = test_bridge(writer);
     let provider = bridge.provider_for_session("confirmation-session");
     let request = tokio::spawn(async move {
         provider
@@ -168,4 +226,11 @@ async fn serve_confirmation_denies_persisted_root_that_differs_from_request() {
         ))
         .unwrap());
     assert_eq!(request.await.unwrap().unwrap(), ConfirmDecision::Deny);
+    assert!(
+        crate::load_config_toml_file(&_temp.path().join("config.toml"))
+            .unwrap()
+            .workspace
+            .workspace_roots
+            .is_empty()
+    );
 }

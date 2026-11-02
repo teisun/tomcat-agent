@@ -16,4 +16,5 @@ mod dispatch_no_extension_test;
 mod dispatch_with_extension_test;
 mod events_test;
 mod mocks;
+mod session_tools_test;
 mod tokio_handle_capture_test;

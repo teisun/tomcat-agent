@@ -238,6 +238,7 @@ impl JsonlFileAppendSink {
 
         let header = SessionHeader {
             r#type: "session".to_string(),
+            origin: None,
             version: Some(3),
             id: self.child_session_id.clone(),
             timestamp: iso_ts_now(),

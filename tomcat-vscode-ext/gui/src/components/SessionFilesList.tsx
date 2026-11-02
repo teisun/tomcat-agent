@@ -21,11 +21,12 @@ export function blockedReason(file: SessionFileView, busy: boolean, t: Translato
   if (file.blockedReason === "not_regular_file") return t("files.notRegular");
   return t(file.restorable ? "files.undoThis" : "files.cannotUndo");
 }
-export function SessionFilesList({ sessionId, sourceTurnId, files, busy, onIntent, listRef, onUndo }: {
+export function SessionFilesList({ sessionId, sourceTurnId, files, busy, readOnly = false, onIntent, listRef, onUndo }: {
+  readOnly?: boolean;
   sessionId: string; sourceTurnId: string; files: SessionFileView[]; busy: boolean; onIntent(intent: SessionFileIntent): void; listRef: RefObject<HTMLDivElement | null>; onUndo(file: SessionFileView): void;
 }) {
   const t = useT();
-  const disabled = busy;
+  const disabled = busy || readOnly;
   return <>
     <div className="tc-session-files__list" ref={listRef} data-testid="session-files-list" role="list" aria-label={t("files.changed")}>
       {files.map((file) => <div className="tc-session-files__row" key={file.path} role="listitem" data-testid="session-file-row" data-file-path={file.path}>
@@ -36,7 +37,7 @@ export function SessionFilesList({ sessionId, sourceTurnId, files, busy, onInten
             {file.added == null || file.removed == null || !file.added && !file.removed ? "—" : <>{file.added ? <span className="tc-session-files__added">+{file.added}</span> : null}{file.removed ? <span className="tc-session-files__removed">-{file.removed}</span> : null}</>}
           </span>
         </button>
-        <span className="tc-session-files__undo-slot" title={blockedReason(file,disabled,t)}><button className="tc-session-files__undo" type="button" data-testid="undo-file" aria-label={t("files.undoNamed", { name: basename(file.path) })} disabled={disabled || !file.restorable} onClick={() => onUndo(file)}><span aria-hidden="true" className="codicon codicon-close" /></button></span>
+        <span className="tc-session-files__undo-slot" title={readOnly ? t("session.readOnly") : blockedReason(file,disabled,t)}><button className="tc-session-files__undo" type="button" data-testid="undo-file" aria-label={t("files.undoNamed", { name: basename(file.path) })} disabled={disabled || !file.restorable} onClick={() => onUndo(file)}><span aria-hidden="true" className="codicon codicon-close" /></button></span>
       </div>)}
     </div>
   </>;

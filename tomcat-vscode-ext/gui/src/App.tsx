@@ -88,10 +88,6 @@ const COMPOSER_DRAFT_DEBOUNCE_MS = 250;
  */
 const ATTACHMENT_FEEDBACK_TIMEOUT_MS = 8000;
 
-interface PersistedGuiState {
-  approvalAnswers: Record<string, ApprovalAnswerState>;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -146,18 +142,6 @@ function pruneApprovalAnswers(
     }
   }
   return changed ? next : current;
-}
-
-function persistGuiState(
-  vscodeApi: VsCodeApiLike,
-  snapshot: WebviewStateSnapshot,
-  approvalAnswers: Record<string, ApprovalAnswerState>,
-): void {
-  const persisted: WebviewStateSnapshot & PersistedGuiState = {
-    ...snapshot,
-    approvalAnswers,
-  };
-  vscodeApi.setState?.(persisted);
 }
 
 interface ContextSearchState {
@@ -1269,13 +1253,20 @@ function submitPrompt(
   onSubmitted: (pending: PendingComposerSubmission) => void,
   slashNames: readonly string[],
   hasAttachments: boolean,
+  onRestart: () => void,
   captured?: { draft: ComposerDraft; attachmentIds: string[] },
 ): void {
   const draft = captured?.draft ?? composer?.getDraft() ?? EMPTY_DRAFT;
   if (!canPrompt || !draft.hasContent) {
     return;
   }
-  if (!hasAttachments && draft.segments.every((segment) => segment.type === "text") && matchSlashCommand(draft.text, slashNames)) {
+  const plainCommand = !hasAttachments && draft.segments.every((segment) => segment.type === "text");
+  if (plainCommand && !captured?.attachmentIds.length && draft.text.trim() === "/restart") {
+    composer?.clear();
+    onRestart(); // Sync the cleared draft before the host disconnects, never enqueue a prompt.
+    return;
+  }
+  if (plainCommand && matchSlashCommand(draft.text, slashNames)) {
     postIntent(vscodeApi, "runSlashCommand", { sessionId: activeSessionId ?? null, text: draft.text });
     // Commands are not transcript messages and have no user-message delivery ack.
     // Clear via the normal local draft callback so a subsequent snapshot cannot revive it.
@@ -1309,6 +1300,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
     () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
   );
+  // The host replays conversations; only unfinished answers need a GUI backup.
+  // The initial write also replaces legacy full-snapshot state.
+  useEffect(() => {
+    vscodeApi.setState?.({ approvalAnswers });
+  }, [vscodeApi, approvalAnswers]);
   const [pendingQuestionDockCollapsed, setPendingQuestionDockCollapsed] = useState<Record<string, boolean>>({});
   const [contextSearch, setContextSearch] = useState<ContextSearchState>(
     EMPTY_CONTEXT_SEARCH_STATE,
@@ -1540,7 +1536,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const commandPending = activeSession?.commandPending === true;
-  const queueEditingItem = state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
+  const readOnly = activeSession?.access === "observe";
+  const queueEditingItem = !readOnly && state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
   const previousQueueEditor = useRef<{ sessionId?: string; id?: string }>({});
   useEffect(() => {
     const previous = previousQueueEditor.current;
@@ -1552,10 +1549,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   // Undefined means a CLI that predates readiness reporting; only an explicit false blocks sending.
   const modelBlocked = activeSession?.modelReady === false;
   const openModelSettings = () => postIntent(vscodeApi, "openSettings", { route: "models" });
-  const canPromptWhenConfigured = state.ready && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
+  const canPromptWhenConfigured = state.ready && !readOnly && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
   const canPrompt = canPromptWhenConfigured && !modelBlocked;
-  const canInterrupt = state.ready;
-  const canBuildPlan = state.ready && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
+  const canInterrupt = state.ready && !readOnly;
+  const canBuildPlan = state.ready && !readOnly && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
   const modelAdminSupported = state.modelAdminSupported;
   const composerModelId = activeSession?.model;
   const activeModelCapabilities = composerModelId
@@ -1880,7 +1877,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         approvalAnswersRef.current = nextAnswers;
         setApprovalAnswers(nextAnswers);
         setState(nextState);
-        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1893,7 +1889,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         approvalAnswersRef.current = nextAnswers;
         setApprovalAnswers(nextAnswers);
         setState(nextState);
-        persistGuiState(vscodeApi, nextState, nextAnswers);
         flushPendingInsertions();
         return;
       }
@@ -1921,7 +1916,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         );
         setApprovalAnswers(approvalAnswersRef.current);
         setState(patched.state);
-        persistGuiState(vscodeApi, patched.state, approvalAnswersRef.current);
         return;
       }
       if (frame.channel === "event") {
@@ -1982,7 +1976,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             };
             approvalAnswersRef.current = next;
             setApprovalAnswers(next);
-            persistGuiState(vscodeApi, stateRef.current, next);
           }
           return;
         }
@@ -2211,9 +2204,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       };
       approvalAnswersRef.current = next;
       setApprovalAnswers(next);
-      persistGuiState(vscodeApi, stateRef.current, next);
     },
-    [vscodeApi],
+    [],
   );
 
   const handlePendingQuestionDockCollapse = useCallback(
@@ -2250,7 +2242,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       };
       approvalAnswersRef.current = next;
       setApprovalAnswers(next);
-      persistGuiState(vscodeApi, stateRef.current, next);
       answerQuestion(vscodeApi, ownerSessionId, requestId, result);
     },
     [vscodeApi],
@@ -2351,6 +2342,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     },
     [activeSession?.sessionId, activeSession?.busy, canPrompt, vscodeApi],
   );
+  const handleCancelErrorRecovery = useCallback((errorId: string, dueAt: number) => {
+    if (!activeSession?.sessionId) return;
+    postIntent(vscodeApi, "cancelErrorRecovery", { sessionId: activeSession.sessionId, errorId, dueAt });
+  }, [activeSession?.sessionId, vscodeApi]);
   const handleRecoverErrorTurn = useCallback(
     (errorId: string, action: "resume" | "retry") => {
       if (!activeSession?.sessionId || !canPrompt || activeSession.busy) {
@@ -2614,6 +2609,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     availableModels: state.availableModels,
     busy: !!activeSession?.busy,
     canChangeConfig: canPromptWhenConfigured && !activeSession?.busy,
+    configDisabledReason: readOnly ? t("session.readOnly") : undefined,
     canInterrupt,
     allowBusyInput: !!state.messageQueueSupported,
     attachmentsPending: !!activeSession && composerWorkRegistryRef.current.pendingCount(activeSession.sessionId) > 0,
@@ -2681,7 +2677,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       flushComposerDraft();
       const submit = (captured?: { draft: ComposerDraft; attachmentIds: string[] }) => submitPrompt(vscodeApi, composerRef.current, sessionId, true, pending => {
         pendingComposerSubmissionRef.current.set(pending.messageId, { ...pending, revision: sessionId ? localDraftRevisionsRef.current.get(sessionId) ?? 0 : 0 });
-      }, state.slashCommands?.map(c => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0, captured);
+      }, state.slashCommands?.map(c => c.name) ?? [], (activeSession?.pendingAttachments.length ?? 0) > 0 || !!(sessionId && composerWorkRegistryRef.current.pendingCount(sessionId)), () => {
+        flushComposerDraft(sessionId);
+        postIntent(vscodeApi, "restartSharedService");
+      }, captured);
       const cutoff = sessionId ? composerWorkRegistryRef.current.cutoff(sessionId) : 0;
       const ids = sessionId ? composerWorkRegistryRef.current.pendingIds(sessionId, cutoff) : [];
       if (!state.messageQueueSupported || !sessionId || !ids.length) { submit(); return; }
@@ -2715,6 +2714,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         activeSessionId={activeSession?.sessionId ?? null}
         creating={draftForkFeedback.pending}
         creationDisabledReason={activeSession?.deleting ? t("session.delete.pending") : undefined}
+        onOpen={() => postIntent(vscodeApi, "listSessions")}
         onOpenSettings={() => postIntent(vscodeApi, "openSettings", { route: "general" })}
         onSetPinned={state.pinSupported ? (sessionId, pinned) => postIntent(vscodeApi, "setSessionPinned", { sessionId, pinned }) : undefined}
         onDeleteSession={(sessionId) => postIntent(vscodeApi, "deleteSession", { sessionId })}
@@ -2778,7 +2778,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               {state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? <>
                 {state.connectionFailure?.detail ? <p role="alert">{state.connectionFailure.detail}</p> : null}
                 <div className="tc-button-row">
-                  <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
+                  {state.connectionFailure?.kind === "version_mismatch" ? (
+                    <button type="button" className="tc-button tc-button--primary" data-testid="restart-shared-service" onClick={() => postIntent(vscodeApi, "restartSharedService")}>{t("host.action.restartSharedService")}</button>
+                  ) : (
+                    <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
+                  )}
                   <button type="button" className="tc-button tc-button--secondary" data-testid="view-connection-logs" onClick={() => postIntent(vscodeApi, "viewConnectionLogs")}>{t("host.action.logs")}</button>
                 </div>
               </> : null}
@@ -2786,9 +2790,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           ) : activeSession ? (
             hasTranscriptContent ? (
               <TranscriptView
+                readOnly={readOnly}
                 onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending && !queueEditingItem
                   ? handleEditUserMessage : undefined}
-                renderUserEditor={(message) => editingMessage?.id === message.id ? (
+                renderUserEditor={(message) => !readOnly && editingMessage?.id === message.id ? (
                   <InlineMessageEditor
                     key={`${activeSession.sessionId}:${message.id}`}
                     message={editingMessage}
@@ -2820,8 +2825,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onOpenImagePreview={handleOpenImagePreview}
                 onOpenPlanFile={handleOpenPlanFile}
                 resolvePaths={resolvePaths}
-                onRecoverErrorTurn={handleRecoverErrorTurn}
-                onRetryUserMessage={handleRetryUserMessage}
+                onRecoverErrorTurn={readOnly ? undefined : handleRecoverErrorTurn}
+                onCancelErrorRecovery={readOnly ? undefined : handleCancelErrorRecovery}
+                errorRecovery={activeSession.errorRecovery}
+                onRetryUserMessage={readOnly ? undefined : handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
                 planId={activeSession.activePlan?.planId}
@@ -2896,7 +2903,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       })() : null}
 
 
-      {pendingRestoreDialog ? (
+      {pendingRestoreDialog && !readOnly ? (
         <RestoreConfirmDialog
           changedFiles={pendingRestoreDialog.changedFiles}
           onCancel={handleCancelRestore}
@@ -2907,8 +2914,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <div className="tc-footer" data-testid="composer-footer">
+        {readOnly ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
+          {activeSession?.origin
+            ? t("session.readOnlyFrom", { source: activeSession.origin.clientName?.trim() || t("session.acpClient") })
+            : t("session.readOnly")}
+        </div> : null}
         {state.ready && modelBlocked && hasTranscriptContent ? <ModelSetupCard onConfigure={openModelSettings} /> : null}
         <SessionDock
+          readOnly={readOnly}
           key={activeSession?.sessionId ?? "empty"}
           sessionId={activeSession?.sessionId ?? ""}
           busy={!!activeSession?.busy}
@@ -2916,13 +2929,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           planState={activeSession?.activePlan?.state}
           planTodos={activeSession?.planTodos ?? []}
           sessionTodos={activeSession?.sessionTodos ?? []}
-          messages={state.messageQueueSupported && activeSession?.messageQueue?.items.length ? <MessageQueueDock sessionId={activeSession.sessionId} queue={activeSession.messageQueue} busy={activeSession.busy} composerProps={composerProps} vscodeApi={vscodeApi} /> : undefined}
+          messages={!readOnly && state.messageQueueSupported && activeSession?.messageQueue?.items.length ? <MessageQueueDock sessionId={activeSession.sessionId} queue={activeSession.messageQueue} busy={activeSession.busy} composerProps={composerProps} vscodeApi={vscodeApi} /> : undefined}
           files={state.sessionFilesSupported ? activeSession?.sessionFiles : undefined}
           onIntent={(intent) => vscodeApi.postMessage(intent)}
         />
         <div className="tc-footer__composer" data-testid="composer-area">
           <div className="tc-main-composer" hidden={!!queueEditingItem} data-testid="main-composer-draft">
-            <ComposerSurface {...composerProps} canPrompt={composerProps.canPrompt && !queueEditingItem} ref={composerRef} />
+            <ComposerSurface {...composerProps} canPrompt={composerProps.canPrompt && !queueEditingItem} ref={composerRef}
+              slashCommands={[...(state.slashCommands ?? []), { name: "restart", usage: "/restart", summary: t("host.action.restartSharedService") }]} />
           </div>
           {queueEditingItem && activeSession ? <QueuedMessageEditor
             key={`${activeSession.sessionId}:${queueEditingItem.userMessageId}`}

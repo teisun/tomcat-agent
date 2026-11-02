@@ -436,7 +436,14 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
             reason: "tool_calls".to_string(),
         }),
     ];
-    let llm = Arc::new(RecordingMockLlmProvider::new(vec![stream_tools]));
+    let llm = Arc::new(RecordingMockLlmProvider::new(vec![
+        vec![Err(crate::infra::error::llm_http_status_error(
+            "mock",
+            503,
+            "temporary",
+        ))],
+        stream_tools,
+    ]));
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
     let synthetic =
@@ -445,6 +452,7 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
     let config = AgentLoopConfig {
         session_id: "s-followup-budget".to_string(),
         max_tool_rounds: 1,
+        retry_base_delay_ms: 0,
         ..Default::default()
     };
     let abort = CancellationToken::new();
@@ -465,8 +473,8 @@ async fn run_follow_up_does_not_bypass_max_tool_rounds() {
     );
     assert_eq!(
         llm.requests.lock().unwrap().len(),
-        1,
-        "follow-up 不应绕过 max_tool_rounds 开启额外 LLM 请求"
+        2,
+        "one retry must not reset the tool-round budget or let follow-up bypass it"
     );
     assert_eq!(
         follow_up_queue.lock().len(),

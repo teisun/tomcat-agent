@@ -1,4 +1,4 @@
-use super::super::code::tests::{seen, vm_fixture};
+use super::super::code::tests::{seen, vm_fixture, vm_limits};
 use crate::core::agent_loop::tool_exec::{
     execute_tool_full_with_policy_and_connectors, ToolExecOutcome,
 };
@@ -14,11 +14,9 @@ async fn entry(
     call: ToolCallInfo,
 ) -> ToolExecOutcome {
     let primitive = crate::core::agent_loop::tests::mock_primitive();
-    let vm_config = crate::ext::PluginEngineConfig {
-        call_timeout_ms: 20,
-        interrupt_budget: 0,
-        ..Default::default()
-    };
+    let vm_config = vm_limits();
+    let tools =
+        crate::core::connector::mcp::manager::McpToolView::new(registry.mcp_manager(), None);
     execute_tool_full_with_policy_and_connectors(
         &primitive,
         session,
@@ -32,7 +30,7 @@ async fn entry(
         None,
         None,
         None,
-        Some(&registry),
+        Some(&tools),
         Some(&vm_config),
         SubagentType::User,
         false,
@@ -103,7 +101,11 @@ async fn real_tool_entries_preserve_progress_and_session_stop_isolation() {
             } else {
                 assert!(result_a.model_text.contains("fixture result: A"));
             }
-            assert!(!b.is_finished());
+            assert!(
+                !b.is_finished(),
+                "{name}, stop={stop}: B ended before release: {}",
+                b.await.unwrap().model_text
+            );
             tokio::fs::write(gate_b, "release").await.unwrap();
             let result_b = b.await.unwrap();
             assert!(!result_b.is_error, "{}", result_b.model_text);

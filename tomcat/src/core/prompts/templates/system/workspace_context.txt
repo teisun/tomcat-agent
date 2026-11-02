@@ -1,5 +1,5 @@
 Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}
-- This is the user's shell working directory when tomcat chat was launched.
+- This is the working directory of the current session.
 - Interpret "current directory", "this project", and relative paths as this directory.
 - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.
 - For bash.cwd, use "." or this absolute path when the user asks to run in the current project, and let permission checks handle first access.

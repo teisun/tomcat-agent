@@ -70,16 +70,98 @@ pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_BACKGROUND_TASK_FINISHED,
 ];
 
+/// One current/last assistant message, never a turn or transcript copy. The slot's
+/// mutex also covers subscription changes and writer enqueue; no I/O/bus mutation
+/// or await may run while holding it.
+#[derive(Default)]
+pub(super) struct MessageReplay {
+    message_id: Option<String>,
+    text: String,
+    thinking: String,
+    ended: bool,
+}
+
+impl MessageReplay {
+    pub(super) fn record(&mut self, payload: &serde_json::Value) {
+        let kind = payload["type"].as_str().unwrap_or_default();
+        let id = payload["assistantMessageId"].as_str();
+        if kind == "message_start" {
+            *self = Self {
+                message_id: id.map(str::to_owned),
+                ..Self::default()
+            };
+            return;
+        }
+        if matches!(kind, "agent_end" | "agent_idle" | "agent_interrupted") {
+            self.ended = true;
+            return;
+        }
+        if id.is_none() || id != self.message_id.as_deref() {
+            return;
+        }
+        if kind == "message_end" {
+            // End precedes persistence. Keep the body until the next message starts.
+            self.ended = true;
+        } else if kind == "message_update" && !self.ended {
+            let event = &payload["assistantMessageEvent"];
+            if let Some(delta) = event["delta"].as_str() {
+                match event["kind"].as_str() {
+                    Some("content_delta") => self.text.push_str(delta),
+                    Some("thinking_delta") => self.thinking.push_str(delta),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub(super) fn send(
+        &self,
+        session_id: &str,
+        writer: &WriterHandle,
+    ) -> Result<(), crate::AppError> {
+        let Some(id) = self.message_id.as_deref() else {
+            return Ok(());
+        };
+        // Existing message field carries a replacement, not an accumulated delta.
+        // Do not coalesce it with subsequent deltas; the existing slow-consumer
+        // policy still applies to this message_update, including its notice.
+        writer.send(OutFrame::Event(serde_json::json!({
+            "type": "message_update", "sessionId": session_id,
+            "assistantMessageId": id, "assistantMessageEvent": null,
+            "message": {"role": "assistant", "content": self.text, "thinking_text": self.thinking}
+        })))?;
+        if self.ended {
+            writer.send(OutFrame::Event(serde_json::json!({
+                "type": "message_end", "sessionId": session_id,
+                "assistantMessageId": id, "message": {}
+            })))?;
+        }
+        Ok(())
+    }
+}
+
 pub fn register_session_event_pump(
     slot: &Arc<SessionSlot>,
     writer: WriterHandle,
+) -> Vec<EventListenerId> {
+    register_session_event_pump_with(
+        slot,
+        Arc::new(move |payload| {
+            let _ = writer.send(OutFrame::Event(payload));
+        }),
+    )
+}
+
+pub(super) fn register_session_event_pump_with(
+    slot: &Arc<SessionSlot>,
+    send: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
 ) -> Vec<EventListenerId> {
     let mut ids = Vec::new();
     for event_name in EVENT_NAMES {
         let session_id = slot.session_id.clone();
         let slot_for_listener = Arc::clone(slot);
         let event_bus = Arc::clone(&slot.ctx.global_services.event_bus);
-        let writer = writer.clone();
+        let send = send.clone();
         let id = event_bus.on(
             event_name,
             Box::new(move |ctx| {
@@ -117,7 +199,7 @@ pub fn register_session_event_pump(
                         }
                     }
                 }
-                let _ = writer.send(OutFrame::Event(ctx.payload.clone()));
+                send(ctx.payload.clone());
                 Ok(())
             }),
         );

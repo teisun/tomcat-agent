@@ -36,7 +36,6 @@ pub(super) async fn handle(
 async fn delete(state: &Arc<ServeState>, id: &str) -> Result<DeleteSessionOutcome, AppError> {
     validate_session_id(id)?;
     let manager = if let Some(active) = state
-        .registry
         .active_session_id()
         .and_then(|id| state.registry.get(&id))
     {

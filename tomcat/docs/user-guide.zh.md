@@ -176,6 +176,20 @@ cd tomcat
 
 插件侧在 Windows 上运行 `npm run gate:fast` 与 `npm run test:integration`。使用假 CLI 脚本的 VS Code 端到端测试（`gate:full`、`test:e2e:*`）只在 macOS 和 Linux 上运行；Windows 包由发布流水线用真实的 `tomcat.exe` 验证。
 
+#### 编译并更新安装副本
+
+首次使用 `tomcat init` 配好 PATH。之后 Windows 日常开发更新，在**独立 PowerShell/CMD 终端**的仓库根目录执行：
+
+```powershell
+.\scripts\dev-install.cmd
+```
+
+脚本只进入 `tomcat/` 并转交 `cargo run --release --bin tomcat -- self-install`。Cargo 负责编译并运行本次实际产物，沿用 `CARGO_TARGET_DIR`；编译失败就停止，不会误装 PATH 上的旧 EXE。普通 `cargo build` 和测试构建不安装。项目规则 `.cursor/rules/windows-dev-update.mdc` 为读取项目规则的 Agent 标明这个入口。
+
+`self-install` 只把当前可执行文件安装到 `~/.local/bin`，不跑初始化向导、不修改 PATH、配置或凭据，也不重启服务；尚未初始化或配置损坏时也可用。安装失败返回非零退出码；没有改动或保留用户自管入口时，不会谎报“已更新”。Windows 沿用现有机制：运行中的旧副本改名为 `*.old`，替换失败尽力回滚，后续安装尝试清理停放文件；这不是事务式升级。Tomcat Agent 工具会被嵌套调用保护拒绝，请在独立终端执行，不要删除保护标记来绕过。
+
+**换文件不等于换后台。** 安装后在 VS Code 主输入框发送 `/restart`；输入框不可用时用命令面板的“Tomcat: 重启共享服务（停止所有任务）”，也可在独立终端执行 `tomcat serve restart`。这会停止共享服务的所有任务，包括其他窗口/宿主的任务。关窗或 Reload 仍只断开本窗口。显式 `tomcat.path` 和 VSIX 内置程序保持原有优先级，更新 `~/.local/bin` 只影响使用该入口的扩展。Mac 保持现有软链接：重新构建链接指向的 target/profile 后，同样需要显式重启后台。
+
 ### 工作目录
 
 tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml` 的 `[storage]` 段修改 `work_dir`。

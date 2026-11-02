@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { InitializeResult } from "../initialize";
+import { ServiceVersionMismatchError } from "../sharedConnection";
+import { en } from "../../shared/i18n/en";
 import {
   DEFAULT_HANDSHAKE_TIMEOUT_MS,
   ServeConnectionSupervisor,
@@ -9,6 +11,7 @@ import {
 } from "../ServeConnectionSupervisor";
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
+  TomcatMessenger,
   type TomcatMessengerExit,
 } from "../TomcatMessenger";
 
@@ -59,6 +62,7 @@ function createMessenger() {
       exitListener = listener;
       return { dispose: vi.fn() };
     }),
+    runServiceAction: vi.fn(async (_action: "stop" | "restart"): Promise<void> => {}),
     restart: vi.fn(() => {
       running = true;
       recentStderr = "";
@@ -85,7 +89,95 @@ async function retryOnce(): Promise<void> {
   await vi.advanceTimersByTimeAsync(300);
 }
 
+  it("automatic reconnect only probes; explicit reconnect may start the service", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = createMessenger();
+      const supervisor = new ServeConnectionSupervisor({
+        initialize: vi.fn().mockResolvedValue(READY_RESULT), isExecutableAvailable: () => true,
+        messenger: runtime.messenger as never, random: () => 0.5,
+      });
+      await supervisor.whenReady();
+      expect(runtime.messenger.start).toHaveBeenLastCalledWith({ allowStart: true });
+      runtime.emitExit(exit({ stderr: "service stopped" }));
+      await retryOnce();
+      expect(runtime.messenger.start).toHaveBeenLastCalledWith({ allowStart: false });
+      expect(runtime.messenger.runServiceAction).not.toHaveBeenCalled();
+      await supervisor.reconnect();
+      expect(runtime.messenger.restart).toHaveBeenLastCalledWith({ allowStart: true });
+      supervisor.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("only the explicit global action restarts the service, then reconnects", async () => {
+    const runtime = createMessenger();
+    const action = deferred<void>();
+    runtime.messenger.runServiceAction.mockReturnValueOnce(action.promise);
+    const supervisor = new ServeConnectionSupervisor({
+      initialize: vi.fn().mockResolvedValue(READY_RESULT), isExecutableAvailable: () => true,
+      messenger: runtime.messenger as never,
+    });
+    await supervisor.whenReady();
+    const restarted = supervisor.restartService();
+    expect(runtime.messenger.stop).toHaveBeenCalledOnce();
+    expect(runtime.messenger.start).toHaveBeenCalledTimes(1);
+    expect(runtime.messenger.runServiceAction).toHaveBeenCalledWith("restart");
+    action.resolve();
+    await expect(restarted).resolves.toEqual(READY_RESULT);
+    expect(runtime.messenger.start).toHaveBeenCalledTimes(2);
+    supervisor.dispose();
+  });
+
+  it("a failed explicit service restart surfaces the error without spinning retries", async () => {
+    const runtime = createMessenger();
+    runtime.messenger.runServiceAction.mockRejectedValueOnce(new Error("stop could not confirm cleanup"));
+    const supervisor = new ServeConnectionSupervisor({
+      initialize: vi.fn().mockResolvedValue(READY_RESULT), isExecutableAvailable: () => true,
+      messenger: runtime.messenger as never,
+    });
+    await supervisor.whenReady();
+    await expect(supervisor.restartService()).rejects.toThrow("stop could not confirm cleanup");
+    expect(supervisor.currentState.phase).toBe("fatal");
+    expect(runtime.messenger.start).toHaveBeenCalledTimes(1);
+    supervisor.dispose();
+  });
+
 describe("ServeConnectionSupervisor", () => {
+  it.each(["0.1.81", "0.1.82"])("preserves the typed connection error through the messenger and stops on the first version mismatch (%s)", async clientVersion => {
+    vi.useFakeTimers();
+    const error = new ServiceVersionMismatchError("0.1.81", clientVersion);
+    const connectFactory = vi.fn().mockRejectedValue(error);
+    const messenger = new TomcatMessenger({ executable: "unused", connectFactory });
+    const supervisor = new ServeConnectionSupervisor({
+      messenger,
+      isExecutableAvailable: () => true,
+      initialize: async () => {
+        await messenger.request({ type: "get_state" });
+        return READY_RESULT;
+      },
+      random: () => 0.5,
+    });
+    try {
+      const rejected = expect(supervisor.whenReady()).rejects.toBe(error);
+      await vi.runAllTimersAsync();
+      await rejected;
+      expect(supervisor.currentState).toMatchObject({
+        phase: "fatal", status: "failed", attempt: 1,
+        failure: { kind: "version_mismatch", error },
+      });
+      expect(connectFactory).toHaveBeenCalledOnce();
+      const summary = summarizeServeFailure({ error, stderr: "unrelated startup diagnostic" });
+      expect(summary).toBe(error.running === error.client
+        ? en["bridge.serviceBuildOutdated"]
+        : en["bridge.serviceVersionMismatch"].replace("{running}", error.running).replace("{client}", error.client));
+      expect(summary).not.toContain("unrelated startup diagnostic");
+    } finally {
+      supervisor.dispose();
+      await messenger.disposeAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it("auto-retries a transient startup failure and resolves initialize on a later attempt", async () => {
     vi.useFakeTimers();
     try {
@@ -278,12 +370,34 @@ describe("ServeConnectionSupervisor", () => {
     }
   });
 
+  it("retries a missing IPC endpoint without claiming the CLI is missing", async () => {
+    vi.useFakeTimers();
+    const runtime = createMessenger();
+    const error = Object.assign(new Error("connect ENOENT /tmp/fixture-service.sock"), {
+      code: "ENOENT", syscall: "connect", address: "/tmp/fixture-service.sock",
+    });
+    runtime.messenger.start.mockImplementationOnce(() => runtime.emitExit(exit({ error })));
+    const supervisor = new ServeConnectionSupervisor({
+      initialize: vi.fn().mockResolvedValue(READY_RESULT), isExecutableAvailable: () => true,
+      messenger: runtime.messenger as never, random: () => 0.5,
+    });
+    try {
+      const ready = supervisor.whenReady().catch(failure => failure);
+      await retryOnce();
+      expect(await ready).toEqual(READY_RESULT);
+      expect(supervisor.currentState).toMatchObject({ phase: "ready", attempt: 2 });
+      expect(runtime.messenger.start).toHaveBeenLastCalledWith({ allowStart: false });
+    } finally { supervisor.dispose(); vi.useRealTimers(); }
+  });
+
   it("classifies ENOENT as executable-missing without retrying", async () => {
     vi.useFakeTimers();
     try {
       const runtime = createMessenger();
       runtime.messenger.start.mockImplementationOnce(() => {
-        runtime.emitExit(exit({ error: new Error("spawn tomcat ENOENT") }));
+        runtime.emitExit(exit({ error: Object.assign(new Error("spawn tomcat ENOENT"), {
+          code: "ENOENT", syscall: "spawn tomcat",
+        }) }));
       });
       const supervisor = new ServeConnectionSupervisor({
         initialize: vi.fn<() => Promise<InitializeResult>>(),

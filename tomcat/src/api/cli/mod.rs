@@ -14,6 +14,7 @@ mod models_toml;
 mod package_cmd;
 mod pathrules_cmd;
 mod plugin_cmd;
+mod self_install_cmd;
 mod session_cmd;
 mod skill_cmd;
 pub(crate) mod splash;
@@ -75,6 +76,8 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
     Init,
+    /// 仅安装或更新当前可执行文件，不改配置、PATH 或运行中的服务
+    SelfInstall,
     /// 检测运行环境、QuickJS 资源与配置合法性，输出修复建议
     Doctor,
     /// 配置管理：get/set/edit
@@ -163,8 +166,17 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
-    /// 以 stdio 协议暴露多会话 Agent Server 给 IDE / GUI
+    /// 以标准 ACP/stdio 接入共享服务
+    Acp {
+        /// 本连接控制会话的私有技能目录（绝对路径）
+        #[arg(long)]
+        skills_dir: Option<std::path::PathBuf>,
+    },
+    /// 共享服务管理；--stdio 保留独立进程协议
+    #[command(args_conflicts_with_subcommands = true)]
     Serve {
+        #[command(subcommand)]
+        sub: Option<ServeSub>,
         /// 显式选择 stdio 传输（Phase 1 主路径）
         #[arg(long, default_value_t = false, conflicts_with = "ws")]
         stdio: bool,
@@ -181,6 +193,32 @@ pub enum Commands {
         /// 恢复上次会话（默认行为，显式语义）
         #[arg(long, default_value_t = false)]
         resume: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServeSub {
+    /// 启动或复用本机共享服务
+    Start {
+        /// 在当前终端前台运行
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// 查看服务身份与运行状态（JSON）
+    Status,
+    /// 停止共享服务及全部任务
+    Stop,
+    /// 停止全部任务并用当前版本重启服务
+    Restart,
+    /// 内部服务进程入口
+    #[command(hide = true)]
+    Run {
+        /// 已解析的绝对数据目录
+        #[arg(long)]
+        work_dir: PathBuf,
+        /// Service identity selected by the connecting client, not ambient config
+        #[arg(long)]
+        agent_id: String,
     },
 }
 
@@ -453,7 +491,7 @@ fn nested_agent_invocation_active() -> bool {
 
 fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
     match cmd {
-        Commands::Init => true,
+        Commands::Init | Commands::SelfInstall => true,
         Commands::Doctor => false,
         Commands::Config { sub } => !matches!(sub, ConfigSub::Get { .. }),
         Commands::Session { sub } => matches!(
@@ -486,8 +524,17 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
         }
         Commands::Pathrules { sub } => matches!(sub, PathRulesSub::Add { .. }),
         // Schema export exits immediately and never starts a session or server.
-        Commands::Serve { print_schema, .. } => !print_schema,
-        Commands::Claw { .. } | Commands::Code { .. } | Commands::Chat { .. } => true,
+        Commands::Serve {
+            print_schema, sub, ..
+        } => match sub {
+            Some(ServeSub::Status) => false,
+            Some(_) => true,
+            None => !print_schema,
+        },
+        Commands::Acp { .. }
+        | Commands::Claw { .. }
+        | Commands::Code { .. }
+        | Commands::Chat { .. } => true,
     }
 }
 
@@ -520,16 +567,43 @@ pub fn run_cli() -> Result<(), AppError> {
     let had_explicit_command = cli.command.is_some();
 
     guard_nested_invocation(cli.command.as_ref())?;
+    // Capture the host's environment before loading Tomcat's own dotenv/credentials.
+    let client_environment = matches!(cli.command.as_ref(), Some(Commands::Acp { .. }))
+        .then(crate::infra::platform::EnvironmentSnapshot::capture)
+        .transpose()?;
 
     match cli.command.as_ref() {
         Some(Commands::Init) => return run_init(),
+        Some(Commands::SelfInstall) => return self_install_cmd::run_self_install(),
         Some(Commands::Doctor) => return run_doctor(),
         _ => {}
     }
 
+    if matches!(
+        cli.command.as_ref(),
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Run { .. }),
+            ..
+        })
+    ) {
+        crate::infra::config::use_saved_configuration_only();
+    }
     let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
-    let (cfg, ignored_keys) =
+    let (mut cfg, ignored_keys) =
         crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?;
+    if let Some(Commands::Serve {
+        sub: Some(ServeSub::Run { work_dir, agent_id }),
+        ..
+    }) = &cli.command
+    {
+        if !work_dir.is_absolute() {
+            return Err(AppError::Config(
+                "internal service data directory must be absolute".into(),
+            ));
+        }
+        cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+        cfg.agent.id = agent_id.clone();
+    }
     if let Err(e) = validate_config(&cfg) {
         eprintln!(
             "{}",
@@ -569,6 +643,7 @@ pub fn run_cli() -> Result<(), AppError> {
 
     match cmd {
         Commands::Init => unreachable!("init handled before config load"),
+        Commands::SelfInstall => unreachable!("self-install handled before config load"),
         Commands::Doctor => unreachable!("doctor handled before config load"),
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
@@ -595,7 +670,16 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Model { sub } => run_model(sub, &cfg),
         Commands::Claw { resume } => run_claw(resume, &cfg),
         Commands::Code { resume } => run_code(resume, &cfg),
+        Commands::Acp { skills_dir } => crate::api::acp::run(
+            &cfg,
+            client_environment.expect("ACP environment captured before bootstrap"),
+            skills_dir,
+        ),
         Commands::Serve {
+            sub: Some(action), ..
+        } => crate::api::serve::service::run(action, &cfg),
+        Commands::Serve {
+            sub: None,
             stdio,
             ws,
             print_schema,
@@ -618,6 +702,10 @@ pub(crate) fn preload_runtime_env(cfg: &AppConfig) -> Result<(), AppError> {
     let env_path = work_dir.join("assets").join(".env");
     if !env_path.exists() {
         return Ok(());
+    }
+
+    if crate::infra::config::saved_configuration_only() {
+        return crate::core::llm::auth::refresh_managed_credentials(&env_path);
     }
 
     let preloaded = crate::infra::config::read_env_entries(&env_path)?

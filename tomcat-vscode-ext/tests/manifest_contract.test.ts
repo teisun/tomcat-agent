@@ -124,6 +124,7 @@ describe("extension manifest contract", () => {
           id: "tomcat.chatView",
           name: "TOMCAT",
           type: "webview",
+          when: "!tomcat.chatView.rebuilding",
         }),
       ]),
     );

@@ -5,7 +5,7 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-基于 Rust 的轻量 AI Agent 运行时与 VS Code 扩展，为作者学习 Agent 开发而作的实践项目：[`tomcat/`](tomcat/) 提供运行时、CLI 与 `tomcat serve --stdio`，[`tomcat-vscode-ext/`](tomcat-vscode-ext/) 提供 VS Code 里的 Tomcat Agent Box。
+基于 Rust 的轻量 AI Agent 运行时与 VS Code 扩展，为作者学习 Agent 开发而作的实践项目：[`tomcat/`](tomcat/) 提供运行时、CLI、每 Agent 的共享服务与 `tomcat acp`，[`tomcat-vscode-ext/`](tomcat-vscode-ext/) 提供 VS Code 里的 Tomcat Agent Box。
 
 ![Tomcat Agent Box screenshot](assets/tomcat-agent-box.png)
 
@@ -35,17 +35,21 @@
 
 仅从源码编译时才需要 Rust stable 1.70+；仓库内的 `tomcat/.env` 仅用于本地/CI 测试夹具，不是终端用户的配置路径。
 
+### Windows 开发更新
+
+首次用 `tomcat init` 配好 PATH 后，在独立 PowerShell/CMD 终端的仓库根目录执行 `.\scripts\dev-install.cmd`，即可编译并更新安装副本。[这个薄入口](scripts/dev-install.cmd) 只转交 Cargo，不自动重启后台；随后在 VS Code 中执行 `/restart`（会停止所有任务），或使用命令面板的重启命令。Tomcat Agent 工具不能绕过自安装保护。详见[Windows 开发流程与路径选择边界](tomcat/docs/user-guide.zh.md#windows-开发环境)。
+
 ## 项目结构
 
 | 组件 | 作用 | 主要文档 |
 | --- | --- | --- |
-| [`tomcat/`](tomcat/) | Rust Agent 运行时、CLI 与 `tomcat serve --stdio` | [用户使用说明](tomcat/docs/user-guide.zh.md)、[tomcat/src/README.md](tomcat/src/README.md) |
+| [`tomcat/`](tomcat/) | Rust Agent 运行时、CLI、共享服务与 ACP 入口 | [用户使用说明](tomcat/docs/user-guide.zh.md)、[tomcat/src/README.md](tomcat/src/README.md) |
 | [`tomcat-vscode-ext/`](tomcat-vscode-ext/) | VS Code 扩展与 Tomcat Agent Box | [tomcat-vscode-ext/README.zh.md](tomcat-vscode-ext/README.zh.md) |
 
 ```text
 tomcat/
 ├── src/
-│   ├── api/              # CLI、serve --stdio、config、session、plugin、audit …
+│   ├── api/              # CLI、共享 serve、ACP、旧 stdio、config、session …
 │   ├── core/             # Agent Loop、LLM、会话、工具、权限、Checkpoint、Plan
 │   ├── ext/              # 插件与扩展能力
 │   └── infra/            # 配置、日志、审计、事件总线、错误、平台 IO
@@ -73,24 +77,23 @@ tomcat-vscode-ext/
     ↑
 宿主核心能力层 (core) — 会话、LLM、Agent Loop、Compaction、工具、权限、Checkpoint、Plan
     ↑
-交互层 (api) — CLI `chat` + `serve --stdio`（供 VS Code Tomcat Agent Box）
+交互层 (api) — CLI `chat` + 共享 `serve` + `acp` + 旧 `serve --stdio`
 ```
 
-两条主要入口共用同一套运行时内核，差别只在交互层：
+各入口共用同一套 Agent 内核。VS Code 和 ACP 客户端连接每个 Agent 的共享服务；CLI chat 与旧 stdio 保留独立入口：
 
 ```text
-VS Code Tomcat Agent Box
-    -> tomcat serve --stdio
-    -> AgentLoop
-    -> LlmProvider
-    -> 工具执行 / transcript / 审计
+VS Code Agent Box -- Native 本机 IPC -----+
+  发现：serve status / serve start       |
+ACP 宿主 -> tomcat acp -- 本机 IPC -------+-> 共享 serve -> AgentLoop
 
-CLI chat
-    -> SessionManager
-    -> AgentLoop
-    -> LlmProvider
-    -> 工具执行 / transcript / 审计
+旧客户端 -> tomcat serve --stdio -----------------------> AgentLoop
+CLI chat ----------------------------------------------> AgentLoop
+
+AgentLoop -> LlmProvider -> 工具执行 / transcript / 审计
 ```
+
+扩展直接连接，不为每个窗口另起中转进程。CLI 预检先核对服务进程所属的系统账号；扩展发送环境变量前，核对当前连接返回的服务编号与预检一致，再等服务回复 `ready`。标准 ACP 宿主使用 `tomcat acp`；`serve --stdio` 是旧 Tomcat 协议，不是 ACP。开始对话前请在 VS Code 中打开项目文件夹；空窗口不会借用后台服务的工作目录。
 
 全貌见 [项目全貌](tomcat/docs/architecture/project-overview-panorama.md)。
 

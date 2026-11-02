@@ -47,15 +47,10 @@ fn executor_reminder_contains_no_legacy_mode_wording() {
 
 #[test]
 fn runtime_reminders_point_final_acceptance_to_the_verify_skill() {
-    let planner: &str = *reminders::PLANNER_REMINDER;
     let executor = reminders::render_executor_reminder("batch-contract");
     let verification =
         crate::core::prompts::load(crate::core::prompts::PromptKey::SystemVerification);
 
-    assert!(planner.contains("not\nto the number of todos"));
-    assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(planner.contains("one final todo with `kind=acceptance`"));
-    assert!(planner.contains("human-readable \"Acceptance\" section"));
     assert!(verification.contains(
         "For final acceptance, run only checks not covered by a still-valid earlier\nresult"
     ));

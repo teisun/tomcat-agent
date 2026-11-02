@@ -1,0 +1,12 @@
+---
+description: Windows local development update entry and installation safety boundaries
+alwaysApply: true
+---
+
+# Windows development updates
+
+- For an explicitly requested Windows build-and-install update, use `scripts/dev-install.cmd` from the repository root (PowerShell/CMD: `.\scripts\dev-install.cmd`). It only delegates to `cargo run --release --bin tomcat -- self-install` in `tomcat/`, honoring `CARGO_TARGET_DIR`.
+- This updates the user's `~/.local/bin/tomcat.exe` copy, not configuration, PATH, credentials or running services. First-time PATH setup remains `tomcat init`; explicit `tomcat.path` and bundled extension binaries are not changed.
+- Ordinary builds, tests and CI must not install implicitly. macOS keeps its existing symlink workflow.
+- Tomcat Agent tools carry `TOMCAT_AGENT_ACTIVE=1`; `self-install` is blocked there. Do not remove or override the guard. Offer the script command for the user's independent terminal instead; do not claim an installation happened after only building.
+- Never restart the shared service through Agent Bash. After installation, the user explicitly runs `/restart` or the existing VS Code restart command (stops all tasks).

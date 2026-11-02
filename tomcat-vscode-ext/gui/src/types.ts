@@ -359,6 +359,9 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  errorRecovery?: { errorId: string; dueAt: number };
+  access?: import("../../src/serveClient/sessionRouter").SessionAccess;
+  origin?: import("../../src/serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
   messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
   sessionFiles?: SessionFilesView;
@@ -384,6 +387,7 @@ export interface WebviewSessionSnapshot {
 }
 
 export interface WebviewSessionTab {
+  origin?: import("../../src/serveClient/sessionRouter").SessionOrigin | null;
   isPinned?: boolean;
   deleting?: boolean;
   busy: boolean;
@@ -555,7 +559,8 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
-  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "retryConnection" | "viewConnectionLogs" }>
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "pong" }>
+  | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "retryConnection" | "restartSharedService" | "viewConnectionLogs" }>
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
   | { messageId: string; type: "setSessionPinned"; data: { sessionId: string; pinned: boolean } }
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "queueAction" }>
@@ -846,6 +851,7 @@ export type WebviewIntent =
         sessionId: string;
       };
     }
+  | { messageId: string; type: "cancelErrorRecovery"; data: { sessionId: string; errorId: string; dueAt: number } }
   | {
       messageId: string;
       type: "recoverErrorTurn";

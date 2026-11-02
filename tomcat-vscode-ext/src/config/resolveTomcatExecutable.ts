@@ -51,6 +51,7 @@ async function defaultCommandRunner(
   const result = await execFileAsync(command, args, {
     env,
     encoding: "utf8",
+    windowsHide: true,
   });
   return String(result.stdout ?? "").trim();
 }
@@ -61,6 +62,7 @@ async function defaultFileExists(
 ): Promise<boolean> {
   const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
   try {
+    if (!(await fs.stat(targetPath)).isFile()) return false;
     await fs.access(targetPath, mode);
     return true;
   } catch {
@@ -80,15 +82,17 @@ async function lookupOnProcessPath(
   commandName: string,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
-  runCommand: CommandRunner,
+  fileExists: FileExists,
 ): Promise<string | undefined> {
-  try {
-    const locator = platform === "win32" ? "where.exe" : "which";
-    const output = await runCommand(locator, [commandName], env);
-    return output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  } catch {
-    return undefined;
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  const executable = platform === "win32" ? `${commandName}.exe` : commandName;
+  for (const entry of (env.PATH ?? "").split(paths.delimiter)) {
+    const directory = entry.trim().replace(/^"(.*)"$/, "$1");
+    if (!directory) continue;
+    const candidate = paths.join(directory, executable);
+    if (await fileExists(candidate, platform)) return candidate;
   }
+  return undefined;
 }
 
 async function lookupOnLoginShellPath(
@@ -220,7 +224,7 @@ export async function resolveTomcatExecutable(
     TOMCAT_EXECUTABLE_NAME,
     env,
     platform,
-    runCommand,
+    fileExists,
   );
   if (processPathHit) {
     return {
