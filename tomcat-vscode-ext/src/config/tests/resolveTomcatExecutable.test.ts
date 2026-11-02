@@ -144,6 +144,36 @@ describe("resolveTomcatExecutable", () => {
     }
   });
 
+  it.skipIf(process.platform === "win32")("keeps executable symlinks usable on POSIX", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-symlink-"));
+    const executable = path.join(root, "tomcat");
+    try {
+      await fs.writeFile(path.join(root, "target"), "fixture", { mode: 0o755 });
+      await fs.symlink("target", executable);
+      expect(await resolveTomcatExecutable({ env: { PATH: root } })).toEqual({
+        executable, found: true, source: "process-path",
+      });
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
+  it("skips a PATH directory named tomcat and keeps looking for a regular executable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-directory-"));
+    const name = process.platform === "win32" ? "tomcat.exe" : "tomcat";
+    const decoy = path.join(root, "first", name);
+    const executable = path.join(root, "second", name);
+    const commandRunner = vi.fn(async () => { throw new Error("must not spawn a locator"); });
+    try {
+      await fs.mkdir(decoy, { recursive: true });
+      await fs.mkdir(path.dirname(executable));
+      await fs.writeFile(executable, "fixture", { mode: 0o755 });
+      const resolved = await resolveTomcatExecutable({
+        env: { PATH: [path.dirname(decoy), path.dirname(executable)].join(path.delimiter) }, commandRunner,
+      });
+      expect(resolved).toEqual({ executable, found: true, source: "process-path" });
+      expect(commandRunner).not.toHaveBeenCalled();
+    } finally { await fs.rm(root, { recursive: true, force: true }); }
+  });
+
   describe("on win32", () => {
     it("accepts a bundled tomcat.exe without the POSIX execute bit", async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-resolve-"));

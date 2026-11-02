@@ -62,6 +62,7 @@ async function defaultFileExists(
 ): Promise<boolean> {
   const mode = platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
   try {
+    if (!(await fs.stat(targetPath)).isFile()) return false;
     await fs.access(targetPath, mode);
     return true;
   } catch {
