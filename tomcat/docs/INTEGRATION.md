@@ -7,7 +7,7 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-03 00:58 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-03 02:06 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -118,7 +118,22 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
 - **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动纳入本轮 CLI `0.1.79` / EXT `0.1.95`；`ext-v0.1.94` 保持未发布。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
 
-### CURRENT RELEASE：CLI 0.1.83 / EXT 0.1.99（整改续发）
+### CURRENT RELEASE：CLI 0.1.83 / EXT 0.1.99（已发布）
+
+```text
+e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
+         → 93a467a7 仅修验收夹具 shell
+         → EXT 0.1.99 四平台原生验收 + 五份 VSIX
+         → Marketplace 四平台 Validated，下载字节与 GitHub 一致
+```
+
+- **最终发布事实**：CLI 标签指向 `e2f9ae6e386bc4f471c3ad5052350b345ad6bf57`，run [41488245125](https://github.com/teisun/tomcat-agent/actions/runs/41488245125) 成功；[CLI Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.83) 四份归档及 SHA256SUMS 已公开并下载核验。EXT 标签指向 `93a467a7f9c157541e68f6da25bf8f56bf204cbe`，run [41492236469](https://github.com/teisun/tomcat-agent/actions/runs/41492236469) 七个 job 全过；[EXT Release](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.1.99) 四个平台包、纯包与 SHA256SUMS 均已公开并通过下载校验。四个 VSIX 的哈希与原生验收记录相同，内置 CLI 与已发 0.1.83 归档逐字节一致，纯包不含 CLI；五份包的 CHANGELOG 与标签源码一致。
+- **两个标签为何不同**：复核实际截图发现旧夹具强制所有系统使用 `/bin/zsh`，Linux 宿主因此弹错遮住输入区。`93a467a7` 只删这一赋值并补继承/未设 SHELL 的断言，沿用宿主环境；CLI 源码、版本、依赖、CHANGELOG 和产品 UI 均不变。没有安装额外 shell、隐藏通知、放宽门禁或重建/替换已发 CLI。
+- **云端验证**：版本提交的 develop/main CI `41488232063` / `41488231306` 全过；夹具提交的 `41492225198` / `41492225378` 也全过，均含三系统 Rust、Windows 扩展及真实 Windows 系统代理/VS Code。三个 version-sync 通过。正式 EXT 的夹具检查 12 passed、13 个无关打包用例未被过滤器选中；四平台实际安装同一待发布包、冷启动、重启、允许/拒写、停止及重载通过；Unix 三目标另通过原始 0.1.90 数据升级。Windows 不代签该 Unix 旧夹具升级。
+- **市场**：OIDC 上传成功，身份检查 [41493675964](https://github.com/teisun/tomcat-agent/actions/runs/41493675964) 成功；01:49 +0800 的公开查询显示四平台 0.1.99 均为 `validated`，下载哈希与 GitHub 四份已验收包一致。最初查询仍返回 0.1.96 的记录保留，不将上传成功冒充立即可见。OpenVSX 按既有条件跳过；发布变量、凭据与保护规则未改。
+- **视觉与日志边界**：逐张读回正式包四平台最终聊天及 Unix 升级计划的宽/窄 14 张 PNG、ARIA 与 console；Linux 错误通知已消失，拒写保持 `Write failed`，窄屏保留型号省略和内容滚动。82 份 webview console 的 `errors=[]`；另外四份 workbench 记录各含测试 harness 的 Marketplace 404，以及宿主告警，不能写成“86 份全部零错误”或全程宿主零告警。升级截图中的旧流式失败原本就在 0.1.90 JSONL 第 12–16 行，当前执行已完成，不改写历史。
+- **旧资产与本机边界**：旧 `cli-v0.1.82` / `ext-v0.1.98` 标签仍在 `3441b9e8`；旧 CLI 资产标识、大小、时间与校验清单均未变。仅快进同步 develop/main/master。本机不跑产品测试、构建、安装或服务重启；删除干净的指定 Windows worktree，使用 `cargo clean --profile dev` 清理调试产物（报告 17.1GiB），保留 release 目录及在用程序原哈希，清理旧 VSIX，磁盘可用约 43GiB；其它 worktree 和验收证据保留。
+- **仍未解决**：旧式动态插件跨会话追加、旧 QuickJS/并行 socket 失败根因、真实付费模型与个人 Windows 设备验证，不因本轮门禁通过而结案。未测 Cov%。完整原始证据与 14 张最终图片清单：`.agents/acceptance/release-0.1.83-0.1.99/{release.md,final-ui-inventory.json,native/}`。下方保留首次失败和整改过程，按当时阶段阅读。
 
 - **首次准备**：用户执行标准 `/release-cli-ext`，源码基线 `12445089`。仅运行版本脚本一次：CLI `0.1.81 → 0.1.82`、EXT `0.1.97 → 0.1.98`，新 EXT pin CLI `0.1.82`；五个版本源/镜像的差异只有业务版本，无依赖变化。起手工作区干净，本地/远端目标 tag 未占用，develop/main/master 可快进同步；版本一致性与两个 tag guard 已通过。
 - **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.96` 为基线核对提交与相关差异，将 Unreleased 收入 `0.1.98`，补齐共享后台/ACP、凭据与代理升级提醒、恢复与引用修复、握手/Windows 探测安全边界、规划授权前置及 Unix 安装副本说明。注明 bundled CLI `0.1.82`；已发布历史条目不改，不为未发布的 `0.1.97` 虚构记录。版本与 CHANGELOG 必须同一提交。
@@ -254,8 +269,9 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 旧式动态插件串会话（未修复） | 第二会话发现资源会向第一会话追加消息；复现补丁为 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch` | 需另定初始化会话归属并修复；本轮 CI/发布通过不代表该遗留问题已关闭 |
 | 执行就绪检查的效果边界（2026-11-02） | 已验证条款与加载链路，未进行真实模型行为评测，不承诺 100% 无人值守 | 生效取决于运行包含新资产的 CLI 并在新会话加载，同名技能覆盖规则不变；新风险或超出授权仍需确认 |
-| 命令入口整改的跨平台验证（2026-11-02） | 本机 macOS 定向验收通过；新代码的 Windows CI 尚未运行，旧 CI 不能代签 | 后续推送后核对本提交的 Windows 矩阵；本次仅本地提交且按要求不跑测试 |
+| 命令入口整改的跨平台验证（2026-11-03 云端已补齐） | `e2f9ae6e` 与 `93a467a7` 的三系统 Rust、Windows 扩展/命令包装器及真实窗口 CI 均通过 | 仍不冒充个人 Windows 设备验证；本机未重新安装或重启服务 |
 | 内核崩溃后续观察（2026-11-02） | 仅确认当前已卸载 MuMu 并备份，尚未重启核对或执行 Apple Diagnostics，崩溃根因未证实 | 用户方便时重启，核对 showloaded/AuxKC；必要时按原计划评估 clear-staging 后再重启，并观察新 panic，不自动重置全部驱动授权 |
 | 共享 serve / ACP 验收边界（2026-10-20） | 本次仅完成设计文档，计划尚未实施，T01–T28 全部待执行 | 后续在功能分支实施并验证两个宿主和 VS Code；文档校验不替代真实任务、停止、慢读及 UI 验收 |
 | IP 中转站验收边界（2026-10-19） | 此前 admin 首轮 26/28，两个删除 Key 用例继承本机 FCODEX_API_KEY/DEEPSEEK_API_KEY；仅对子进程移除这两个变量后 28/28，未修改凭证文件或断言 | 保留环境失败记录；浏览器使用模拟宿主，未访问报告 IP 或验证真实中转站认证；本次提交按要求不跑测试，不称全仓门禁通过 |
@@ -265,7 +281,7 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 | 本次提交的验证边界 | 按用户要求不重新运行测试、构建或视觉验收；上方通过项属于此前实施验收，Cov% 未测量 | 本次仅做 diff／暂存范围／格式检查；不将旧结果表述为新一轮全量通过 |
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
-| Linux CI 宿主告警 | 已下载截图可见 `spawn /bin/zsh ENOENT`；`tomcat-vscode-ext/scripts/realServeFixture.ts:34` 在夹具中固定 `SHELL=/bin/zsh`，原生功能用例仍成功 | 保留为验收环境问题，不把 console 的空错误数组当作全宿主零告警；另行修正夹具，不改本轮已发资产 |
+| Linux CI 宿主 shell 告警（2026-11-03 已修复） | 原夹具强制 `/bin/zsh`，Linux 截图出现 ENOENT 通知；`93a467a7` 改为保留宿主 SHELL 并补断言，正式 0.1.99 宽窄截图已确认通知消失 | 旧证据与已发布资产不修改；harness Marketplace 404 和宿主告警另行保留，不宣称全宿主零错误 |
 | QuickJS 时间敏感失败仍未解决（2026-10-19） | 此前两项 20ms 超时保留；本次 main CI 的 `code_vm_polling_and_sibling_progress_cannot_renew_a_wrong_token_call` 再次失败于 `code_test.rs:125` 的 `!vm.is_finished()` 断言，lib 为 3345 passed / 1 failed / 5 ignored | 本次没有输出 20ms 超时，不能据此钉死同一根因；同 SHA 的 develop macOS 已通过，也不证明问题已修。保留原始日志与失败，不重复运行来掩盖结果 |
 | 本轮平台验收边界（2026-10-19） | 开发机专项验证为 Intel macOS；release-ext run `39180141401` 已通过 macOS ARM64/x64、Linux x64、Windows x64 四个平台的真实发布包原生安装验收 | 原生安装通过不替代完整 Rust 单测、所有 Linux 发行版或真实供应商验证；Windows Rust 普通 CI 与安装门禁分别记录 |
 | 本轮全量门禁记录（2026-10-19） | 平台修复后 gate-fast 原始结果为 lib 3342 passed / 4 failed / 5 ignored、parallel 376 passed / 3 failed、serial 50 passed；后续为定向隔离和复验 | 保留原始失败与后续通过记录，未重新执行完整门禁，不将定向 4/4 与代理对照通过写成全量全绿 |
