@@ -7,7 +7,33 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 14:00 +0800 | DONE（仅本地合并，外部验收待补） | develop | - |
+| Tomcat Agent | 2026-11-02 15:29 +0800 | Windows 定向补验通过（修复已合入 develop） | develop | - |
+
+### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
+
+```text
+f836f03f 的 Windows 已通过项 ──────────────┐
+唯一失败：对照任务漏传环境 → 单例修复 4efb1a17 ─┴─> 本轮 Windows 缺口补齐
+  产品代码不变；四组已有窗口证据读回通过；修复已择取到 develop，标准 CI 保持不变
+```
+
+- **当前结论**：按 Windows 专项计划完成取证、测试夹具局部修复和定向补验；未重跑 Mac/Linux、完整 Rust/扩展套件或真实付费模型。本节更新下方历史记录中 Windows 待验及远端 CI 缺失的状态，不覆盖 real-llm、旧式动态插件串会话或个人 Windows 设备兼容等未验事项，不是发布许可。
+- **精确基线**：开工时本地与远端 develop 已为 `f836f03f3d34c84e8c12252b85872bc19d51d291`，tree `4fcc83098a03a5114d082cd6b09045cb1c1189ed`；工作树干净。补验阶段仅推送 `acceptance/windows-f836f03f`，未写入 develop/main、未开 PR、未安装或重启在用服务；随后用户授权将三个已验收提交择取到 develop 并推送，见下方合入记录。
+- **根因与修复**：`tomcat/tests/acp_stdio_e2e.rs` 的慢读取消测试为 Native 对照连接传了空环境，Windows 因而找不到 Git Bash，对照写入器没有启动；受测 ACP 任务已拿到 PID。失败发生在准备阶段，不是取消阶段。`289db042` 保留 Native 工具结果和两条 PID 的诊断；`4efb1a17` 仅为该用例接入已有 `open_with_environment`，提供 PATH/PATHEXT/SYSTEMROOT 及隔离 HOME/USERPROFILE，不继承密钥/代理，不改公共夹具默认值或产品代码。
+
+| 批次 | 提交 / 运行 | 实际结果与边界 |
+| --- | --- | --- |
+| 原 Windows CI，复用成功项 | `f836f03f` / [41397562092](https://github.com/teisun/tomcat-agent/actions/runs/41397562092) | Windows Clippy、库3442通过/5忽略、并行369通过/27跳过；串行85通过/1失败/3跳过。三个 Git 探测用例均通过。扩展host915通过/1跳过、GUI888通过、根CMD包装器2通过/0跳过、代理保护与构建选择9通过。原run仍为失败，不改写。 |
+| 加诊断，精确复现 | `289db042` / [41402467311](https://github.com/teisun/tomcat-agent/actions/runs/41402467311) | Windows fmt、目标Clippy及新CLI构建通过；精确1例失败。日志显示 other 的 Bash 为 Git Bash 缺失错误，job PID=4340、other PID=None，确认测试漏传连接环境。 |
+| 修复后补验 | `4efb1a17ca41ac4ab45f371c07aa2388dd6209b7` / [41404375858](https://github.com/teisun/tomcat-agent/actions/runs/41404375858) | job `125142979395`，仅Windows，success。fmt、`cargo clippy --test acp_stdio_e2e -- -D warnings`、当前CLI构建通过；T实际执行1例、1通过，耗时2.970s。20例/9个binary被过滤，不计通过。 |
+
+- **断言未放宽**：程序比对确认该用例之外的测试与共享助手不变，取消部分逐字不变。实际覆盖两条活进程和真实背压；目标进程在恢复读取前退出、另一会话继续写入；恢复读取后正文完整、唯一取消终态、至 EOF 无迟到输出。原期限、权限和停止流程不变。仅T内接线/诊断变化，未以同文件修改为由扩大回归。
+- **四组真实窗口制品已逐张复核**：原run的 `windows-shared-service-f836f03f…` 制品中，`shared-service-completed`、`restart-menu-desktop`、`restart-menu-narrow`、`restart-reconnected` 均通过 PNG/ARIA/console 读回。宽图1391×808、窄图341×752；完成消息、可读的 `/restart` 菜单、重连后的历史及空可编辑草稿符合既有场景。四份捕获范围内 `errors=[]`，不代表全程宿主零告警。重启由PID4200换为7508；随后关窗前后及禁止启动的Native重连后，PID7508/instance保持不变。系统代理回执 `restored=true`。不重跑窗口，不冒充个人设备或其他窗口场景验收。
+- **源码与结果对应**：验收分支除该测试、临时验收CI和本状态文档外，产品、依赖、测试分组及UI与f836f03f相同，原成功项继续有效。原Rust基线镜像为20261030.294.1；本次诊断与修复后两轮均为20261021.278.1，均属windows-2025-vs2026。红→绿发生在相同镜像，其他成功项保留其原环境证据，不声称整个套件在补验镜像上重跑。本次是分批补齐，不声称原始完整门禁一次全绿。GitHub对Node20 action迁移到Node24的告警保留，不在本轮升级CI依赖。
+- **本次合入**：按用户后续授权，使用 `cherry-pick -x` 将诊断 `289db042 → bf183325`、修复 `4efb1a17 → 5b153edb`、验收记录 `28327c7e → 3436489b` 无冲突择取到 develop，保留原提交来源；本状态及自动汇总看板随之回填。`baf7cc74` 临时CI提交未合入，`.github/` 与原develop基线逐字一致；测试文件与已通过Windows验收的 `4efb1a17` 逐字一致，复用其有效结果，不重复本机测试。此次按授权正常推送 `origin/develop`，不强推、不改main、不升版或发布；新SHA的常规CI结果须另行查看，不用旧结果冒称新CI全绿。
+- **本地证据索引**：项目资源目录 `.agents/acceptance/windows-shared-serve/` 下的 `baseline-evidence.md`、`diagnosis.md`、`acceptance.md`，以及 `baseline/`、`diagnostic/`、`fixed/` 的原始run/job、日志和制品。临时PNG查看器已停止；查看器自身的初次加载失败不计产品故障，交付使用未修改的原CI图片。
+
+下方 14:00 的本地合并结论及更早记录保留原样，按当时状态阅读；本节更新本轮 Windows 补验及择取合入状态。
 
 ### CURRENT INTEGRATION：共享后台与 ACP 接入审查后本地合并（2026-11-02）
 
