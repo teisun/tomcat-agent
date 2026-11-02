@@ -23,7 +23,12 @@ fn loopback_urls_are_literal_hosts_not_lookalike_domains_or_lan_addresses() {
         let url = reqwest::Url::parse(&format!("http://{host}:1234/v1")).unwrap();
         assert!(crate::infra::http_client::is_loopback_url(&url), "{url}");
     }
-    for host in ["10.0.0.1", "127.0.0.1.example.invalid", "localhost.example.invalid", "[::2]"] {
+    for host in [
+        "10.0.0.1",
+        "127.0.0.1.example.invalid",
+        "localhost.example.invalid",
+        "[::2]",
+    ] {
         let url = reqwest::Url::parse(&format!("http://{host}/")).unwrap();
         assert!(!crate::infra::http_client::is_loopback_url(&url), "{url}");
     }

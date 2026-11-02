@@ -73,9 +73,14 @@ pub(crate) fn clamp_timeout_within_budget(timeout_ms: u64, budget_ms: u64) -> Du
 /// Only literal loopback addresses and localhost; never DNS suffixes or private LANs.
 pub(crate) fn is_loopback_url(url: &reqwest::Url) -> bool {
     url.domain() == Some("localhost")
-        || url.host_str().and_then(|host| {
-            host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok()
-        }).is_some_and(|ip| ip.is_loopback())
+        || url
+            .host_str()
+            .and_then(|host| {
+                host.trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+            })
+            .is_some_and(|ip| ip.is_loopback())
 }
 
 pub(crate) fn build_outbound_client(

@@ -77,7 +77,11 @@ pub fn read_language(path: &Path) -> Result<UiLanguage, AppError> {
     }
 }
 
-pub fn preferences(path: &Path, host: Option<&str>, override_language: Option<&str>) -> Result<UiPreferences, AppError> {
+pub fn preferences(
+    path: &Path,
+    host: Option<&str>,
+    override_language: Option<&str>,
+) -> Result<UiPreferences, AppError> {
     resolve_preferences(
         read_language(path)?,
         override_language,

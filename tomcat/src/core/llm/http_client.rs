@@ -15,7 +15,9 @@ pub(crate) fn build_http_client(
     let mut options = OutboundClientOptions::new(proxy_override.or(cfg.proxy.as_deref()));
     let loopback = |url: &str| reqwest::Url::parse(url).is_ok_and(|url| is_loopback_url(&url));
     // A route and its fallback share one client. Unknown or remote targets keep discovery.
-    options.bypass_system_proxy = options.explicit_proxy_url.is_none_or(|s| s.trim().is_empty())
+    options.bypass_system_proxy = options
+        .explicit_proxy_url
+        .is_none_or(|s| s.trim().is_empty())
         && base_url.is_some_and(loopback)
         && fallback_url.is_none_or(loopback);
     if cfg.http_read_timeout_sec > 0 {

@@ -16,7 +16,11 @@ fn language_environment(state: &ServeState) -> (Option<String>, Option<String>) 
 
 pub(super) fn snapshot(state: &ServeState) -> Result<ui::UiPreferences, AppError> {
     let (host, override_language) = language_environment(state);
-    ui::preferences(&state.config_path, host.as_deref(), override_language.as_deref())
+    ui::preferences(
+        &state.config_path,
+        host.as_deref(),
+        override_language.as_deref(),
+    )
 }
 
 pub(super) async fn set_language(
