@@ -38,6 +38,39 @@ const __testing = (
 const remoteErrorDetail = "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>";
 const remoteErrorSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-123";
 
+it("explains an empty window's missing workspace without inventing a session", async () => {
+  __testing.reset();
+  setLocale("en");
+  const reportBootstrapFailure = vi.fn();
+  const provider = new TomcatWebviewViewProvider({
+    extensionUri: vscode.Uri.file("/workspace/extension"),
+    extensionMode: vscode.ExtensionMode.Development,
+    getDefaultCwd: () => undefined,
+    ide: {} as never,
+    initialize: async () => ({ attachmentRoot: null, capabilities: [], protocolVersion: 2, sessionId: null, serverVersion: "0.1.81" }),
+    messenger: { onEvent: () => ({ dispose() {} }) } as never,
+    sessionRouter: {} as never,
+    reportBootstrapFailure,
+  });
+  const host = provider as any;
+  const logging = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(host, "refreshModels").mockResolvedValue(undefined);
+  vi.spyOn(host.sessionPool, "refresh").mockRejectedValue(new Error("scope_requires_cwd"));
+  try {
+    await provider.dispatchTestIntent({ type: "ready", messageId: "empty-window" });
+    const detail = translate("en", "bridge.workspaceRequired");
+    expect(provider.currentState()).toMatchObject({
+      activeSessionId: null,
+      connectionStatus: "degraded",
+      connectionFailure: { kind: "bootstrap", detail },
+    });
+    expect(reportBootstrapFailure).toHaveBeenCalledWith(expect.objectContaining({ message: detail }));
+  } finally {
+    provider.dispose();
+    logging.mockRestore();
+  }
+});
+
 describe("Host message queue integration", () => {
   function setup() {
     __testing.reset();

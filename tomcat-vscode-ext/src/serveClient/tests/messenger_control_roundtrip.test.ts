@@ -114,6 +114,22 @@ describe("TomcatMessenger control roundtrip", () => {
     await messenger.disposeAsync();
   });
 
+  it("keeps global initialization available without inventing an empty window's scope", async () => {
+    const socket = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "unused", connectFactory: createConnectionFactory(socket) });
+    const initialized = initializeServe(messenger);
+    try {
+      const init = readLatestCommand(socket);
+      socket.emitStdout(JSON.stringify({ type: "control_response", requestId: init.requestId, payload: {
+        capabilities: ["prompt", "ask_question"], protocolVersion: 2, serverVersion: "0.1.81", sessionId: null,
+      } }) + "\n");
+      // Global controls remain usable without a project. Chat must handle the
+      // missing working directory separately, not invent a scope in this handshake.
+      expect(await initialized).toMatchObject({ sessionId: null, protocolVersion: 2 });
+      expect(socket.readStdin()).toBe("");
+    } finally { await messenger.disposeAsync(); }
+  });
+
   it("auto-answers ask_question via registered handler", async () => {
     const child = new FakeConnection();
     const messenger = await createReadyMessenger({

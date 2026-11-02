@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 08:30 | IN_PROGRESS | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 10:45 | IN_PROGRESS | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -109,8 +109,8 @@
 - 审查覆盖：按 `383a7b97..970b6bb5` 的 385 个变更路径分六组检查 serve/IPC/所有权、ACP/MCP/插件、重试/技能/提示、扩展/GUI、多平台/CI、宿主包/版本/文档；以架构分层、错误传播、测试布局、Rust 惯用法和注释规范为依据，长文件不机械拆分。
 - 已知修复仍按计划推进。额外审查线索须由主 Agent 复核或用例复现后归因：开始回合前 writer 失败导致 busy 遗留、审批回复被入队命令阻塞、插件停止与第二会话的弱引用存活、空窗口初始化及 IPC ENOENT 分类、Git 探测早于授权、CLI 管理命令失败返回成功、可执行路径误选目录。未复现项不冒充运行时结论，不因报告建议直接扩大设计。
 - 握手兼容需特别核对：精确包版本不能区分同版本号的不同构建；fake-Serve 安装态夹具也是 Native 握手消费者。保持现有直连，不恢复已撤销的 relay。
-- 技能文档仍称 Project 最高优先级，但实现有 Connection 覆盖；在文档任务中修正。服务端文本采用进程级语言是既有边界，不扩成逐连接翻译。关窗清理失败通知、一次性 CI 代理原值修复不因审查报告自动恢复为新需求。
-- 两份宿主包只读审查的清单、27 个新增文件、69 个最终文件和四份 patch 哈希对应；精确基线隔离副本已找到，patch apply 检查待执行。Multica 宿主 30 秒与适配器 65 秒取消预算差异沿用既有风险记录，不能把 backend 单测当成宿主工作目录安全收尾证明。
+- 文档已对齐：根与扩展双语 README 区分共享服务、ACP 与 legacy stdio；共享服务架构补 Native 的编号核对/环境/ready 顺序；技能文档补 Connection 高于基础库存的优先级；测试规范与脚本帮助改为实际 10 个 serial 目标，未改测试分组或并发模型。
+- 两份宿主包静态核验通过（`1793587030689-y4z2d0`）：Paperclip 46 个路径/19 个新增文件，Multica 23 个路径/8 个新增文件；清单路径唯一、与 FILES 对应、最终文件和新增载荷/patch/许可证哈希一致、四份 patch 头目标集合准确。分别在干净的精确基线 `2f6ad2226aec330251438c47cbc45fd92e0d3132`、`06835b8f50606ca3f8bebbb5d07ac8901f831e69` 隔离副本执行四次 `git apply --check` 均退出 0；未应用补丁、未在宿主仓跑测试，不用旧包记录代签当前 Tomcat。Multica 30/65 秒取消预算差异保留为未实测风险。
 - 本轮审查小修：先补 Story 8c/8d 与 E2E-CLI-103～105、E2E-VSCEXT-036～037 的契约（待后续实现验收）；更正 QueuedCommand 注释；empty_turn 写盘失败增加含回合/尝试/分类的 warn，不打印正文、不改变重试额度或结果。
 - T16 红→绿：任务 `1793572679889-arqsiq`（日志 `~/.tomcat/agents/main/tool-results/bash-1793572679889-arqsiq.log`）先得到 0 passed / 1 failed，失败原因是两次空答诊断写失败没有 warn。修后任务 `1793572948891-ydxnc6`（同目录对应 `.log`）执行 `cargo test -p tomcat --lib empty_turn -- --nocapture`：6 passed / 0 failed / 0 ignored；校验正常与诊断失败都恰好请求三次、最终正文 recovered、不泄露思考文本/响应 ID/载荷哨兵。紧接 `cargo clippy -p tomcat --lib -- -D warnings` 退出 0。仅定向结果，未执行全库/全门禁。
 - `node scripts/release-version.mjs check` 与本轮 `git diff --check` 通过；版本未修改。测试后只更新状态说明，未改变行为或夹具。
@@ -134,12 +134,21 @@
 - T13：后台 Bash 授权后才解析 shell，解析失败复用 record_spawn_result 记已授权但启动失败。Windows 两条 Git 探测入口共用 5 秒期限；同步入口用短生命周期线程运行已有 Tokio/ProcessTree 能力，超时终止整棵树并等待子进程回收，连同后代占着 stdout 的情形一起覆盖；不改选择规则、控制者环境或增加 Agent 标记。
 - T13 红→绿：`1793582387881-2mj5wv` 旧 output 路径直到 8 秒测试保险才退出，期限用例先失败；`1793582756127-qq2hg0` 两个探测用例通过，超时后父子 PID 均已消失、正常/非零退出结果不变。该平台批次为 62 passed / 1 failed：未修改的 local_socket 旧用例在 drop 后一次 connect 仍成功，根因未确认；`1793583022347-6wfzg7` 单独复跑通过，但不据此抹去整批失败，B2 继续核验。
 - Bash 原语模块 `1793583022347-6wfzg7` 为 162 passed；随后的 Clippy 指出新增审计代码应使用 inspect_err，已按建议等价修改，`1793583275839-uefi1y` 的 `cargo clippy -p tomcat --lib -- -D warnings` 通过。Windows 专属用例以相对 PATH 的 git.cmd 验证拒绝时不探测、允许后照常执行、探测失败有审计；本机未编译/运行该 cfg(windows) 用例，必须在推送前补齐，不代签授权顺序的 Windows 实测。
+- T17 / 新一轮复现：`1793584488404-emb4oz` 的三个库用例均先失败（0 passed / 3 failed）：ack 写失败后 busy 未释放；同一 scope 第二上下文插件 hostcall 返回 `SessionManager not configured`；第二会话执行旧式动态发现时，`INVENTORY_FROM_SECOND_SESSION` 被写入第一会话。前两项按局部修复处理，尚待绿结果；同批 CLI 管理命令测试 1 passed，覆盖 `serve status` 与 `session list`，无效 log.level 已由配置加载器拒绝且未创建运行目录，退出成功的线索未复现，未改 CLI 产品代码。
+- T17 / 动态发现归属：对照 develop，`context.rs` 已有 scope 缓存、pin_session、activate_session_plugins 的 bare load_plugin，dispatcher 已有 bare ID 回退首个 SessionManager 的路径；属于旧机制，不因本次复现擅自改变插件初始化/懒加载契约。失败断言原样保存到本地 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch`，未反转断言或加 ignore 来冒充修复；此诊断不纳入默认回归，问题仍未解决，见 BLOCKED。默认门禁通过也不能代签此问题。
+- T17 / 扩展补证：`1793584566135-ymcwib` 的控制往返与隐藏面板恢复两个文件共 81 passed，扩展 TypeScript 检查通过。隐藏期间收到同版本构建冲突，页面挂载和 ready 后仍保留 version_mismatch，未复现普通 Retry 覆盖。空窗口的全局初始化保留 sessionId=null、不猜服务 cwd；不能因此宣布聊天已建 scope，更不能简单让 initialize 拒绝而连带禁用全局设置，界面入口仍继续核对。
+- T17 / 空窗口：原断言先失败（`1793585791172-21ker4`），实际 detail 是内部码 `scope_requires_cwd`。provider 只把这个码映射成已本地化的 `bridge.workspaceRequired`，不猜 cwd、不创建会话、不改初始化或设置流程。`1793586042918-2uhx22` 的 provider / recovery / messenger 三文件 175 passed，`npm run lint`（扩展和 GUI）退出 0。
+- T3 / 夹具语言串扰：serve 组合批次出现五条英文断言失败；`1793586217650-qnyd85` 用 Native 握手与 foreign-checkpoint 两条测试稳定复现 1 passed / 1 failed。握手用例原来把全进程 locale 留在中文；改为父环境中文、连接环境英文，既证明连接环境覆盖有效，又不污染英文断言。只为它的环境修改使用既有 env_lock，不串行化全库、不改产品语言机制。
+- 本机验证前提记录：磁盘剩余 2.8 GiB，先经 `cargo clean -p tomcat --profile dev --dry-run` 预览，再仅清理 debug 包产物，释放后剩余 29 GiB；PATH 的在用 CLI 实际指向 `target/macos-acceptance-8a5b7885f212f4549043a9b26502e6a6e89f5b20/release/tomcat`，未触碰。随后 `1793586354655-a45eup` 在 rustc 编译 lib test 时 SIGSEGV（无 Rust 源码诊断），测试及后续 clippy 未运行，不计通过；正在以单编译任务重试，测试并发不变。
+- 格式门禁 `1793586746321-u3lgcz` 指出分支原有 10 个 Rust 文件未按 rustfmt 排版；只修换行与尾逗号，不改逻辑。第一次手工排版复检 `1793587030632-azmmwb` 还差一个 assert_eq 换行，已修；该次因 fmt 失败没有启动编译或测试。版本镜像复检 `1793586880023-meeigw` 通过：CLI 0.1.81、扩展 0.1.97、bundled CLI 0.1.81，未改版本。
+- 空窗口视觉补验：使用现有 `gui` 的 `npm run dev` 与已配置 Playwright，真实 React 页面接收与 provider 用例一致的 degraded 状态，正文取英文源 catalog；桌面 1440×900、窄屏 390×844 的 `.agents/shots/shared-serve-review/empty-workspace-{desktop,narrow}.{png,aria.txt,console.json}` 均已读回。提示完整可见、窄屏自然换行、无横向溢出；设置按钮可用，聊天/发送禁用，采集范围内 errors=[]。这是页面呈现补验，不冒充 VS Code 空窗口端到端；T10 的真实安装态另行验收。验后已停止自建 Vite，未操作正式服务。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
+| 旧式动态插件初始化串会话 | 本轮最小用例已失败，第二会话触发的动态发现会向第一会话追加消息；对照 develop 已有相同 bare-ID/default-session 机制，不算本次新增回归，但未修复 | 单独明确初始化应绑定触发会话还是禁止会话能力，再复用现有会话 VM 路径设计；保留失败日志与本地 repro patch。按获准计划，需设计的旧问题记录、不阻塞本地合并，不代签通过 |
 | 本轮整改与合并 | 计划修订已获准，正在逐项复现、修复与定向验证，尚未执行最终全门禁或合并 | 按 session-cleanup、Native、ACP、界面与平台边界等任务推进；未完成项不记为通过 |
 | 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
 | write-plans 完整库验收 | 已用受控环境复现并隔离 package-install 夹具的进程覆盖；原疑似挂起测试 128.56s 通过，改虚拟时钟后同模块六项 3.62s 通过 | 原始失败记录保留；B2 仍须并发全库验证，当前不记全库全绿 |

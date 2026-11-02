@@ -561,6 +561,7 @@ export const en = {
   "protocol.missingCapabilities": "tomcat serve is missing required capabilities: {capabilities}",
   "bridge.cliMissing": "Tomcat CLI executable was not found",
   "bridge.connectionFailed": "Tomcat connection failed",
+  "bridge.workspaceRequired": "Open a folder in VS Code before starting a chat.",
   "bridge.serviceVersionMismatch": "The shared service is v{running}; this extension uses CLI v{client}. Restart the shared service to continue.",
   "bridge.serviceBuildOutdated": "The shared service is an outdated build of the same version. Restart the shared service to continue.",
   "host.bridge.timeout": "Unable to {action}: Tomcat bridge is not responding. Restart Tomcat and try again.",

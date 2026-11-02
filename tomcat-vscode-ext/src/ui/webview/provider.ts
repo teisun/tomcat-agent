@@ -1986,7 +1986,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.bootstrap();
       this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     } catch (error) {
-      const normalized = error instanceof Error ? error : new Error(String(error));
+      let normalized = error instanceof Error ? error : new Error(String(error));
+      if (normalized.message === "scope_requires_cwd") {
+        normalized = new Error(t("bridge.workspaceRequired"));
+      }
       console.error("[Tomcat webview] connected, but bootstrap failed", normalized);
       this.stateStore.setConnectionStatus("degraded", { kind: "bootstrap", detail: normalized.message });
       // Never let a failed state publication hide the original bootstrap failure. In

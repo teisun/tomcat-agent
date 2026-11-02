@@ -559,6 +559,7 @@ export const zhCN = {
   "protocol.missingCapabilities": "tomcat serve 缺少必要能力：{capabilities}",
   "bridge.cliMissing": "未找到 Tomcat CLI 可执行文件",
   "bridge.connectionFailed": "Tomcat 连接失败",
+  "bridge.workspaceRequired": "请先在 VS Code 中打开文件夹，再开始对话。",
   "bridge.serviceVersionMismatch": "后台共享服务是 v{running}，本扩展使用的 CLI 是 v{client}。重启共享服务后即可使用。",
   "bridge.serviceBuildOutdated": "后台共享服务是同版本的旧构建，重启共享服务后即可使用。",
   "host.bridge.timeout": "无法{action}：Tomcat 桥接未响应。请重启 Tomcat 后重试。",
