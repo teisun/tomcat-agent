@@ -121,6 +121,9 @@
 - 安全前提复核：instanceId 只由 `service.rs::run_service` 用 UUID v4 生成；常驻服务 stdout 为 null，日志 0600。Windows `local_socket.rs::private_pipe` 使用 `private_acl::current_user_acl` 的当前用户单条 ACE 并拒绝远程客户端；Unix accept 检查 peer UID。CLI `open_management` 先经 `local_socket::connect` 核对服务端账号才读取编号。Node 首条 hello 不含编号或环境，编号不匹配时环境 0 字节发送的断言覆盖全部接收字节。此证据不等于双账号攻击实测，也不防同账号恶意进程。
 - T11 红→绿：`1793579754418-6c7wi4` 复现 history 后迟到的 message_start 会把正文和 thinking 再追加一遍；`state.ts` 在开头复用 hasPersistedAssistant 跳过已落盘消息，不新增序号或完成表。`1793579798278-25d6ex` 的 dual_channel 17 项通过（同批三个文件共 163 项），新消息仍正常流式显示，断言在第二次 hydrate 之前检查；扩展与 GUI TypeScript 检查通过。
 - T12 红→绿：同一红批次复现 restoreCheckpoint 等待期间旧计时器仍对 s1 发 Retry；只把该意图加入现有接管集合。绿批次 provider_error_recovery 73 项通过：恢复进行中与失败后旧等待都不重试，s2 的计时仍按时执行，原计时/持久化机制不变。
+- T9 红→绿：同一红批次复现 ready 后把所选旁观会话 B 换回磁盘 A；`bootstrap` 只让仍存在、未退役的宿主选择优先，删除与服务重连仍回原默认路径。实现取刷新列表前的 `state.activeSessionId`，而不是计划写的 `initialized.sessionId`：后者是初始化回执（provider.ts::ensureInitialized），切换页面更新的是 state（::switchSessionView / stateStore.setActiveSession）。`webview_provider_flow` 73 项通过；顺带把 switchSession 替身对齐产品对象回执。
+- T10 安装态实测：`1793581140788-2ii5gr` 在隔离 HOME/profile 的真实 VS Code Production 扩展中通过（1 passed，33s）；自动探活确实销毁旧文档并重建，B、草稿、只读与编辑器焦点保留，恢复等待投影不变（旁观会话没有自动重试倒计时），真实 Bash 继续完成。Desktop 1440×900 / narrow 390×844 工作台，实际面板 1381×794 / 331×738；`.agents/acceptance/shared-serve-review/gui-Igyjaf/observer-{desktop,narrow}.{png,aria.txt,console.json}` 全部读回：无空白/重字/横向溢出，模式/模型/发送按钮为禁用；两份面板 console errors=[]（采集上下文范围，并非整段宿主日志）。
+- 安装态夹具调试记录：`1793580507670-q1kgz0`、`1793580637484-6y5orr` 发现 ACP 新建 B 自身会更新磁盘默认值，改由原控制路径先恢复 A 再旁观 B；`1793580735922-2ulsn5` 发现销毁旧 iframe 时只读 CDP 探测会失联，限定重试已知连接/上下文消失；`1793580915356-ux1ri2` 的断言误把忙且有草稿的 Send 当 Stop，按现有 Composer 规则核验实际显示的唯一按钮必须禁用，未改 UI 交互。最后一次代码编译和安装态验证通过；这些失败不计产品回归。`1793580422849-y4r84f` launch-env 23 项、harness tsc 与构建通过。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）

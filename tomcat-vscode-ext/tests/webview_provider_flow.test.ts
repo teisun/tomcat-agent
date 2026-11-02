@@ -13,6 +13,7 @@ import type {
   RestoreCheckpointPayload,
   SessionCheckpointListPayload,
   SessionHistoryPayload,
+  SessionOpenResult,
 } from "../src/serveClient/sessionRouter";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
@@ -444,8 +445,8 @@ function buildProvider(options: BuildProviderOptions = {}) {
         warnings: [],
       } satisfies RestoreCheckpointPayload;
     },
-    async switchSession(sessionId: string) {
-      return sessionId;
+    async switchSession(sessionId: string): Promise<SessionOpenResult> {
+      return { sessionId, access: "control", origin: null };
     },
   };
   const openSettings = options.openSettings ?? vi.fn();
@@ -472,7 +473,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState };
+  return { historyCalls, messenger, provider, retryCalls, resumeCalls, sessionState, sessionRouter };
 }
 
 type BroadcastInternals = {
@@ -534,6 +535,45 @@ function replayFrames(frames: HostToWebviewFrame[]): WebviewStateSnapshot {
 const PNG_SHA = "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56";
 
 describe("webview provider integration", () => {
+  it.each(["present", "deleted", "reconnected"])("rebuilds the selected observation or falls back when %s", async phase => {
+    let ids = ["session-1", "session-2"];
+    const { provider, sessionRouter } = buildProvider({
+      listSessionsImpl: async () => ({ scope: "disk", activeSessionId: "session-1",
+        sessions: ids.map(sessionId => ({ sessionId, isCurrent: sessionId === "session-1", busy: false, updatedAt: 1 })),
+      }),
+    });
+    const create = vi.spyOn(sessionRouter, "newSession");
+    vi.spyOn(sessionRouter, "switchSession").mockImplementation(async sessionId => ({
+      sessionId, access: sessionId === "session-2" ? "observe" : "control",
+      origin: sessionId === "session-2" ? { kind: "acp", clientName: "test-host" } : null,
+    }));
+    try {
+      await provider.dispatchTestIntent({ type: "ready", messageId: "first-ready" });
+      expect(provider.currentState().activeSessionId).toBe("session-1");
+      await provider.dispatchTestIntent({ type: "syncComposerDraft", messageId: "draft-b",
+        data: { sessionId: "session-2", text: "keep this draft", segments: [] },
+      });
+      await provider.flushDrafts();
+      await provider.dispatchTestIntent({ type: "switchSession", messageId: "select-b", data: { sessionId: "session-2" } });
+      const before = provider.currentState().sessionViews["session-2"];
+      expect(provider.currentState().activeSessionId).toBe("session-2");
+      expect(before.access).toBe("observe");
+      expect(before.composerDraft.text).toBe("keep this draft");
+      if (phase === "deleted") ids = ["session-1"];
+      if (phase === "reconnected") provider.prepareForServeReconnect();
+      await provider.dispatchTestIntent({ type: "ready", messageId: "replacement-ready" });
+      const state = provider.currentState();
+      expect(state.activeSessionId).toBe(phase === "present" ? "session-2" : "session-1");
+      expect(create).not.toHaveBeenCalled();
+      if (phase === "present") {
+        expect(state.sessionViews["session-2"]).toMatchObject({ access: before.access, origin: before.origin,
+          ownedByThisFrontend: false, composerDraft: before.composerDraft,
+        });
+        expect(state.sessionViews["session-2"].errorRecovery).toEqual(before.errorRecovery);
+      }
+    } finally { provider.dispose(); vi.restoreAllMocks(); }
+  });
+
   it("projects host countdown identically in full and session frames and calls only the existing retry route", async () => {
     const time = recoveryClock();
     const historyMessages = [

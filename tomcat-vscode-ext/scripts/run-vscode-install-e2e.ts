@@ -8,7 +8,8 @@ import {
 } from "./e2eHostFixture";
 import { packageVsixOrReuse } from "./package-vsix";
 import { runCommand } from "./runCommand";
-import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
+import { reserveLoopbackPort, runVsCodeGuiTests } from "./vscodeLaunchEnv";
+import { setupRealServeFixture } from "./realServeFixture";
 
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
@@ -23,7 +24,20 @@ async function main(): Promise<void> {
   })();
   const extensionsDir = path.join(installRoot, ".vscode-test", "extensions");
   const userDataDir = path.join(installRoot, "user-data");
-  const fixture = await createHostE2eFixture();
+  const realObservation = process.env.TOMCAT_E2E_REAL_OBSERVATION === "1";
+  const fixture = await (async () => {
+    if (!realObservation) return createHostE2eFixture();
+    const binary = path.resolve(process.env.CARGO_TARGET_DIR ?? path.resolve(extensionRoot, "../tomcat/target"),
+      "debug", process.platform === "win32" ? "tomcat.exe" : "tomcat");
+    await fs.access(binary);
+    const modelPort = await reserveLoopbackPort();
+    const real = await setupRealServeFixture(`http://127.0.0.1:${modelPort}`, "openai", { binary });
+    return { cleanup: real.cleanup, workspaceDir: real.workspacePath, env: {
+      ...real.env, TOMCAT_VSCODE_TEST_PATH: binary, TOMCAT_VSCODE_TEST_DEFAULT_CWD: real.workspacePath,
+      TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1", TOMCAT_E2E_OBSERVATION_MODEL_PORT: String(modelPort),
+      TOMCAT_E2E_GREP: process.env.TOMCAT_E2E_GREP ?? "recovers an observed session",
+    } };
+  })();
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
@@ -53,7 +67,7 @@ async function main(): Promise<void> {
       launchArgs: [
         `--user-data-dir=${userDataDir}`,
         `--extensions-dir=${extensionsDir}`,
-        path.resolve(extensionRoot, ".."),
+        realObservation ? fixture.workspaceDir : path.resolve(extensionRoot, ".."),
       ],
       reuseMachineInstall: false,
       vscodeExecutablePath: resolveVsCodeExecutable(),

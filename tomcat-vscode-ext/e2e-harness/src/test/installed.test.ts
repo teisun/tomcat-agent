@@ -424,6 +424,15 @@ suite("Installed Tomcat extension", () => {
     await hostE2e.assertTranscriptUiFlow(api);
   });
 
+  test("recovers an observed session without changing its selection, access or draft", async function () {
+    if (process.env.TOMCAT_E2E_REAL_OBSERVATION !== "1") { this.skip(); return; }
+    this.timeout(180_000);
+    const observation = require(path.resolve(repoRoot, "out/test/suite/support/sharedObservationScenario.js")) as {
+      assertSharedObservationFlow(getApi: () => Promise<unknown>, replacement: "liveness"): Promise<void>;
+    };
+    await observation.assertSharedObservationFlow(hostE2e.getTomcatExtensionApi, "liveness");
+  });
+
   test("recovers an unresponsive webview with its running task and answer draft intact", async function () {
     this.timeout(60_000);
     const api = await hostE2e.getTomcatExtensionApi() as PackagedWebviewApi;

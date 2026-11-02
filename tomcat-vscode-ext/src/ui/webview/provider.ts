@@ -1954,8 +1954,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const sessions = await this.sessionPool.refresh();
     await this.reconcileDeletions(sessions);
     this.diskScopeKey = sessions.sessionKey;
+    const selectedSessionId = this.peekState().activeSessionId;
     this.stateStore.syncSessionList(sessions);
     const preferredSessionId =
+      (selectedSessionId && sessions.sessions.some(session => session.sessionId === selectedSessionId) &&
+        !this.draftCoordinator.isRetired(selectedSessionId) ? selectedSessionId : null) ??
       this.sessionPool.pickDefaultSession(sessions) ??
       (this.initialized?.sessionId && !this.draftCoordinator.isRetired(this.initialized.sessionId) ? this.initialized.sessionId : null);
     if (!preferredSessionId) {

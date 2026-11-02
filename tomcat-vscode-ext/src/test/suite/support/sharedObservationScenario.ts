@@ -8,8 +8,8 @@ import { startAcpTestHost } from "./acpTestHost";
 import { spawnScriptedOpenAiStreamServer, sseDelta, sseToolCall, sseFinish, sseDone } from "./scriptedModel";
 import { SettingsFrameDriver } from "./workbenchFindDriver";
 
-async function until(predicate: () => boolean | Promise<boolean>, description: string): Promise<void> {
-  const deadline = Date.now() + 20_000;
+async function until(predicate: () => boolean | Promise<boolean>, description: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -18,7 +18,9 @@ async function until(predicate: () => boolean | Promise<boolean>, description: s
 }
 
 /** Real CLI, real shared service, real webview; only the external LLM is scripted. */
-export async function assertSharedObservationFlow(getApi: () => Promise<TomcatExtensionApi>): Promise<void> {
+export async function assertSharedObservationFlow(
+  getApi: () => Promise<TomcatExtensionApi>, replacement: "reload" | "liveness" = "reload",
+): Promise<void> {
   const binary = process.env[TEST_PATH_ENV];
   const cwd = process.env[TEST_DEFAULT_CWD_ENV];
   const artifacts = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
@@ -51,6 +53,9 @@ export async function assertSharedObservationFlow(getApi: () => Promise<TomcatEx
     const turn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Inspect this project and run the check." }] }, 180_000);
     void turn.catch(() => undefined);
     await until(() => JSON.stringify(host.updates).includes(prefix), "host prefix before opening");
+    // Creating the ACP session changed the disk default. Restore A through its
+    // real control path before observing B, which must not change that default.
+    await api.__testing.sendWebviewIntent({ type: "switchSession", messageId: "restore-disk-default", data: { sessionId: ownId } });
     chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
     // Capture a real desktop-width panel, not a narrow sidebar inside a wide workbench.
     await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
@@ -67,42 +72,78 @@ export async function assertSharedObservationFlow(getApi: () => Promise<TomcatEx
     await until(() => state()?.timeline.some(item => item.type === "message" && item.text === prefix) === true, "replayed prefix");
     assert.equal(state().access, "observe");
     const readOnlyDom = async () => {
-      const dom = await chat!.evaluate<{ notice: string; editable: string; disabled: string[]; controlsFit: boolean }>(`({
+      const dom = await chat!.evaluate<{ notice: string; editable: string; disabled: string[]; actions: Array<{ disabled: boolean }>; controlsFit: boolean }>(`({
         notice: document.querySelector('[data-testid="observer-notice"]')?.textContent ?? '',
         editable: document.querySelector('[data-testid="composer-input"]')?.getAttribute('contenteditable'),
         disabled: [...document.querySelectorAll('button[disabled]')].map(button => button.dataset.testid),
+        actions: [...document.querySelectorAll('[data-testid="stop-button"], [data-testid="send-button"]')].map(button => ({ disabled: button.disabled })),
         controlsFit: [...document.querySelectorAll('[data-testid="mode-select"], [data-testid="model-select"], [data-testid="stop-button"], [data-testid="send-button"]')].every(button => { const rect = button.getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth; })
       })`);
       assert.ok(dom.notice.includes("ACP test host"));
       assert.equal(dom.editable, "false");
       assert.ok(dom.controlsFit, "composer controls fit inside the panel");
-      for (const id of ["mode-select", "model-select", "thinking-level-select", state().busy ? "stop-button" : "send-button"]) assert.ok(dom.disabled.includes(id), `${id} must be disabled`);
+      for (const id of ["mode-select", "model-select", "thinking-level-select"]) assert.ok(dom.disabled.includes(id), `${id} must be disabled`);
+      // A nonempty preserved draft shows Send even while busy; either action is read-only.
+      assert.equal(dom.actions.length, 1);
+      assert.equal(dom.actions[0].disabled, true, "The displayed Send/Stop action must be disabled");
     };
     await until(() => chat!.evaluate<boolean>("!!document.querySelector('[data-testid=\"observer-notice\"]')"), "read-only chrome");
     await readOnlyDom();
-    await chat.capture(path.join(artifacts, "observer-desktop.png"));
-    // A real webview reload must rehydrate the same prefix, not replay it twice.
     const previousDocument = await chat.evaluate<number>("performance.timeOrigin");
+    let editor: vscode.TextEditor | undefined;
+    if (replacement === "liveness") {
+      assert.equal((await api.__testing.listSessions("disk")).activeSessionId, ownId,
+        "The disk default must differ from the observed selection");
+      await api.__testing.sendWebviewIntent({ type: "syncComposerDraft", messageId: "observer-draft",
+        data: { sessionId, text: "Keep the observed session draft", segments: [] },
+      });
+      await until(() => state().composerDraft?.text === "Keep the observed session draft", "host draft before recovery");
+      editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({ content: "Keep editor focus during observation recovery" }));
+      await api.__testing.sendWebviewHostEvent({ type: "__test.pause_liveness", enabled: true });
+      await until(() => chat!.evaluate<boolean>("document.body.hasAttribute('data-tomcat-liveness-paused') || !!document.querySelector('[data-tomcat-liveness-paused]')"), "paused production liveness");
+    }
+    const before = state();
+    const backendPid = api.__testing.getServeProcessId();
     chat.close(); chat = undefined;
-    const reloadCommand = "workbench.action.webview.reloadWebviewAction";
-    assert.ok((await vscode.commands.getCommands(true)).includes(reloadCommand));
-    await api.__testing.executeCommand(reloadCommand);
+    if (replacement === "reload") {
+      const reloadCommand = "workbench.action.webview.reloadWebviewAction";
+      assert.ok((await vscode.commands.getCommands(true)).includes(reloadCommand));
+      await api.__testing.executeCommand(reloadCommand);
+    }
     // The command resolves before Chromium replaces the old iframe. Probe only;
     // never replay the command or a click when its execution context disappears.
     await until(async () => {
-      const candidate = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+      let candidate: SettingsFrameDriver | undefined;
       try {
+        candidate = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
         if (await candidate.evaluate<number>("performance.timeOrigin") !== previousDocument) { chat = candidate; return true; }
       } catch (error) {
-        if (!(error instanceof Error) || error.message !== "CDP -32000: Cannot find context with specified id") throw error;
-      } finally { if (chat !== candidate) candidate.close(); }
+        // Discovery can race destruction of the old iframe. Retry only these
+        // read-only probes, never the recovery action or a user-visible click.
+        if (!(error instanceof Error) || ![
+          "CDP -32000: Cannot find context with specified id", "Failed to open CDP websocket",
+        ].includes(error.message)) throw error;
+      } finally { if (chat !== candidate) candidate?.close(); }
       return false;
-    }, "new rendered webview document");
+    }, "new rendered webview document", replacement === "liveness" ? 30_000 : 20_000);
     // The polling callback assigned this value; TypeScript cannot follow that write.
     chat = chat as SettingsFrameDriver | undefined;
     assert.ok(chat);
     await api.__testing.waitForWebviewReady();
     await until(() => chat!.evaluate<boolean>(`document.body.innerText.includes(${JSON.stringify(prefix)})`), "prefix after webview reload");
+    assert.equal(api.__testing.getWebviewState().activeSessionId, sessionId);
+    assert.equal(state().access, before.access);
+    assert.deepEqual(state().composerDraft, before.composerDraft);
+    assert.deepEqual(state().errorRecovery, before.errorRecovery);
+    assert.equal(api.__testing.getServeProcessId(), backendPid);
+    if (editor) {
+      assert.equal(vscode.window.activeTextEditor?.document, editor.document);
+      assert.equal(await chat.evaluate("document.hasFocus()"), false, "Recovery must not steal editor focus");
+    }
+    await readOnlyDom();
+    await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
+    await chat.setViewport(1440, 900);
+    await chat.capture(path.join(artifacts, "observer-desktop.png"));
     assert.equal(state().timeline.filter(item => item.type === "message" && item.text === prefix).length, 1);
     release();
     await until(() => fs.stat(path.join(cwd, "observer-tool.running")).then(() => true, () => false), "actual tool started");
@@ -128,7 +169,7 @@ export async function assertSharedObservationFlow(getApi: () => Promise<TomcatEx
     await api.__testing.sendWebviewIntent({ messageId: "observe-return-own", type: "switchSession", data: { sessionId: ownId } });
     await until(() => chat!.evaluate<boolean>("document.querySelector('[data-testid=\"composer-input\"]')?.getAttribute('contenteditable') === 'true'"), "own session becomes writable again");
     assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, ownId, foreignSessionId: foreign.sessionId, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "real running and completed tool", "readonly busy and idle", "own session writable"] }, null, 2));
+    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "real running and completed tool", "readonly busy and idle", "own session writable"] }, null, 2));
   } finally {
     release();
     await fs.writeFile(toolRelease, "cleanup");

@@ -194,7 +194,7 @@ describe("VS Code GUI launch environment", () => {
         extensionDevelopmentPath: root, extensionTestsPath: "fake-test", harnessTestsPath: "fake-test",
         extensionRoot: root, userDataDir: path.join(root, "profile"), extensionsDir: root,
         workspaceDir: root, workspaceFile: path.join(root, "profile", "host.code-workspace"), screenshotsDir: root, reportPath: path.join(root, "report.json"),
-        artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345,
+        artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345, realObservation: false,
       };
       const code = ts.transpileModule(`${calls[0].getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
       await vm.runInNewContext(code, locals);

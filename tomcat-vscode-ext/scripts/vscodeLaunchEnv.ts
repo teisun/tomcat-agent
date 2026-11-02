@@ -57,7 +57,7 @@ export async function withVsCodeGuiEnvironment<T>(
   }
 }
 
-async function reserveCapturePort(): Promise<number> {
+export async function reserveLoopbackPort(): Promise<number> {
   const server = net.createServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -89,7 +89,7 @@ export async function runVsCodeGuiTests<T extends GuiOptions>(
   // store. password-store=basic alone does not prevent macOS keychain dialogs.
   if (!launchArgs.includes("--use-inmemory-secretstorage")) launchArgs.push("--use-inmemory-secretstorage");
   const existingPort = launchArgs.find((arg) => arg.startsWith("--remote-debugging-port="));
-  const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveCapturePort();
+  const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveLoopbackPort();
   if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) throw new Error("Invalid VS Code capture port");
   if (!existingPort) launchArgs.push(`--remote-debugging-port=${cdpPort}`);
   const root = env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(os.tmpdir(), "tomcat-vscode-runs");
