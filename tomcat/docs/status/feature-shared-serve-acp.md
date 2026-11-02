@@ -147,8 +147,9 @@
 - T3 / 语言夹具绿结果：`1793587162521-afsa6t` 中 Native 环境覆盖与所有 serve 断言同批通过，原 foreign-checkpoint 中文串扰未再出现；既有 ignored 项是 `resource_inventory_test::sync_timing_matrix`，不是功能失败。随后 `cargo clippy -j 1 -p tomcat --lib -- -D warnings` 退出 0；编译 jobs=1 仅限制编译调度，没有限制测试并发。
 - local_socket 旧失败的跟进：同一 325 项组合中 `local_socket_excludes_duplicate_listeners_and_recovers_stale_endpoint` 通过；原失败保留、根因仍未确认，不改产品或用串行化掩盖，B2 继续观察。
 - T17 / 未复现项的保留用例：真实 `run_command_stream` FIFO 中，先排 NewSession 再回复待决审批，原审批仍完成且新会话成功（`1793587162521-afsa6t`）；隐藏面板的版本冲突在挂载/ready 后仍保留分类（`1793586042918-2uhx22`）；无效 log.level 下 `serve status` / `session list` 均非零退出、未创建运行目录（`1793584488404-emb4oz`，CLI 1 passed）。仅保留这些测试，不增加新审批通道、不改隐藏面板恢复或 CLI 管理语义；CLI 同文件附带 rustfmt 排版。
-- 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
+- 源分支实现与逐项提交已收口，开始 B2 正式门禁；仍未合并，不推送、不安装、不重启正式服务。Rust 与扩展验收共用测试 CLI，顺序执行以免编译覆盖正在被测试使用的二进制。
 
+- 合并前全差异复核：相对 develop 共 394 个变更路径，预演树仍等于源树。原始 `git diff --check develop..HEAD` 非零仅来自四份原始 patch 的上下文前缀（合法空格/Tab，不能格式化破坏补丁）与原样内置 workflow 末尾空行；明确排除这五份原始资料后检查通过，未全局关闭空白检查、未改哈希或增加豁免配置。原始资料由前述哈希与 patch apply 核验守护。此前注释写回丢失的门禁脚本执行位已在 `761f6051` 恢复，最终相对原分支没有文件模式变化。
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
