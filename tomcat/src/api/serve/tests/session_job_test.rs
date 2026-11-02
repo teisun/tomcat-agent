@@ -22,6 +22,42 @@ async fn response(buffer: &SharedWriterBuffer, id: &str) -> serde_json::Value {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn start_turn_writer_failure_releases_admission_without_starting_work() {
+    let _key = install_test_api_key();
+    let (state, _buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    // A failed physical writer sets this same closed signal before the next send.
+    state.writer.close();
+    let result = super::super::commands::start_turn(
+        state.clone(),
+        slot.clone(),
+        Some("closed-writer".into()),
+        None,
+        super::super::commands::TurnAck::Accepted,
+    )
+    .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("connection_closed"));
+    assert!(
+        slot.run_task.lock().is_none(),
+        "no turn may start after a failed acknowledgement"
+    );
+    assert!(
+        !slot.is_busy(),
+        "a failed start must release its busy admission"
+    );
+    assert!(slot.ctx.session_runtime.cancel_token.lock().is_cancelled());
+    assert!(!slot.ctx.session_runtime.steering_queue.lock().is_open());
+    assert!(slot.mark_busy(), "a later controller must be able to enter");
+    slot.mark_idle();
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn session_stop_catches_a_shell_registered_after_the_first_scan() {
     let _key = install_test_api_key();
     let (state, _buffer, work, slot) = build_initialized_state_with_streams(vec![]).await;

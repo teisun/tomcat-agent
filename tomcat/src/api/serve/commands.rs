@@ -3073,35 +3073,41 @@ async fn start_turn_with_token(
         let mut guard = slot.ctx.session_runtime.cancel_token.lock();
         *guard = turn_token.clone();
     }
-    if let Err(error) = slot
-        .ctx
-        .agent_registry
-        .rearm_root(&slot.session_id, turn_token.child_token())
-    {
-        slot.mark_idle();
-        return Err(AppError::Config(crate::infra::i18n::tr(
-            "terminal.rearmFailed",
-            &[("detail", &error.to_string())],
-        )));
-    }
-
-    state.set_active_session(&slot.session_id)?;
-    match ack {
-        TurnAck::Accepted => {
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                Some(slot.session_id.clone()),
-                Some(serde_json::json!({ "accepted": true })),
-            )))?;
-        }
-        TurnAck::Payload(payload) => {
+    let prepared = (|| {
+        slot.ctx
+            .agent_registry
+            .rearm_root(&slot.session_id, turn_token.child_token())
+            .map_err(|error| {
+                AppError::Config(crate::infra::i18n::tr(
+                    "terminal.rearmFailed",
+                    &[("detail", &error.to_string())],
+                ))
+            })?;
+        state.set_active_session(&slot.session_id)?;
+        let payload = match ack {
+            TurnAck::Accepted => Some(serde_json::json!({ "accepted": true })),
+            TurnAck::Payload(payload) => Some(payload),
+            TurnAck::Silent => None,
+        };
+        if let Some(payload) = payload {
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
                 Some(payload),
             )))?;
         }
-        TurnAck::Silent => {}
+        Ok::<(), AppError>(())
+    })();
+    if let Err(error) = prepared {
+        // No task owns the admission yet; every failed setup path must release it.
+        turn_token.cancel();
+        slot.ctx
+            .session_runtime
+            .steering_queue
+            .lock()
+            .close_and_clear();
+        slot.mark_idle();
+        return Err(error);
     }
 
     // Install the handle before an immediately completed turn can clear it.

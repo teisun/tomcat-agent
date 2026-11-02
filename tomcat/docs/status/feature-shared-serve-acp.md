@@ -142,6 +142,7 @@
 - 本机验证前提记录：磁盘剩余 2.8 GiB，先经 `cargo clean -p tomcat --profile dev --dry-run` 预览，再仅清理 debug 包产物，释放后剩余 29 GiB；PATH 的在用 CLI 实际指向 `target/macos-acceptance-8a5b7885f212f4549043a9b26502e6a6e89f5b20/release/tomcat`，未触碰。随后 `1793586354655-a45eup` 在 rustc 编译 lib test 时 SIGSEGV（无 Rust 源码诊断），测试及后续 clippy 未运行，不计通过；正在以单编译任务重试，测试并发不变。
 - 格式门禁 `1793586746321-u3lgcz` 指出分支原有 10 个 Rust 文件未按 rustfmt 排版；只修换行与尾逗号，不改逻辑。第一次手工排版复检 `1793587030632-azmmwb` 还差一个 assert_eq 换行，已修；该次因 fmt 失败没有启动编译或测试。版本镜像复检 `1793586880023-meeigw` 通过：CLI 0.1.81、扩展 0.1.97、bundled CLI 0.1.81，未改版本。
 - 空窗口视觉补验：使用现有 `gui` 的 `npm run dev` 与已配置 Playwright，真实 React 页面接收与 provider 用例一致的 degraded 状态，正文取英文源 catalog；桌面 1440×900、窄屏 390×844 的 `.agents/shots/shared-serve-review/empty-workspace-{desktop,narrow}.{png,aria.txt,console.json}` 均已读回。提示完整可见、窄屏自然换行、无横向溢出；设置按钮可用，聊天/发送禁用，采集范围内 errors=[]。这是页面呈现补验，不冒充 VS Code 空窗口端到端；T10 的真实安装态另行验收。验后已停止自建 Vite，未操作正式服务。
+- T17 / busy 局部修复已转绿：回合任务尚未接管前，rearm/切活动会话/ack 任一准备失败，都取消本轮 token、关闭 steering 并 mark_idle；不启动模型或工具。`1793587162521-afsa6t` 的原失败用例通过，断言没有任务、busy 释放、队列关闭且后来控制者能重新进入；同批 serve/资源库存/platform 为 325 passed / 0 failed / 1 ignored（既有手动项，不计通过），264.34s。编译器 SIGSEGV 后单编译任务重试成功，原崩溃根因未确认；测试仍按原并发运行。Clippy 结果另记。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
