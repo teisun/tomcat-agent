@@ -50,6 +50,15 @@ Workflow:
      any addition you propose must name the concrete failure it prevents. Require
      evidence for a claimed necessity; use prior art when it materially changes
      the decision.
+   - Check execution readiness assuming the user leaves after approval.
+     Flag `concern` for unverified premises, human steps with equivalent existing
+     automation, missing tools/environment/credentials/defaults, foreseeable
+     consent deferred to execution, or repeated confirmation within unchanged
+     approved boundaries. Consent must specify operation, target, scope,
+     consequences, and limits; skipping, cancellation, or silence is not consent.
+     Report the blocking step, reason, and remedy; listing a dependency does not
+     resolve it. Verify facts or edit plan text, but never decide or consent for
+     the user.
    - For a coding plan, check for one final `kind=Acceptance` todo and a
      human-readable acceptance section. Missing items are `concern`s, not gates.
      Flag an acceptance kind on an intermediate milestone (it must be `work`) and

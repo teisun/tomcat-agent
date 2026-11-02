@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 22:07 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-02 22:13 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -159,6 +159,8 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1，2026-11-02，计划执行就绪]** write-plans 的 Final Check 与计划 reviewer 增加执行就绪检查：先核实关键前提、优先等效自动化，在规划阶段问清可预见的风险操作并记录授权边界，执行时不重复确认已同意事项。同步 review brief、单条提示词契约测试与职责文档；五个实现文件及分支状态/汇总看板纳入本次本地提交。
+- [✓] **[执行就绪的提交前验收证据]** 提示词模块与技能物化/发现/加载回归共 33 passed、0 failed（`1793625169364-y9ujje`）；格式与 diff 检查通过（`1793625242644-m4h9li`），五个场景已作条款走查。两次断线仅留编译日志，结果未知；新增测试的一处格式问题已修正，原失败记录保留。按用户要求本次提交不重跑测试或构建，Cov% 未测量；不推送、不安装、不重启。
 - [✓] **[P1，2026-11-02]** Unix 命令入口改为独立副本：已有软链（含同目标与悬空链接）迁移为普通文件，内容不同的入口以同目录临时副本、`sync_all`、`rename` 替换；清理构建目录不再破坏入口，运行中的进程继续持有旧文件。新增 `scripts/dev-install.sh`（100755），沿用 Cargo、`CARGO_TARGET_DIR` 与 Agent 保护；脚本测试、非 Windows CI 步骤、双语文档及开发规则一并纳入本次本地提交。Windows 生产行为、插件路径选择与版本号不变。
 - [✓] **[本轮提交前的验收证据]** 定向库 13 项、self-install CLI 4 项通过（任务 `1793626820092-6y5212`）；Unix 包装器 2 项通过，Windows 2 项按平台跳过（`1793626881020-yjbd4e`）；`cargo fmt --check`（`1793626952581-m4wypu`）、定向 Clippy `-D warnings`（`1793627274153-2refvy`）及 diff 检查通过。按用户要求本次提交不重跑测试或构建，Cov% 未测量；只提交本次 12 个相关文件与两处 status，先前五个计划技能/提示词及其测试文件仍留在工作区，不推送或发布。
 - [✓] **[本机操作，2026-11-02]** NemuDrv 卸载成功，驱动目录和启动项链接已移至 `/Users/Shared/nemu-backup`，没有删除；launchd 原本未注册该任务，bootout 的“进程不存在”如实保留。复查 showloaded 成功且未发现 NemuDrv。用户在独立终端执行安装脚本两次后，已核实 `~/.local/bin/tomcat` 为 0755 普通文件、与 release 产物字节一致、版本 `0.1.81`；服务 PID 12802 及启动时间不变，Agent 保护未移除（安装核对任务 `1793628324840-uvzuia`）。这些机器操作不作为自动卸载机制进入仓库，不据此断言内核崩溃根因或永久治愈。
@@ -202,6 +204,7 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-11-02 计划执行就绪**：仅调整写作/评审提示词契约；不改执行器、`ask_question` 实现、工具权限、状态机或审计存储。reviewer 保持建议性输出及原 `<review>` 格式，不代用户决定或授权。
 - **2026-11-02 Unix 安装入口**：`install_user_command` 的签名不变；Unix 不再保留内容不同的普通入口，软链一律迁移为副本。`init`/`self-install` 安装当前程序的快照，后续仅编译不会自动刷新，需再次执行安装；macOS 通过根目录 `./scripts/dev-install.sh` 完成编译与安装，不改 PATH、配置、凭据或服务生命周期。
 - **2026-10-20 ACP 技术方案**：仅记录拟议接口与实现边界，未修改现有 CLI、serve、扩展或宿主接口；不能将文档中的 access/origin、共享连接和 ACP 示例当作已交付协议。
 - **2026-10-19 IP 中转站**：无新增接口、配置键、存储格式或依赖；仅改变数字开头的自动默认槽名，严格校验 `^[A-Z_][A-Z0-9_]*$` 不变。旧数字 provider 若使用默认槽，须重新配置 Key 或把启动器注入变量改为 `PROVIDER_<规范化名称>_API_KEY`；合法显式槽不变，不新增自动迁移或旧名回退。
@@ -240,6 +243,7 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 执行就绪检查的效果边界（2026-11-02） | 已验证条款与加载链路，未进行真实模型行为评测，不承诺 100% 无人值守 | 生效取决于运行包含新资产的 CLI 并在新会话加载，同名技能覆盖规则不变；新风险或超出授权仍需确认 |
 | 命令入口整改的跨平台验证（2026-11-02） | 本机 macOS 定向验收通过；新代码的 Windows CI 尚未运行，旧 CI 不能代签 | 后续推送后核对本提交的 Windows 矩阵；本次仅本地提交且按要求不跑测试 |
 | 内核崩溃后续观察（2026-11-02） | 仅确认当前已卸载 MuMu 并备份，尚未重启核对或执行 Apple Diagnostics，崩溃根因未证实 | 用户方便时重启，核对 showloaded/AuxKC；必要时按原计划评估 clear-staging 后再重启，并观察新 panic，不自动重置全部驱动授权 |
 | 共享 serve / ACP 验收边界（2026-10-20） | 本次仅完成设计文档，计划尚未实施，T01–T28 全部待执行 | 后续在功能分支实施并验证两个宿主和 VS Code；文档校验不替代真实任务、停止、慢读及 UI 验收 |

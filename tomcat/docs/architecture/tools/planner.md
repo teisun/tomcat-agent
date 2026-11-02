@@ -327,7 +327,7 @@ PLAN：         常驻清单仍不列它，由上面的短句指向 load_skill
 - **注入与退出**：`RuntimeTailProvider` 在每次模型请求前读取实时模式，只有 PLAN 才附加此提醒。同一轮调用 `start_plan` 后，下一请求就换成执行提醒，不必等下一条用户消息；临时提醒不写入聊天历史，不改变稳定系统前缀。
 - **清单与权限**：`render_available_skills_block` 按 `WRITE_PLANS_SKILL_NAME` 排除该名称，主代理和子代理共用。发现、同名覆盖、`load_skill` 按名解析、`/skill` 用户清单和权限闸门不变；已经加载的历史正文不会被删除。
 - **关闭后的行为**：关闭 Skill、按名禁用或设置 user-only 后，沿用现有错误反馈或工具不暴露行为；不自动改配置，不保留第二份备用写作规则。PLAN 路径限制和执行确认等运行时守卫继续生效。
-- **写作与评审分工**：write-plans 教怎么写；plan reviewer 检查没有聊天背景的读者能否理解改什么、为何这样改、如何验证，以及设计、范围和过度设计风险。reviewer 不再规定固定章节或排版，不为此新增 Skill 加载；UX 原则、brief、工具权限、advisory 与 `<review>` 输出契约保持不变。
+- **写作与评审分工**：write-plans 教怎么写；plan reviewer 检查没有聊天背景的读者能否理解改什么、为何这样改、如何验证，以及设计、范围和过度设计风险。两者都检查用户批准后能否不再提问就走到交付。reviewer 不再规定固定章节或排版，不为此新增 Skill 加载；UX 原则、brief、工具权限、advisory 与 `<review>` 输出契约保持不变。
 
 内置资产的正式来源、聊天初始化物化与覆盖边界见 [Skill 系统 §4.2.5](../skill-system.md#425-pr-sk-b内置资产与-write-plans-的-plan-入口)。
 

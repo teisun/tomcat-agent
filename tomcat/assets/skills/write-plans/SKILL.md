@@ -24,6 +24,19 @@ description: Write or revise visually explained, reviewable, executable developm
 3. Before finishing any plan change (the first draft, each revision, and the content you add after the plan review returns), perform a deletion pass and remove over-designed items and their related content.
 
 
+## Execution readiness
+
+The user often approves a plan and leaves. A question raised during execution must wait for their return, often for hours; asked during planning, it takes only a minute. Therefore, you must perform the following checks:
+
+1. Verify premises. Check key decision assumptions against source, configuration, or tests.
+2. Prefer paths without people. Reuse equivalent automation without weakening acceptance; agree unavoidable human steps during planning.
+3. Decide foreseeable branches now. Record defaults for reversible in-scope choices. Use `ask_question` during planning for unresolved user decisions and missing consent for foreseeable risky operations. Before asking, explain the operation, target, scope, consequences, and failure handling. Record each answer in the plan with its scope and limits; skipping, cancellation, or silence is not consent.
+4. Walk it through. Cover implementation, verification, delivery, and known failure branches; resolve missing tools, environment, credentials, permissions, and defaults before execution.
+5. Honor recorded consent. Do not re-ask within approved boundaries. Ask again only for uncovered actions or material changes to the agreed risk, target, or scope.
+
+Close gaps by investigating and deciding, not by adding mechanisms; the over-design rules apply.
+
+
 ## Reader check:
 - Before delivery, review the document from the perspective of someone who has not seen the conversation:
   - Can they answer why the change is needed, what will change, why this approach was chosen, and how completion will be verified?

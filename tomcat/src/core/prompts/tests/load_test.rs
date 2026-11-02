@@ -92,6 +92,42 @@ fn write_plans_and_reviewer_carry_anti_over_design_rules() {
 }
 
 #[test]
+fn write_plans_and_reviewer_check_execution_readiness() {
+    let planner = WRITE_PLANS_SKILL
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for rule in [
+        "## Execution readiness",
+        "Verify premises",
+        "Prefer paths without people",
+        "Record each answer in the plan",
+        "Do not re-ask within approved boundaries",
+        "missing consent for foreseeable risky operations",
+        "skipping, cancellation, or silence is not consent",
+        "the over-design rules apply",
+    ] {
+        assert!(planner.contains(rule), "write-plans must contain {rule:?}");
+    }
+    let reviewer = load(PromptKey::ReviewerPlan);
+    let reviewer = reviewer.split_whitespace().collect::<Vec<_>>().join(" ");
+    for rule in [
+        "Check execution readiness",
+        "unverified premise",
+        "repeated confirmation within unchanged approved boundaries",
+        "never decide or consent for the user",
+        "listing a dependency does not resolve it",
+        "Your output is advisory",
+    ] {
+        assert!(
+            reviewer.contains(rule),
+            "plan reviewer must contain {rule:?}"
+        );
+    }
+    assert!(load(PromptKey::ReviewerPlanBrief).contains("execution-readiness"));
+}
+
+#[test]
 fn executor_prompt_renders_plan_id() {
     let rendered = render(
         PromptKey::ExecutorReminderFmt,
