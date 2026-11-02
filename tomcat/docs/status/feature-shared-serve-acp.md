@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 10:45 | IN_PROGRESS | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 12:40 | IN_PROGRESS | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -157,12 +157,18 @@
 
 - Native 断言的 Clippy 修复仅去掉 `Option<&str>` 上无效的 `.as_deref()`，仍精确断言最后一条 Normal 用户消息是 B 的新指令，历史前缀不变；不弱化 T6。
 
+- B2 Rust 补验（`1793592276899-692cph`，S=`c0ab1f428e64ed27babd6f0b88b579a8b70b1061`，tree=`7042eaa72706b4ab445841780f2ef83e1ccbc8bb`）exit 0：Native 新控制者用例 1 passed，parallel 384 passed / 27 skipped（142.131s）；两处注入 sink 回归都执行并通过。结合前轮仍有效的 lib/serial 与全目标 Clippy，完成本机离线 Rust 范围，真实模型仍未运行。
+- B2 扩展首轮（`1793593147179-moayq4`，同一 S）exit 1：两份 tsc、host 916 / GUI 888、构建、integration 269 passed / 1 skipped、真实 VS Code 安装态 24 passing / 6 场景条件 pending 均通过；最后 verify:vsix 首场景 4 项超时，服务连接失败，未执行后续场景，不记完整扩展门禁通过。
+- verify:vsix 失败已最小复现（`1793594179340-qvpzap`，1 passed / 1 failed）：full-gate 的同步子进程等待堵住同进程的 Native 测试服务，子进程 `serve status` 等不到回复。仅将这个启动器改为异步等待，沿用跨平台 spawnCommand、输出与失败退出约定；不改产品、夹具服务归属或增加期限。新增真实 IPC 及子进程失败传播回归，待绿结果和原门禁路径复验。原失败截图缺失记录与宿主日志保留在 `.agents/acceptance/shared-serve-review/b2-c0ab1f42/`。
+
+- 启动器定向绿结果：`1793594285210-ekctw6` 的真实 IPC / 管理命令 / 非零退出与启动错误共 3 passed；`1793594406711-6pozlu` 的定向 strict tsc 退出 0。脚本不在 extension tsconfig 的 src 范围内，使用与 tsx 混合模块相容的 preserve/bundler、显式 Node 类型；先前两次推断命令分别因 TS6 的 ignoreConfig 要求及错误的模块/类型选项失败，未用改产品代码或放宽 strict 处理。启动器改变了整条门禁的等待方式，因此补跑原 `npm run gate:full` 入口，Rust 源码不变，不重跑 Rust 全门禁。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
 | 旧式动态插件初始化串会话 | 本轮最小用例已失败，第二会话触发的动态发现会向第一会话追加消息；对照 develop 已有相同 bare-ID/default-session 机制，不算本次新增回归，但未修复 | 单独明确初始化应绑定触发会话还是禁止会话能力，再复用现有会话 VM 路径设计；保留失败日志与本地 repro patch。按获准计划，需设计的旧问题记录、不阻塞本地合并，不代签通过 |
-| 本轮整改与合并 | 修复提交已收口，B2 完整库与 serial 已通过；全目标检查抓到三处测试接线遗漏，正在局部补齐；尚未合并 | 补 Clippy、parallel、扩展全门禁及安装态专项，再按已测树本地合并；未运行项不记通过 |
+| 本轮整改与合并 | 本机离线 Rust 范围通过；扩展前四阶段通过，最后打包检查暴露门禁启动器互等，已复现并局部修复；尚未合并 | 复验原扩展门禁与安装态旁观专项，再按已测树本地合并；未运行项不记通过 |
 | 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
 | write-plans 完整库验收（本轮已补证） | B2 `1793588892574-uour5x` 并发完整库 3454 passed / 5 既有 ignored，两条原失败用例均通过；完整门禁仍因其它已列问题非零 | 保留原始失败和归因，不把库通过代签其它门禁或真实模型层 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |

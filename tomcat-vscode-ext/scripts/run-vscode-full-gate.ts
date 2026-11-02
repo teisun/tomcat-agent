@@ -3,10 +3,18 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { createHostE2eFixture } from "./e2eHostFixture";
 import { packageVsix, PREBUILT_VSIX_ENV } from "./package-vsix";
-import { runCommand } from "./runCommand";
+import { spawnCommand } from "./runCommand";
 
-function run(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): void {
-  runCommand(command, args, { cwd, env });
+/** Keep the bundled fixture's IPC server responsive while a child runs its tests. */
+export function runGateCommand(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawnCommand(command, args, { cwd, env, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} ${args.join(" ")} exited with ${code ?? signal}`));
+    });
+  });
 }
 
 function currentVsCodeTarget(): string | undefined {
@@ -31,7 +39,7 @@ async function main(): Promise<void> {
   const fixture = await createHostE2eFixture();
 
   try {
-    run("npm", ["run", "gate:fast"], extensionRoot);
+    await runGateCommand("npm", ["run", "gate:fast"], extensionRoot);
     const prebuiltVsixPath = packageVsix({
       bundleBinaryPath: fixture.fakeServePath,
       extensionRoot,
@@ -43,16 +51,18 @@ async function main(): Promise<void> {
       ...process.env,
       [PREBUILT_VSIX_ENV]: prebuiltVsixPath,
     };
-    run("npm", ["run", "test:integration"], extensionRoot, gateEnv);
-    run("npm", ["run", "test:e2e:vscode-install"], extensionRoot, gateEnv);
-    run("npm", ["run", "verify:vsix"], extensionRoot, gateEnv);
+    await runGateCommand("npm", ["run", "test:integration"], extensionRoot, gateEnv);
+    await runGateCommand("npm", ["run", "test:e2e:vscode-install"], extensionRoot, gateEnv);
+    await runGateCommand("npm", ["run", "verify:vsix"], extensionRoot, gateEnv);
   } finally {
     await fixture.cleanup();
     await fs.rm(prebuiltVsixRoot, { force: true, recursive: true });
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
