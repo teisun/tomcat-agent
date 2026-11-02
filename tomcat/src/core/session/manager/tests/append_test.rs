@@ -169,11 +169,16 @@ fn compaction_skips_a_busy_session_until_a_later_housekeeping_run() {
     .unwrap();
 
     let guard = crate::infra::config::lock::acquire_config_lock(&transcript).unwrap();
+    // A concurrent fork can retain this open file description until exec.
+    // Keep a duplicate so the release boundary is tested without a scheduling race.
+    let inherited_guard = guard.try_clone().unwrap();
     let other = SessionManager::new(manager.sessions_dir().to_path_buf());
     assert_eq!(other.compact_tool_display_sidecars().unwrap(), 0);
+    fs2::FileExt::unlock(&guard).unwrap();
     drop(guard);
 
     assert_eq!(manager.compact_tool_display_sidecars().unwrap(), 1);
+    drop(inherited_guard);
 }
 
 #[test]

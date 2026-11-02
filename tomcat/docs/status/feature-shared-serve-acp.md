@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 12:58 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 13:45 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -166,6 +166,11 @@
 - B2 扩展完整复验（`1793594442583-2fzg8u`，S=`a4b61eda331c828a26db6bace511d37ff758476f`，tree=`9338e453b089dd59803eda55bb8561c0a6be97fd`）`npm run gate:full` exit 0：两份 tsc、host 916、GUI 888、构建、integration 271 passed / 1 skipped、安装态 24 passing / 6 条件场景 pending、verify:vsix 五场景合计 10 passing。没有放宽期限、跳过原失败场景或改变默认选例；原来超时的四项现为 4 passing。慢握手重启中的 bootstrap 断连日志、VS Code 提案/账号/弃用告警均保留，不称全程零告警。
 - B3 最终安装态旁观复验（`1793595245110-u2j0ap`，同一 S）exit 0、1 passing / 26s：当前纯包 + 真实 CLI，自动探活重建页面后仍保留 B、草稿、只读与焦点，后台真实 Bash 完成；跨项目隔离、无重字、切回自有会话可写均通过。`.agents/acceptance/shared-serve-review/b3-a4b61eda/gui-7FxJcN/observer-{desktop,narrow}.{png,aria.txt,console.json}` 已逐项读回，实际面板为 1381×794 / 331×738：内容正常、长命令换行、底部操作不越界，两份捕获范围内 errors=[]。常规门禁的重建/场景替身不冒充此真实服务专项。
 - 证据复用核对：`c0ab1f42..a4b61eda` 仅门禁启动器、其已有测试文件、此 status 三个路径；Rust 产品/测试/依赖/分组不变，前述 Rust 分批结果有效。空窗口提示的两组页面 PNG/ARIA/console 对应 GUI/provider 源码也未变，继续有效。随后仅回填此状态文档，不使已测行为失效；版本未升级，正式服务未安装或重启，源分支与 develop 均未推送。
+
+- B4 首次待合并树与 `fe08633bfb180ae83b634112529bc7886a48b23d` 完全相同（tree=`4cd6c2d7f6e9b1db4228dad024084d35b0c6d358`）。`1793595769842-ex75gj` 的 Rust gate-fast exit 1：严格全目标 Clippy、doctest 编译、parallel 384/27 skipped、serial 89/3 skipped 通过；lib 3453 passed / 1 failed / 5 ignored，唯一失败为 `append_test::compaction_skips_a_busy_session_until_a_later_housekeeping_run`（期望 1，实际 0）。串联的扩展快门禁未执行。已核对该测试、压缩函数及配置锁函数与 develop 原基线逐字一致，不是本分支新回归；只撤销本任务尚未提交的合并，回源分支补测试，未改 develop 或他人工作。
+- 压缩夹具红→绿：`1793597540910-ed5llm` 保留一个 `File::try_clone` 重复句柄，确定性复现仅 drop 原句柄后仍未解锁（0 passed / 1 failed）。并行 fork 可以产生这种同一文件描述的继承窗口（`infra/platform/process.rs::spawn_detached` 使用 pre_exec），但原批次未记录具体持有者，不能据此指认某一进程。仅在原测试中显式 `fs2::FileExt::unlock`，重复句柄保留至压缩断言之后；占用时为 0、释放后为 1 的原断言不变。`1793597923702-qgd17f`：fmt、append 模块 24 passed / 3.39s、`cargo clippy -j 1 -p tomcat --lib --tests -- -D warnings` 均 exit 0；未串行化、加等待或修改产品锁/压缩机制。
+- 本次补修只涉及上述测试及此状态文档；B4 的其余 3453 库用例、完整集成及此前扩展/UI 证据仍有效，按影响范围复用，不把原 Rust 命令 exit 1 写成 exit 0。再次合并后补未运行的扩展快门禁，最终源码 SHA 与提交树记入 develop status。
+- B2 视觉制品补读：`b2-async-gate/run-yY3gZu/gui-0AFbAi/` 五张原始全帧 PNG 与 `b2-async-gate/gui-eFrGHp/` 两张选择器 PNG，以及各自 ARIA/console 均已读回；进度/折叠/展开/切换/重载、QuickPick 与回填正常。自动 `*-cropped.png` 错裁到左侧 Explorer，不能当聊天视觉证据，保留为调试件并采用原始全帧图；未为此改变产品或重跑无关场景。`1793596077368-22hmlg` 核对七份捕获范围内 errors=[]，保留 VS Code sandbox/local-network-access 警告；不冒充全程监控或系统文件对话框实选。临时图片回看服务已停止。
 
 ### BLOCKED（待验收与风险）
 
