@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { STOP_COMMAND_TIMEOUT_MS } from "../src/serveClient/sharedConnection";
 export { spawnScriptedOpenAiStreamServer, sseDelta, sseFinish, sseDone, sseToolCall } from "../src/test/suite/support/scriptedModel";
 export type { ScriptedPart, ScriptedResponse } from "../src/test/suite/support/scriptedModel";
 
@@ -60,7 +61,7 @@ export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup:
   const cleanup = () => cleanupTask ??= (async () => {
     // Closing a messenger no longer owns the service process. Only this isolated
     // fixture may stop its service, and it must do so before removing its HOME.
-    await runCli(binary, ["serve", "stop"], { cwd: workspacePath, env, timeout: 35_000 });
+    await runCli(binary, ["serve", "stop"], { cwd: workspacePath, env, timeout: STOP_COMMAND_TIMEOUT_MS });
     await rm(homePath, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
   })().catch(error => { cleanupTask = undefined; throw error; });
   try {

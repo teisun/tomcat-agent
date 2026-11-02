@@ -8,11 +8,13 @@ on:
     paths:
       - "tomcat/**"
       - "tomcat-vscode-ext/**"
+      - "scripts/dev-install.*"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "tomcat/**"
       - "tomcat-vscode-ext/**"
+      - "scripts/dev-install.*"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
 
@@ -132,6 +134,13 @@ jobs:
 
       - name: Run gate:fast
         run: npm run gate:fast
+
+      - name: Test Windows development-install wrapper without installing
+        working-directory: .
+        run: node --test scripts/dev-install.test.mjs
+
+      - name: Test Windows proxy guard and bundled-binary build selection
+        run: npx vitest run --maxWorkers 4 tests/windows_system_proxy.test.ts tests/build_tomcat_binary.test.ts
 
   shared-service-windows:
     name: shared service OS proxy and real VS Code (windows)
