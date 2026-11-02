@@ -1486,10 +1486,7 @@ async fn disconnect_discards_queued_follow_up_before_the_next_controller_prompt(
             m.role == ChatMessageRole::User && m.kind == crate::core::llm::MessageKind::Normal
         })
         .unwrap();
-    assert_eq!(
-        last_user.text_content().as_deref(),
-        Some("B new instruction")
-    );
+    assert_eq!(last_user.text_content(), Some("B new instruction"));
     assert!(
         std::fs::read_to_string(transcript)
             .unwrap()

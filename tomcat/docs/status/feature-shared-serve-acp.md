@@ -155,6 +155,8 @@
 
 - B2 补验第一步：三处测试修正后的工作树在 `1793591795013-au3690` 通过 `git diff --check`、`cargo fmt --check` 及 `cargo clippy --all-targets -- -D warnings`（exit 0）。这次检查包含测试目标，不是此前只检查产品库的 `--lib`；接下来补 Native 用例和 parallel 组，不预先记成通过。
 
+- Native 断言的 Clippy 修复仅去掉 `Option<&str>` 上无效的 `.as_deref()`，仍精确断言最后一条 Normal 用户消息是 B 的新指令，历史前缀不变；不弱化 T6。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
