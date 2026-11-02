@@ -29,6 +29,7 @@ function fixture(action: "retry" | "resume" = "retry") {
   let listener!: (event: ServeEvent) => void;
   const retry = vi.fn().mockResolvedValue(undefined);
   const resume = vi.fn().mockResolvedValue(undefined);
+  const restoreCheckpoint = vi.fn();
   const getMessages = vi.fn(async (id: string) => history(id, action));
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/workspace/extension"),
@@ -36,7 +37,9 @@ function fixture(action: "retry" | "resume" = "retry") {
     getDefaultCwd: () => "/workspace", ide: {} as never,
     initialize: async () => ({ sessionId: "s1", capabilities: [] } as never),
     messenger: { onEvent: (callback: typeof listener) => { listener = callback; return { dispose() {} }; } } as never,
-    sessionRouter: { retry, resume, getMessages } as never,
+    sessionRouter: { retry, resume, getMessages, restoreCheckpoint,
+      switchSession: async (sessionId: string) => ({ sessionId, access: "control", origin: null }),
+    } as never,
     errorRecoveryClock: time.clock,
   });
   providers.push(provider);
@@ -55,7 +58,7 @@ function fixture(action: "retry" | "resume" = "retry") {
   };
   const projection = (id = "s1") => provider.currentState().sessionViews[id]?.errorRecovery;
   const card = () => provider.currentState().sessionViews.s1.timeline.find(item => item.type === "message" && item.id === "error-1");
-  return { provider, host, time, retry, resume, getMessages, emit, failed, projection, card, select };
+  return { provider, host, time, retry, resume, getMessages, restoreCheckpoint, emit, failed, projection, card, select };
 }
 
 for (const action of ["retry", "resume"] as const) describe(`${action} countdown`, () => {
@@ -166,6 +169,27 @@ describe("recovery lifecycle and ownership", () => {
     f.time.advance(300_000); await flush();
     expect(f.retry).not.toHaveBeenCalled(); expect(f.resume).not.toHaveBeenCalled(); expect(f.projection()).toBeUndefined();
     f.host.pendingQuestions.clear();
+  });
+
+  it("checkpoint restore takes over recovery while pending and after failure without cancelling another session", async () => {
+    const f = fixture();
+    await f.failed(); await f.failed("s2");
+    const [staleCallback] = f.time.callbacks();
+    const pending = deferred<void>();
+    f.restoreCheckpoint.mockReturnValue(pending.promise);
+    const restore = f.provider.dispatchTestIntent({ type: "restoreCheckpoint", messageId: "restore",
+      data: { sessionId: "s1", checkpointId: "checkpoint-1", revertFiles: true },
+    });
+    await flush();
+    f.time.advance(300_000); await flush();
+    const duringRestore = [...f.retry.mock.calls];
+    pending.reject(new Error("checkpoint restore failed")); await restore;
+    staleCallback(); f.time.advance(300_000); await flush();
+    expect(f.restoreCheckpoint).toHaveBeenCalledExactlyOnceWith("s1", "checkpoint-1", true);
+    expect(duringRestore).toEqual([["s2", "user-1"]]);
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith("s2", "user-1");
+    expect(f.resume).not.toHaveBeenCalled();
+    expect(f.projection()).toBeUndefined();
   });
 
   const takeover = [

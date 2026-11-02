@@ -17,7 +17,7 @@ const DELAY_MS = 5 * 60 * 1_000;
 // Take over only when an intent invalidates automatic recovery before execution/deadline checks can see it.
 const TAKEOVER = new Set<WebviewIntent["type"]>([
   "prompt", "steer", "retryUserMessage", "recoverErrorTurn", "runSlashCommand", "compact",
-  "rewindAndResend", "restoreSessionFiles", "closeSession", "deleteSession",
+  "rewindAndResend", "restoreSessionFiles", "restoreCheckpoint", "closeSession", "deleteSession",
 ]);
 export function takesOverErrorRecovery(intent: WebviewIntent): boolean {
   return TAKEOVER.has(intent.type)

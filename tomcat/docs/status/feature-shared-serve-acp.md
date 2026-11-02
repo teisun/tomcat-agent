@@ -120,6 +120,7 @@
 - Native 扩展侧红→绿：`1793578883207-6o6hpp` 复现先发环境和同版本误导文案，3 failed / 1 passed；`1793578927379-eibfes` 新握手、失败分类与关闭回归 46 passed，两份 TypeScript 检查通过。`1793579245175-epovi3` 安装态假服务 transport/history/questions 4 passed；仅夹具协议验证，不代替真实 VS Code 视觉验收。Rust `1793579213705-y4249a` 先得到 4 failed / 3 passed；新代码在 `1793579618198-eio5wr` 转为 7 passed：第二阶段之前不建连接、非法/旧形状拒绝、原总握手期限、ACP/status/stop 格式不变。原 `service_test.rs` 移为 service 的私有子测试模块，未提高生产符号可见性。
 - 安全前提复核：instanceId 只由 `service.rs::run_service` 用 UUID v4 生成；常驻服务 stdout 为 null，日志 0600。Windows `local_socket.rs::private_pipe` 使用 `private_acl::current_user_acl` 的当前用户单条 ACE 并拒绝远程客户端；Unix accept 检查 peer UID。CLI `open_management` 先经 `local_socket::connect` 核对服务端账号才读取编号。Node 首条 hello 不含编号或环境，编号不匹配时环境 0 字节发送的断言覆盖全部接收字节。此证据不等于双账号攻击实测，也不防同账号恶意进程。
 - T11 红→绿：`1793579754418-6c7wi4` 复现 history 后迟到的 message_start 会把正文和 thinking 再追加一遍；`state.ts` 在开头复用 hasPersistedAssistant 跳过已落盘消息，不新增序号或完成表。`1793579798278-25d6ex` 的 dual_channel 17 项通过（同批三个文件共 163 项），新消息仍正常流式显示，断言在第二次 hydrate 之前检查；扩展与 GUI TypeScript 检查通过。
+- T12 红→绿：同一红批次复现 restoreCheckpoint 等待期间旧计时器仍对 s1 发 Retry；只把该意图加入现有接管集合。绿批次 provider_error_recovery 73 项通过：恢复进行中与失败后旧等待都不重试，s2 的计时仍按时执行，原计时/持久化机制不变。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
