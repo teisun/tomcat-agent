@@ -5786,7 +5786,7 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
     ctx.session_runtime.message_append_sink = Arc::new(CliInjectAppendInvariantSink::new(
-        ctx.session_runtime.session.clone(),
+        ctx.session_runtime.session.as_ref().clone(),
     ));
 
     let system_text = "system prompt";
