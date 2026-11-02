@@ -9,7 +9,7 @@ use super::{
 };
 use crate::api::serve::{
     runtime::ServeRuntime,
-    test_support::{serve_test_config, write_test_config},
+    test_support::{serve_test_config, write_test_config, EnvGuard},
 };
 use crate::AppError;
 use serde_json::{json, Value};
@@ -84,23 +84,24 @@ impl HandshakeFixture {
 }
 
 #[tokio::test]
+#[serial_test::serial(env_lock)]
 async fn native_waits_for_environment_then_acknowledges_before_initialize() {
+    // Contradict the connection's locale without changing the library suite's English locale.
+    let _host = EnvGuard::set("TOMCAT_HOST_LOCALE", "zh-CN");
+    let _override = EnvGuard::set("TOMCAT__UI__LANGUAGE", "zh-CN");
     let mut fx = HandshakeFixture::new();
     fx.hello().await;
     assert!(
         fx.runtime.connections.read().is_empty(),
         "hello must not admit a native connection"
     );
-    fx.send(&json!({"environment":{"TOMCAT_HOST_LOCALE":"zh-CN"}}))
+    fx.send(&json!({"environment":{"TOMCAT_HOST_LOCALE":"en"}}))
         .await;
     assert_eq!(fx.next().await, json!({"ready":true}));
     fx.send(&json!({"type":"control_request", "requestId":"init", "subtype":"initialize", "payload":{}})).await;
     let initialized = fx.next().await;
     assert_eq!(initialized["type"], "control_response");
-    assert_eq!(
-        initialized["payload"]["uiPreferences"]["effective"],
-        "zh-CN"
-    );
+    assert_eq!(initialized["payload"]["uiPreferences"]["effective"], "en");
     fx.client.shutdown().await.unwrap();
     fx.task.await.unwrap().unwrap();
 }

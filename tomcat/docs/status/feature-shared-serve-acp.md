@@ -144,6 +144,8 @@
 - 空窗口视觉补验：使用现有 `gui` 的 `npm run dev` 与已配置 Playwright，真实 React 页面接收与 provider 用例一致的 degraded 状态，正文取英文源 catalog；桌面 1440×900、窄屏 390×844 的 `.agents/shots/shared-serve-review/empty-workspace-{desktop,narrow}.{png,aria.txt,console.json}` 均已读回。提示完整可见、窄屏自然换行、无横向溢出；设置按钮可用，聊天/发送禁用，采集范围内 errors=[]。这是页面呈现补验，不冒充 VS Code 空窗口端到端；T10 的真实安装态另行验收。验后已停止自建 Vite，未操作正式服务。
 - T17 / busy 局部修复已转绿：回合任务尚未接管前，rearm/切活动会话/ack 任一准备失败，都取消本轮 token、关闭 steering 并 mark_idle；不启动模型或工具。`1793587162521-afsa6t` 的原失败用例通过，断言没有任务、busy 释放、队列关闭且后来控制者能重新进入；同批 serve/资源库存/platform 为 325 passed / 0 failed / 1 ignored（既有手动项，不计通过），264.34s。编译器 SIGSEGV 后单编译任务重试成功，原崩溃根因未确认；测试仍按原并发运行。Clippy 结果另记。
 - T17 / 共享插件绑定局部修复已转绿：SessionRuntime 持有构造时已交给 dispatcher 的同一个 `Arc<SessionManager>`，而不是只保存内部值的 clone 后释放原 Arc；因此弱引用与实际会话同寿命，不改 scope 共享或 VM 初始化。`1793587162521-afsa6t` 中第二会话 getCurrentSession 在构造后和第一会话关闭后均返回第二会话；停止中的真实 JS/fetch 续体也未晚写历史，后者未复现缺陷，仅保留回归。旧式 bare-ID 动态初始化仍按 BLOCKED 单独记录。
+- T3 / 语言夹具绿结果：`1793587162521-afsa6t` 中 Native 环境覆盖与所有 serve 断言同批通过，原 foreign-checkpoint 中文串扰未再出现；既有 ignored 项是 `resource_inventory_test::sync_timing_matrix`，不是功能失败。随后 `cargo clippy -j 1 -p tomcat --lib -- -D warnings` 退出 0；编译 jobs=1 仅限制编译调度，没有限制测试并发。
+- local_socket 旧失败的跟进：同一 325 项组合中 `local_socket_excludes_duplicate_listeners_and_recovers_stale_endpoint` 通过；原失败保留、根因仍未确认，不改产品或用串行化掩盖，B2 继续观察。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
