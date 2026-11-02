@@ -15,7 +15,7 @@ describe("serve fixture resource ownership", () => {
 
   it("isolates config, models, credentials, and the disposable child process", () => {
     const parent = {
-      HOME: "/real-home", PATH: "/bin", TOMCAT_AGENT_ACTIVE: "1",
+      HOME: "/real-home", PATH: "/bin", SHELL: "/bin/bash", TOMCAT_AGENT_ACTIVE: "1",
       TOMCAT__AGENT__ID: "other", TOMCAT__STORAGE__WORK_DIR: "/real-storage",
       TOMCAT__LLM__DEFAULT_MODEL: "live-model", ANTHROPIC_API_KEY: "not-a-real-key",
       HTTP_PROXY: "http://proxy", https_proxy: "http://proxy",
@@ -24,7 +24,7 @@ describe("serve fixture resource ownership", () => {
     const env = serveFixtureEnvironment("/private-fixture", parent);
     expect(parent).toEqual(before);
     expect(env).toMatchObject({ HOME: "/private-fixture", USERPROFILE: "/private-fixture",
-      PATH: "/bin", OPENAI_API_KEY: "dummy-key",
+      PATH: "/bin", SHELL: "/bin/bash", OPENAI_API_KEY: "dummy-key",
       TOMCAT__STORAGE__WORK_DIR: path.join("/private-fixture", ".tomcat"),
       TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4", HTTP_PROXY: "", https_proxy: "" });
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
@@ -34,6 +34,7 @@ describe("serve fixture resource ownership", () => {
     expect(env.TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect({ ...parent, ...env }.ANTHROPIC_API_KEY).toBeUndefined();
     expect(serveFixtureEnvironment("/fixture", {}).TOMCAT_AGENT_ACTIVE).toBeUndefined();
+    expect(serveFixtureEnvironment("/fixture", {}).SHELL).toBeUndefined();
   });
 
   it("starts cold without init, persisted models, keys, or model overrides", async () => {

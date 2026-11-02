@@ -19,7 +19,7 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
     if (key.startsWith("TOMCAT__") || /_API_KEY$/i.test(key)) env[key] = undefined;
   }
   return {
-    ...env, HOME: homePath, USERPROFILE: homePath, TOMCAT_HOST_LOCALE: "en", SHELL: "/bin/zsh",
+    ...env, HOME: homePath, USERPROFILE: homePath, TOMCAT_HOST_LOCALE: "en",
     TOMCAT__STORAGE__WORK_DIR: path.join(homePath, ".tomcat"),
     TOMCAT__CONTEXT__COMPACTION_MODEL: coldStart ? undefined : "gpt-5.4",
     TOMCAT__LLM__DEFAULT_MODEL: coldStart ? undefined : "gpt-5.4",
