@@ -238,7 +238,7 @@ impl Fixture {
             _key: key,
         }
     }
-    fn ctx(&self, mode: SessionMode, isolated: bool) -> ChatContext {
+    fn config(&self) -> AppConfig {
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(self.work.path().to_string_lossy().into_owned());
         cfg.llm.api_key_env = Some("TOMCAT_INVENTORY_TEST_KEY".into());
@@ -250,12 +250,43 @@ impl Fixture {
                 ),
             ],
         );
+        cfg
+    }
+    fn ctx(&self, mode: SessionMode, isolated: bool) -> ChatContext {
+        let cfg = self.config();
         let mut overrides = ChatContextOverrides::default()
             .with_session_cwd_override(self.workspace.path().to_path_buf());
         if isolated {
             overrides = overrides.with_fetch_http_client(reqwest::Client::new());
         }
         ChatContext::from_config_with_mode_and_overrides(cfg, mode, overrides).unwrap()
+    }
+    fn next_code_ctx(&self, current: &ChatContext) -> ChatContext {
+        let session = &current.session_runtime.session;
+        let id = session.current_session_id().unwrap().unwrap();
+        let entry = session.get_session_by_id(&id).unwrap().unwrap();
+        let key = session.current_session_key();
+        let manager = crate::SessionManager::new_scoped(
+            crate::resolve_sessions_dir(&current.config).unwrap(),
+            key,
+        );
+        manager
+            .create_session_with_project_root(key, entry.cwd, entry.project_root)
+            .unwrap();
+        let next = self.ctx(SessionMode::Code, false);
+        assert_ne!(
+            next.session_runtime
+                .session
+                .current_session_id()
+                .unwrap()
+                .unwrap(),
+            id
+        );
+        assert!(Arc::ptr_eq(
+            &current.scope_services.scope_container,
+            &next.scope_services.scope_container
+        ));
+        next
     }
     fn skill(&self, name: &str, description: &str) -> PathBuf {
         let root = self.workspace.path().join(".agents/skills").join(name);
@@ -317,6 +348,175 @@ async fn stop(ctx: &ChatContext) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(env_lock)]
+async fn shared_scope_plugin_binding_survives_context_construction_and_other_close() {
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    fixture.plugin("bound", "session", &script("bound", "fixture"));
+    let first = fixture.ctx(SessionMode::Code, false);
+    let second = fixture.next_code_ctx(&first);
+    let sid = second
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    let expected = serde_json::to_value(
+        second
+            .session_runtime
+            .session
+            .get_session_by_id(&sid)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let manager = second.global_services.plugin_manager.as_ref().unwrap();
+    let instance = manager.start_session_vm(&sid, "bound").await.unwrap();
+    let dispatcher = &second.scope_services.scope_container.dispatcher;
+    let request = || crate::ext::HostRequest {
+        module: "session".into(),
+        method: "getCurrentSession".into(),
+        params: json!({}),
+        call_id: None,
+    };
+    let before = dispatcher
+        .dispatch_async(&instance.instance_id, request())
+        .await
+        .unwrap();
+    stop(&first).await;
+    drop(first);
+    let after = dispatcher
+        .dispatch_async(&instance.instance_id, request())
+        .await
+        .unwrap();
+    stop(&second).await;
+    for response in [before, after] {
+        assert!(response.ok, "{}", serde_json::to_string(&response).unwrap());
+        assert_eq!(
+            response.data,
+            Some(expected.clone()),
+            "the live second session, not the scope's first session, owns this binding"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(env_lock)]
+async fn ending_plugin_session_rejects_an_inflight_continuations_message() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let proxy = MockServer::start().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let count = Arc::new(AtomicUsize::new(0));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let (release, pending) = std::sync::mpsc::channel();
+    let pending = parking_lot::Mutex::new(pending);
+    let entered_request = entered.clone();
+    let request_count = count.clone();
+    let barrier_timeout = timed_out.clone();
+    Mock::given(method("CONNECT"))
+        .respond_with(move |_: &wiremock::Request| {
+            if request_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                entered_request.notify_one();
+                barrier_timeout.store(
+                    pending.lock().recv_timeout(Duration::from_secs(5)).is_err(),
+                    Ordering::SeqCst,
+                );
+            }
+            ResponseTemplate::new(502)
+        })
+        .mount(&proxy)
+        .await;
+    let root = fixture.plugin(
+        "inflight",
+        "lazy",
+        r#"
+        pi.registerTool({name:'inflight_tool',description:'fixture',parameters:{type:'object'},
+          execute:async function(){
+            try { await pi.fetch({url:'https://example.com/cancel-fixture'}); } catch (_) {}
+            pi.sendUserMessage('PLUGIN_AFTER_FETCH');
+            return {done:true};
+          }});
+    "#,
+    );
+    let path = root.join("plugin.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["requiredPermissions"] = json!(["net:fetch"]);
+    manifest["allowedHosts"] = json!(["example.com"]);
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(proxy.uri()).unwrap())
+        .build()
+        .unwrap();
+    let ctx = ChatContext::from_config_with_mode_and_overrides(
+        fixture.config(),
+        SessionMode::Code,
+        ChatContextOverrides::default()
+            .with_session_cwd_override(fixture.workspace.path().to_path_buf())
+            .with_fetch_http_client(client),
+    )
+    .unwrap();
+    let sid = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    let registry = ctx.global_services.tool_registry.clone();
+    registry
+        .call_tool("inflight_tool", json!({}), "test", Some(&sid))
+        .await
+        .unwrap();
+    let before =
+        serde_json::to_string(&ctx.session_runtime.session.get_entries(256).unwrap()).unwrap();
+    assert_eq!(
+        before.matches("PLUGIN_AFTER_FETCH").count(),
+        1,
+        "without shutdown the continuation really writes a message"
+    );
+    let manager = ctx.global_services.plugin_manager.as_ref().unwrap();
+    let vm = manager.start_session_vm(&sid, "inflight").await.unwrap();
+    let call_session = sid.clone();
+    let call = tokio::spawn(async move {
+        registry
+            .call_tool("inflight_tool", json!({}), "test", Some(&call_session))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    manager.end_session(&sid).await.unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !matches!(
+            vm.current_state(),
+            crate::ext::VmActorState::Stopped | crate::ext::VmActorState::Error
+        ) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The actor is already done: dropping its caller cannot hide a late write.
+    call.abort();
+    let _ = call.await;
+    let after =
+        serde_json::to_string(&ctx.session_runtime.session.get_entries(256).unwrap()).unwrap();
+    assert!(
+        !timed_out.load(Ordering::SeqCst),
+        "the barrier fail-safe must not end the request"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        after, before,
+        "retired JS must not append after end_session returned"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

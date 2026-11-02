@@ -1092,7 +1092,7 @@ impl ChatContext {
         let session_runtime = SessionRuntime {
             session_mcp: RwLock::new(None),
             connection_skill_dir: RwLock::new(None),
-            session: session.clone(),
+            session: session_arc,
             message_append_sink: message_append_sink.clone(),
             cancel_token: cancel_token.clone(),
             last_interrupt_at: last_interrupt_at.clone(),

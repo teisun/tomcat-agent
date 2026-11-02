@@ -92,7 +92,8 @@ pub struct SessionRuntime {
     /// ACP-supplied connectors, replaced on control handoff and never cwd-cached.
     pub session_mcp: RwLock<Option<Arc<crate::core::connector::mcp::manager::McpManager>>>,
     pub connection_skill_dir: RwLock<Option<PathBuf>>,
-    pub session: SessionManager,
+    /// Own the exact allocation borrowed by the shared dispatcher's weak session binding.
+    pub session: Arc<SessionManager>,
     pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,

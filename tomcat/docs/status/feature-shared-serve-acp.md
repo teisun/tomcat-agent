@@ -143,6 +143,7 @@
 - 格式门禁 `1793586746321-u3lgcz` 指出分支原有 10 个 Rust 文件未按 rustfmt 排版；只修换行与尾逗号，不改逻辑。第一次手工排版复检 `1793587030632-azmmwb` 还差一个 assert_eq 换行，已修；该次因 fmt 失败没有启动编译或测试。版本镜像复检 `1793586880023-meeigw` 通过：CLI 0.1.81、扩展 0.1.97、bundled CLI 0.1.81，未改版本。
 - 空窗口视觉补验：使用现有 `gui` 的 `npm run dev` 与已配置 Playwright，真实 React 页面接收与 provider 用例一致的 degraded 状态，正文取英文源 catalog；桌面 1440×900、窄屏 390×844 的 `.agents/shots/shared-serve-review/empty-workspace-{desktop,narrow}.{png,aria.txt,console.json}` 均已读回。提示完整可见、窄屏自然换行、无横向溢出；设置按钮可用，聊天/发送禁用，采集范围内 errors=[]。这是页面呈现补验，不冒充 VS Code 空窗口端到端；T10 的真实安装态另行验收。验后已停止自建 Vite，未操作正式服务。
 - T17 / busy 局部修复已转绿：回合任务尚未接管前，rearm/切活动会话/ack 任一准备失败，都取消本轮 token、关闭 steering 并 mark_idle；不启动模型或工具。`1793587162521-afsa6t` 的原失败用例通过，断言没有任务、busy 释放、队列关闭且后来控制者能重新进入；同批 serve/资源库存/platform 为 325 passed / 0 failed / 1 ignored（既有手动项，不计通过），264.34s。编译器 SIGSEGV 后单编译任务重试成功，原崩溃根因未确认；测试仍按原并发运行。Clippy 结果另记。
+- T17 / 共享插件绑定局部修复已转绿：SessionRuntime 持有构造时已交给 dispatcher 的同一个 `Arc<SessionManager>`，而不是只保存内部值的 clone 后释放原 Arc；因此弱引用与实际会话同寿命，不改 scope 共享或 VM 初始化。`1793587162521-afsa6t` 中第二会话 getCurrentSession 在构造后和第一会话关闭后均返回第二会话；停止中的真实 JS/fetch 续体也未晚写历史，后者未复现缺陷，仅保留回归。旧式 bare-ID 动态初始化仍按 BLOCKED 单独记录。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
