@@ -213,31 +213,35 @@ async fn official_client_selects_a_model_and_receives_a_real_stream() {
     );
 }
 
+async fn receive_raw(
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    id: &str,
+) -> Vec<Value> {
+    use tokio::io::AsyncBufReadExt;
+    tokio::time::timeout(WAIT, async {
+        let mut frames = Vec::new();
+        loop {
+            let mut line = String::new();
+            assert!(
+                stdout.read_line(&mut line).await.unwrap() > 0,
+                "unexpected ACP EOF"
+            );
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["jsonrpc"], "2.0");
+            let finished = frame["id"] == id;
+            frames.push(frame);
+            if finished {
+                return frames;
+            }
+        }
+    })
+    .await
+    .expect("ACP reply deadline")
+}
+
 #[tokio::test]
 async fn slow_host_still_receives_the_complete_reply() {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-    async fn receive(stdout: &mut BufReader<tokio::process::ChildStdout>, id: &str) -> Vec<Value> {
-        tokio::time::timeout(WAIT, async {
-            let mut frames = Vec::new();
-            loop {
-                let mut line = String::new();
-                assert!(
-                    stdout.read_line(&mut line).await.unwrap() > 0,
-                    "unexpected ACP EOF"
-                );
-                let frame: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(frame["jsonrpc"], "2.0");
-                let finished = frame["id"] == id;
-                frames.push(frame);
-                if finished {
-                    return frames;
-                }
-            }
-        })
-        .await
-        .expect("ACP reply deadline")
-    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
     let chunks: Vec<_> = (0..500)
         .map(|i| format!("{i:04}{}", "x".repeat(2044)))
@@ -285,7 +289,7 @@ async fn slow_host_still_receives_the_complete_reply() {
             )
             .await
             .unwrap();
-        let frames = receive(&mut stdout, id).await;
+        let frames = receive_raw(&mut stdout, id).await;
         let reply = ok(&frames);
         if id == "new" {
             stdin.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":"slow","method":"session/prompt","params":{
@@ -294,7 +298,7 @@ async fn slow_host_still_receives_the_complete_reply() {
         }
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let frames = receive(&mut stdout, "slow").await;
+    let frames = receive_raw(&mut stdout, "slow").await;
     assert_eq!(ok(&frames)["stopReason"], "end_turn");
     let received = text(&frames, "agent_message_chunk");
     assert!(!received.contains("Tomcat transport notice"));
@@ -310,6 +314,183 @@ async fn slow_host_still_receives_the_complete_reply() {
         .await
         .unwrap()
         .unwrap();
+    assert!(tokio::time::timeout(WAIT, child.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+}
+
+#[tokio::test]
+async fn cancel_stops_background_work_before_a_backpressured_host_resumes_reading() {
+    use common::shared_serve::NativeClient;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let background = |name: &str| {
+        response(vec![
+            sse_tool_call(
+                name,
+                "bash",
+                &json!({"command":background_writer_command(name), "run_in_background":true})
+                    .to_string(),
+            ),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ])
+    };
+    let chunks: Vec<_> = (0..500)
+        .map(|i| format!("{i:04}{}", "x".repeat(2044)))
+        .collect();
+    let marker = "all queued before cancellation";
+    let expected = chunks.concat() + marker;
+    let mut parts: Vec<_> = chunks.iter().map(|chunk| sse_delta(chunk)).collect();
+    parts.extend([sse_delta(marker), sse_finish("stop"), sse_done()]);
+    let server = common::serve::spawn_paused_openai_stream_server(
+        vec![
+            background("other"),
+            response(vec![
+                sse_delta("other is working"),
+                sse_finish("stop"),
+                sse_done(),
+            ]),
+            background("job"),
+            response(parts),
+        ],
+        chunks.len() + 1,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let fx = ServiceFixture::new(&server.base_url);
+    fx.configure(|cfg| {
+        cfg.serve.delta_coalesce_ms = 0;
+        cfg.serve.max_buffered_frames = 4096;
+    });
+    let info = fx.action("start");
+    let mut observer = NativeClient::connect(&info).await;
+    let other = observer.new_session(&fx.0.workspace).await;
+    let accepted = observer.request(json!({"type":"prompt","id":"other-work","sessionId":other,"text":"start the other writer"})).await;
+    assert_eq!(accepted["success"], true);
+    observer
+        .until(|v| v["assistantMessageEvent"]["delta"] == "other is working")
+        .await;
+
+    // Unlike ServeChild, no background reader drains this real host pipe.
+    let mut child = tokio::process::Command::from(fx.command())
+        .arg("acp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut session = Value::Null;
+    for (id, method, params) in [
+        (
+            "init",
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        ),
+        (
+            "new",
+            "session/new",
+            json!({"cwd":fx.0.workspace,"mcpServers":[]}),
+        ),
+    ] {
+        stdin
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let frames = receive_raw(&mut stdout, id).await;
+        if id == "new" {
+            session = ok(&frames)["sessionId"].clone();
+        }
+    }
+    let opened = observer
+        .request(json!({"type":"switch_session","id":"observe","sessionId":session}))
+        .await;
+    assert_eq!(opened["success"], true);
+    assert_eq!(opened["payload"]["access"], "observe");
+    stdin.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":"work","method":"session/prompt","params":{
+        "sessionId":session,"prompt":[{"type":"text","text":"fill stdout and keep writing"}]
+    }})).as_bytes()).await.unwrap();
+    // Independent native observation proves the megabyte was queued before cancel;
+    // the ACP host still has not consumed a single prompt output frame.
+    observer
+        .until(|v| v["sessionId"] == session && v["assistantMessageEvent"]["delta"] == marker)
+        .await;
+    let pid = |name: &str| {
+        std::fs::read_to_string(fx.0.workspace.join(format!("{name}.pid")))
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    };
+    tokio::time::timeout(WAIT, async {
+        while pid("job").is_none() || pid("other").is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both real writers started");
+    let job_pid = pid("job").unwrap();
+    let other_pid = pid("other").unwrap();
+    assert!(fixture_process_alive(job_pid) && fixture_process_alive(other_pid));
+    stdin
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while fixture_process_alive(job_pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancel must stop the shell while host stdout is still blocked");
+    let ticks = |name: &str| {
+        std::fs::metadata(fx.0.workspace.join(format!("{name}.ticks")))
+            .unwrap()
+            .len()
+    };
+    let before = (ticks("job"), ticks("other"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ticks("job"), before.0);
+    assert!(fixture_process_alive(other_pid) && ticks("other") > before.1);
+
+    let frames = receive_raw(&mut stdout, "work").await;
+    let terminals: Vec<_> = frames.iter().filter(|v| v["id"] == "work").collect();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0]["result"]["stopReason"], "cancelled");
+    assert_eq!(text(&frames, "agent_message_chunk"), expected);
+
+    let terminal = frames.iter().position(|v| v["id"] == "work").unwrap();
+    assert!(frames[terminal + 1..]
+        .iter()
+        .all(|v| v["method"] != "session/update"));
+    let closed = observer
+        .request(json!({"type":"close_session","id":"stop-other","sessionId":other}))
+        .await;
+    assert_eq!(closed["success"], true);
+    drop(stdin);
+    let mut remaining = Vec::new();
+    tokio::time::timeout(WAIT, stdout.read_to_end(&mut remaining))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        remaining.is_empty(),
+        "no second terminal or late update after cancellation"
+    );
     assert!(tokio::time::timeout(WAIT, child.wait())
         .await
         .unwrap()
@@ -1399,16 +1580,21 @@ fn fixture_process_alive(pid: u32) -> bool {
     }
 }
 
+fn background_writer_command(name: &str) -> String {
+    // MSYS $$ is not a native Windows PID; Node reports the actual child PID.
+    if cfg!(windows) {
+        format!(
+            r#"node -e 'const fs=require("node:fs");fs.writeFileSync("{name}.pid",String(process.pid));fs.writeFileSync("{name}.ticks","t");setInterval(()=>fs.appendFileSync("{name}.ticks","t"),50)'"#
+        )
+    } else {
+        format!("echo $$ > {name}.pid; while :; do printf t >> {name}.ticks; sleep 0.05; done")
+    }
+}
+
 fn background_turn_shutdown(how: &str) {
     let mut delayed = sse_delta("still working");
     delayed.delay_ms = 10_000;
-    // MSYS shell $$ is not a native Windows PID. Have a real Node subprocess
-    // report its OS PID and keep writing, so Windows checks actual process death.
-    let command = if cfg!(windows) {
-        r#"node -e 'const fs=require("node:fs");fs.writeFileSync("job.pid",String(process.pid));fs.writeFileSync("job.ticks","t");setInterval(()=>fs.appendFileSync("job.ticks","t"),50)'"#
-    } else {
-        "echo $$ > job.pid; while :; do printf t >> job.ticks; sleep 0.05; done"
-    };
+    let command = background_writer_command("job");
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             sse_tool_call(

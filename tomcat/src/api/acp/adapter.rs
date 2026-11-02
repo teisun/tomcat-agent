@@ -323,29 +323,51 @@ impl Adapter {
         let adapter = self.clone();
         Ok(async move {
             let outcome = async {
-                adapter
-                    .native(QueuedCommand {
-                        command: ServeCommand::Prompt {
-                            id: Some(id.clone()),
-                            session_id: Some(session_id.clone()),
-                            text,
-                            params: Default::default(),
-                        },
-                        turn_token: Some(cancellation),
-                        session_mcp: None,
-                    })
-                    .await?;
-                // accepted/agent_end are not completion. Keep this request pending
-                // through cancellation cleanup so another prompt cannot overtake it.
-                let response = result.await.map_err(|_| failed("connection_closed"))??;
-                if response.stop_reason == acp::StopReason::Cancelled {
+                let completion = async {
+                    adapter
+                        .native(QueuedCommand {
+                            command: ServeCommand::Prompt {
+                                id: Some(id.clone()),
+                                session_id: Some(session_id.clone()),
+                                text,
+                                params: Default::default(),
+                            },
+                            turn_token: Some(cancellation.clone()),
+                            session_mcp: None,
+                        })
+                        .await?;
+                    result.await.map_err(|_| failed("connection_closed"))?
+                };
+                tokio::pin!(completion);
+                let stop = || async {
+                    // EOF belongs to the existing disconnect cleanup, not this turn.
+                    if adapter.state.lifetime.is_cancelled() {
+                        return Ok(());
+                    }
                     adapter
                         .state
                         .finish_cancelled_turn(&session_id)
                         .await
-                        .map_err(|e| failed(e.to_string()))?;
+                        .map_err(|error| failed(error.to_string()))
+                };
+                // Both acceptance and agent_idle pass through the output writer.
+                // Stop work independently of that backpressure; keep the terminal
+                // and pending-prompt ownership behind the same ordered output.
+                tokio::select! {
+                    response = &mut completion => {
+                        let response = response?;
+                        if response.stop_reason == acp::StopReason::Cancelled {
+                            stop().await?;
+                        }
+                        Ok(response)
+                    }
+                    _ = cancellation.cancelled() => {
+                        let (response, stopped) = tokio::join!(&mut completion, stop());
+                        let response = response?;
+                        stopped?;
+                        Ok(response)
+                    }
                 }
-                Ok(response)
             }
             .await;
             let mut pending = adapter.replies.prompts.lock();
