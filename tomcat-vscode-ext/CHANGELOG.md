@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.98
 
 - Connect VS Code windows and Paperclip/Multica to one local Tomcat background service instead of starting a private server for each window. Closing a window leaves the service running, but still cancels tasks controlled by that window.
 - Shared-service model API keys now come from Tomcat Settings, not environment-variable fallbacks. If your key exists only in shell exports or in a Paperclip/Multica agent's environment settings, save it once in Tomcat Settings after upgrading. Already-saved keys need no migration; terminal chat and legacy stdio keep their existing behavior.
@@ -8,6 +8,13 @@
 - The folder-level permission approval now saves that folder in Tomcat's workspace permissions across sessions, matching the CLI, instead of granting access only for the current VS Code session.
 - Add an explicit shared-service restart command and a restart button when the extension's CLI version differs from the running service. Restarting stops every task on that service; a version mismatch now stops connection retries immediately rather than offering an ineffective retry.
 - Observe Paperclip/Multica sessions read-only through the existing session picker when the window is open on the same project. Other projects remain hidden; for a separate worktree, open that worktree. Closing an observer view does not stop the host's task.
+- Recover unresponsive chat panels automatically. Fix request-level retries and add a cancellable five-minute countdown before retrying or resuming eligible failed turns, without switching away from the session you are viewing.
+- Preserve read-only observer sessions when the panel is rebuilt, avoid duplicated historical text from late streaming events, and cancel obsolete automatic recovery when restoring a checkpoint.
+- Fix attachment selection on Windows and Linux by choosing files or folders before opening the native picker. Preserve complete filesystem paths for references from multi-root workspaces while keeping their displayed labels short.
+- Verify the advertised shared-service instance before forwarding the controller's environment. On Windows, probe Git only after command permission approval and bound probe duration.
+- Improve built-in planning and review guidance to check execution prerequisites and request foreseeable risk authorization during planning. Avoid redundant confirmation within approved boundaries without weakening tool permissions.
+- Install the standalone CLI as an independent copy on macOS and other Unix systems, so cleaning a developer build directory no longer breaks the installed command. Re-run installation to update that copy; building alone no longer updates it.
+- Bundle CLI 0.1.82 in platform-specific packages. Pure-extension users must update their external CLI to use the new shared-service protocol and these fixes. If an older background service is still running, use the explicit restart command after checking its active tasks; restarting stops all of them.
 
 ## 0.1.96
 
