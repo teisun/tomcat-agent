@@ -10,7 +10,7 @@
 #   ./scripts/run-integration-tests.sh clippy               # 仅 cargo clippy --all-targets -- -D warnings
 #   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（cargo test --lib）
 #   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
-#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + 六个 serial 目标）
+#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + 十个 serial 目标）
 #   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（nextest 4 并发，含原串行组已放开的 binary）
 #   ./scripts/run-integration-tests.sh integration-parallel -E 'test(=case_name)' # 聚焦重跑；后续参数原样传给 nextest
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（也支持 nextest 过滤参数）

@@ -5,7 +5,7 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-A lightweight Rust-based AI agent runtime and VS Code extension built as a hands-on project for learning agent development: [`tomcat/`](tomcat/) provides the runtime, CLI, and `tomcat serve --stdio`, while [`tomcat-vscode-ext/`](tomcat-vscode-ext/) provides Tomcat Agent Box inside VS Code.
+A lightweight Rust-based AI agent runtime and VS Code extension built as a hands-on project for learning agent development: [`tomcat/`](tomcat/) provides the runtime, CLI, per-agent shared service, and `tomcat acp`, while [`tomcat-vscode-ext/`](tomcat-vscode-ext/) provides Tomcat Agent Box inside VS Code.
 
 ![Tomcat Agent Box screenshot](assets/tomcat-agent-box.png)
 
@@ -43,13 +43,13 @@ After first-time `tomcat init` has set up PATH, run `.\scripts\dev-install.cmd` 
 
 | Component | Purpose | Primary docs |
 | --- | --- | --- |
-| [`tomcat/`](tomcat/) | Rust agent runtime, CLI, and `tomcat serve --stdio` | [User Guide](tomcat/docs/user-guide.md), [tomcat/src/README.md](tomcat/src/README.md) |
+| [`tomcat/`](tomcat/) | Rust agent runtime, CLI, shared service and ACP entry | [User Guide](tomcat/docs/user-guide.md), [tomcat/src/README.md](tomcat/src/README.md) |
 | [`tomcat-vscode-ext/`](tomcat-vscode-ext/) | VS Code extension and Tomcat Agent Box | [tomcat-vscode-ext/README.md](tomcat-vscode-ext/README.md) |
 
 ```text
 tomcat/
 ├── src/
-│   ├── api/              # CLI, serve --stdio, config, session, plugin, audit, ...
+│   ├── api/              # CLI, shared serve, ACP, legacy stdio, config, session, ...
 │   ├── core/             # Agent Loop, LLM, sessions, tools, permissions, checkpoints, plan
 │   ├── ext/              # Plugins and extension capabilities
 │   └── infra/            # Config, logging, auditing, event bus, errors, platform I/O
@@ -77,24 +77,23 @@ Infrastructure layer (infra)
     ↑
 Core host capability layer (core) — sessions, LLM, Agent Loop, Compaction, tools, permissions, checkpoints, plan
     ↑
-Interaction layer (api) — CLI `chat` + `serve --stdio` (for VS Code Tomcat Agent Box)
+Interaction layer (api) — CLI `chat` + shared `serve` + `acp` + legacy `serve --stdio`
 ```
 
-The same runtime core powers both main entry points; only the interaction layer differs:
+The entry points reuse the same agent core. VS Code and ACP clients connect to a shared service for each Agent; CLI chat and legacy stdio retain their standalone entry points:
 
 ```text
-VS Code Tomcat Agent Box
-    -> tomcat serve --stdio
-    -> AgentLoop
-    -> LlmProvider
-    -> tool execution / transcript / audit
+VS Code Agent Box -- native local IPC -----+
+  discovery: serve status / serve start    |
+ACP host -> tomcat acp -- local IPC -------+-> shared serve -> AgentLoop
 
-CLI chat
-    -> SessionManager
-    -> AgentLoop
-    -> LlmProvider
-    -> tool execution / transcript / audit
+Legacy client -> tomcat serve --stdio ----------------------> AgentLoop
+CLI chat --------------------------------------------------> AgentLoop
+
+AgentLoop -> LlmProvider -> tool execution / transcript / audit
 ```
+
+The extension connects directly; it does not start a relay per window. The CLI checks the service's operating-system account during discovery. Before sending environment variables, the extension checks that its connection reports the same service instance ID, then waits for the service's `ready` reply. Standard ACP hosts use `tomcat acp`; `serve --stdio` is the legacy Tomcat protocol, not ACP. Open a project folder in VS Code before starting a chat; an empty window does not borrow the service process's working directory.
 
 See [Project Overview](tomcat/docs/architecture/project-overview-panorama.md) for the full picture.
 

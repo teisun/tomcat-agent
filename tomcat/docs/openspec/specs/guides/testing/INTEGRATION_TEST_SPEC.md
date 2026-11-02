@@ -126,7 +126,7 @@ my_project/
 *   **分类执行约定（本仓库）**：Rust 门禁唯一入口仍是 `./scripts/run-integration-tests.sh`；`integration*` 统一走 `cargo-nextest`，`lib` / `doctest` 继续用 `cargo test`，避免把纯单测误切到“一用例一进程”模型。
 *   运行默认集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`
 *   仅运行默认 integration 组：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
-*   仅运行 serial 兜底组（当前六个进程密集目标）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
+*   仅运行 serial 兜底组（当前十个进程密集目标）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
 *   运行真 LLM 显式层：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-real-llm`
 *   40K 单列表长会话是付费手动专项，不计入 `integration-real-llm` 的执行数。显式运行（先构建当前 CLI）：`cargo build --bin tomcat && TOMCAT_REAL_LLM_E2E=1 RUST_LOG=tomcat=debug,info cargo test -j 1 --test single_list_real_llm_long_session_e2e real_terra_long_session_exercises_single_list_handoffs -- --ignored --exact --nocapture --test-threads=1`。模型由 `TOMCAT_E2E_GUARD_REAL_MODEL` 选择，默认 `idatatlas/gpt-5.6-terra`，复制该模型的现有 models.toml 条目；只向隔离的 Serve 子进程显式传入该条目所需凭据，并保留原有父环境过滤规则。缺前提或调用失败不得计通过。
 *   运行 Rust 快门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
@@ -140,8 +140,8 @@ my_project/
 
 **当前模型（默认追求最省时间）**：
 
-1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc` 等；下一项列出的六个目标除外。
-2. **serial 兜底组**：`test-groups.serial.max-threads = 1`；当前为 `project_trust_cli_tests`、`serve_multi_session`、`serve_ask_question_tests`、`serve_robustness_tests`、`serve_stdio_e2e`、`serve_rewind_and_resend`。`test-groups.sh` 记录了三轮门禁中并发启动会错过首帧 10 秒预算的回退依据；不得为了宣称并行而重新放开。新增回退仍需 3x 连跑证明确实互踩、OOM 或明显抖动。
+1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc` 等；下一项列出的十个目标除外。
+2. **serial 兜底组**：`test-groups.serial.max-threads = 1`；当前为 `project_trust_cli_tests`、`serve_multi_session`、`serve_ask_question_tests`、`serve_robustness_tests`、`data_dir_forward_compat_tests`、`serve_stdio_e2e`、`serve_shared_e2e`、`acp_stdio_e2e`、`acp_observer_e2e`、`serve_rewind_and_resend`。`test-groups.sh` 记录了三轮门禁中并发启动会错过首帧 10 秒预算的回退依据；不得为了宣称并行而重新放开。新增回退仍需 3x 连跑证明确实互踩、OOM 或明显抖动。
 3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS`、`TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS` 及 `TOMCAT_INTEGRATION_REAL_LLM_CASES`；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
 4. **本地服务特性与手动项**：`TOMCAT_INTEGRATION_FEATURE_TESTS` 随默认门禁启用 `test-streamable-http-server`，覆盖本机 HTTP/OAuth 测试服务；`TOMCAT_INTEGRATION_MANUAL_TESTS` / `MANUAL_CASES` 明确列出需专用环境的用例，不把它们伪称离线或 real-llm 已通过。`integration_gate_config_tests` 对照 Cargo targets 检查分类遗漏。
 

@@ -5,7 +5,9 @@
   <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md">简体中文</a>
 </p>
 
-Tomcat Agent Box brings the `tomcat serve --stdio` runtime into a dedicated VS Code sidebar.
+Tomcat Agent Box connects its dedicated VS Code sidebar directly to Tomcat's per-Agent shared service over local IPC. It discovers or starts the service through `tomcat serve status` / `tomcat serve start`; windows share the service, not their session selection or control rights.
+
+Standard ACP hosts use `tomcat acp`. The standalone `tomcat serve --stdio` entry remains available for legacy Tomcat-protocol clients; it is not the extension's default connection path or an ACP endpoint.
 
 ![Tomcat Agent Box screenshot](https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png)
 
@@ -48,6 +50,8 @@ Configure a model through **Add Models...** and supply the credentials required 
 3. VS Code reveals the Secondary Side Bar and focuses Tomcat Agent Box.
 
 You can also open the Secondary Side Bar yourself and click the Tomcat Agent Box icon.
+
+Open a project folder before starting a chat. With no working directory, the panel asks you to open a folder rather than using the background service's directory. The extension verifies the discovered service instance before sending environment variables and waits for `ready` before sending session requests.
 
 ## First-time setup
 

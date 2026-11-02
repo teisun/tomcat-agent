@@ -5,7 +5,9 @@
   <a href="https://github.com/teisun/tomcat-agent/blob/main/tomcat-vscode-ext/README.zh.md">简体中文</a>
 </p>
 
-Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 侧边栏中。
+Tomcat Agent Box 的 VS Code 侧边栏通过本机 IPC 直接连接每个 Agent 的共享服务，使用 `tomcat serve status` / `tomcat serve start` 发现或启动服务。多个窗口共用后台服务，但不共用所选会话或控制权。
+
+标准 ACP 宿主使用 `tomcat acp`。独立的 `tomcat serve --stdio` 保留给旧 Tomcat 协议客户端，不是扩展的默认连接路径，也不是 ACP 入口。
 
 ![Tomcat Agent Box screenshot](https://raw.githubusercontent.com/teisun/tomcat-agent/main/assets/tomcat-agent-box.png)
 
@@ -48,6 +50,8 @@ Windows 上下载 `tomcat-vscode-ext-<版本>-win32-x64.vsix`，传入完整路�
 3. VS Code 会展开 `Secondary Side Bar` 并聚焦到 Tomcat Agent Box。
 
 你也可以自己打开 `Secondary Side Bar`，然后点击 Tomcat Agent Box 图标。
+
+开始对话前请打开项目文件夹。没有工作目录时，面板会提示先打开文件夹，不借用后台服务的目录。扩展先核对服务编号，再发送环境变量；收到 `ready` 后才发送会话请求。
 
 ## 首次设置
 

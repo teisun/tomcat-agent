@@ -882,7 +882,7 @@ Tomcat 保存的凭据 --------> Tomcat 调用大模型（不从会话环境取 
 
 ### 4.1 本机握手与优雅离开
 
-本机流先交换一行 JSON 握手；native/acp 成功后在同一连接传相应协议消息，status/stop 用于管理服务。握手只存在于本机 IPC，不进入宿主的 ACP stdout，也不送给 LLM。下面列出当前 `ConnectionHello` 的全部字段；客户端应显式发送环境快照。
+本机 IPC 按 `protocol` 区分握手：Native 必须先核对服务编号、再交环境；ACP 保持原来的单次 hello；status/stop 用于管理服务。握手不进入宿主的 ACP stdout，也不送给 LLM。下面是 `ConnectionHello` 的字段，Native 的环境记录另列在表后。
 
 | 字段 | JSON 类型 | 必填 | 默认值 | 适用场景 | 说明 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -890,12 +890,30 @@ Tomcat 保存的凭据 --------> Tomcat 调用大模型（不从会话环境取 
 | `protocolVersion` | integer（u32） | 是 | 无 | 所有握手 | 当前为 1，非 ACP 版本；不匹配拒绝 | 先确认内部协议兼容。 |
 | `clientVersion` | string | 是 | 无 | 所有握手 | 客户端二进制版本；仅 native 要与服务版本相同，ACP 只受本机协议版本约束 | 界面版本要匹配，中转不必同版本。 |
 | `protocol` | string | 是 | 无 | 所有握手 | `native` / `acp` / `status` / `stop`；未知值/null 拒绝 | 这条连接接下来做什么。 |
-| `environment` | object<string,string> | 否（客户端应传） | `{}` | 连接环境 | 当前反序列化允许省略；null 拒绝；空表不回退服务环境 | 没带变量就是没有，不借别人的。 |
+| `environment` | object<string,string> | ACP 客户端应传；Native hello 禁止 | ACP 省略时为空表 | ACP 连接环境 | Native 改在核对 ServiceInfo 后单独发送；ACP 空表不回退服务环境 | 敏感变量不能在认清收件人之前交出去。 |
 | `skillsDir` | string/null | 否 | null | ACP 连接 | 省略/null 不叠加；非空时须是可读绝对目录且 protocol 为 acp | 可选宿主私有技能目录。 |
+
+**Native 的实际顺序：**
+
+```text
+CLI 预检：核对服务端系统账号 -> 读取 ServiceInfo.instanceId
+                                              |
+扩展直连：hello（不含环境） -> ServiceInfo -> 比对同一编号
+                                              |
+                              匹配才发 {"environment": {...}}
+                                              |
+                              服务校验 -> {"ready": true}
+                                              |
+                              initialize / new_session / 其它业务
+```
+
+环境里可能含 API key，所以不能先发再核对。系统账号由既有 Rust 本机连接层验证；扩展用预检拿到的编号确认新连接仍指向那一台服务，不新增认证进程或持久 token，也不声称能防同账号恶意程序。编号不符、被拒或坏回复时不发送环境；Native 第二阶段仍使用原来的总握手期限。
+
+Native hello 带旧式 `environment`（包括空对象）时，新服务回复 `native_handshake_outdated`；新扩展遇到同版本旧握手形状时提示重启旧构建。`LOCAL_PROTOCOL_VERSION` 仍为 1，status/stop 与 ACP hello 不变，新 CLI 仍能管理旧服务。Native 的第二条记录必须带有效环境对象，成功的 `ready` 不回显环境。实现见 `tomcat/src/api/serve/service.rs` 的 `handle_connection`、`tomcat-vscode-ext/src/serveClient/sharedConnection.ts` 的 `connectSharedService`，以及 `tomcat/src/infra/platform/local_socket.rs` 的 `connect`。
 
 `environment` 是 K-V 对象，不是字符串化 JSON，也不是 ACP `mcpServers[].env` 的数组。名称/值必须能表示为 UTF-8；名称不许为空或含 `=`/NUL，值不许含 NUL；Windows 额外拒绝忽略大小写后的重名。源码：`tomcat/src/infra/platform/environment.rs::capture`、`validate`。
 
-握手整行（含换行）上限为 1MiB，连接/握手等待为 5 秒。`write_json` 序列化后追加 `\n`；`read_json` 有界读到换行再解析。非法 JSON/缺必填字段等解码失败可直接结束连接；解码成功后的版本、环境或技能目录校验失败，回复带 `error` 后结束，不承诺所有失败都有统一 JSON 错误外壳。
+每条握手记录（含换行）上限为 1MiB，连接/握手等待为 5 秒；Native 读第二条环境记录不会重新开始计时。`write_json` 序列化后追加 `\n`；`read_json` 有界读到换行再解析。非法 JSON/缺必填字段等解码失败可直接结束连接；解码成功后的版本、环境或技能目录校验失败，回复带 `error` 后结束，不承诺所有失败都有统一 JSON 错误外壳。
 
 ```text
 acp 的进程环境
@@ -908,9 +926,9 @@ acp 的进程环境
 握手成功后：同一条连接继续传 ACP；宿主只看见标准 ACP 输入/输出。
 ```
 
-**说人话：**首次接线时先递一次“任务配置单”，之后才转接对话。握手是 Tomcat 内部交接，不要求 Paperclip 或 Multica 会讲这套消息。
+**说人话：**ACP 中转仍沿用先递“任务配置单”、再转接对话的路径；Native 扩展先核对服务编号，再递配置单。两者都是 Tomcat 内部交接，不要求 Paperclip 或 Multica 会讲这套消息。
 
-下例值均为虚构；为便于阅读排成多行，实际线上压成一行并以换行结束。`<binary-version>` 须替换成双方实际相同的版本，路径随平台改变：
+下例是 ACP hello，值均为虚构；为便于阅读排成多行，实际线上压成一行并以换行结束。`<binary-version>` 替换成客户端实际版本，路径随平台改变；仅 Native 要求客户端与服务产品版本相同：
 
 ```json
 {
@@ -946,7 +964,7 @@ acp 的进程环境
 
 回复中的字段均由服务填写：`service`、`serverVersion`、`instanceId`、`agentId`、`endpoint` 是字符串，`protocolVersion`、`pid` 是 u32，`running` 是 boolean；没有缺省/null。`endpoint` 在 Windows 为命名管道名称。校验失败时同一对象额外带 `error` 字符串，成功时省略。客户端核对 service、端点、agent、协议和服务版本，环境值不参与日志输出。证据：`tomcat/src/api/serve/service.rs::ServiceInfo`、`open_management`、`handle_connection`。
 
-**优雅离开也按当前实现校正。** relay 在宿主 stdin EOF 后，沿**原本的本机数据连接**发送私有记录；不另建旧草案中的 `drain_connection` 管理连接。下面的 `NUL` 表示一个零字节，`LF` 表示换行，不是把这些字母作为 JSON 发送：
+**ACP 中转的优雅离开也按当前实现校正。** 以下私有 close/确认记录仅用于 `tomcat acp` 中转；Native 扩展仍沿用 socket EOF 与原断连清理，不新增关闭握手。relay 在宿主 stdin EOF 后，沿**原本的本机数据连接**发送私有记录；不另建旧草案中的 `drain_connection` 管理连接。下面的 `NUL` 表示一个零字节，`LF` 表示换行，不是把这些字母作为 JSON 发送：
 
 ```text
 宿主关闭 stdin

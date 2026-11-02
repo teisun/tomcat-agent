@@ -339,6 +339,8 @@ sequenceDiagram
 
 ## 1. 术语统一
 
+**共享服务补充：** 控制连接可提供私有技能目录，实际同名优先级为 `Connection > Project > Agent > Managed`；下文 P0–P2 指后三层基础库存。Connection 只进入当前会话的技能视图，不写回共享 scope 清单，控制权交接时替换；禁用规则和读盘权限不变。证据：`src/core/skill/discovery.rs::discover_with_connection`、`src/core/skill/model.rs::SkillSource`、`src/api/chat/context.rs::bind_connection_skill_dir`。
+
 
 | 术语                                | 语义（大白话）                                                | 数据载体                                                                                 | 行为约束                                                                                                          | 说人话                                 |
 | --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
@@ -349,7 +351,7 @@ sequenceDiagram
 | **skill body（技能正文）**              | `SKILL.md` 去掉 frontmatter 后的正文指令                       | 磁盘文件；`load_skill` 读出后作为 tool 消息文本                                                    | 仅在装载时读盘；可引用 `references/*.md` 等同目录附件（`load_skill(name, file=...)`）                                            | 技能的「正文操作步骤」。                        |
 | `**load_skill`（工具）**              | 模型按 **名字** 装载某条技能完整正文的内置工具                             | `BUILTIN_TOOL_CATALOG` 新条目；`tool_exec/branches/load_skill.rs::handle_load_skill`     | `scope=Read`、`read_only=true`；按 name 解析（避免模型猜路径）；正文读盘仍过 `PermissionGate`                                      | 模型说「我要用 pdf 技能」，这个工具就把 pdf 技能正文调出来。 |
 | **discovery root（发现根）**           | 扫描 `SKILL.md` 的来源目录层级                                  | `core::skill::discovery::skill_roots()`                                              | 三层优先级 P0→P2：Project（`agent_workspace_dir/.tomcat/skills`）> Agent（`~/.tomcat/agents/<agentId>/skills/`）> Managed（`~/.tomcat/skills/`）；Project = 当前 CLI cwd 下的 `.tomcat/skills`，与 `[permission-system.md](./permission-system.md)` 对 `agent_workspace_dir` 的语义一致；官方内置 skill 在创建聊天上下文时先写入 P2，再按普通 Managed skill 被发现 | 技能从哪几个目录找出来，谁优先。                    |
-| **source / precedence（来源与优先级）**   | 同名技能的去重裁决依据                                            | `Skill.source: SkillSource{Project,Agent,Managed}`                                   | 同名 **first-wins**（高优先级先入选，低优先级丢弃 + warning）                                                                   | 同名技能撞车时，优先级高的赢。                     |
+| **source / precedence（来源与优先级）**   | 同名技能的去重裁决依据                                            | `Skill.source: SkillSource{Connection,Project,Agent,Managed}`                                   | 同名 **first-wins**（高优先级先入选，低优先级丢弃 + warning）                                                                   | 同名技能撞车时，优先级高的赢。                     |
 | `**disable_model_invocation`**    | 该技能是否对模型隐藏（仅用户可用）                                      | frontmatter `disable-model-invocation: true` → `Skill.disable_model_invocation`      | `true` → 不进 `<available_skills>`、`load_skill` 拒绝；用户 `/skill use <name>` 仍可用                                              | 这条技能不让模型自己点，只能用户主动用。                |
 | **官方内置 skill 资产**                  | 随 tomcat 发版的官方 skill 文件源                                   | `tomcat/assets/skills/`（编译嵌入），创建聊天上下文时写入 `<work_dir>/skills/`          | 不是独立发现根；写入后按普通 Managed skill 参与发现/披露/装载；用户可见、可删、可被 P0/P1 覆盖                                             | 出厂自带几条 skill，但发现链路里不单独加一档。             |
 | **Skill vs Plugin（技能 vs 插件）**     | 技能是「惰性指令文本」，插件是「可执行代码」                                 | Skill：`core/skill`（无 hostcall）；Plugin：`ext/plugin`（`rquickjs` 插件运行时）                   | 技能 **不能** 自己执行代码、不注册工具；要执行的动作交给既有工具 + 权限闸门                                                                    | 技能是说明书，插件才是能跑的程序，两条线。               |
@@ -825,7 +827,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 | `tomcat.config.toml` | `[skills] max_description_chars`     | 单条描述截断                            | config      | 默认 250。   |
 | `tomcat.config.toml` | `[skills] disabled`                | 按名拉黑技能                              | config      | 临时禁某几条。   |
 | `tomcat.config.toml` | `[skills] expose_to_reviewer`      | reviewer/verifier 是否可用 `load_skill` | config      | 默认 false。 |
-| 磁盘 P0              | `<agent_workspace_dir>/.agents/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
+| 磁盘 P0              | `<agent_workspace_dir>/.agents/skills/` | 当前 project 本地技能（基础库存中优先级最高）              | —           | 当前仓库自己写的技能。 |
 | 磁盘 P1              | `~/.tomcat/agents/<agentId>/skills/` | 当前 agent 专属技能                         | —           | 绑定 agent 的技能。 |
 | 磁盘 P2              | `~/.tomcat/skills/`                | 全局托管技能（Gateway 安装）                  | —           | 集中管理的技能。  |
 | 编译期资产源 | `tomcat/assets/skills/` | 官方内置技能文件源，须登记进 `build.rs` | build/context | 不是发现根；创建聊天上下文时写入 P2 Managed。 |
