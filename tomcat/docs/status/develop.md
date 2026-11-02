@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-03 00:21 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-03 00:58 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -111,15 +111,16 @@ VS Code            → 原生连接 → 同项目实时只读旁观
 - **验收后续修复**：§13 验收发现的 MCP 退出卡住、路径分隔符混用、验收脚本 CLI 路径，以及 CI 暴露的问题，都在 `afbec1ff` 之后另行提交（`26af661d`、`a8a100f0`、`bb8c618f`），因此正式标签须打在新提交上，并重新跑 release-cli 后再推 EXT 标签。
 - **平台层收口**：按 `平台层收口整改_90f59927` 把业务层的平台 `cfg` 与系统 crate 调用清零，`infra/platform` 成为唯一平台差异层，由 `platform/tests/boundary_test.rs` 守护；预检两平台统一为后台安装。工作流 `windows-ci.yml` 改名为 `ci.yml`，rust gate-fast 扩成 Windows / Ubuntu / macOS 三平台矩阵（上文 windows-ci run 均为改名前的记录）。本改动纳入本轮 CLI `0.1.79` / EXT `0.1.95`；`ext-v0.1.94` 保持未发布。明细与证据见 [feature-windows-support.md](feature-windows-support.md)「平台层收口」。
 
-### CURRENT RELEASE：CLI 0.1.82 / EXT 0.1.98
+### CURRENT RELEASE：CLI 0.1.83 / EXT 0.1.99（整改续发）
 
-- **准备状态**：用户执行标准 `/release-cli-ext`，源码基线 `12445089`。仅运行版本脚本一次：CLI `0.1.81 → 0.1.82`、EXT `0.1.97 → 0.1.98`，新 EXT pin CLI `0.1.82`；五个版本源/镜像的差异只有业务版本，无依赖变化。起手工作区干净，本地/远端目标 tag 未占用，develop/main/master 可快进同步；版本一致性与两个 tag guard 已通过。
+- **首次准备**：用户执行标准 `/release-cli-ext`，源码基线 `12445089`。仅运行版本脚本一次：CLI `0.1.81 → 0.1.82`、EXT `0.1.97 → 0.1.98`，新 EXT pin CLI `0.1.82`；五个版本源/镜像的差异只有业务版本，无依赖变化。起手工作区干净，本地/远端目标 tag 未占用，develop/main/master 可快进同步；版本一致性与两个 tag guard 已通过。
 - **CHANGELOG**：以 GitHub 实际已发布的 `ext-v0.1.96` 为基线核对提交与相关差异，将 Unreleased 收入 `0.1.98`，补齐共享后台/ACP、凭据与代理升级提醒、恢复与引用修复、握手/Windows 探测安全边界、规划授权前置及 Unix 安装副本说明。注明 bundled CLI `0.1.82`；已发布历史条目不改，不为未发布的 `0.1.97` 虚构记录。版本与 CHANGELOG 必须同一提交。
 - **执行边界**：本地仅做版本镜像、tag guard、CHANGELOG 与差异检查，不额外运行产品测试、构建或安装，不重启在用服务。推送 develop 后仅 fast-forward 同步 main/master；先发布 CLI，确认四平台归档与 SHA256SUMS 就绪后才发布 EXT，沿用既有 GitHub 构建及四平台原生安装验收。
-- **发布结果（BLOCKED）**：release 提交 `3441b9e87931b0e83f338a4a76f0e791fd044c0e` 已推送并快进同步 develop/main/master。CLI run `41462040464` 成功，四平台归档与 SHA256SUMS 已公开，实际下载哈希均通过。EXT run `41464467206` 打包与 Windows 原生验收通过，但两种 macOS 和 Linux 的真实 `serve restart` 失败；EXT GitHub/Marketplace 发布均 skipped。两个 tag 保留，不能将 CLI 发布成功写成 Unix 运行验收通过。
-- **整改进行中**：用户已授权修复后以新 patch（拟 CLI `0.1.83` / EXT `0.1.99`）继续，不改旧 tag/资产。先修已确认的 readline 未处理错误与夹具超时常量漏导出，新增真实连接失败回归和 80 秒超时断言；固定 Linux 构建为验收使用的 Ubuntu 22.04，并按 runner/target 隔离缓存。保留隔离 HOME 的服务日志，复用现有两条 workflow_dispatch dry-run 取得证据后再正式发布；本地只做差异检查，不跑测试/构建。原生 CLI 重启底层根因尚未确认，不吞掉错误或放宽断言。
+- **首次发布（被拦）**：release 提交 `3441b9e87931b0e83f338a4a76f0e791fd044c0e` 已推送并快进同步 develop/main/master。CLI run `41462040464` 成功，四平台归档与 SHA256SUMS 已公开，实际下载哈希均通过。EXT run `41464467206` 打包与 Windows 原生验收通过，但两种 macOS 和 Linux 的真实 `serve restart` 失败；EXT GitHub/Marketplace 发布均 skipped。两个 tag 保留，不能将 CLI 发布成功写成 Unix 运行验收通过。
+- **整改授权与首批修复**：用户已授权修复后以新 patch（CLI `0.1.83` / EXT `0.1.99`）继续，不改旧 tag/资产。先修已确认的 readline 未处理错误与夹具超时常量漏导出，新增真实连接失败回归和 80 秒超时断言；固定 Linux 构建为验收使用的 Ubuntu 22.04，并按 runner/target 隔离缓存。保留隔离 HOME 的服务日志，复用现有两条 workflow_dispatch dry-run 取得证据后再正式发布；本地只做差异检查，不跑测试/构建。本阶段尚未确认启动发现的瞬断处理缺口，后续定位及修复证据见下；不吞掉错误或放宽断言。
 - **首轮诊断**：保留远端并行修复 `2a1b6056`，本地未推送提交重放后为 `b9cf1f45`；未强推。EXT dry-run `41470577638` 使用原 CLI 资产：Windows 全过，Linux 冷启动/重启过但旧数据升级失败，macOS 两架构重启仍失败。Linux 已定位为夹具将 `/private/var/...` 替换成 `/private/tmp/...` 的搬迁错误；现只修复制数据，并加入工作目录/会话索引可访问、原件不变的回归。既有 release workflow 增加夹具定向检查；Rust 增加失败阶段日志但不改变返回值、身份校验或清理顺序。下一轮用同一源码提交的 CLI/EXT dry-run 包诊断，不正式发布。`b9cf1f45` 的 Windows 扩展 gate:fast 与真实 VS Code 代理/生命周期门禁已通过，其余 CI 随后亦通过。
-- **发现阶段修复待验**：同提交 `34c23b69` 的 CLI dry-run `41473991662` 构建全过，EXT dry-run `41476369424` 的 Windows/Linux 全过；macOS 日志已将失败定位到 restart 的 start 阶段状态查询 EOF（停止阶段未报错，不据此猜测 None/确认结果或内核原因）。新增统一只读 `probe_service`：仅连接断开在原 connect+hello 10 秒总预算内重试，不将 EOF 当作端点不存在；鉴权/协议/其他错误立即失败，Stop/ACP/Native 不重放，启动锁与清理确认不改。四条真实 IPC 回归覆盖恢复、拒绝、总截止时间及 Stop 正确认可；尚待新云端 CI 和同提交原生包验证。旧 `34c23b69` CI `41473979066` 全过，不代签新修复。
+- **发现阶段定位与修复**：同提交 `34c23b69` 的 CLI dry-run `41473991662` 构建全过，EXT dry-run `41476369424` 的 Windows/Linux 全过；macOS 日志已将失败定位到 restart 的 start 阶段状态查询 EOF（停止阶段未报错，不据此猜测 None/确认结果或内核原因）。新增统一只读 `probe_service`：仅连接断开在原 connect+hello 10 秒总预算内重试，不将 EOF 当作端点不存在；鉴权/协议/其他错误立即失败，Stop/ACP/Native 不重放，启动锁与清理确认不改。四条真实 IPC 回归覆盖恢复、拒绝、总截止时间及 Stop 正向清理确认；修复提交 `7b842ae7` 的 CI `41481377749` 五个 job 全过，CLI dry-run `41481389686` 四平台构建全过，EXT dry-run `41483492908` 四平台原生包全过（Unix 另含 0.1.90 升级）。夹具聚焦检查 12 passed，13 个打包用例未被该过滤器选择；原生断言没有跳过或放宽。诊断包未发布。
+- **正式续发准备**：已按批准范围审查 `3441b9e8..7b842ae7`，保留身份、权限、停止确认、启动锁与退出时任务清理边界。项目脚本仅运行一次，将 CLI `0.1.82 → 0.1.83`、EXT `0.1.98 → 0.1.99` 并 pin CLI `0.1.83`；五个镜像仅版本改动，两个 tag guard 通过。未发布的 EXT 0.1.98 条目合入 0.1.99，补本轮修复与 Linux 基线，0.1.96 及更早已发布历史保留。目标 tag 尚未使用、main/master 可快进；先发 CLI 并验证四份归档及哈希，再发 EXT 并执行正式包原生验收和市场门禁。Marketplace 环境只允许 `ext-v*` tag，没有 reviewer 审批规则。本地仅版本、格式与差异核对，无产品测试/构建/安装。
 - **市场与更新**：已查询 `PUBLISH_MARKETPLACE=true`，沿用现有 OIDC 发布；Marketplace 与 OpenVSX 的实际结果以本轮工作流为准，不改仓库变量、凭据或发布门禁。
 - **证据边界**：记录与原始失败见 `.agents/acceptance/release-0.1.82-0.1.98/{release.md,repair.md,ext-failed.log,native/}`。原提交三个 version-sync 和 main 普通 CI 已通过；develop 普通 CI `41461835254` 在 Windows 的 `connector_test.rs:96`（`real_tool_entries_preserve_progress_and_session_stop_isolation`）报 agent code execution is closed；同 SHA 的 main CI 通过，根因未定，不称全量全绿。Linux 的 weak `GLIBC_2.39` 提示不是已证实的重启根因；CLI 构建原镜像实际为 Ubuntu 26.04.1。本轮不测 Cov%；既有动态插件串会话、真实模型/个人设备未验等风险继续保留。
 
