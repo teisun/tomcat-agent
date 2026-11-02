@@ -988,7 +988,7 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
     let _ = fx.home;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
     let _g = home_lock().lock().unwrap();
     let (fcodex, fcodex_requests) = RecordingProvider::keepalive_only_idle("fcodex", 1);
@@ -1012,6 +1012,8 @@ async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
         )
         .await;
 
+    // Advance the real retry/idle timers virtually, without skipping any request.
+    assert_eq!(fx.fcodex_requests.lock().len(), 10);
     assert!(summary.aborted, "summary={}", summary.summary);
     assert_eq!(summary.reviewer_stop_reason, "llm_error");
     assert!(

@@ -129,6 +129,8 @@
 - ACP 仅调整 prompt future 的等待：收到本轮取消就并行调用现有 finish_cancelled_turn；受理回执及 agent_idle 都由原 writer 排序，清理完成后才放终态并移除 pending；父 lifetime 取消交原断连清理。`1793581081555-ak4ezu` 的 ACP 库 7 passed、clippy -D warnings、CLI 构建通过，按 B1 跑 acp_stdio_e2e/acp_observer_e2e 共 27 passed / 0 skipped（125s），覆盖立即取消、后续回合、MCP、EOF、转发器崩溃与慢读完整性；未改帧格式或回放分页。
 - T17 / IPC ENOENT：`1793582522201-mj3ly8` 先复现连接端点不存在被归为 executable_missing、立即终止重试（该批两项预期失败，另一项为 PATH 目录，分别处置）。`ServeConnectionSupervisor::classifyFailure` 改按系统错误 code=ENOENT 且 syscall=spawn 判断缺可执行文件，不再匹配任意错误文案；临时 IPC 失联沿原策略重试且 allowStart=false，不自动重启服务。`1793582637511-eo7rjd` 中 supervisor 18 项与扩展 TypeScript 检查通过，真实缺 CLI 仍一次失败、版本冲突分类保持。
 - T17 / PATH 目录：同一红批次 `1793582522201-mj3ly8` 在真实临时 PATH 的首目录放同名文件夹、次目录放可执行文件，发现 resolver 选中了文件夹。`defaultFileExists` 在原权限检查之前要求 stat.isFile，保留 stat 跟随符号链接的既有安装方式；不更换发现优先级或增加定位进程。`1793582637511-eo7rjd` 的 resolver 13 项通过，含真实文件、POSIX 符号链接、目录跳过和 Windows 无执行位语义；Windows 平台运行仍另行补证。
+- T15 / 测试隔离：`1793582133871-2iktgd` 通过仅向子测试进程传入 `TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR=tools/agents`，稳定复现 package-install 权限用例读取预期 `.agents` 文件失败（原批次 HOME/temp 归因保留为当时观察，不据此认定同一个具体环境变量）。干扰来源有源码证据：`infra/config/tests/load_test.rs` 在进程内修改同名环境。该权限用例改用已有 `load_config_toml_file` 读取自己的固定夹具，不再无关地加载全进程覆盖；未串行化全库、未增加锁。`1793582387881-2mj5wv` 在相同注入下 1 passed / 0 failed。
+- T15 / 评审器等待：`1793581958528-mmm2sj` 完整等到单例通过（128.56s），不是已证明的死锁；十轮真实退避造成超 60 秒告警。仅对该测试启用 Tokio 虚拟时钟并新增恰好十次请求的断言，产品期限、重试额度、错误分类原样保留。`1793582387881-2mj5wv` 的 provider-binding 同模块六项共 3.62s 全部通过。原并发全库验证仍由 B2 的 T15 批次完成，不把定向结果冒充全门禁。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
@@ -137,7 +139,7 @@
 | :--- | :--- | :--- |
 | 本轮整改与合并 | 计划修订已获准，正在逐项复现、修复与定向验证，尚未执行最终全门禁或合并 | 按 session-cleanup、Native、ACP、界面与平台边界等任务推进；未完成项不记为通过 |
 | 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
-| write-plans 完整库验收 | 相关离线用例通过；全库批次有 1 项临时目录错误（单独重跑通过）、5 项忽略，另 1 项既有评审器测试挂起未验证 | 保留失败与未验证记录；后续单独处理测试隔离与挂起，不将本次提交标成全库全绿 |
+| write-plans 完整库验收 | 已用受控环境复现并隔离 package-install 夹具的进程覆盖；原疑似挂起测试 128.56s 通过，改虚拟时钟后同模块六项 3.62s 通过 | 原始失败记录保留；B2 仍须并发全库验证，当前不记全库全绿 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
 | 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
 | macOS 正式体验 | 安装、Dock、中文/空格项目连接、当前会话工具读写及语言实际操作已有证据；没有另发新窗口模型任务或全面实测 Mac 系统代理 | 保持上述证据边界，不重复要求已完成的小步骤 |
