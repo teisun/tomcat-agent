@@ -369,7 +369,7 @@ async fn cancel_stops_background_work_before_a_backpressured_host_resumes_readin
     let other = observer.new_session(&fx.0.workspace).await;
     let accepted = observer.request(json!({"type":"prompt","id":"other-work","sessionId":other,"text":"start the other writer"})).await;
     assert_eq!(accepted["success"], true);
-    observer
+    let other_frames = observer
         .until(|v| v["assistantMessageEvent"]["delta"] == "other is working")
         .await;
 
@@ -422,7 +422,7 @@ async fn cancel_stops_background_work_before_a_backpressured_host_resumes_readin
     }})).as_bytes()).await.unwrap();
     // Independent native observation proves the megabyte was queued before cancel;
     // the ACP host still has not consumed a single prompt output frame.
-    observer
+    let job_frames = observer
         .until(|v| v["sessionId"] == session && v["assistantMessageEvent"]["delta"] == marker)
         .await;
     let pid = |name: &str| {
@@ -436,7 +436,19 @@ async fn cancel_stops_background_work_before_a_backpressured_host_resumes_readin
         }
     })
     .await
-    .expect("both real writers started");
+    .unwrap_or_else(|error| {
+        // Diagnose via already-consumed native frames, never drain the ACP pipe.
+        for frame in other_frames.iter().chain(&job_frames) {
+            if frame["type"] == "tool_execution_end" {
+                eprintln!("writer tool result: {frame}");
+            }
+        }
+        panic!(
+            "both real writers started: {error}; job PID={:?}, other PID={:?}",
+            pid("job"),
+            pid("other")
+        );
+    });
     let job_pid = pid("job").unwrap();
     let other_pid = pid("other").unwrap();
     assert!(fixture_process_alive(job_pid) && fixture_process_alive(other_pid));
