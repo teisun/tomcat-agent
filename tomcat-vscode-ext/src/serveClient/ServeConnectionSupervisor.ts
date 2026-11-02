@@ -450,9 +450,10 @@ export class ServeConnectionSupervisor {
       return { attempt: attempt.number, error, kind: "version_mismatch", stderr };
     }
 
+    const systemError = error as NodeJS.ErrnoException;
     if (
       !this.options.isExecutableAvailable() ||
-      /ENOENT/u.test(error.message)
+      (systemError.code === "ENOENT" && systemError.syscall?.startsWith("spawn"))
     ) {
       return {
         attempt: attempt.number,

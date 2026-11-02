@@ -127,6 +127,7 @@
 - T14：真实服务夹具停服预算直接引用产品 `STOP_COMMAND_TIMEOUT_MS`，失败保留 HOME 的既有行为不变。CI push/PR 加上 `scripts/dev-install.*`，Windows extension job 接入根目录假 Cargo 的 CMD 测试及两个 tests/ 定向用例。`1793581416440-agmlv7` 本机 20 passed（fixture lifecycle 11 / proxy guard 6 / build selection 3），YAML 解析与根目录执行位置校验通过；`1793581683825-63z3cl` 的 CMD 两例在 macOS 全部 SKIP（0 passed），Windows 实机与 CI 实跑仍须推送前补证，不计为通过。未执行安装或代理修改。
 - T8 红→绿：`1793580960772-y1mvlx` 在真实 ACP stdout 停读、Native 独立旁观确认约 1 MiB 已排入输出之后取消，后台 PID 超过原测试期限仍存活；`1793581081555-ak4ezu` 修后同例 3.655s 通过，恢复读取前 PID 已退出且文件不再增长，另一会话持续写入；读取后既有正文完整、Cancelled 终态唯一、其后没有多余帧。早一轮 `1793580713517-6ppqu7` 是串行脚本模型被另一会话的定时等待堵住，非有效缺陷复现；改用既有 pause barrier 后得到上述有效红结果。
 - ACP 仅调整 prompt future 的等待：收到本轮取消就并行调用现有 finish_cancelled_turn；受理回执及 agent_idle 都由原 writer 排序，清理完成后才放终态并移除 pending；父 lifetime 取消交原断连清理。`1793581081555-ak4ezu` 的 ACP 库 7 passed、clippy -D warnings、CLI 构建通过，按 B1 跑 acp_stdio_e2e/acp_observer_e2e 共 27 passed / 0 skipped（125s），覆盖立即取消、后续回合、MCP、EOF、转发器崩溃与慢读完整性；未改帧格式或回放分页。
+- T17 / IPC ENOENT：`1793582522201-mj3ly8` 先复现连接端点不存在被归为 executable_missing、立即终止重试（该批两项预期失败，另一项为 PATH 目录，分别处置）。`ServeConnectionSupervisor::classifyFailure` 改按系统错误 code=ENOENT 且 syscall=spawn 判断缺可执行文件，不再匹配任意错误文案；临时 IPC 失联沿原策略重试且 allowStart=false，不自动重启服务。`1793582637511-eo7rjd` 中 supervisor 18 项与扩展 TypeScript 检查通过，真实缺 CLI 仍一次失败、版本冲突分类保持。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）

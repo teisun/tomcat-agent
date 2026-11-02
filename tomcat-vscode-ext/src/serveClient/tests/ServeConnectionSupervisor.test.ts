@@ -370,12 +370,34 @@ describe("ServeConnectionSupervisor", () => {
     }
   });
 
+  it("retries a missing IPC endpoint without claiming the CLI is missing", async () => {
+    vi.useFakeTimers();
+    const runtime = createMessenger();
+    const error = Object.assign(new Error("connect ENOENT /tmp/fixture-service.sock"), {
+      code: "ENOENT", syscall: "connect", address: "/tmp/fixture-service.sock",
+    });
+    runtime.messenger.start.mockImplementationOnce(() => runtime.emitExit(exit({ error })));
+    const supervisor = new ServeConnectionSupervisor({
+      initialize: vi.fn().mockResolvedValue(READY_RESULT), isExecutableAvailable: () => true,
+      messenger: runtime.messenger as never, random: () => 0.5,
+    });
+    try {
+      const ready = supervisor.whenReady().catch(failure => failure);
+      await retryOnce();
+      expect(await ready).toEqual(READY_RESULT);
+      expect(supervisor.currentState).toMatchObject({ phase: "ready", attempt: 2 });
+      expect(runtime.messenger.start).toHaveBeenLastCalledWith({ allowStart: false });
+    } finally { supervisor.dispose(); vi.useRealTimers(); }
+  });
+
   it("classifies ENOENT as executable-missing without retrying", async () => {
     vi.useFakeTimers();
     try {
       const runtime = createMessenger();
       runtime.messenger.start.mockImplementationOnce(() => {
-        runtime.emitExit(exit({ error: new Error("spawn tomcat ENOENT") }));
+        runtime.emitExit(exit({ error: Object.assign(new Error("spawn tomcat ENOENT"), {
+          code: "ENOENT", syscall: "spawn tomcat",
+        }) }));
       });
       const supervisor = new ServeConnectionSupervisor({
         initialize: vi.fn<() => Promise<InitializeResult>>(),
