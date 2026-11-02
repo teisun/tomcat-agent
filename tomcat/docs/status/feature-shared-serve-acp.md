@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 12:40 | IN_PROGRESS | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 12:58 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -93,7 +93,7 @@
 - 既有 `prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout` 隔离运行超过 60 秒仍未完成，停止后记为未验证；完整库门禁不记全绿。详细任务退出码记录在本地 write-plans 内置计划的验收 evidence 中。
 - 本次提交遵照用户要求不重跑测试、构建或覆盖率，Cov% 保持未测量；归档 bench、真实模型评测、release 构建、安装和服务重启均不执行。技能工作流附件的原文末尾空行保留，不为 Git 空白提示改写已验收资产。
 
-### 合并审查与验收（修订获准，整改进行中）
+### 合并审查与验收（本机离线验证完成，待本地合并）
 
 | 审查组 | 规范 / 调用链与结论 | 测试落点 |
 | --- | --- | --- |
@@ -163,13 +163,18 @@
 
 - 启动器定向绿结果：`1793594285210-ekctw6` 的真实 IPC / 管理命令 / 非零退出与启动错误共 3 passed；`1793594406711-6pozlu` 的定向 strict tsc 退出 0。脚本不在 extension tsconfig 的 src 范围内，使用与 tsx 混合模块相容的 preserve/bundler、显式 Node 类型；先前两次推断命令分别因 TS6 的 ignoreConfig 要求及错误的模块/类型选项失败，未用改产品代码或放宽 strict 处理。启动器改变了整条门禁的等待方式，因此补跑原 `npm run gate:full` 入口，Rust 源码不变，不重跑 Rust 全门禁。
 
+- B2 扩展完整复验（`1793594442583-2fzg8u`，S=`a4b61eda331c828a26db6bace511d37ff758476f`，tree=`9338e453b089dd59803eda55bb8561c0a6be97fd`）`npm run gate:full` exit 0：两份 tsc、host 916、GUI 888、构建、integration 271 passed / 1 skipped、安装态 24 passing / 6 条件场景 pending、verify:vsix 五场景合计 10 passing。没有放宽期限、跳过原失败场景或改变默认选例；原来超时的四项现为 4 passing。慢握手重启中的 bootstrap 断连日志、VS Code 提案/账号/弃用告警均保留，不称全程零告警。
+- B3 最终安装态旁观复验（`1793595245110-u2j0ap`，同一 S）exit 0、1 passing / 26s：当前纯包 + 真实 CLI，自动探活重建页面后仍保留 B、草稿、只读与焦点，后台真实 Bash 完成；跨项目隔离、无重字、切回自有会话可写均通过。`.agents/acceptance/shared-serve-review/b3-a4b61eda/gui-7FxJcN/observer-{desktop,narrow}.{png,aria.txt,console.json}` 已逐项读回，实际面板为 1381×794 / 331×738：内容正常、长命令换行、底部操作不越界，两份捕获范围内 errors=[]。常规门禁的重建/场景替身不冒充此真实服务专项。
+- 证据复用核对：`c0ab1f42..a4b61eda` 仅门禁启动器、其已有测试文件、此 status 三个路径；Rust 产品/测试/依赖/分组不变，前述 Rust 分批结果有效。空窗口提示的两组页面 PNG/ARIA/console 对应 GUI/provider 源码也未变，继续有效。随后仅回填此状态文档，不使已测行为失效；版本未升级，正式服务未安装或重启，源分支与 develop 均未推送。
+
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
 | 旧式动态插件初始化串会话 | 本轮最小用例已失败，第二会话触发的动态发现会向第一会话追加消息；对照 develop 已有相同 bare-ID/default-session 机制，不算本次新增回归，但未修复 | 单独明确初始化应绑定触发会话还是禁止会话能力，再复用现有会话 VM 路径设计；保留失败日志与本地 repro patch。按获准计划，需设计的旧问题记录、不阻塞本地合并，不代签通过 |
-| 本轮整改与合并 | 本机离线 Rust 范围通过；扩展前四阶段通过，最后打包检查暴露门禁启动器互等，已复现并局部修复；尚未合并 | 复验原扩展门禁与安装态旁观专项，再按已测树本地合并；未运行项不记通过 |
+| 本轮整改与合并 | 本机离线 Rust、完整扩展门禁及最终真实旁观专项已通过，源分支待本地合并 | 核对合并树与已测树，跑 B4、汇总 develop 状态并本地提交；只改说明文档可复用行为证据 |
 | 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
+| 本轮 Windows 专项与 CI | 未提供 Windows 执行环境；本地新增提交未推送，旧 SHA 的 CI 不代签 | 推送前必须补齐 Git 探测授权/回收、根 CMD 安装脚本及 Windows 用例证据；推送后另核对对应 SHA 的 CI，不绕过 runner 保护 |
 | write-plans 完整库验收（本轮已补证） | B2 `1793588892574-uour5x` 并发完整库 3454 passed / 5 既有 ignored，两条原失败用例均通过；完整门禁仍因其它已列问题非零 | 保留原始失败和归因，不把库通过代签其它门禁或真实模型层 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |
 | 多根引用 Windows 验收 | 开发与 macOS 验证完成；Windows 真实盘符 Host/工具、同事安装版本未核验，UNC 仅有字符串保持用例 | 用户明确保留 Windows 验收并暂停等待产物；收到 6 条 Host、3 条 Rust 及 PNG/ARIA/console 后再关闭计划，UNC 实际共享不作为额外必过项 |
