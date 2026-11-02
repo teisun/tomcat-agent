@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 13:45 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 13:54 | PENDING_INTEGRATION | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -168,8 +168,9 @@
 - 证据复用核对：`c0ab1f42..a4b61eda` 仅门禁启动器、其已有测试文件、此 status 三个路径；Rust 产品/测试/依赖/分组不变，前述 Rust 分批结果有效。空窗口提示的两组页面 PNG/ARIA/console 对应 GUI/provider 源码也未变，继续有效。随后仅回填此状态文档，不使已测行为失效；版本未升级，正式服务未安装或重启，源分支与 develop 均未推送。
 
 - B4 首次待合并树与 `fe08633bfb180ae83b634112529bc7886a48b23d` 完全相同（tree=`4cd6c2d7f6e9b1db4228dad024084d35b0c6d358`）。`1793595769842-ex75gj` 的 Rust gate-fast exit 1：严格全目标 Clippy、doctest 编译、parallel 384/27 skipped、serial 89/3 skipped 通过；lib 3453 passed / 1 failed / 5 ignored，唯一失败为 `append_test::compaction_skips_a_busy_session_until_a_later_housekeeping_run`（期望 1，实际 0）。串联的扩展快门禁未执行。已核对该测试、压缩函数及配置锁函数与 develop 原基线逐字一致，不是本分支新回归；只撤销本任务尚未提交的合并，回源分支补测试，未改 develop 或他人工作。
-- 压缩夹具红→绿：`1793597540910-ed5llm` 保留一个 `File::try_clone` 重复句柄，确定性复现仅 drop 原句柄后仍未解锁（0 passed / 1 failed）。并行 fork 可以产生这种同一文件描述的继承窗口（`infra/platform/process.rs::spawn_detached` 使用 pre_exec），但原批次未记录具体持有者，不能据此指认某一进程。仅在原测试中显式 `fs2::FileExt::unlock`，重复句柄保留至压缩断言之后；占用时为 0、释放后为 1 的原断言不变。`1793597923702-qgd17f`：fmt、append 模块 24 passed / 3.39s、`cargo clippy -j 1 -p tomcat --lib --tests -- -D warnings` 均 exit 0；未串行化、加等待或修改产品锁/压缩机制。
-- 本次补修只涉及上述测试及此状态文档；B4 的其余 3453 库用例、完整集成及此前扩展/UI 证据仍有效，按影响范围复用，不把原 Rust 命令 exit 1 写成 exit 0。再次合并后补未运行的扩展快门禁，最终源码 SHA 与提交树记入 develop status。
+- 压缩夹具红→绿：`1793597540910-ed5llm` 保留一个 `File::try_clone` 重复句柄，确定性复现仅 drop 原句柄后仍未解锁（0 passed / 1 failed）。并行 fork 可以产生这种同一文件描述的继承窗口（`infra/platform/process.rs::spawn_service_process` 使用 pre_exec），但原批次未记录具体持有者，不能据此指认某一进程。仅在原测试中显式 `fs2::FileExt::unlock`，重复句柄保留至压缩断言之后；占用时为 0、释放后为 1 的原断言不变。`1793597923702-qgd17f`：fmt、append 模块 24 passed / 3.39s、`cargo clippy -j 1 -p tomcat --lib --tests -- -D warnings` 均 exit 0；未串行化、加等待或修改产品锁/压缩机制。
+- 本次补修只涉及上述测试及此状态文档；B4 的其余 3453 库用例、完整集成及此前扩展/UI 证据仍有效，按影响范围复用，不把原 Rust 命令 exit 1 写成 exit 0。最终源码 SHA 与提交树记入 develop status。
+- B4 扩展补验：`1793598458874-yr40gj` 在与 `9d48409e` 相同的待合并树 `43ec806ed95ccc8367b671da113072c5c8045972` 上执行 gate:fast；extension tsc 已通过，但 npm GUI lint 进程 SIGSEGV / exit 139，尚未运行单测。检查 Node 23.11.0/npm 10.9.2、磁盘剩余 8.5 GiB 和 swap 使用 7883.5 MiB，未找到源码诊断，崩溃根因未确认；不把资源观察写成已证明的 OOM。源码、依赖和并发不变，`1793598602816-a62zbn` 只补 `npm --prefix gui run lint && npm run test:unit`，exit 0：GUI tsc、host 916 / GUI 888 全通过。两条 gate:fast 原始失败均保留，各有效步骤与定向补验合并记账，不称单次完整入口全绿。回源只订正此文档的进程函数引用并回填结果，不使行为证据失效。
 - B2 视觉制品补读：`b2-async-gate/run-yY3gZu/gui-0AFbAi/` 五张原始全帧 PNG 与 `b2-async-gate/gui-eFrGHp/` 两张选择器 PNG，以及各自 ARIA/console 均已读回；进度/折叠/展开/切换/重载、QuickPick 与回填正常。自动 `*-cropped.png` 错裁到左侧 Explorer，不能当聊天视觉证据，保留为调试件并采用原始全帧图；未为此改变产品或重跑无关场景。`1793596077368-22hmlg` 核对七份捕获范围内 errors=[]，保留 VS Code sandbox/local-network-access 警告；不冒充全程监控或系统文件对话框实选。临时图片回看服务已停止。
 
 ### BLOCKED（待验收与风险）
