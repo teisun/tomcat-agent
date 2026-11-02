@@ -111,6 +111,29 @@ impl ServeRuntime {
     }
 }
 
+/// Signal shells before joining the turn; output draining may itself await that turn.
+async fn request_bash_stop(slot: &SessionSlot, failures: &mut Vec<String>) -> Vec<String> {
+    use crate::core::tools::primitive::BashTaskStatus;
+    let bash = &slot.ctx.session_runtime.bash_task_registry;
+    let running: Vec<_> = bash
+        .list()
+        .into_iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                BashTaskStatus::Running | BashTaskStatus::DrainingOutput
+            )
+        })
+        .map(|task| task.task_id)
+        .collect();
+    for task_id in &running {
+        if let Err(error) = bash.stop(task_id).await {
+            failures.push(error.to_string());
+        }
+    }
+    running
+}
+
 impl ServeConnection {
     /// ACP cancellation is terminal only after tools have stopped too. Keep the
     /// controller and the slot, and serialize cleanup with admission/takeover.
@@ -207,7 +230,6 @@ impl ServeRuntime {
 
     /// Retain the slot and durable history; a replacement controller must wait for real quiescence.
     pub(super) async fn stop_slot_work(&self, slot: &Arc<SessionSlot>) -> Result<(), AppError> {
-        use crate::core::tools::primitive::BashTaskStatus;
         let mut failures = Vec::new();
         self.ask_question
             .cancel_live_session(&slot.session_id, "connection_closed");
@@ -216,22 +238,7 @@ impl ServeRuntime {
         slot.ctx.session_runtime.cancel_token.lock().cancel();
         slot.ctx.agent_registry.cascade_abort(&slot.session_id);
         slot.ctx.suspend_session_mcp();
-        let bash = &slot.ctx.session_runtime.bash_task_registry;
-        let running: Vec<_> = bash
-            .list()
-            .into_iter()
-            .filter(|task| {
-                matches!(
-                    task.status,
-                    BashTaskStatus::Running | BashTaskStatus::DrainingOutput
-                )
-            })
-            .collect();
-        for task in &running {
-            if let Err(error) = bash.stop(&task.task_id).await {
-                failures.push(error.to_string());
-            }
-        }
+        let mut running = request_bash_stop(slot, &mut failures).await;
         // Maintenance can be writing a checkpoint/transcript. Never abort it and claim success.
         if slot.is_command_job_running() {
             let handle = slot.run_task.lock().take();
@@ -250,12 +257,19 @@ impl ServeRuntime {
         if let Err(error) = super::cancel_and_wait(self, slot).await {
             failures.push(error.into());
         }
+        // A spawn already in flight can register after the first scan. Once the turn
+        // has joined, no new tool spawn can escape this final sweep.
+        running.extend(request_bash_stop(slot, &mut failures).await);
         if let Err(error) = slot.ctx.stop_session_mcp().await {
             failures.push(error.to_string());
         }
         let drained = tokio::time::timeout(super::SESSION_SHUTDOWN_TIMEOUT, async {
-            for task in &running {
-                bash.wait_for_finish(&task.task_id).await?;
+            for task_id in &running {
+                slot.ctx
+                    .session_runtime
+                    .bash_task_registry
+                    .wait_for_finish(task_id)
+                    .await?;
             }
             Ok::<_, AppError>(())
         })
@@ -265,6 +279,9 @@ impl ServeRuntime {
             Ok(Err(error)) => failures.push(error.to_string()),
             Err(_) => failures.push("stop_timeout".into()),
         }
+        // Stop retires pending input, not history. A new controller must not inherit
+        // the previous controller's unconsumed instructions.
+        slot.ctx.session_runtime.follow_up_queue.lock().clear();
         if failures.is_empty() {
             Ok(())
         } else {

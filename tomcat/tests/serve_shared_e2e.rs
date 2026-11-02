@@ -918,6 +918,17 @@ fn service_survives_killing_the_starter_process_group_and_uses_its_data_director
 #[cfg(unix)]
 #[tokio::test]
 async fn controller_eof_waits_for_its_shell_to_stop_without_stopping_the_other_session() {
+    assert_controller_shell_stop(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn controller_close_waits_for_its_shell_to_stop_without_stopping_the_other_session() {
+    assert_controller_shell_stop(true).await;
+}
+
+#[cfg(unix)]
+async fn assert_controller_shell_stop(close_session: bool) {
     use common::serve::{
         response, spawn_scripted_openai_stream_server_with_auto_title, sse_delta, sse_done,
         sse_finish, sse_tool_call,
@@ -960,21 +971,36 @@ async fn controller_eof_waits_for_its_shell_to_stop_without_stopping_the_other_s
     };
     let a_pid = pid("a");
     let b_pid = pid("b");
-    a.0.shutdown().await.unwrap();
-    let mut tail = Vec::new();
-    tokio::time::timeout(
-        WAIT,
-        tokio::io::AsyncReadExt::read_to_end(&mut a.0, &mut tail),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    if close_session {
+        let reply = a
+            .request(json!({"type":"close_session", "id":"close-owned"}))
+            .await;
+        assert_eq!(reply["success"], true, "{reply}");
+        assert_eq!(reply["payload"]["closed"], true);
+    } else {
+        a.0.shutdown().await.unwrap();
+        let mut tail = Vec::new();
+        tokio::time::timeout(
+            WAIT,
+            tokio::io::AsyncReadExt::read_to_end(&mut a.0, &mut tail),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
     // SAFETY: signal 0 only queries processes whose PIDs the controlled shells wrote.
-    assert_ne!(
-        unsafe { libc::kill(a_pid, 0) },
-        0,
-        "socket EOF must acknowledge actual shell exit"
-    );
+    let a_alive = unsafe { libc::kill(a_pid, 0) } == 0;
+    if a_alive && close_session {
+        // Pre-fix close unloads the slot: fixture shutdown can no longer find this child.
+        // SAFETY: this PID is the dedicated process group of our own isolated shell.
+        unsafe {
+            libc::kill(-a_pid, libc::SIGKILL);
+        }
+    }
+    assert!(!a_alive, "close/EOF must acknowledge actual shell exit");
+    let a_before = std::fs::metadata(fx.0.workspace.join("a.ticks"))
+        .unwrap()
+        .len();
     assert_eq!(unsafe { libc::kill(b_pid, 0) }, 0);
     let before = std::fs::metadata(fx.0.workspace.join("b.ticks"))
         .unwrap()
@@ -986,6 +1012,13 @@ async fn controller_eof_waits_for_its_shell_to_stop_without_stopping_the_other_s
             .len()
             > before
     );
+    assert_eq!(
+        std::fs::metadata(fx.0.workspace.join("a.ticks"))
+            .unwrap()
+            .len(),
+        a_before
+    );
+    let mut tail = Vec::new();
     b.0.shutdown().await.unwrap();
     tokio::time::timeout(
         WAIT,

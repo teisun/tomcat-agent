@@ -1309,6 +1309,126 @@ async fn disconnect_waits_for_slow_checkpoints_and_retains_timed_out_writers() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn disconnect_discards_queued_follow_up_before_the_next_controller_prompt() {
+    use crate::core::llm::{ChatMessageRole, StreamEvent};
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let (a, output_a) = connect(&runtime);
+    let (b, output_b) = connect_in_project(&runtime, work.path()).await;
+    let (provider, requests) = RecordingMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "B response".into(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }),
+    ]]);
+    let mut slot = create_session_slot(
+        a.clone(),
+        NewSessionParams {
+            cwd: Some(work.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let ctx = Arc::get_mut(&mut Arc::get_mut(&mut slot).unwrap().ctx).unwrap();
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        Arc::new(provider),
+        "gpt-5.4",
+        ctx.global_services.model_catalog.snapshot(),
+    ));
+    *slot.controller.lock() = Some(a.connection_id);
+    runtime.registry.insert(slot.clone()).unwrap();
+    register_slot_hooks(&a, &slot);
+    a.set_active_session(&slot.session_id).unwrap();
+    let cancel = slot.ctx.session_runtime.cancel_token.lock().clone();
+    let worker_slot = slot.clone();
+    assert!(slot.mark_busy());
+    *slot.run_task.lock() = Some(tokio::spawn(async move {
+        cancel.cancelled().await;
+        worker_slot.mark_idle();
+    }));
+    handle_command(
+        a.clone(),
+        ServeCommand::FollowUp {
+            id: Some("queued-a".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "A queued instruction".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output_a, |f| f["id"] == "queued-a").await["payload"]["queued"],
+        true
+    );
+    assert_eq!(slot.ctx.session_runtime.follow_up_queue.lock().len(), 1);
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let history = std::fs::read_to_string(&transcript).unwrap();
+    assert!(history.contains("A queued instruction"));
+    a.disconnect().await.unwrap();
+    handle_command(
+        b.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("takeover".into()),
+            session_id: slot.session_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output_b, |f| f["id"] == "takeover").await["payload"]["access"],
+        "control"
+    );
+    let inherited_queue = slot.ctx.session_runtime.follow_up_queue.lock().clone();
+    handle_command(
+        b.clone(),
+        ServeCommand::Prompt {
+            id: Some("prompt-b".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "B new instruction".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    frame(&output_b, |f| f["type"] == "agent_idle").await;
+    runtime.stop_all().await.unwrap();
+    assert!(
+        inherited_queue.is_empty(),
+        "old controller's queue survived takeover: {inherited_queue:?}"
+    );
+    let requests = requests.0.lock();
+    assert_eq!(requests.len(), 1);
+    let last_user = requests[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m.role == ChatMessageRole::User && m.kind == crate::core::llm::MessageKind::Normal
+        })
+        .unwrap();
+    assert_eq!(
+        last_user.text_content().as_deref(),
+        Some("B new instruction")
+    );
+    assert!(
+        std::fs::read_to_string(transcript)
+            .unwrap()
+            .starts_with(&history),
+        "clearing pending input must not rewrite durable history"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn eof_stops_owned_background_processes_before_control_can_transfer() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(2);

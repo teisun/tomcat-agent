@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-02 06:50 | BLOCKED | feature/shared-serve-acp | - |
+| Tomcat Agent | 2026-11-02 08:30 | IN_PROGRESS | feature/shared-serve-acp | - |
 
 ### DONE（已完成）
 
@@ -93,7 +93,7 @@
 - 既有 `prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout` 隔离运行超过 60 秒仍未完成，停止后记为未验证；完整库门禁不记全绿。详细任务退出码记录在本地 write-plans 内置计划的验收 evidence 中。
 - 本次提交遵照用户要求不重跑测试、构建或覆盖率，Cov% 保持未测量；归档 bench、真实模型评测、release 构建、安装和服务重启均不执行。技能工作流附件的原文末尾空行保留，不为 Git 空白提示改写已验收资产。
 
-### 合并审查与验收（等待计划修订）
+### 合并审查与验收（修订获准，整改进行中）
 
 | 审查组 | 规范 / 调用链与结论 | 测试落点 |
 | --- | --- | --- |
@@ -114,14 +114,18 @@
 - 本轮审查小修：先补 Story 8c/8d 与 E2E-CLI-103～105、E2E-VSCEXT-036～037 的契约（待后续实现验收）；更正 QueuedCommand 注释；empty_turn 写盘失败增加含回合/尝试/分类的 warn，不打印正文、不改变重试额度或结果。
 - T16 红→绿：任务 `1793572679889-arqsiq`（日志 `~/.tomcat/agents/main/tool-results/bash-1793572679889-arqsiq.log`）先得到 0 passed / 1 failed，失败原因是两次空答诊断写失败没有 warn。修后任务 `1793572948891-ydxnc6`（同目录对应 `.log`）执行 `cargo test -p tomcat --lib empty_turn -- --nocapture`：6 passed / 0 failed / 0 ignored；校验正常与诊断失败都恰好请求三次、最终正文 recovered、不泄露思考文本/响应 ID/载荷哨兵。紧接 `cargo clippy -p tomcat --lib -- -D warnings` 退出 0。仅定向结果，未执行全库/全门禁。
 - `node scripts/release-version.mjs check` 与本轮 `git diff --check` 通过；版本未修改。测试后只更新状态说明，未改变行为或夹具。
-- 执行中计划正文不可直接编辑；握手同版本兼容与 Git 探测授权的两条新证据已与原决策相矛盾，等待切回 PLAN 修订后继续，预计修订获准后恢复实施。不绕过计划约束，也不把这些问题标成已修复。
+- 用户已批准修订后的执行计划：Native 改用握手形状识别同版本旧构建，保持管理协议版本 1；Git 探测移到授权之后。恢复实施，不恢复 relay 或额外 Agent 标记。
+- session-cleanup 复现：`1793578183918-6esdvy` 四项库测试均先失败，分别暴露 CloseSession 超时仍成功、维护任务旧关闭路径直接 abort、断连追加消息留存、晚注册 Bash 漏停；真实进程用例 `1793578454531-aml9z0` 在收到 closed 后仍查到活动 shell。测试自建进程已回收，没有操作正式服务。
+- 修复仍收敛到原停止入口：CloseSession 先 stop_slot_work；停止结束清内存追加队列（不动历史），回合退出后补一次 Bash 扫描。`1793578796044-u1fb2m` 的 serve 模块批次为 247 passed / 1 failed；失败是新增模型请求断言把 EphemeralTail 工作区提醒误认成最后一条用户消息，已按 Normal 用户消息类型修正。`1793579618198-eio5wr` 定向复验全部四项关闭/断连/晚注册用例通过；同批服务握手用例共 11 passed / 0 failed。`cargo clippy -p tomcat --lib -- -D warnings`、当前 CLI 构建均退出 0，`cargo nextest run --test serve_shared_e2e` 为 12 passed / 2 skipped（原有受控系统代理专项，未运行、不计通过），含关闭和 EOF 之后本会话 shell 已退出、文件不再增长、另一会话仍继续工作的真实进程断言。产品未修改维护任务、FIFO 或 steering 的既有停止规则。
+- Native 扩展侧红→绿：`1793578883207-6o6hpp` 复现先发环境和同版本误导文案，3 failed / 1 passed；`1793578927379-eibfes` 新握手、失败分类与关闭回归 46 passed，两份 TypeScript 检查通过。`1793579245175-epovi3` 安装态假服务 transport/history/questions 4 passed；仅夹具协议验证，不代替真实 VS Code 视觉验收。Rust `1793579213705-y4249a` 先得到 4 failed / 3 passed；新代码在 `1793579618198-eio5wr` 转为 7 passed：第二阶段之前不建连接、非法/旧形状拒绝、原总握手期限、ACP/status/stop 格式不变。原 `service_test.rs` 移为 service 的私有子测试模块，未提高生产符号可见性。
+- 安全前提复核：instanceId 只由 `service.rs::run_service` 用 UUID v4 生成；常驻服务 stdout 为 null，日志 0600。Windows `local_socket.rs::private_pipe` 使用 `private_acl::current_user_acl` 的当前用户单条 ACE 并拒绝远程客户端；Unix accept 检查 peer UID。CLI `open_management` 先经 `local_socket::connect` 核对服务端账号才读取编号。Node 首条 hello 不含编号或环境，编号不匹配时环境 0 字节发送的断言覆盖全部接收字节。此证据不等于双账号攻击实测，也不防同账号恶意进程。
 - 本轮尚未运行正式门禁、未完成合并；保持不推送、不安装、不重启正式服务。
 
 ### BLOCKED（待验收与风险）
 
 | 项目 | 当前边界 | 下一步 |
 | :--- | :--- | :--- |
-| 本轮合并计划修订 | 同版本旧服务无法被产品版本门禁识别；Git 探测可能运行项目 PATH 中的程序且早于授权，原计划的两项前提不成立 | 切回 PLAN 修订握手识别与探测授权边界，并确认新增审查线索的复现范围后继续；当前只完成基线与审查小修 |
+| 本轮整改与合并 | 计划修订已获准，正在逐项复现、修复与定向验证，尚未执行最终全门禁或合并 | 按 session-cleanup、Native、ACP、界面与平台边界等任务推进；未完成项不记为通过 |
 | 本轮真实模型验收 | 默认必需 IDATATLAS_OPENAI_API_KEY 未配置，无法执行要求的 gate-full 真实 API 层 | 用户在本机私有环境准备凭据后复查；不收集/输出密钥，不以离线测试代签 |
 | write-plans 完整库验收 | 相关离线用例通过；全库批次有 1 项临时目录错误（单独重跑通过）、5 项忽略，另 1 项既有评审器测试挂起未验证 | 保留失败与未验证记录；后续单独处理测试隔离与挂起，不将本次提交标成全库全绿 |
 | 请求级重试与自动恢复交付 | 代码与 macOS 本地受控服务验收完成；未安装到在用环境，未验证 Windows 实机或真实上游可用性 | 安装、共享服务重启及发布须另行授权；源码提交不代表在用版本已更新 |

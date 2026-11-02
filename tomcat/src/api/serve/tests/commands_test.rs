@@ -26,6 +26,50 @@ use crate::{
     RestoreOptions,
 };
 
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_close_timeout_keeps_the_slot_controller_and_history() {
+    let _key = install_test_api_key();
+    let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    *slot.controller.lock() = Some(state.connection_id);
+    let transcript = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let before = std::fs::read(&transcript).unwrap();
+    let (release, pending) = oneshot::channel::<()>();
+    let worker_slot = slot.clone();
+    assert!(slot.mark_busy());
+    *slot.run_task.lock() = Some(tokio::spawn(async move {
+        pending.await.unwrap();
+        worker_slot.mark_idle();
+    }));
+    super::super::stdin::dispatch_command(
+        state.clone(),
+        ServeCommand::CloseSession {
+            id: Some("close-timeout".into()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |f| f["id"] == "close-timeout").await;
+    let reply = lines.iter().find(|f| f["id"] == "close-timeout").unwrap();
+    assert_eq!(reply["success"], false, "{reply}");
+    assert!(reply["error"].as_str().unwrap().contains("stop_timeout"));
+    assert_ne!(reply["payload"]["closed"], true);
+    assert!(state.registry.get(&slot.session_id).is_some());
+    assert_eq!(*slot.controller.lock(), Some(state.connection_id));
+    assert!(slot.run_task.lock().is_some());
+    assert_eq!(std::fs::read(transcript).unwrap(), before);
+    release.send(()).unwrap();
+    state.stop_slot_work(&slot).await.unwrap();
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(env_lock)]
 async fn serve_shared_slash_handshake_reload_and_rejected_inputs_do_not_write_transcript() {

@@ -20,6 +20,62 @@ async fn response(buffer: &SharedWriterBuffer, id: &str) -> serde_json::Value {
     .expect("response must arrive")
 }
 
+#[tokio::test]
+#[serial(env_lock)]
+async fn session_stop_catches_a_shell_registered_after_the_first_scan() {
+    let _key = install_test_api_key();
+    let (state, _buffer, work, slot) = build_initialized_state_with_streams(vec![]).await;
+    let (release, pending) = tokio::sync::oneshot::channel::<()>();
+    let (registered, ticket) = tokio::sync::oneshot::channel();
+    let worker_slot = slot.clone();
+    let cwd = work.path().to_owned();
+    assert!(slot.mark_busy());
+    *slot.run_task.lock() = Some(tokio::spawn(async move {
+        pending.await.unwrap();
+        let task = worker_slot
+            .ctx
+            .session_runtime
+            .bash_task_registry
+            .spawn("sleep 30".into(), Some(cwd))
+            .await
+            .unwrap();
+        registered.send(task).unwrap();
+        worker_slot.mark_idle();
+    }));
+    let stopping = state.stop_slot_work(&slot);
+    tokio::pin!(stopping);
+    // The first poll passes the empty Bash scan and blocks on the controlled turn.
+    assert!(futures_util::poll!(&mut stopping).is_pending());
+    assert!(slot
+        .ctx
+        .session_runtime
+        .bash_task_registry
+        .list()
+        .is_empty());
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), &mut stopping)
+        .await
+        .unwrap()
+        .unwrap();
+    let ticket = ticket.await.unwrap();
+    let bash = &slot.ctx.session_runtime.bash_task_registry;
+    let stopped = bash
+        .list()
+        .into_iter()
+        .find(|task| task.task_id == ticket.task_id)
+        .unwrap();
+    // Always clean up the real process, including on the pre-fix failure path.
+    bash.stop(&ticket.task_id).await.unwrap();
+    bash.wait_for_finish(&ticket.task_id).await.unwrap();
+    assert!(
+        matches!(
+            stopped.status,
+            crate::core::tools::primitive::BashTaskStatus::Stopped
+        ),
+        "successful session stop left a live late registration: {stopped:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(env_lock)]
 async fn session_job_releases_fifo_blocks_mutation_and_is_idle_before_response() {
@@ -202,22 +258,26 @@ async fn session_job_panic_and_immediate_completion_clear_handle_and_busy_gate()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(env_lock)]
-async fn session_job_close_aborts_at_existing_shutdown_timeout() {
+async fn session_job_close_retains_unfinished_work_and_can_be_retried() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let home = tempfile::tempdir().unwrap();
     let _home = EnvGuard::set("HOME", home.path().as_os_str());
     let _key = EnvGuard::set(TEST_API_KEY_ENV, "stub");
     let (state, buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;
+    let (release, pending) = tokio::sync::oneshot::channel::<()>();
     spawn_session_job(
         Arc::clone(&state),
         Arc::clone(&slot),
         Some("never".into()),
-        std::future::pending(),
+        async move {
+            pending.await.unwrap();
+            Ok(serde_json::Value::Null)
+        },
     )
     .unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
-        handle_command(
+        super::super::stdin::dispatch_command(
             Arc::clone(&state),
             ServeCommand::CloseSession {
                 id: Some("close".into()),
@@ -228,7 +288,23 @@ async fn session_job_close_aborts_at_existing_shutdown_timeout() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(response(&buffer, "close").await["success"], true);
+    let rejected = response(&buffer, "close").await;
+    assert_eq!(rejected["success"], false, "{rejected}");
+    assert!(rejected["error"].as_str().unwrap().contains("stop_timeout"));
+    assert!(state.registry.get(&slot.session_id).is_some());
+    assert!(slot.is_busy() && slot.run_task.lock().is_some());
+    release.send(()).unwrap();
+    assert_eq!(response(&buffer, "never").await["success"], true);
+    handle_command(
+        state.clone(),
+        ServeCommand::CloseSession {
+            id: Some("retry-close".into()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(response(&buffer, "retry-close").await["success"], true);
     assert!(state.registry.get(&slot.session_id).is_none());
     assert!(slot.run_task.lock().is_none());
 }

@@ -2671,6 +2671,7 @@ pub(crate) async fn handle_command(
             state
                 .ask_question
                 .cancel_live_session(&slot.session_id, "close_session");
+            state.stop_slot_work(&slot).await?;
             cleanup_session_slot(&state, &slot, super::SlotCleanup::Close).await?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
