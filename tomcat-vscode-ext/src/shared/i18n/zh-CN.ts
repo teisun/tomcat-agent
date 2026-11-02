@@ -560,6 +560,7 @@ export const zhCN = {
   "bridge.cliMissing": "未找到 Tomcat CLI 可执行文件",
   "bridge.connectionFailed": "Tomcat 连接失败",
   "bridge.serviceVersionMismatch": "后台共享服务是 v{running}，本扩展使用的 CLI 是 v{client}。重启共享服务后即可使用。",
+  "bridge.serviceBuildOutdated": "后台共享服务是同版本的旧构建，重启共享服务后即可使用。",
   "host.bridge.timeout": "无法{action}：Tomcat 桥接未响应。请重启 Tomcat 后重试。",
   "host.bridge.exited": "无法{action}：Tomcat serve 已退出。请重启 Tomcat 后重试。",
   "host.bridge.unavailable": "无法{action}：Tomcat 桥接不可用。请重启 Tomcat 后重试。",

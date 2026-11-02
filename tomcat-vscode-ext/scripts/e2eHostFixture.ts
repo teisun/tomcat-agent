@@ -3255,10 +3255,10 @@ async function listenForFakeServe(
     const lines = createInterface({ input: socket });
     lines.once("line", line => {
       socket.pause();
-      lines.close();
       void (async () => {
         const hello = JSON.parse(line);
         if (["start", "status", "stop", "restart"].includes(hello.action)) {
+          lines.close();
           if (hello.action === "stop" || hello.action === "restart") {
             running = false;
             await stopChildren();
@@ -3269,11 +3269,27 @@ async function listenForFakeServe(
           return;
         }
         if (!running || hello.service !== "tomcat" || hello.protocol !== "native") {
+          lines.close();
           socket.end(JSON.stringify({ service: "tomcat", running: false }) + "\n").resume();
           return;
         }
+        if ("environment" in hello) {
+          lines.close();
+          socket.end(JSON.stringify({ ...info(), error: "native_handshake_outdated" }) + "\n").resume();
+          return;
+        }
+        const environmentLine = once(lines, "line", { signal: AbortSignal.timeout(5_000) });
+        socket.write(JSON.stringify(info()) + "\n");
+        socket.resume();
+        const [record] = await environmentLine;
+        socket.pause();
+        lines.close();
+        const { environment } = JSON.parse(record);
+        if (!environment || typeof environment !== "object" || Array.isArray(environment)) {
+          throw new Error("invalid_connection_environment");
+        }
         const child = spawn(process.execPath, [fixture.fakeServePath, "serve", "--stdio"], {
-          cwd: fixture.workspaceDir, env: { ...fixture.env, ...hello.environment }, stdio: "pipe", windowsHide: true,
+          cwd: fixture.workspaceDir, env: { ...fixture.env, ...environment }, stdio: "pipe", windowsHide: true,
         });
         children.add(child);
         child.once("close", () => { children.delete(child); socket.end(); });
@@ -3281,7 +3297,7 @@ async function listenForFakeServe(
         socket.once("close", () => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
         child.stdin!.on("error", () => socket.destroy());
         child.stderr!.on("data", chunk => process.stderr.write(chunk));
-        socket.write(JSON.stringify(info()) + "\n");
+        socket.write('{"ready":true}\n');
         socket.pipe(child.stdin!);
         child.stdout!.pipe(socket);
       })().catch(error => socket.destroy(error));

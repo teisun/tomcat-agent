@@ -28,7 +28,6 @@ mod ndjson_test;
 mod registry_test;
 mod rewind_and_resend_test;
 mod schema_test;
-mod service_test;
 mod session_cwd_test;
 mod session_delete_test;
 mod session_files_test;

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { InitializeResult } from "../initialize";
 import { ServiceVersionMismatchError } from "../sharedConnection";
+import { en } from "../../shared/i18n/en";
 import {
   DEFAULT_HANDSHAKE_TIMEOUT_MS,
   ServeConnectionSupervisor,
@@ -142,9 +143,9 @@ async function retryOnce(): Promise<void> {
   });
 
 describe("ServeConnectionSupervisor", () => {
-  it("preserves the typed connection error through the messenger and stops on the first version mismatch", async () => {
+  it.each(["0.1.81", "0.1.82"])("preserves the typed connection error through the messenger and stops on the first version mismatch (%s)", async clientVersion => {
     vi.useFakeTimers();
-    const error = new ServiceVersionMismatchError("0.1.81", "0.1.82");
+    const error = new ServiceVersionMismatchError("0.1.81", clientVersion);
     const connectFactory = vi.fn().mockRejectedValue(error);
     const messenger = new TomcatMessenger({ executable: "unused", connectFactory });
     const supervisor = new ServeConnectionSupervisor({
@@ -166,8 +167,9 @@ describe("ServeConnectionSupervisor", () => {
       });
       expect(connectFactory).toHaveBeenCalledOnce();
       const summary = summarizeServeFailure({ error, stderr: "unrelated startup diagnostic" });
-      expect(summary).toContain(error.running);
-      expect(summary).toContain(error.client);
+      expect(summary).toBe(error.running === error.client
+        ? en["bridge.serviceBuildOutdated"]
+        : en["bridge.serviceVersionMismatch"].replace("{running}", error.running).replace("{client}", error.client));
       expect(summary).not.toContain("unrelated startup diagnostic");
     } finally {
       supervisor.dispose();

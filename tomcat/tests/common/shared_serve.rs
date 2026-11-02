@@ -79,10 +79,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> TestIo for T {}
 /// The same native IPC client used by shared-service and ACP observation tests.
 pub struct NativeClient(pub BufReader<Box<dyn TestIo>>);
 impl NativeClient {
-    pub async fn open(info: &Value, version: &str) -> Self {
+    pub async fn open(info: &Value, version: &str) -> (Self, Value) {
         Self::open_with_environment(info, version, json!({})).await
     }
-    pub async fn open_with_environment(info: &Value, version: &str, environment: Value) -> Self {
+    pub async fn open_with_environment(
+        info: &Value,
+        version: &str,
+        environment: Value,
+    ) -> (Self, Value) {
         let endpoint = info["endpoint"].as_str().unwrap();
         #[cfg(unix)]
         let stream = tokio::net::UnixStream::connect(endpoint).await.unwrap();
@@ -91,12 +95,22 @@ impl NativeClient {
             .open(endpoint)
             .unwrap();
         let mut client = Self(BufReader::new(Box::new(stream)));
-        client.send(json!({"service":"tomcat","protocolVersion":1,"clientVersion":version,"protocol":"native","environment":environment})).await;
-        client
+        client.send(json!({"service":"tomcat","protocolVersion":1,"clientVersion":version,"protocol":"native"})).await;
+        let hello = client.next().await;
+        if hello.get("error").is_some() {
+            return (client, hello);
+        }
+        assert_eq!(hello["instanceId"], info["instanceId"]);
+        client.send(json!({"environment":environment})).await;
+        let ready = client.next().await;
+        if ready.get("error").is_some() {
+            return (client, ready);
+        }
+        assert_eq!(ready, json!({"ready":true}));
+        (client, hello)
     }
     pub async fn connect(info: &Value) -> Self {
-        let mut client = Self::open(info, env!("CARGO_PKG_VERSION")).await;
-        let hello = client.next().await;
+        let (mut client, hello) = Self::open(info, env!("CARGO_PKG_VERSION")).await;
         assert_eq!(hello["instanceId"], info["instanceId"]);
         assert!(hello.get("error").is_none(), "{hello}");
         client.send(json!({"type":"control_request", "requestId":"init", "subtype":"initialize", "payload":{}})).await;

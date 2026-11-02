@@ -101,10 +101,14 @@ export const connectSharedService: SharedConnectionFactory = async (options) => 
   try {
     await new Promise<void>((resolve, reject) => {
       const lines = createInterface({ input: socket, crlfDelay: Infinity });
+      let identityVerified = false;
+      let settled = false;
       const timer = setTimeout(() => finish(new Error("Tomcat local handshake timed out")), 5_000);
       const abort = () => finish(new Error("Tomcat connection cancelled"));
       const end = () => finish(new Error("Tomcat closed before its local handshake"));
       const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         options.signal.removeEventListener("abort", abort);
         // Keep the one-shot error listener until the socket's next error; the
@@ -116,31 +120,49 @@ export const connectSharedService: SharedConnectionFactory = async (options) => 
       options.signal.addEventListener("abort", abort, { once: true });
       socket.once("error", finish);
       socket.once("end", end);
-      lines.once("line", (line) => {
+      lines.on("line", (line) => {
+        if (settled) return;
         try {
-          const hello = serviceInfo(JSON.parse(line));
-          if (hello.instanceId !== info.instanceId || hello.serverVersion !== version || hello.endpoint !== info.endpoint) {
-            throw new Error("Tomcat service identity changed during connection; reconnect without replaying requests.");
+          const reply = JSON.parse(line);
+          if (!identityVerified) {
+            const hello = serviceInfo(reply);
+            if (hello.instanceId !== info.instanceId || hello.serverVersion !== version || hello.endpoint !== info.endpoint) {
+              throw new Error("Tomcat service identity changed during connection; reconnect without replaying requests.");
+            }
+            identityVerified = true;
+            const environment = { ...process.env, ...options.env };
+            if (process.platform === "win32") {
+              // Match Node's spawn/execFile, including undefined values that remove a variable.
+              const seen = new Set<string>();
+              for (const key of Object.keys(environment).sort()) {
+                const folded = key.toUpperCase();
+                if (seen.has(folded)) delete environment[key];
+                else seen.add(folded);
+              }
+            }
+            // Never log this record: it contains the controller's environment.
+            socket.write(`${JSON.stringify({ environment })}\n`);
+            return;
           }
-          finish();
+          if (reply && typeof reply === "object" && !Array.isArray(reply)) {
+            if (!("type" in reply) && typeof reply.error === "string") {
+              throw new Error(`Tomcat shared service rejected the connection: ${reply.error}`);
+            }
+            if (!("type" in reply) && reply.ready === true) {
+              finish();
+              return;
+            }
+          }
+          // Same-version old builds parse the environment record as a native command.
+          // Their response is not a ready acknowledgement; use the existing restart UX.
+          throw new ServiceVersionMismatchError(version, version);
         } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
       });
       socket.once("connect", () => {
-        const environment = { ...process.env, ...options.env };
-        if (process.platform === "win32") {
-          // Match Node's spawn/execFile: first case-insensitive key in sorted order,
-          // including undefined values that intentionally remove a variable.
-          const seen = new Set<string>();
-          for (const key of Object.keys(environment).sort()) {
-            const folded = key.toUpperCase();
-            if (seen.has(folded)) delete environment[key];
-            else seen.add(folded);
-          }
-        }
-        // Do not log this envelope: it contains the controller's environment.
+        if (settled) return;
         socket.write(`${JSON.stringify({
           service: "tomcat", protocolVersion: LOCAL_PROTOCOL_VERSION, clientVersion: version,
-          protocol: "native", environment,
+          protocol: "native",
         })}\n`);
       });
       if (options.signal.aborted) abort();

@@ -19,17 +19,31 @@ async fn self_install_updates_running_copy_without_restarting_until_explicit_res
     let mut stale = current.clone();
     stale.extend_from_slice(b"older-build"); // Runnable PE, distinct same-version build fixture.
     std::fs::write(&installed, stale).unwrap();
-    let action = |name: &str| output_json(
-        isolated_serve_command_with_binary(&fx.0.home_path, &installed)
-            .current_dir(&fx.0.workspace).args(["serve", name]).output().unwrap()
-    );
+    let action = |name: &str| {
+        output_json(
+            isolated_serve_command_with_binary(&fx.0.home_path, &installed)
+                .current_dir(&fx.0.workspace)
+                .args(["serve", name])
+                .output()
+                .unwrap(),
+        )
+    };
     let before = action("start");
     let output = fx.command().arg("self-install").output().unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(std::fs::read(&installed).unwrap() == current);
-    assert_eq!(std::fs::read_dir(&bin).unwrap().filter(|entry|
-        entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".old")
-    ).count(), 1);
+    assert_eq!(
+        std::fs::read_dir(&bin)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".old"))
+            .count(),
+        1
+    );
     let unchanged = action("status"); // Never let start hide an accidental shutdown.
     assert_eq!(unchanged["running"], true);
     assert_eq!(unchanged["instanceId"], before["instanceId"]);
@@ -39,7 +53,9 @@ async fn self_install_updates_running_copy_without_restarting_until_explicit_res
     assert_ne!(after["pid"], before["pid"]);
     let mut client = Client::connect(&after).await;
     let session_id = client.new_session(&fx.0.workspace).await;
-    let reply = client.request(json!({"type":"get_state","id":"after-update","sessionId":session_id})).await;
+    let reply = client
+        .request(json!({"type":"get_state","id":"after-update","sessionId":session_id}))
+        .await;
     assert_eq!(reply["success"], true, "{reply}");
 }
 
@@ -64,36 +80,63 @@ fn service_owns_a_hidden_console_so_children_open_no_windows() {
 #[tokio::test]
 async fn shared_service_resolves_auto_language_per_connection() {
     let fx = ServiceFixture::new("http://127.0.0.1:1");
-    let info = output_json(fx.command()
-        .env("TOMCAT_HOST_LOCALE", "zh-CN")
-        .env_remove("TOMCAT__UI__LANGUAGE")
-        .env("LC_ALL", "en_US.UTF-8")
-        .args(["serve", "start"]).output().unwrap());
+    let info = output_json(
+        fx.command()
+            .env("TOMCAT_HOST_LOCALE", "zh-CN")
+            .env_remove("TOMCAT__UI__LANGUAGE")
+            .env("LC_ALL", "en_US.UTF-8")
+            .args(["serve", "start"])
+            .output()
+            .unwrap(),
+    );
     for (environment, effective, overridden) in [
         (json!({"TOMCAT_HOST_LOCALE":"zh-CN"}), "zh-CN", false),
         (json!({"TOMCAT_HOST_LOCALE":"en"}), "en", false),
-        (json!({"TOMCAT_HOST_LOCALE":"en", "TOMCAT__UI__LANGUAGE":"zh-CN"}), "zh-CN", true),
+        (
+            json!({"TOMCAT_HOST_LOCALE":"en", "TOMCAT__UI__LANGUAGE":"zh-CN"}),
+            "zh-CN",
+            true,
+        ),
         // Missing connection keys must not borrow the starter's zh-CN host locale.
         (json!({}), "en", false),
     ] {
-        let mut client = Client::open_with_environment(&info, env!("CARGO_PKG_VERSION"), environment).await;
-        let hello = client.next().await;
+        let (mut client, hello) =
+            Client::open_with_environment(&info, env!("CARGO_PKG_VERSION"), environment).await;
         assert!(hello.get("error").is_none(), "{hello}");
         client.send(json!({"type":"control_request","requestId":"init","subtype":"initialize","payload":{}})).await;
-        let frames = client.until(|v| v["type"] == "control_response" && v["requestId"] == "init").await;
-        assert_eq!(frames.last().unwrap()["payload"]["uiPreferences"],
-            json!({"language":"auto","effective":effective,"envOverride":overridden}));
+        let frames = client
+            .until(|v| v["type"] == "control_response" && v["requestId"] == "init")
+            .await;
+        assert_eq!(
+            frames.last().unwrap()["payload"]["uiPreferences"],
+            json!({"language":"auto","effective":effective,"envOverride":overridden})
+        );
         if effective == "en" {
-            let error = client.request(json!({"type":"new_session","id":"bad-cwd","params":{"cwd":"relative"}})).await;
+            let error = client
+                .request(json!({"type":"new_session","id":"bad-cwd","params":{"cwd":"relative"}}))
+                .await;
             assert_eq!(error["success"], false, "{error}");
-            let catalog: Value = serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
-            assert!(error.to_string().contains(catalog["serve.cwdAbsolute"].as_str().unwrap()), "{error}");
+            let catalog: Value =
+                serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains(catalog["serve.cwdAbsolute"].as_str().unwrap()),
+                "{error}"
+            );
         }
         // Saving and switching back to auto must resolve this same connection, too.
-        let saved = client.request(json!({"type":"set_ui_language","id":"save","language":"en"})).await;
+        let saved = client
+            .request(json!({"type":"set_ui_language","id":"save","language":"en"}))
+            .await;
         assert_eq!(saved["success"], true, "{saved}");
-        assert_eq!(saved["payload"]["effective"], if overridden { "zh-CN" } else { "en" });
-        let auto = client.request(json!({"type":"set_ui_language","id":"auto","language":"auto"})).await;
+        assert_eq!(
+            saved["payload"]["effective"],
+            if overridden { "zh-CN" } else { "en" }
+        );
+        let auto = client
+            .request(json!({"type":"set_ui_language","id":"auto","language":"auto"}))
+            .await;
         assert_eq!(auto["success"], true, "{auto}");
         assert_eq!(auto["payload"]["effective"], effective);
     }
@@ -172,9 +215,8 @@ async fn system_proxy_routes_native_and_acp_model_and_remote_mcp() {
     // not a malformed snapshot with both NO_PROXY and no_proxy.
     let environment = json!({"HTTP_PROXY":"http://native.invalid:bad-port", "HTTPS_PROXY":"http://native.invalid:bad-port",
         "ALL_PROXY":"http://native.invalid:bad-port", "NO_PROXY":"*"});
-    let mut native =
+    let (mut native, hello) =
         Client::open_with_environment(&info, env!("CARGO_PKG_VERSION"), environment).await;
-    let hello = native.next().await;
     assert_eq!(hello["instanceId"], info["instanceId"]);
     assert!(hello.get("error").is_none(), "{hello}");
     native.send(json!({"type":"control_request","requestId":"init","subtype":"initialize","payload":{}})).await;
@@ -380,7 +422,7 @@ async fn shared_service_saved_proxy_cannot_be_bypassed_by_starter_or_native_envi
             .output()
             .unwrap(),
     );
-    let mut client = Client::open_with_environment(
+    let (mut client, hello) = Client::open_with_environment(
         &info,
         env!("CARGO_PKG_VERSION"),
         json!({
@@ -391,7 +433,6 @@ async fn shared_service_saved_proxy_cannot_be_bypassed_by_starter_or_native_envi
         }),
     )
     .await;
-    let hello = client.next().await;
     assert_eq!(hello["instanceId"], info["instanceId"]);
     assert!(hello.get("error").is_none(), "{hello}");
     client.send(json!({"type":"control_request","requestId":"init","subtype":"initialize","payload":{}})).await;
@@ -556,8 +597,8 @@ async fn native_connections_keep_request_ids_selection_and_cwd_separate() {
             .await["sessionId"],
         sa
     );
-    let mut wrong = Client::open(&info, "0.0.0-incompatible").await;
-    assert!(wrong.next().await["error"]
+    let (_wrong, rejected) = Client::open(&info, "0.0.0-incompatible").await;
+    assert!(rejected["error"]
         .as_str()
         .unwrap()
         .contains("service_version_mismatch"));

@@ -102,6 +102,7 @@ const FAILURE_SUMMARY_MAX_CHARS = 240;
 /** One line for the chat panel and notifications; the full stderr stays in the output log. */
 export function summarizeServeFailure(failure: Pick<ServeConnectionFailure, "error" | "stderr">): string {
   if (failure.error instanceof ServiceVersionMismatchError) {
+    if (failure.error.running === failure.error.client) return t("bridge.serviceBuildOutdated");
     return t("bridge.serviceVersionMismatch", { running: failure.error.running, client: failure.error.client });
   }
   const lines = failure.stderr.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);

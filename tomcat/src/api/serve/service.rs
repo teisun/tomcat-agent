@@ -28,6 +28,8 @@ use crate::{AppConfig, AppError};
 
 // Incompatible changes to ConnectionHello, ServiceInfo or ACP's private close records
 // require a version bump. Optional fields with compatible defaults may keep this version.
+// The unpublished Native environment exchange is identified by message shape, not this
+// version, so a new CLI can still status/stop an old same-version service build.
 pub(crate) const LOCAL_PROTOCOL_VERSION: u32 = 1;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -55,6 +57,11 @@ pub(crate) struct ConnectionHello {
     pub environment: platform::EnvironmentSnapshot,
     #[serde(default)]
     pub skills_dir: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct NativeEnvironment {
+    environment: platform::EnvironmentSnapshot,
 }
 
 impl ConnectionHello {
@@ -453,11 +460,16 @@ async fn handle_connection(
     mut finished: watch::Receiver<Option<Result<(), String>>>,
 ) -> Result<(), AppError> {
     let mut stream = BufReader::new(stream);
-    let hello: ConnectionHello = tokio::time::timeout(CONNECT_TIMEOUT, read_json(&mut stream))
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+    let record: serde_json::Value = tokio::time::timeout_at(deadline, read_json(&mut stream))
         .await
         .map_err(|_| AppError::Config("local handshake timed out".into()))??;
+    let carries_environment = record.get("environment").is_some();
+    let hello: ConnectionHello = serde_json::from_value(record).map_err(AppError::Serialize)?;
     let error = if hello.service != "tomcat" || hello.protocol_version != LOCAL_PROTOCOL_VERSION {
         Some("local_protocol_mismatch")
+    } else if hello.protocol == ConnectionProtocol::Native && carries_environment {
+        Some("native_handshake_outdated")
     } else if hello.environment.validate().is_err() {
         Some("invalid_connection_environment")
     } else if hello.skills_dir.as_deref().is_some_and(|directory| {
@@ -509,15 +521,27 @@ async fn handle_connection(
             .await
         }
         ConnectionProtocol::Native => {
+            let environment =
+                tokio::time::timeout_at(deadline, read_json::<NativeEnvironment>(&mut stream))
+                    .await
+                    .map_err(|_| AppError::Config("local handshake timed out".into()))?;
+            let environment = match environment {
+                Ok(record) if record.environment.validate().is_ok() => record.environment,
+                _ => {
+                    // Do not echo parsing errors or values from a credential-bearing record.
+                    write_json(
+                        &mut stream,
+                        &serde_json::json!({"error":"invalid_connection_environment"}),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            write_json(&mut stream, &serde_json::json!({"ready":true})).await?;
             let (read, write) = tokio::io::split(stream);
             let writer = spawn_writer(Box::pin(write), WriterConfig::from(&runtime.cfg.serve));
-            let connection = ServeState::connect_with_source(
-                runtime,
-                writer.clone(),
-                None,
-                hello.environment,
-                None,
-            );
+            let connection =
+                ServeState::connect_with_source(runtime, writer.clone(), None, environment, None);
             let result = super::stdin::run_connection_loop(connection, BufReader::new(read)).await;
             writer.close();
             result
@@ -547,6 +571,10 @@ async fn read_json<T: DeserializeOwned>(
     }
     serde_json::from_slice(&line).map_err(AppError::Serialize)
 }
+
+#[cfg(test)]
+#[path = "tests/service_test.rs"]
+mod tests;
 
 async fn write_json(
     writer: &mut (impl AsyncWrite + Unpin),

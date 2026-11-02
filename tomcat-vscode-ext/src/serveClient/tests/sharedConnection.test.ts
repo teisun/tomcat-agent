@@ -24,17 +24,25 @@ vi.mock("node:child_process", async (importOriginal) => {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function fixture(options: { stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean; holdHello?: boolean; handshakeError?: string; actionExitCode?: number } = {}) {
+async function fixture(options: {
+  stopped?: boolean; version?: string; protocol?: number; changedIdentity?: boolean;
+  holdHello?: boolean; malformedHello?: boolean; handshakeError?: string;
+  holdReady?: boolean; readyError?: string; oldBuild?: boolean; actionExitCode?: number;
+} = {}) {
   const root = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tc-connect-"));
   const endpoint = process.platform === "win32" ? String.raw`\\.\pipe\tc-connect-${randomUUID()}` : path.join(root, "serve.sock");
   const info: SharedServiceInfo = { service: "tomcat", running: true, protocolVersion: options.protocol ?? 1,
     serverVersion: options.version ?? "0.1.80", instanceId: "instance", pid: process.pid, agentId: "main", endpoint };
   const received: Array<Record<string, unknown>> = [];
+  const bytes: Buffer[] = [];
+  let sawEnvironment!: () => void;
+  const environmentReceived = new Promise<void>(resolve => { sawEnvironment = resolve; });
   const sockets = new Set<Socket>();
   let sawHello!: () => void;
   const helloReceived = new Promise<void>(resolve => { sawHello = resolve; });
   const server = createServer(socket => {
     sockets.add(socket);
+    socket.on("data", chunk => bytes.push(Buffer.from(chunk)));
     socket.on("error", () => undefined);
     socket.once("close", () => sockets.delete(socket));
     const lines = createInterface({ input: socket });
@@ -45,9 +53,17 @@ async function fixture(options: { stopped?: boolean; version?: string; protocol?
         socket.write(JSON.stringify({ type: "response", id: frame.id, success: true, payload: { native: true } }) + "\n");
         return;
       }
-      sawHello();
-      if (!options.holdHello) socket.write(JSON.stringify({ ...info, instanceId: options.changedIdentity ? "replacement" : info.instanceId,
-        ...(options.handshakeError ? { error: options.handshakeError } : {}) }) + "\n");
+      if (frame.protocol) {
+        sawHello();
+        if (!options.holdHello) socket.write(options.malformedHello ? "not-json\n" : JSON.stringify({ ...info,
+          instanceId: options.changedIdentity ? "replacement" : info.instanceId,
+          ...(options.handshakeError ? { error: options.handshakeError } : {}) }) + "\n");
+      } else if ("environment" in frame) {
+        sawEnvironment();
+        if (!options.holdReady) socket.write(JSON.stringify(options.oldBuild
+          ? { type: "response", success: false, error: "missing field type" }
+          : options.readyError ? { error: options.readyError } : { ready: true }) + "\n");
+      }
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(endpoint, resolve); });
@@ -75,7 +91,9 @@ console.log(args[0] === "--version" ? "tomcat 0.1.80" : ${JSON.stringify(JSON.st
     executable: process.execPath, extraArgs: [script], cwd: root, signal: abort.signal,
     allowStart: true, env: { TEST_CONTROLLER_VALUE: "private-value" }, onStderr: vi.fn(),
   };
-  return { abort, connectOptions, received, helloReceived,
+  return { abort, connectOptions, received, helloReceived, environmentReceived,
+    receivedBytes: () => Buffer.concat(bytes).toString("utf8"),
+    releaseReady: () => { for (const socket of sockets) socket.write('{"ready":true}\n'); },
     childEnvironment: async () => JSON.parse(await readFile(envLog, "utf8")),
     calls: async () => (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line)),
   };
@@ -105,7 +123,9 @@ it("uses CLI discovery then native IPC with the controller environment, never lo
   }
   expect(await f.calls()).toEqual([["--version"], ["serve", "start"]]);
   expect(f.received[0].protocol).toBe("native");
-  expect((f.received[0].environment as Record<string, string>).TEST_CONTROLLER_VALUE).toBe("private-value");
+  expect("environment" in f.received[0]).toBe(false);
+  expect(f.received.length).toBe(2);
+  expect((f.received[1].environment as Record<string, string>).TEST_CONTROLLER_VALUE).toBe("private-value");
   expect(f.connectOptions.onStderr).not.toHaveBeenCalled();
   connection.socket.destroy();
 });
@@ -115,7 +135,7 @@ it.each(["upper", undefined])("encodes case aliases exactly as the actual CLI ch
   f.connectOptions.env = { ...f.connectOptions.env, TEST_ENV_CASE: value, test_env_case: "lower" };
   const connection = await connectSharedService(f.connectOptions);
   try {
-    const sent = f.received[0].environment as Record<string, string>;
+    const sent = f.received[1].environment as Record<string, string>;
     const aliases = Object.fromEntries(Object.entries(sent).filter(([key]) => key.toUpperCase() === "TEST_ENV_CASE"));
     expect(aliases).toEqual(await f.childEnvironment());
     expect(Object.keys(aliases)).toHaveLength(process.platform === "win32" ? (value === undefined ? 0 : 1) : (value === undefined ? 1 : 2));
@@ -127,7 +147,7 @@ it("hands the paused handshake socket to the normal NDJSON reader", async () => 
   const messenger = new TomcatMessenger(f.connectOptions);
   try {
     await expect(messenger.request({ type: "get_state" }, 2_000)).resolves.toMatchObject({ success: true, payload: { native: true } });
-    expect(f.received.map(frame => frame.type ?? frame.protocol)).toEqual(["native", "get_state"]);
+    expect(f.received.map(frame => frame.type ?? frame.protocol ?? "environment")).toEqual(["native", "environment", "get_state"]);
   } finally { await messenger.disposeAsync(); }
 });
 
@@ -165,6 +185,57 @@ it("rejects an instance change between discovery and socket handshake", async ()
   const f = await fixture({ changedIdentity: true });
   await expect(connectSharedService(f.connectOptions)).rejects.toThrow("identity changed");
   expect(f.received).toHaveLength(1);
+  expect(f.receivedBytes().includes("environment")).toBe(false);
+  expect(f.receivedBytes().includes("private-value")).toBe(false);
+});
+
+it.each([{ malformedHello: true }, { holdHello: true }])("never sends any environment bytes before a valid identity ($malformedHello)", async options => {
+  const f = await fixture(options);
+  await expect(connectSharedService(f.connectOptions)).rejects.toThrow();
+  expect(f.receivedBytes().includes("environment")).toBe(false);
+  expect(f.receivedBytes().includes("private-value")).toBe(false);
+  expect(f.connectOptions.onStderr).not.toHaveBeenCalled();
+}, 10_000);
+
+it("waits for environment acknowledgement before returning the socket", async () => {
+  const f = await fixture({ holdReady: true });
+  let connected = false;
+  const pending = connectSharedService(f.connectOptions).then(value => { connected = true; return value; });
+  await f.environmentReceived;
+  expect(connected).toBe(false);
+  f.releaseReady();
+  (await pending).socket.destroy();
+});
+
+it("preserves an environment rejection instead of admitting a messenger", async () => {
+  const f = await fixture({ readyError: "invalid_connection_environment" });
+  await expect(connectSharedService(f.connectOptions)).rejects.toThrow("invalid_connection_environment");
+  expect(f.received.length).toBe(2);
+  expect(f.connectOptions.onStderr).not.toHaveBeenCalled();
+});
+
+it("classifies a same-version old native reply as a service build mismatch", async () => {
+  const f = await fixture({ oldBuild: true });
+  await expect(connectSharedService(f.connectOptions)).rejects.toMatchObject({
+    name: "ServiceVersionMismatchError", running: "0.1.80", client: "0.1.80",
+  });
+  expect(f.received.length).toBe(2);
+  expect("environment" in f.received[0]).toBe(false);
+});
+
+it("applies the original handshake deadline while awaiting ready", async () => {
+  const f = await fixture({ holdReady: true });
+  await expect(connectSharedService(f.connectOptions)).rejects.toThrow("handshake timed out");
+  expect(f.received.length).toBe(2);
+}, 10_000);
+
+it("cancels while awaiting ready without replaying the environment", async () => {
+  const f = await fixture({ holdReady: true });
+  const pending = expect(connectSharedService(f.connectOptions)).rejects.toThrow("cancelled");
+  await f.environmentReceived;
+  f.abort.abort();
+  await pending;
+  expect(f.received.length).toBe(2);
 });
 
 it("cancels a pending local handshake without leaking or restarting the service", async () => {
