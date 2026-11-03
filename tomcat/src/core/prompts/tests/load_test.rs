@@ -9,6 +9,10 @@ const PLAN_WORKFLOW: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/skills/write-plans/references/tomcat-plan-workflow.md"
 ));
+const WRITING_STANDARDS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/skills/write-plans/references/writing-standards.md"
+));
 const PLAN_STRUCTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/skills/write-plans/references/plan-structure.md"
@@ -51,11 +55,14 @@ fn write_plans_workflow_mentions_create_plan_and_ask_question() {
     assert!(s.contains("never start merely because they asked to create or revise a plan"));
     assert!(s.contains("ask_question"));
     assert!(s.contains("PLAN mode"));
-    assert!(s.contains("requested plan/proposal creation or revision"));
+    assert!(s.contains("Creating/editing a PlanFile: choose the tool by the part being changed:"));
     assert!(s.contains("New plan: use `create_plan`"));
     assert!(s.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
     assert!(s.contains("Existing `frontmatter.todos`: use `update_plan`"));
-    assert!(s.contains("Do NOT emit a plan/proposal as prose"));
+    assert!(!s.contains("requested plan/proposal creation or revision"));
+    assert!(!s.contains("Do NOT emit a plan/proposal as prose"));
+    assert!(!s.contains("Read this before starting planning in Tomcat."));
+    assert!(!s.contains("Loading this skill neither enters PLAN mode"));
 }
 
 #[test]
@@ -228,6 +235,7 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
         ("write-plans skill", WRITE_PLANS_SKILL),
         ("plan workflow", PLAN_WORKFLOW),
         ("plan structure", PLAN_STRUCTURE),
+        ("writing standards", WRITING_STANDARDS),
     ];
     for (name, text) in navigating_surfaces.iter().copied().chain([
         ("verify skill", VERIFY_SKILL),
@@ -297,11 +305,108 @@ fn write_plans_preserves_heading_and_reader_contracts() {
         "Use the equivalent labels in the plan's language; always include both the label and the number."
     ));
     assert!(PLAN_STRUCTURE.contains("Do not invent a root cause for a new requirement."));
-    assert!(PLAN_STRUCTURE.contains("The following requirements apply to the plan document, not to chat replies or review reports."));
+    assert!(WRITING_STANDARDS.contains("The following requirements apply to the plan document, not to chat replies or review reports."));
     assert!(PLAN_STRUCTURE
         .contains("The following six-column table is the only format for key decisions:"));
+    for removed in [
+        "Put the complete explanation in the plan itself",
+        "Do not generate empty tables for inapplicable content",
+        "Omitting an OPTION chapter does not mean omitting necessary information",
+        "simple content may be combined",
+        "| `### Implementation Locations` |",
+        "| `### Deletion Review and Triggers for Reconsideration` |",
+        "| `### Implementation and Verification Arrangements` |",
+    ] {
+        assert!(
+            !PLAN_STRUCTURE.contains(removed) && !WRITING_STANDARDS.contains(removed),
+            "write-plans must not restore the removed instruction: {removed}"
+        );
+    }
     assert!(WRITE_PLANS_SKILL.contains("## Reader check:"));
     assert!(WRITE_PLANS_SKILL.contains("does not require another model call or review workflow"));
+}
+
+#[test]
+fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
+    let rows: Vec<_> = PLAN_STRUCTURE
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.strip_prefix('|')?.split('|');
+            Some((cells.next()?.trim(), cells.next()?.trim()))
+        })
+        .collect();
+    let expected = [
+        ("`### Solution Breakdown and Implementation`", "MUST"),
+        (
+            "`#### Issue N: Description` / `#### Requirement N: Description`",
+            "MUST",
+        ),
+        (
+            "`##### Problem Symptoms` / `##### Requirement Description`",
+            "MUST",
+        ),
+        ("`##### Root Cause and Evidence`", "MUST (issues only)"),
+        ("`##### Solution`", "MUST"),
+        ("`###### Solution Explanation`", "MUST"),
+        ("`###### UI Mockup`", "OPTION"),
+        ("`##### Key Decisions Table`", "MUST"),
+        ("`##### Test Cases`", "MUST"),
+        ("Other optional chapters", "OPTION"),
+        ("`### Acceptance`", "MUST"),
+    ];
+    assert!(
+        rows.windows(expected.len()).any(|rows| rows == expected),
+        "chapter rows must preserve heading levels, order, and conditional requirements"
+    );
+    for rule in [
+        "Chapter Title (Follow These Names Exactly)",
+        "Bold text and list items are not substitutes for headings.",
+        "Keep every required subsection, even in a small plan.",
+        "Omit Root Cause and Evidence for requirements.",
+        "For issues, include prose and add an ASCII diagram as needed.",
+        "Solution Explanation includes an ASCII diagram plus prose.",
+        "UI Mockup is a separate subsection under Solution, included only as needed.",
+        "Include the six-column table from §2.3, not just prose or a reference to the table.",
+    ] {
+        assert!(PLAN_STRUCTURE.contains(rule), "missing rule: {rule}");
+    }
+    // This is the structural diagram, not a snapshot of the explanatory prose.
+    assert!(PLAN_STRUCTURE.contains(concat!(
+        "Issue N: Description                  Requirement N: Description\n",
+        "├─ Problem Symptoms                   ├─ Requirement Description\n",
+        "├─ Root Cause and Evidence            ├─ Solution\n",
+        "├─ Solution                           │  ├─ Solution Explanation\n",
+        "│  ├─ Solution Explanation            │  └─ UI Mockup (as needed)\n",
+        "│  └─ UI Mockup (as needed)            ├─ Key Decisions Table\n",
+        "├─ Key Decisions Table                └─ Test Cases\n",
+        "└─ Test Cases\n",
+    )));
+    let small_change = PLAN_STRUCTURE
+        .split_once("## 3. Simplifying Small Changes\n")
+        .expect("small-change guidance exists")
+        .1;
+    let headings: Vec<_> = small_change
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "## Goal",
+            "## Plan",
+            "### Solution Breakdown and Implementation",
+            "#### Issue N: Description",
+            "##### Problem Symptoms",
+            "##### Root Cause and Evidence",
+            "##### Solution",
+            "###### Solution Explanation",
+            "##### Key Decisions Table",
+            "##### Test Cases",
+            "### Acceptance",
+            "## Todos Board",
+        ],
+        "the small-issue skeleton must not collapse required headings"
+    );
 }
 
 #[test]
@@ -607,9 +712,9 @@ fn write_plans_preserves_decomposition_and_test_design() {
     assert!(PLAN_STRUCTURE.contains("unit, integration, and E2E coverage"));
     assert!(PLAN_STRUCTURE.contains("where each layer catches a\n  distinct failure type"));
     assert!(PLAN_STRUCTURE.contains("Source commands from the user, project rules, manifests"));
-    assert!(PLAN_STRUCTURE.contains("first principles"));
-    assert!(PLAN_STRUCTURE.contains("ASCII diagram"));
-    assert!(PLAN_STRUCTURE.contains("Put user experience first"));
+    assert!(WRITING_STANDARDS.contains("first principles"));
+    assert!(WRITING_STANDARDS.contains("ASCII diagram"));
+    assert!(WRITING_STANDARDS.contains("Put user experience first"));
 }
 
 /// S6/S8 remain shared. Core identity keeps general explanation rules;
@@ -785,15 +890,33 @@ fn long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract() {
 }
 
 #[test]
-fn write_plans_and_system_verification_share_scoped_batches() {
-    let planner = PLAN_STRUCTURE
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let verification = load(PromptKey::SystemVerification);
+fn write_plans_keeps_overview_brief_and_omits_optional_chapter_templates() {
+    let overview = PLAN_STRUCTURE
+        .split_once("### 2.1 Solution Overview\n")
+        .expect("overview guidance exists")
+        .1
+        .split_once("### 2.2 Local Skeleton for Each Problem or Requirement\n")
+        .expect("local skeleton follows overview")
+        .0
+        .trim();
+    assert_eq!(
+        overview,
+        "Explain the overall flow and core design so readers can get a general understanding of the solution. Small plans do not need this chapter."
+    );
+    for removed in [
+        "### 3.3 Implementation and Verification Arrangements",
+        "Milestones are delivery boundaries",
+        "verification batches are shared build/test boundaries",
+        "The following is an optional verification-batch format:",
+    ] {
+        assert!(
+            !PLAN_STRUCTURE.contains(removed),
+            "removed template: {removed}"
+        );
+    }
 
-    assert!(planner.contains("verification batches are shared build/test boundaries"));
-    assert!(planner.contains("Milestones are delivery boundaries"));
+    // Removing optional plan templates must not remove shared execution rules.
+    let verification = load(PromptKey::SystemVerification);
     assert!(verification
         .contains("Do not schedule the same test family once per todo and again at the end"));
     assert!(verification

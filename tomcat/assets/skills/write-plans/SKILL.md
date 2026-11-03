@@ -6,7 +6,7 @@ description: Write or revise visually explained, reviewable, executable developm
 # Development Plan Writing Steps
 
 1. First read the [Tomcat Plan Workflow](references/tomcat-plan-workflow.md).
-2. Then read the [Plan Writing Standards](references/plan-structure.md).
+2. Then read the [Plan Writing Standards](references/writing-standards.md) and [Plan Structure](references/plan-structure.md).
 3. Start writing the plan.
 
 

@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-03 02:06 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-03 23:06 +0800 | ACTIVE | develop | - |
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -178,6 +178,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- **[2026-11-03，write-plans 结构整理，本次本地提交]** 将技术设计、文字与图示指导移到独立 `references/writing-standards.md`，入口先读工作流再读写作规范和结构；章节表、局部骨架与小改动示例统一独立标题及层级，问题与需求按适用条件包含根因、方案说明、可选 UI 图、六列决策表和测试章节，删除可选章节模板并精简工作流措辞。提示词契约测试同步覆盖标题/骨架及已移除条款，技能物化测试补新附件加载检查；四个技能文档、两个 Rust 测试及两处 status 全部纳入。仅做差异、空白与提交范围检查；按用户要求不跑测试或构建，不声称新增用例通过，Cov% 未测量；未升版、安装、重启、推送或发布。
 - [✓] **[P1，2026-11-02，计划执行就绪]** write-plans 的 Final Check 与计划 reviewer 增加执行就绪检查：先核实关键前提、优先等效自动化，在规划阶段问清可预见的风险操作并记录授权边界，执行时不重复确认已同意事项。同步 review brief、单条提示词契约测试与职责文档；五个实现文件及分支状态/汇总看板纳入本次本地提交。
 - [✓] **[执行就绪的提交前验收证据]** 提示词模块与技能物化/发现/加载回归共 33 passed、0 failed（`1793625169364-y9ujje`）；格式与 diff 检查通过（`1793625242644-m4h9li`），五个场景已作条款走查。两次断线仅留编译日志，结果未知；新增测试的一处格式问题已修正，原失败记录保留。按用户要求本次提交不重跑测试或构建，Cov% 未测量；不推送、不安装、不重启。
 - [✓] **[P1，2026-11-02]** Unix 命令入口改为独立副本：已有软链（含同目标与悬空链接）迁移为普通文件，内容不同的入口以同目录临时副本、`sync_all`、`rename` 替换；清理构建目录不再破坏入口，运行中的进程继续持有旧文件。新增 `scripts/dev-install.sh`（100755），沿用 Cargo、`CARGO_TARGET_DIR` 与 Agent 保护；脚本测试、非 Windows CI 步骤、双语文档及开发规则一并纳入本次本地提交。Windows 生产行为、插件路径选择与版本号不变。
@@ -223,6 +224,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-11-03 write-plans 结构整理**：仅改变内置计划技能的写作/结构约定及配套测试；新增技能附件 `references/writing-standards.md`，`references/plan-structure.md` 保留章节骨架、决策表与测试设计。未修改工具实现、权限、计划状态机、持久化格式、跨进程协议或依赖。
 - **2026-11-02 计划执行就绪**：仅调整写作/评审提示词契约；不改执行器、`ask_question` 实现、工具权限、状态机或审计存储。reviewer 保持建议性输出及原 `<review>` 格式，不代用户决定或授权。
 - **2026-11-02 Unix 安装入口**：`install_user_command` 的签名不变；Unix 不再保留内容不同的普通入口，软链一律迁移为副本。`init`/`self-install` 安装当前程序的快照，后续仅编译不会自动刷新，需再次执行安装；macOS 通过根目录 `./scripts/dev-install.sh` 完成编译与安装，不改 PATH、配置、凭据或服务生命周期。
 - **2026-10-20 ACP 技术方案**：仅记录拟议接口与实现边界，未修改现有 CLI、serve、扩展或宿主接口；不能将文档中的 access/origin、共享连接和 ACP 示例当作已交付协议。
@@ -271,7 +273,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 | 会话菜单交付范围 | 已完成真实 Dev Host + fake Serve 的焦点／菜单验收并交付纯 VSIX；安装升级用例同步语义且类型检查通过 | Agent 未安装该 VSIX，不将源码宿主验证或用户请求提交等同于完整安装包／真实 CLI 验收；首次取证超时与后续通过记录均保留 |
 | 会话恢复范围 | 保留同 agent／项目 scope 级共享 current；用户已反馈本次修复验收通过 | 不承诺多个窗口各自独立恢复；尚未正式发布，不把用户验收反馈表述为 Agent 已采集主窗口截图／日志 |
 | 本轮既有格式与代理环境问题 | 全仓 fmt 的 17 个文件格式差异与 HEAD 一致；命令模块首轮 6 项本地 HTTP 测试受代理环境影响 | 不并入无关格式化；补本机 NO_PROXY 后同一二进制 6/6 复验通过，保留首轮失败，不冒称一次聚合全绿 |
-| 本次提交的验证边界 | 按用户要求不重新运行测试、构建或视觉验收；上方通过项属于此前实施验收，Cov% 未测量 | 本次仅做 diff／暂存范围／格式检查；不将旧结果表述为新一轮全量通过 |
+| 本次提交的验证边界（2026-11-03） | 按用户要求不运行测试或构建；本次 write-plans 新增/调整的提示词契约与技能附件物化用例尚未执行，Cov% 未测量 | 本次仅做完整差异、空白与三类变更区域核对；后续补提示词和技能物化相关用例，不以历史通过项代签本次改动 |
 | 本机数据验证边界 | 实际 36 模型与近期 3 会话及其引用图片，在隔离 HOME、禁止网络和外部写入条件下通过；原始受保护配置/凭证未读，使用 config_get 非敏感默认模型生成隔离配置 | 不把样本读取说成全目录逐字兼容、所有历史或真实凭证认证通过；先前等待豁免已被安全的数据读取方案替代，没有把未回应当同意；Windows/Linux 新版原生安装未执行 |
 | 本轮宿主日志边界 | 真实包完整 workbench 有 E2E harness 的 Marketplace 元数据 404；fake 安装 session-files 用例曾记录 VS Code `Illegal value for lineNumber`，用例本身通过 | 与注入错误边界测试的预期崩溃分开记录；不称全宿主零告警，不归为产品 webview 的运行时错误 |
 | Linux CI 宿主 shell 告警（2026-11-03 已修复） | 原夹具强制 `/bin/zsh`，Linux 截图出现 ENOENT 通知；`93a467a7` 改为保留宿主 SHELL 并补断言，正式 0.1.99 宽窄截图已确认通知消失 | 旧证据与已发布资产不修改；harness Marketplace 404 和宿主告警另行保留，不宣称全宿主零错误 |
