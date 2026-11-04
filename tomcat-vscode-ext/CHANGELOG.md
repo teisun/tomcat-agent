@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+- Guide empty VS Code windows to open a project folder instead of reporting a session or connection failure. Keep Settings available and show the shared service as connected while a project folder is required.
+- Create the default Playwright MCP configuration on normal startup without requiring `tomcat init`, while preserving every existing `mcp.json`, including empty, invalid and customized files. Playwright requires Node.js 20+, `npx` on the service's PATH and a usable browser; browsers are not installed automatically. Deleting the whole configuration file restores the default on the next startup; disable the source in Settings to keep it off.
+- Make connector Reload reread configuration from disk, reconnect the selected source and start other sources changed or added in the same edit, while keeping unchanged healthy connections. Invalid JSON and removed or disabled targets now return explicit errors; an accepted reload request does not yet mean the source is ready.
+- Give actionable MCP startup errors for missing programs, permission failures and processes exiting before initialization. Report JSON error category, line and column without echoing sensitive configuration values. After changing PATH, explicitly restart the shared service; Reload does not refresh its environment, and restarting stops all active tasks.
+- Refresh the model connection on the next Retry, Resume or new message after a final local connection failure, so a running service can pick up current proxy settings after a proxy or VPN change. Preserve history, tool results and existing retry limits; HTTP errors such as 401, 429 and 503 do not trigger this refresh.
+- Clarify built-in plan-writing guidance with separate problem and requirement sections, explicit decision tables and test cases.
+- Bundle CLI 0.1.84 in platform-specific packages. Pure-extension users must update their external CLI to receive the backend fixes. To use the new CLI with an already-running shared service, explicitly restart it after checking active tasks; restarting stops all of them.
+
 ## 0.1.99
 
 Includes the changes prepared for the unpublished 0.1.98 extension release.
