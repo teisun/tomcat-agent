@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.1
+## 0.2.2
+
+Includes the changes prepared for the unpublished 0.2.1 extension release.
 
 - Guide empty VS Code windows to open a project folder instead of reporting a session or connection failure. Keep Settings available and show the shared service as connected while a project folder is required.
 - Create the default Playwright MCP configuration on normal startup without requiring `tomcat init`, while preserving every existing `mcp.json`, including empty, invalid and customized files. Playwright requires Node.js 20+, `npx` on the service's PATH and a usable browser; browsers are not installed automatically. Deleting the whole configuration file restores the default on the next startup; disable the source in Settings to keep it off.

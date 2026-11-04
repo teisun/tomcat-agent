@@ -1,5 +1,5 @@
 import * as http from "node:http";
-import { mkdir, stat, readFile } from "node:fs/promises";
+import { mkdir, stat, readFile, readdir } from "node:fs/promises";
 import { connect } from "node:net";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -37,7 +37,7 @@ describe("serve fixture resource ownership", () => {
     expect(serveFixtureEnvironment("/fixture", {}).SHELL).toBeUndefined();
   });
 
-  it("starts cold without init, persisted models, keys, or model overrides", async () => {
+  it.each([false, true])("starts cold without init, persisted models, keys, or model overrides (missing MCP: %s)", async (missingMcpConfig) => {
     const runCli = vi.fn(async () => undefined);
     const parent = { TOMCAT__LLM__DEFAULT_MODEL: "live-model", OPENAI_API_KEY: "private" };
     const env = serveFixtureEnvironment("/fixture", parent, true);
@@ -46,12 +46,19 @@ describe("serve fixture resource ownership", () => {
     expect(env.TOMCAT__LLM__DEFAULT_MODEL).toBeUndefined();
     expect(env.TOMCAT__CONTEXT__COMPACTION_MODEL).toBeUndefined();
     const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
-      binary: "not-executed", coldStart: true, runCli,
+      binary: "not-executed", coldStart: true, missingMcpConfig, runCli,
     });
     try {
       expect(runCli).not.toHaveBeenCalled();
       expect(fixture.env.OPENAI_API_KEY).toBeUndefined();
-      await expect(stat(path.join(fixture.homePath, ".tomcat"))).rejects.toMatchObject({ code: "ENOENT" });
+      const workDir = path.join(fixture.homePath, ".tomcat");
+      if (missingMcpConfig) {
+        await expect(stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(await readdir(workDir)).toEqual(["mcp.json"]);
+        expect(JSON.parse(await readFile(path.join(workDir, "mcp.json"), "utf8")))
+          .toEqual({ mcpServers: {} });
+      }
     } finally { await fixture.cleanup(); }
     expect(runCli).toHaveBeenCalledExactlyOnceWith("not-executed", ["serve", "stop"], expect.objectContaining({ env: fixture.env, cwd: fixture.workspacePath }));
     expect(runCli).toHaveBeenLastCalledWith("not-executed", ["serve", "stop"], expect.objectContaining({ timeout: 80_000 }));
