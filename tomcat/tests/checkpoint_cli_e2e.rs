@@ -13,7 +13,6 @@ use std::fs;
 #[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 #[cfg(unix)]
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -35,19 +34,8 @@ use child_harness::{BackgroundProcessGuard, CheckpointChild};
 #[cfg(unix)]
 use mock_protocol::{classify_mock_request, MockRequestClass};
 
-fn isolated_cli_command() -> StdCommand {
-    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("TOMCAT__") {
-            command.env_remove(key);
-        }
-    }
-    command.env("TOMCAT__UI__LANGUAGE", "en");
-    command
-}
-
-fn cmd() -> Command {
-    let mut c = Command::from_std(isolated_cli_command());
+fn cmd(home: &Path) -> Command {
+    let mut c = Command::from_std(common::serve::isolated_serve_command(home));
     c.timeout(Duration::from_secs(30));
     c
 }
@@ -75,19 +63,10 @@ fn setup_fixture() -> Fixture {
     let workdir = home.path().join("workspace");
     fs::create_dir_all(&workdir).unwrap();
 
-    eprintln!("[checkpoint] phase=init start home={}", home_path.display());
-    cmd()
-        .args(["init"])
-        .timeout(Duration::from_secs(20))
-        .current_dir(&workdir)
-        .env("HOME", &home_path)
-        .env("SHELL", "/bin/zsh")
-        .assert()
-        .success();
-
-    eprintln!("[checkpoint] phase=init complete");
+    // These cases exercise checkpoints, not interactive initialization or command
+    // installation. Seed their isolated state directly; cli_tests covers real init.
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
-    let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    let mut cfg = tomcat::AppConfig::default();
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     common::apply_idatatlas_app_config(&mut cfg);
     // Checkpoint mock servers model the main turn only; an implicit title request
@@ -122,6 +101,29 @@ fn setup_fixture() -> Fixture {
         session,
         session_id,
         store,
+    }
+}
+
+#[test]
+fn checkpoint_fixture_prepares_local_state_without_installing_cli() {
+    let fx = setup_fixture();
+    let cfg = load_config_toml_file(&fx.home_path.join(".tomcat/tomcat.config.toml")).unwrap();
+    assert_eq!(cfg.llm.default_model, common::idatatlas_test_model());
+    assert!(tomcat::ModelCatalog::load(&cfg)
+        .unwrap()
+        .entries()
+        .iter()
+        .any(|entry| entry.id == cfg.llm.default_model));
+    let mcp = fs::read_to_string(fx.home_path.join(".tomcat/mcp.json")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&mcp).unwrap(),
+        json!({"mcpServers": {}})
+    );
+    for path in [".local", ".zprofile", ".zshrc"] {
+        assert!(
+            !fx.home_path.join(path).exists(),
+            "checkpoint setup must not install commands or edit shell profiles: {path}"
+        );
     }
 }
 
@@ -612,7 +614,7 @@ fn test_resume_after_interrupt() {
     );
 
     info!("Act: tomcat chat --resume + local /ckpt list");
-    let assert = cmd()
+    let assert = cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
@@ -671,7 +673,7 @@ fn test_slash_restore_recovers_after_bad_edit() {
     fs::write(fx.workdir.join("note.txt"), "bad").unwrap();
 
     info!("Act: tomcat chat + local /restore");
-    let assert = cmd()
+    let assert = cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -753,7 +755,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         "[checkpoint] phase=restore-turn-end start id={turn_end_ckpt}; EOF follows restore input"
     );
     fs::write(fx.workdir.join("note.txt"), "broken-after-turn-end").unwrap();
-    cmd()
+    cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -801,7 +803,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         "[checkpoint] phase=restore-manual start id={manual_ckpt}; EOF follows restore input"
     );
     fs::write(fx.workdir.join("note.txt"), "manual-bad").unwrap();
-    cmd()
+    cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -845,7 +847,7 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
     let _span = info_span!("test_idle_readline_eof_exits_without_interrupt_ckpt").entered();
     let fx = setup_fixture();
 
-    cmd()
+    cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -893,7 +895,7 @@ fn test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning() {
     write_session_plugin_fixture(&fx.workdir, "session-eof-plugin", "session");
     write_session_plugin_fixture(&fx.workdir, "lazy-eof-plugin", "lazy");
 
-    cmd()
+    cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .arg("code")
         .env("HOME", &fx.home_path)
@@ -952,7 +954,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .current_transcript_path()
         .unwrap()
         .expect("transcript path");
-    let mut command = isolated_cli_command();
+    let mut command = common::serve::isolated_serve_command(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .arg("code")
@@ -1069,7 +1071,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .current_transcript_path()
         .unwrap()
         .expect("transcript path");
-    let mut command = isolated_cli_command();
+    let mut command = common::serve::isolated_serve_command(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .arg("code")
