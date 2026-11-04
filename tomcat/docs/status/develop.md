@@ -1,6 +1,27 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-04 14:17 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-04 17:16 +0800 | ACTIVE | develop | - |
+
+### CURRENT RELEASE：CLI 0.1.85 / EXT 0.2.3（已发布并完成制品核验）
+
+```text
+已确认 CI 故障修复 → 91fe2746 标准 CI 五项通过 → develop/main/master 快进同步
+  → CLI 0.1.85 四份归档与校验清单下载通过
+  → EXT 0.2.3 四平台原生验收通过 → 五份 VSIX 校验与内置 CLI 比对通过
+  → Marketplace 四平台公开 Validated；下载字节与 GitHub 已验收包一致
+```
+
+- **发布身份与顺序**：两个正式 tag 均指向 `91fe2746008b1c1064b794873149c225cd9bb34f`；EXT 0.2.3 pin CLI 0.1.85。先确认 CLI 公开资产并实际下载核验，再推 EXT tag；三分支仅 fast-forward，没有强推、移动标签或替换旧资产。版本镜像、tag guard 与 CHANGELOG 同提交，0.2.2 及更早日志历史不改。
+- **已确认故障及修复**：普通冷启动会预写空 MCP，0.2.1 的目录不存在断言错误，已只修夹具断言并以 0.2.2 续发；本轮修复 MCP 诊断的 needless borrow、并发启动请求过早返回导致迟到子进程在显式 stop 后重新拉起服务，以及 checkpoint 夹具无关完整 init 超时。复用原锁、身份、启动期限和清理机制；保留中断/恢复断言，不加超时、不跳过用例。
+- **标准 CI**：发布源码的 develop [41796868754](https://github.com/teisun/tomcat-agent/actions/runs/41796868754) 与 main [41801529625](https://github.com/teisun/tomcat-agent/actions/runs/41801529625) 均已 completed success，各五个 job 全过：三系统 Rust、Windows 扩展、Windows 系统代理/真实 VS Code。三个分支的 version-sync 成功；main 最终状态由 `1793783672048-i0ieuu` exit 0 于 09:14 UTC 单独确认，不再以此前的执行中状态代替最终结果。后续验收记录提交仅改两份状态文档，复用本源码结果，不重复产品门禁。
+- **CLI 正式资产**：[release-cli 41801722176](https://github.com/teisun/tomcat-agent/actions/runs/41801722176) 成功；[CLI Release](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.85) 四平台归档与 SHA256SUMS 已公开。`1793782714076-a3r8hh` exit 0，四份归档同时匹配公开 digest 和下载清单，归档内为对应普通二进制；本机 x64 发布二进制 `--version` 为 `tomcat 0.1.85`，没有安装。
+- **EXT 正式资产与原生验收**：[release-ext 41803846821](https://github.com/teisun/tomcat-agent/actions/runs/41803846821) 七个 job 全过，含 darwin-arm64、darwin-x64、linux-x64、win32-x64 的 exact VSIX 原生验收与 Marketplace 上传；[EXT Release](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.2.3) 四个平台包、纯包与 SHA256SUMS 已公开。五份下载 SHA256 通过，`1793783418480-uujglg` exit 0，ZIP/身份/target/版本/pin/入口均正确；包内 changelog 与 tag 源码字节一致，四个内置 CLI 与 CLI 归档逐字节一致，纯包无 CLI。
+- **市场最终状态**：OIDC 四平台上传成功；09:16 UTC 公开 Gallery 的 0.2.3 四个平台均为 Validated，`1793783242260-uz64i0` exit 0，四份实际公开下载的 SHA256 同时匹配 Gallery 属性与 GitHub 已验收包。最初仍返回 0.2.2、随后 macOS 尚未验证的阶段记录保留，没有重复上传。OpenVSX 的发布 step 为 skipped（`1793783672048-i0ieuu`），未改发布开关或凭据。
+- **原始失败与验收限制**：旧 Windows 专项 run [41787591287](https://github.com/teisun/tomcat-agent/actions/runs/41787591287) 的单次 exit 1 根因仍未查明；修复候选随后两轮同专项通过，用户明确选择 `release-current-green-candidate` 后继续发版，不把后续绿色说成旧根因已修复。第一次一次性包核验器误用大写 `extension/CHANGELOG.md` 而 exit 1；实际包条目为 `extension/changelog.md`，仅修读取路径并补齐检查，未重下或更改制品。本机没有 nextest，使用已完成的定向 cargo test/Clippy 与云端标准 CI；不声称本地跑过 nextest。
+- **安全与保留边界**：保留 CLI 0.1.84、失败未发布的 EXT 0.2.1、已发布 EXT 0.2.2 及其 tag/资产。未安装到在用环境、改配置/凭据/PATH 或停止/重启正式共享服务；收到新 CLI 后，用户须先检查活动任务再显式重启，重启会停止全部任务。本轮相对 0.2.2 未改 Webview 结构/样式；未人工下载复阅本轮 CI PNG，不冒称全界面视觉复核或真实收费模型验证。旧动态插件串会话、QuickJS 等历史风险与原始失败继续保留，Cov% 未测量。
+- **证据与文档范围**：本地细节及 hash 清单在 `.agents/acceptance/release-0.1.85-0.2.3/{release.md,repair.md,cli/,ext/,marketplace/}`，不强制纳入 Git。本次只回填本权威状态与根状态入口；当前克隆仅本地 `feature/cli-chat`，不运行整表聚合，避免删除看板中其他 feature 的历史碎片。
+
+下方为实施和较早发布的历史记录，按当时阶段阅读；其中“未发布/仅本地提交”的当前交付状态由本节更新，原始失败和独立遗留边界不被覆盖。
 
 ### DONE：889b90d7 五项整改（Agent 自动验收完成，未发布）
 

@@ -2,6 +2,8 @@
 
 本分支的唯一状态表维护在 [tomcat/docs/status/develop.md](../../tomcat/docs/status/develop.md)，与现有状态汇总目录保持一致；元数据、Cov%、DONE、INTERFACE 和 BLOCKED 均以该文件为准，此处不维护副本。
 
+2026-11-04 17:16 +0800，CLI `0.1.85` / EXT `0.2.3` 正式发布及制品核验完成，EXT 内置 CLI `0.1.85`，两 tag 均指向 `91fe2746`。该源码的 develop/main 标准 CI 各五项、四平台原生包和七项 EXT 工作流通过；四份 CLI 归档、五份 VSIX、各自清单及四个内置二进制比对通过。Marketplace 四平台均已公开 Validated，实际下载哈希与 GitHub 已验收包一致；OpenVSX 跳过。旧 Windows 单次失败仍未定位，按用户确认的绿色候选标准继续，不把后续绿色当根因修复。旧 tag/资产、原始失败与遗留风险保留；未安装或重启在用服务。证据和边界见唯一状态表与 `.agents/acceptance/release-0.1.85-0.2.3/release.md`，Cov% 未测量。
+
 2026-11-03 23:06 +0800，write-plans 拆分写作规范与章节结构，明确问题/需求的独立标题层级、决策表和测试章节，精简可选模板与工作流措辞；四个技能文档和两个配套 Rust 测试文件随本次本地提交纳入。已核对完整暂存差异和三类变更区域；按用户要求不跑测试、不构建、不安装、不重启、不推送，新增/调整用例尚未执行，Cov% 未测量。详细范围、接口边界和待验事项见唯一状态表，既有发布及风险记录保留。
 
 2026-11-03 02:06 +0800，CLI `0.1.83` / EXT `0.1.99` 正式发布完成。CLI 标签在 `e2f9ae6e`，EXT 标签在仅修验收夹具 shell 的 `93a467a7`；CLI 与扩展产品源码、版本 pin 未在两标签间改变。GitHub 四份 CLI 归档、五份 VSIX 和校验清单均已核验；四平台原生包、两次提交的 develop/main 常规 CI、市场身份检查通过。Marketplace 四平台已公开 Validated，下载哈希与 GitHub 一致。14 张最终宽窄 PNG/ARIA/console 已复核，Linux 夹具通知已消失；82 份 webview 错误数组为空，四份 workbench 的 harness 404 保留。旧 tag/资产不变，指定 worktree 与调试缓存、旧 VSIX 已清理，在用程序哈希不变；本地未跑产品测试、构建、安装或重启。独立遗留缺陷与未验范围仍保留，详情见唯一状态表与 `.agents/acceptance/release-0.1.83-0.1.99/release.md`，Cov% 未测量。
