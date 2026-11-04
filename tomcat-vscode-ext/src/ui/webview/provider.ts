@@ -1011,10 +1011,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.sessionsAwaitingErrorHistoryRefresh.clear();
     }
     // `initialize()` can resolve before its supervisor notification has been delivered. If
-    // bootstrap then fails, that delayed `ready` notification must not erase the user-visible
-    // degraded state. A reconnecting/failed notification still clears it, and a successful
-    // retry restores ready through `bootstrapWithConnectionState`.
-    if (status === "ready" && this.stateStore.snapshot().connectionStatus === "degraded") {
+    // bootstrap then fails or requires a workspace, that delayed `ready` notification must
+    // not erase the result. A reconnecting/failed notification still clears it, and a
+    // successful retry restores ready through `bootstrapWithConnectionState`.
+    const panelStatus = this.stateStore.snapshot().connectionStatus;
+    if (status === "ready" && (panelStatus === "degraded" || panelStatus === "workspace_required")) {
       return;
     }
     this.stateStore.setConnectionStatus(status, failure);
@@ -1988,9 +1989,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
       if (normalized.message === "scope_requires_cwd") {
-        this.stateStore.setConnectionStatus("degraded", {
-          kind: "workspace_required", detail: t("bridge.workspaceRequired"),
-        });
+        this.stateStore.setConnectionStatus("workspace_required");
         await this.postState();
         return;
       }
@@ -2709,8 +2708,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "openFolder":
-        await vscode.commands.executeCommand(process.platform === "darwin"
-          ? "workbench.action.files.openFileFolder" : "workbench.action.files.openFolder");
+        await vscode.commands.executeCommand("vscode.openFolder");
         return;
       case "retryConnection":
         if (this.peekState().connectionStatus === "degraded") await this.retryBootstrap();

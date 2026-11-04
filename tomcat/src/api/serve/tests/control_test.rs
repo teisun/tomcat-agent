@@ -165,6 +165,8 @@ async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
         .join("tests/fixtures/mcp/fake_stdio_server.mjs");
     let sibling_pid = temp.path().join("sibling.pid");
     let target_pid = temp.path().join("target.pid");
+    let late_pid = temp.path().join("late.pid");
+    let changed_late_pid = temp.path().join("changed-late.pid");
     let mut config = serde_json::json!({"mcpServers": {
         "target": {"command": temp.path().join("missing")},
         "sibling": {"command": "node", "args": [fixture, "--pid-file", sibling_pid]}
@@ -210,6 +212,9 @@ async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
     config["mcpServers"]["target"] = serde_json::json!({
         "command": "node", "args": [fixture, "--pid-file", target_pid]
     });
+    config["mcpServers"]["late"] = serde_json::json!({
+        "command": "node", "args": [fixture, "--pid-file", late_pid]
+    });
     fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     for phase in ["changed", "broken", "removed"] {
         if phase == "broken" {
@@ -219,6 +224,9 @@ async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
                 .as_object_mut()
                 .unwrap()
                 .remove("target");
+            config["mcpServers"]["late"] = serde_json::json!({
+                "command": "node", "args": [fixture, "--pid-file", changed_late_pid]
+            });
             fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
         }
         let before = manager
@@ -268,6 +276,27 @@ async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
                 .as_str()
                 .is_some_and(|error| !error.is_empty()));
         }
+        if phase != "broken" {
+            // A new sibling must connect, and a changed one must reconnect even
+            // when the requested target was removed and Reload returns an error.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !manager
+                    .statuses()
+                    .iter()
+                    .any(|s| s.name == "late" && s.state.code() == "connected")
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let pid_file = if phase == "changed" {
+                &late_pid
+            } else {
+                &changed_late_pid
+            };
+            assert!(!fs::read(pid_file).unwrap().is_empty());
+        }
         let sibling = manager
             .statuses()
             .into_iter()
@@ -278,6 +307,7 @@ async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
         assert_eq!(fs::read(&sibling_pid).unwrap(), sibling_pid_before);
     }
     registry.logout_server("sibling").unwrap();
+    registry.logout_server("late").unwrap();
 }
 
 #[tokio::test]

@@ -396,7 +396,7 @@ describe("inline model configuration", () => {
     const detail = translate("en", "bridge.workspaceRequired");
     await emitState({ channel: "state", content: {
       ...snapshot, activeSessionId: null, sessions: [], sessionViews: {}, ready: false,
-      connectionStatus: "degraded", connectionFailure: { kind: "workspace_required", detail },
+      connectionStatus: "workspace_required",
     }, messageId: "workspace-required" });
     const loading = within(screen.getByTestId("loading-state"));
     expect(loading.getByText(detail)).toBeTruthy();
@@ -405,6 +405,10 @@ describe("inline model configuration", () => {
     expect(loading.queryByTestId("retry-connection")).toBeNull();
     expect(loading.queryByTestId("view-connection-logs")).toBeNull();
     expect(loading.getAllByRole("button")).toHaveLength(1);
+    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toBe(translate("en", "connection.ready"));
+    expect(screen.getByTestId("connection-chip").classList.contains("tc-conn-light--connected")).toBe(true);
+    expect(loading.getByRole("status").textContent).toBe(detail);
+    expect(screen.getByTestId("loading-state").querySelector(".tc-spinner")).toBeNull();
     fireEvent.click(loading.getByRole("button", { name: translate("en", "host.action.openProjectFolder") }));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openFolder" }));
     await emitState({ channel: "state", content: {

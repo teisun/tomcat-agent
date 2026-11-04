@@ -261,13 +261,24 @@ impl ConnectorRegistry {
         Ok(())
     }
 
-    /// Reread this registry's configuration, then reserve only the requested source.
+    /// Reread configuration, reserve the target reload, and reconnect other changed sources.
     pub(crate) fn request_reload(
         &self,
         identifier: &str,
     ) -> Result<mcp::manager::ReloadReceipt, AppError> {
-        self.mcp.reload_configuration(&self.config)?;
-        self.mcp.request_reconnect(identifier)
+        let changed = self.mcp.reload_configuration(&self.config)?;
+        let receipt = self.mcp.request_reconnect(identifier);
+        if self.started.load(Ordering::Acquire) {
+            let target = receipt.as_ref().ok().map(|r| r.config_key.as_str());
+            for key in changed
+                .into_iter()
+                .filter(|key| Some(key.as_str()) != target)
+            {
+                let manager = self.mcp.clone();
+                tokio::spawn(async move { connect_in_background(manager, key).await });
+            }
+        }
+        receipt
     }
 
     /// Explicit user reload also retries stopped/failed sources with a fresh

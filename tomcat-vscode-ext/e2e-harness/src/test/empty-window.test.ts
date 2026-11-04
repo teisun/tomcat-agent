@@ -10,7 +10,7 @@ type Api = { __testing: {
   getResolvedExecutable(): { source: string; executable: string };
   getPromptHistory(): Array<{ message: string; severity: string }>;
   getObservedWebviewErrors(): unknown[];
-  getWebviewState(): { activeSessionId: string | null; connectionFailure?: { kind: string } | null };
+  getWebviewState(): { activeSessionId: string | null; connectionStatus?: string };
 } };
 const support = require(path.join(root, "out/test/suite/support/hostE2eScenario.js")) as {
   getTomcatExtensionApi(): Promise<Api>;
@@ -42,12 +42,14 @@ suite("Installed release first launch without a workspace", () => {
     const chat = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
     try {
       await chat.waitForSnapshot(s => s.buttons.some(b => b.testId === "open-project-folder"), "Open Folder guidance must render");
-      assert.equal(api.__testing.getWebviewState().connectionFailure?.kind, "workspace_required");
+      assert.equal(api.__testing.getWebviewState().connectionStatus, "workspace_required");
       assert.equal(api.__testing.getWebviewState().activeSessionId, null);
-      const panel = await chat.evaluate<{ text: string; buttons: string[] }>(`(() => {
+      const panel = await chat.evaluate<{ text: string; buttons: string[]; connectionLabel: string | null }>(`(() => {
         const panel = document.querySelector('[data-testid="loading-state"]');
-        return { text: panel?.textContent ?? '', buttons: [...panel.querySelectorAll('button')].map(button => button.textContent.trim()) };
+        return { text: panel?.textContent ?? '', buttons: [...panel.querySelectorAll('button')].map(button => button.textContent.trim()),
+          connectionLabel: document.querySelector('[data-testid="connection-chip"]')?.getAttribute('aria-label') };
       })()`);
+      assert.equal(panel.connectionLabel, translate("en", "connection.ready"));
       assert.ok(panel.text.includes(translate("en", "bridge.workspaceRequired")));
       assert.ok(!panel.text.includes(translate("en", "chat.degraded")));
       assert.ok(!panel.text.includes("unknown_session"));

@@ -130,7 +130,7 @@ export function SessionBar({
       ? t("session.choose")
       : t("session.empty");
   const connected =
-    connectionStatus === "ready" || (!connectionStatus && ready);
+    connectionStatus === "ready" || connectionStatus === "workspace_required" || (!connectionStatus && ready);
   const connectionLabel = t(connected ? "connection.ready"
     : connectionStatus === "reconnecting" ? "connection.reconnecting"
     : connectionStatus === "degraded" ? "connection.degraded"

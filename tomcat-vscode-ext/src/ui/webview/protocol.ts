@@ -444,6 +444,7 @@ export type WebviewConnectionStatus =
   | "connecting"
   | "reconnecting"
   | "ready"
+  | "workspace_required"
   | "degraded"
   | "failed";
 

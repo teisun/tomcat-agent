@@ -58,12 +58,14 @@ it("explains an empty window's missing workspace without inventing a session", a
   vi.spyOn(host.sessionPool, "refresh").mockRejectedValue(new Error("scope_requires_cwd"));
   try {
     await provider.dispatchTestIntent({ type: "ready", messageId: "empty-window" });
-    const detail = translate("en", "bridge.workspaceRequired");
     expect(provider.currentState()).toMatchObject({
       activeSessionId: null,
-      connectionStatus: "degraded",
-      connectionFailure: { kind: "workspace_required", detail },
+      connectionStatus: "workspace_required",
+      ready: false,
     });
+    expect(provider.currentState().connectionFailure).toBeUndefined();
+    await provider.setServeConnectionState("ready");
+    expect(provider.currentState()).toMatchObject({ connectionStatus: "workspace_required", ready: false });
     expect(reportBootstrapFailure).not.toHaveBeenCalled();
     expect(logging).not.toHaveBeenCalled();
   } finally {
@@ -2771,8 +2773,7 @@ describe("serve connection readiness", () => {
       const intent = { type: "openFolder", messageId: "open-folder" } as const;
       expect(isWebviewIntent(intent)).toBe(true);
       await provider.dispatchTestIntent(intent);
-      expect(execute).toHaveBeenCalledWith(process.platform === "darwin"
-        ? "workbench.action.files.openFileFolder" : "workbench.action.files.openFolder");
+      expect(execute).toHaveBeenCalledExactlyOnceWith("vscode.openFolder");
       expect(initialize).not.toHaveBeenCalled();
     } finally {
       provider.dispose();

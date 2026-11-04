@@ -88,7 +88,8 @@ tool_call                      tool_describe([名])   → schema(批量)◄│ (
 ```text
 普通 CLI/serve 启动 → assets 就位 → 锁内补建缺失 mcp.json → 创建连接器注册表
 已有文件（包括空文件、坏 JSON、自定义配置）→ 不改任何字节
-Settings 的 Reload → 重读磁盘 → 只预约目标重连；配置未变的 Ready 连接保留
+Settings 的 Reload → 重读磁盘 → 目标按 Reload 预算重连；同次变更/新增的来源后台连接
+配置未变的 Ready 连接保留；目标重连预约失败不阻止其他变更来源启动
 ```
 
 - `run_cli` 在任何注册表创建前调用 `materialize_default_mcp_json`；`init` 仍复用同一函数。补建失败只记 warn，不阻塞启动。禁用连接器不会阻止补建文件，也不会因此启用连接。
@@ -96,7 +97,6 @@ Settings 的 Reload → 重读磁盘 → 只预约目标重连；配置未变的
 - `program_not_found` / `permission_denied` 通过既有 phase 与 i18n 给出建议；握手前退出提示查看 Tomcat 输出和 `agents/<id>/serve/serve.log`。不额外截取 stderr，不在错误里回显 command 参数或 env。
 - JSON 解析失败仅显示类别、行、列；不回显 serde 原始错误中的配置值。Reload 遇坏 JSON 或目标删除/禁用会明确失败，不拿缓存假装成功；成功返回的是预约回执，不等于 MCP 已 Ready。
 - 启动超时在 `tomcat.config.toml` 的 **`[connector.mcp].startup_timeout_ms`** 配置，不是 `mcp.json` 的 `startupTimeoutMs`。PATH 改变后须用户显式重启共享服务；Reload 只重读 MCP 配置，不刷新服务进程环境，重启会停止所有任务。
-- 真实首装必须是无 init、无预写 MCP 配置、无默认 cwd 的 VSIX 空窗口，再用同 HOME 开文件夹。旧的“冷模型配置”夹具不能代签此场景。详见 [develop status](../status/develop.md)。
 
 ---
 

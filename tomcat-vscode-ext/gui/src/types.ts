@@ -417,12 +417,7 @@ export interface WebviewModelInfo {
   selectedSpeed?: Speed | null;
 }
 
-export type WebviewConnectionStatus =
-  | "connecting"
-  | "reconnecting"
-  | "ready"
-  | "degraded"
-  | "failed";
+export type WebviewConnectionStatus = import("../../src/ui/webview/protocol").WebviewConnectionStatus;
 
 export interface WebviewStateSnapshot {
   pinSupported?: boolean;

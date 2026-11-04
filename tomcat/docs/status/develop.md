@@ -1,6 +1,47 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-04 10:18 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-04 14:17 +0800 | ACTIVE | develop | - |
+
+### DONE：889b90d7 五项整改（Agent 自动验收完成，未发布）
+
+```text
+独立 workspace_required → 绿灯 + 打开文件夹引导
+Reload(A) → 目标重连 + 同次变更的其他来源后台连接 → 未变来源保留
+定向回归 / gate:fast / Rust clippy → 当前 Debug VSIX → 隔离 A → B → 旧数据升级
+```
+
+- **范围与复核**：按计划完成空窗口独立状态、GUI 共享 protocol 类型、迟到 ready 守卫、公开 `vscode.openFolder` 命令、Reload 其他变更来源恢复连接、中英文文档整理，以及冗余 VSIX 自定义 MCP 场景/重复守卫删除。`cwd_lazy` 子进程过滤器由模块路径推导并断言 `1 passed`。对照计划审阅 diff，未新增配置、依赖、存储格式或 wire 版本；默认 MCP 补建/保留、懒换 HTTP Client、诊断脱敏和后端 `scope_requires_cwd` 实现未改。
+- **新增回归边界**：Reload 用例既验证新增 `late` 自动连接，也验证目标被删除而返回错误时，配置已变的 `late` 仍能重连；未变 `sibling` 的 PID/generation 保持不变。未启动注册表仍由现有 `started` 条件限制，不扩散到其他工作区。
+
+| 检查（在对应包目录执行） | 本次结果与 task 证据 |
+| :--- | :--- |
+| `npm ci && npm --prefix gui ci` | `1793763527402-25db8o` exit 0；锁文件未变。npm 对锁定依赖报告宿主 21、GUI 39 项安全告警（含 high/critical），本轮未升级依赖，不将告警说成已修复。 |
+| `npx --no-install vitest run src/ui/webview/tests/provider.test.ts`；`npm --prefix gui run test -- src/App.test.tsx` | `1793763611538-i7ouuj` exit 0；95/95、100/100。 |
+| `npm run gate:fast` | `1793763780047-6dy9zf` exit 0；宿主与 GUI lint、宿主 918/918、GUI 890/890。定向结果有重叠，不累计总用例数。 |
+| `npx --no-install vitest run tests/vscode_launch_env.test.ts tests/playwright_mcp_smoke.test.ts`；harness tsc；脚本严格 tsc | `1793763730685-elecny` exit 0；28/28，Agent MCP 冒烟仍在检查/安装 VSIX 前被拒绝。类型检查分别为 `npx --no-install tsc -p e2e-harness/tsconfig.json` 和 `npx --no-install tsc --ignoreConfig --noEmit --strict --skipLibCheck --esModuleInterop --resolveJsonModule --types node,vscode --target ES2022 --module ESNext --moduleResolution Bundler scripts/run-vscode-verify-vsix.ts scripts/realServeFixture.ts`。 |
+| `cargo test --lib reload_connector_rereads_disk_and_preserves_unrelated_ready_source`；`cargo test --lib api::chat::permission::cwd_lazy::tests`；`script -q /dev/null cargo test --lib dismisses_and_forwards_when_stdin_not_tty` | `1793763730621-ef20f6` exit 0；分别 1、16、1 通过，PTY 确实触发父测试及其非 TTY 子进程断言。 |
+| `cargo fmt --check`；`cargo clippy --tests -- -D warnings`；`cargo test --test mcp_startup_tests`；`cargo build --bin tomcat` | `1793763805997-urkixd` exit 0；静态检查通过、二进制层保留/写入失败测试 2/2、CLI 构建成功，`file` 为 Mach-O x86_64。 |
+| `npm run package:vsix -- --target darwin-x64 --bundle-binary ../tomcat/target/debug/tomcat --out /tmp/tomcat-first-launch.vsix`；`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=/tmp/tomcat-first-launch-artifacts npm run verify:vsix -- --release-bundle /tmp/tomcat-first-launch.vsix` | `1793765412329-2889gi` exit 0；VS Code 1.106.0，A 空窗口、B 同 HOME 有项目、旧数据升级三轮各 1 passing / exit 0。Agent 自行执行，未交给用户；外层 Agent 标记保留，沿用临时 HOME/profile/扩展目录与清理机制。 |
+| 制品与资料核对 | `1793765620264-ia22n8` exit 0；包内 CLI 与当前构建 SHA256 相同；空窗口 ARIA 有 `Connected` 与 status、无 alert；`git diff --check` 通过，入口文档搜索未命中 `Start Setup`。 |
+
+**真实窗口证据**：产物在 `/tmp/tomcat-first-launch-artifacts`；逐张读回 `gui-GKiuvU/empty-window-{desktop,narrow,settings}.png` 与对应 ARIA、console，以及 `empty-window.json`。桌面 299×808 与窄栏 169×752 的绿灯、引导及唯一打开文件夹按钮均可见，Settings 可用，三个捕获范围 `errors=[]`；窄栏底部原有禁用 composer 工具栏仍裁切，与下方历史记录一致，本次未改变该布局、不声称全界面无裁切。B 的 `gui-nJNGzn` 与升级的 `upgrade-v0.1.90/gui-COXsZR` 保留运行记录及辅助截图；上游模型回复为既有本地脚本，不是真实付费模型验收。本次视觉交付图仅为上述三张空窗口证据。
+
+**制品身份**：`/tmp/tomcat-first-launch.vsix` 是验收用 Debug 包，扩展 0.1.99 / CLI 0.1.83，宿主、Node、Electron、包内 CLI 均为 Intel macOS/x64。VSIX SHA256 `f5b64689caf88d979addffb9982653444b8f0011c701881983d4e572e389ff24`；CLI SHA256 `4dbfb2262865ccfca168d966b7679250990a656383eb0a7cad32c6912c3ee6a7`，与 `release-artifact.json` 一致。
+
+**提交阶段**：按用户要求只核对 staged / unstaged / untracked、差异、空白及提交规范，不重跑测试、构建或视觉验收；上表为此前实施阶段的真实结果。本次范围为五项整改及其测试、文档、状态记录，共 20 个文件，验收包和截图不纳入 Git；仅本地提交，不推送远端。Cov% 未测量，提交信息不填写数值。
+
+### INTERFACE：本次整改
+
+- 扩展内部 `WebviewConnectionStatus` 新增 `workspace_required`，GUI 直接复用该类型；Rust wire 协议不变。
+- `ConnectorRegistry::request_reload` 返回契约不变；注册表已启动时，同次配置变更涉及的其他来源通过现有后台连接入口恢复。未新增对外配置或存储格式。
+
+### BLOCKED：本次整改的边界与风险
+
+本次计划范围内无待处理阻塞；既有告警和未覆盖项如下，不把本地定向验收扩大为全平台发布许可。
+
+**失败与未覆盖项**：首轮 fmt（`1793763730747-yoexje`）指出两处本次 Rust 增量的排版问题，修正后上述 fmt/clippy 通过；未出现功能测试失败。构建的 chunk 大小、扩展打包数量和 Electron 启动参数告警原样保留。未运行完整 Rust 全套、Windows/Linux 原生窗口、原生文件选择器实选或真实 Playwright MCP 冒烟；不将定向检查或公开命令的单测冒充这些验收。未升版、推送、self-install、安装到用户在用环境或停止/重启在用共享服务；Cov% 未测量。
+
+以下为上一轮实施的历史记录，保留原始失败和证据；其中自定义 MCP VSIX 子场景已由本轮删除，保留契约由本轮二进制层 2/2 测试覆盖。
 
 ### CURRENT WORK：空窗口首启、默认 MCP 与旧连接恢复（本机范围验收完成，未发布）
 

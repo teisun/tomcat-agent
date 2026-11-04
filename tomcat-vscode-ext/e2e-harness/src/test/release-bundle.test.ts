@@ -209,11 +209,6 @@ suite("Native installed release bundle", () => {
       }
       const sessionId = await api.__testing.createFreshWebviewSession(workspace);
       const mcpPath = path.join(required("HOME"), ".tomcat/mcp.json");
-      if (process.env.TOMCAT_RELEASE_CUSTOM_MCP !== undefined) {
-        assert.equal(await fs.readFile(mcpPath, "utf8"), process.env.TOMCAT_RELEASE_CUSTOM_MCP);
-        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", customMcpPreserved: true, resolved }, null, 2));
-        return;
-      }
       if (process.env.TOMCAT_RELEASE_NEW_USER === "1") {
         const mcp = JSON.parse(await fs.readFile(mcpPath, "utf8"));
         assert.equal(mcp.mcpServers.playwright.command, "npx");

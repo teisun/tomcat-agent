@@ -433,12 +433,13 @@ async fn dismisses_and_forwards_when_stdin_not_tty() {
     // An interactive cargo invocation inherits the terminal. Exercise the same
     // test in a child with explicit EOF instead of waiting for a human answer.
     if std::io::stdin().is_terminal() {
+        let test_name = format!(
+            "{}::dismisses_and_forwards_when_stdin_not_tty",
+            module_path!().split_once("::").unwrap().1
+        );
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
         child
-            .args([
-                "--exact",
-                "api::chat::permission::cwd_lazy::tests::dismisses_and_forwards_when_stdin_not_tty",
-            ])
+            .args(["--exact", &test_name])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
@@ -450,6 +451,11 @@ async fn dismisses_and_forwards_when_stdin_not_tty() {
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child must run exactly one test: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
         return;
     }
