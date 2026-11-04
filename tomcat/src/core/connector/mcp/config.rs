@@ -576,7 +576,7 @@ fn read_mcp_file(path: &Path) -> Result<McpFile, AppError> {
             &[("path", &path.display().to_string()), ("detail", &detail)],
         ))
     };
-    let raw: serde_json::Value = serde_json::from_str(&content).map_err(&parse_error)?;
+    let raw: serde_json::Value = serde_json::from_str(&content).map_err(parse_error)?;
     let parsed = serde_json::from_str(&content).map_err(parse_error)?;
     warn_about_ignored_server_keys(path, &raw);
     Ok(parsed)

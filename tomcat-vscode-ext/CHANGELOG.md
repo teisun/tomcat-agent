@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- Fix a shared-service startup race after concurrent launches: wait for losing startup children to exit before reporting success, so a late child from a completed start request cannot bring the service back after an explicit stop. Keep startup time limits, instance checks, locking and confirmed task cleanup unchanged.
+- Bundle CLI 0.1.85 in platform-specific packages. Pure-extension users must update their external CLI to receive the startup fix. To upgrade an already-running shared service, check its active tasks before explicitly restarting it; restarting stops all of them.
+
 ## 0.2.2
 
 Includes the changes prepared for the unpublished 0.2.1 extension release.

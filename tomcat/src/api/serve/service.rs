@@ -258,12 +258,25 @@ pub(crate) async fn ensure_running(cfg: &AppConfig) -> Result<ServiceInfo, AppEr
         ))
     })?;
     drop(lock); // The child reacquires it before probing/cleaning/binding.
+    wait_for_started_service(cfg, &mut child, &log_path).await
+}
+
+async fn wait_for_started_service(
+    cfg: &AppConfig,
+    child: &mut std::process::Child,
+    log_path: &Path,
+) -> Result<ServiceInfo, AppError> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
-        if let Some(info) = probe_service(cfg).await? {
-            return Ok(info);
-        }
-        if let Some(status) = child.try_wait()? {
+        let observed = probe_service(cfg).await?;
+        let exited = child.try_wait()?;
+        if let Some(info) = observed {
+            // A concurrent starter may have won. Do not report success while our
+            // losing child can still acquire the lock and resurrect a later stop.
+            if info.pid == child.id() || exited.is_some() {
+                return Ok(info);
+            }
+        } else if let Some(status) = exited {
             return Err(AppError::Config(format!(
                 "shared service exited during startup ({status}); see {}",
                 log_path.display()

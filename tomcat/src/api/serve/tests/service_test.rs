@@ -381,6 +381,85 @@ async fn stop_still_requires_a_positive_cleanup_acknowledgement() {
 }
 
 #[test]
+#[ignore = "subprocess helper for startup ownership regression"]
+fn startup_wait_worker() {
+    if std::env::var_os("TOMCAT_TEST_STARTUP_WAITER").is_none() {
+        return;
+    }
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).unwrap();
+    println!("startup worker released");
+}
+
+#[tokio::test]
+async fn startup_waits_for_its_losing_child_before_reporting_success() {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    let (_root, cfg, mut listener, info) = probe_fixture();
+    let expected = info.instance_id.clone();
+    let worker = format!(
+        "{}::startup_wait_worker",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &worker, "--ignored", "--nocapture"])
+        .env("TOMCAT_TEST_STARTUP_WAITER", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let release = child.stdin.take().unwrap();
+    assert_ne!(child.id(), info.pid);
+    let (seen, first_probe) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut seen = Some(seen);
+        loop {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["protocol"], "status");
+            write_json(&mut stream, &info).await.unwrap();
+            if let Some(seen) = seen.take() {
+                let _ = seen.send(());
+            }
+        }
+    });
+    let mut waiting = tokio::spawn(async move {
+        let result =
+            super::wait_for_started_service(&cfg, &mut child, Path::new("unused.log")).await;
+        (result, child)
+    });
+    tokio::time::timeout(CONNECT_TIMEOUT, first_probe)
+        .await
+        .unwrap()
+        .unwrap();
+    // A different service is already ready, but this child can still acquire the
+    // startup lock later. A successful starter must not leave that contender behind.
+    let premature = tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiting).await;
+    let stayed_pending = premature.is_err();
+    drop(release);
+    let (result, child) = match premature {
+        Ok(result) => result.unwrap(),
+        Err(_) => tokio::time::timeout(CONNECT_TIMEOUT, waiting)
+            .await
+            .unwrap()
+            .unwrap(),
+    };
+    let output = child.wait_with_output().unwrap();
+    server.abort();
+    let _ = server.await;
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("startup worker released"), "{stdout}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(
+        stayed_pending,
+        "startup returned while its losing child was still alive"
+    );
+    assert_eq!(result.unwrap().instance_id, expected);
+}
+
+#[test]
 fn service_command_removes_starter_proxy_variables() {
     let root = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
