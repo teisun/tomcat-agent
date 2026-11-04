@@ -144,8 +144,8 @@ jobs:
         working-directory: .
         run: node --test scripts/dev-install.test.mjs
 
-      - name: Test Windows proxy guard and bundled-binary build selection
-        run: npx vitest run --maxWorkers 4 tests/windows_system_proxy.test.ts tests/build_tomcat_binary.test.ts
+      - name: Test proxy, build selection, and isolated acceptance contracts
+        run: npx vitest run --maxWorkers 4 tests/windows_system_proxy.test.ts tests/build_tomcat_binary.test.ts tests/serve_fixture_lifecycle.test.ts tests/vscode_launch_env.test.ts tests/playwright_mcp_smoke.test.ts
 
   shared-service-windows:
     name: shared service OS proxy and real VS Code (windows)

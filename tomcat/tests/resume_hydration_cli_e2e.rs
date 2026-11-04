@@ -10,12 +10,10 @@ use tomcat::{
     ContextConfig, SessionManager, TranscriptEntry,
 };
 
-#[allow(deprecated)]
-fn cmd() -> Command {
-    let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
-    c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
-    c.env("TOMCAT__UI__LANGUAGE", "en");
-    c
+fn isolated_cmd(home: &std::path::Path) -> Command {
+    let mut command = Command::from_std(common::serve::isolated_serve_command(home));
+    command.env("USERPROFILE", home);
+    command
 }
 
 fn apply_idatatlas_env(command: &mut Command) {
@@ -39,9 +37,8 @@ fn setup_fixture() -> Fixture {
     let workdir = home_path.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
 
-    cmd()
+    isolated_cmd(&home_path)
         .args(["init"])
-        .env("HOME", &home_path)
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -264,7 +261,7 @@ fn resume_cli_cold_start_trace_is_bounded_with_sidecar() {
     let _ = init_context_state(&fx.session, &ContextConfig::default(), "sys").unwrap();
     let file_len = std::fs::metadata(&transcript_path).unwrap().len();
 
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
@@ -326,7 +323,7 @@ fn resume_cli_plan_fastpath_reports_sidecar_plan_source() {
     }
     let _ = init_context_state(&fx.session, &ContextConfig::default(), "sys").unwrap();
 
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
@@ -372,7 +369,7 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
     json["schema_version"] = serde_json::json!(999);
     std::fs::write(&sidecar, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
@@ -423,7 +420,7 @@ fn resume_cli_heals_dangling_tool_call_tail_without_llm() {
         .unwrap();
     let transcript_path = fx.session.current_transcript_path().unwrap().unwrap();
 
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
@@ -516,7 +513,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
     ]);
     write_mock_models_toml(&fx.home_path, &base_url);
 
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
@@ -629,7 +626,7 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
         serde_json::json!({"content": "RESUMED_PLAN_DONE"}),
     ]);
     write_mock_models_toml(&fx.home_path, &base_url);
-    let output = cmd()
+    let output = isolated_cmd(&fx.home_path)
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)

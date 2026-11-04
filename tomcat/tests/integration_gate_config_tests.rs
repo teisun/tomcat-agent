@@ -218,7 +218,7 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
         // Record dispatch only: preflight must never contact a real provider.
         std::fs::write(
             &cargo,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TOMCAT_GATE_CARGO_LOG\"\nprintf '%s\\n' \"NO_PROXY=$NO_PROXY\" \"no_proxy=$no_proxy\" \"HTTP_PROXY=$HTTP_PROXY\" >> \"$TOMCAT_GATE_CARGO_LOG\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TOMCAT_GATE_CARGO_LOG\"\nprintf '%s\\n' \"NO_PROXY=$NO_PROXY\" \"no_proxy=$no_proxy\" \"HTTP_PROXY=$HTTP_PROXY\" \"TOMCAT_AGENT_ACTIVE=$TOMCAT_AGENT_ACTIVE\" >> \"$TOMCAT_GATE_CARGO_LOG\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -230,6 +230,7 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
             .env("HOME", dir.path())
             .env("PATH", std::env::join_paths(paths).unwrap())
             .env("TOMCAT_GATE_CARGO_LOG", &log)
+            .env("TOMCAT_AGENT_ACTIVE", "1")
             .env("NO_PROXY", "existing.example")
             .env("no_proxy", "other.example")
             .env("HTTP_PROXY", "http://proxy.invalid:9000")
@@ -250,6 +251,7 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
             assert!(dispatch.contains("NO_PROXY=existing.example,127.0.0.1,localhost,::1"));
             assert!(dispatch.contains("no_proxy=other.example,127.0.0.1,localhost,::1"));
             assert!(dispatch.contains("HTTP_PROXY=http://proxy.invalid:9000"));
+            assert!(dispatch.contains("TOMCAT_AGENT_ACTIVE=1"), "{dispatch}");
         } else {
             assert_eq!(output.status.code(), Some(2), "{output:?}");
             let missing = if target_key {

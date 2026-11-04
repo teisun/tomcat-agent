@@ -1,6 +1,41 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-04 17:16 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-04 21:47 +0800 | ACTIVE | develop | - |
+
+### DONE：隔离测试自动化整改（本地提交，未发布）
+
+```text
+外层 Agent 保留保护标记
+  → 已绑定私有 HOME / workspace / profile 的测试子进程净化环境
+  → 现有 gate 与真实 VSIX / MCP / connectors / Multica 自动验收
+  → 只停自有服务；停服失败保留现场并报错
+```
+
+- **范围**：只改测试、夹具、验收脚本、CI、规则说明与文档。产品运行时代码、CLI guard / 拒绝文本、Multica backend 不改；未新增令牌、验收服务、存储格式或依赖。未执行 self-install 或正式后台重启；本次仅提交到本地，不推送或发布。
+- **实现**：移除 Rust gate 的整体 unset，在实际需要的 CLI 创建点绑定私有 HOME 并净化；保留通用 `cmd()` 的标记以覆盖负例。Rust / Go 停服失败保留 HOME，补双实例正常停止隔离。TS 复用现有 `serveFixtureEnvironment`，connectors 每个 phase 自行停服，只有收尾成功才删除安装根；Multica 默认测试校验 CLI 与 backend 合并后的环境。扩展三组快速回归复用现有 CI 步骤。
+- **工具与证据**：nextest、rg、Python/Pillow 均私有放在 `.agents/acceptance/20261104T110014Z-isolated-tests/`，只在本轮 shell 使用，不安装到全局。命令、退出码、完整门禁、原始失败、VSIX/CLI hash 与资源核对见该目录 `README.md`；背景及实现取舍见 `../reports/isolated-test-automation-background-and-remediation.md` 第 8 节。
+
+**提交阶段核对**：本次代码差异与已验收快照一致，已检查 staged / unstaged / untracked 并将相关文件全部纳入。按用户要求仅检查提交范围、状态与差异格式，不重跑测试、构建或视觉验收；下表保留实施阶段的实际结果，不冒充本次重新运行。Cov% 未测量，保持 `-`，提交信息不编造覆盖率。
+
+| 本轮检查 | 结果 |
+|---|---|
+| Rust 定向边界 | gate 探针 6、nested guard 4、guard 分类 7、内部 Bash 标记 1、hydration 6、ACP 24、shared service 13 通过；2 个既有 system-proxy ignored 不计通过 |
+| Rust 默认 gate-fast | `1793795970608-qgnftz` 整条重跑 exit 0；Clippy、lib 3476、parallel 389 / serial 90 passed；既有跳过不计通过，完整日志与原失败分别保留 |
+| 扩展 gate:full | exit 0；宿主 918、GUI 890、harness 279 passed / 1 skipped；fake VSIX 6 个非零测试阶段通过，不代签真实服务 |
+| 原生 Release VSIX / MCP | `1793795515456-2bx15w` exit 0；Release 三阶段各 1 passing，真实 MCP 1 passing；外层标记均为 1 |
+| 真实 connectors | `1793795319690-id4eow` exit 0；四个 phase 1 / 3 / 1 / 1 passing，覆盖 6 个不同用例，不以画像切换产生的 pending 计通过 |
+| Multica | 默认环境回归先红后绿；真实 opt-in `1793794835146-e6mdwd` exit 0，执行 / 取消 / 恢复与 registered backend 均通过 |
+| 补充静态与断言检查 | runner / harness 严格 tsc、Rust fmt 通过；保留严格 denied-history 判定的 5 项快测和 Agent-side MCP 入口 5 项快测通过（与其他批次重叠，不累计总数） |
+
+### INTERFACE：隔离测试整改
+
+无显著对外接口变更；生产 CLI guard、配置格式、协议和 Multica backend 均不变，仅调整测试启动与清理边界。
+
+### BLOCKED：隔离测试整改
+
+**失败保留与边界**：Rust 首轮 lib 缺 rg 的失败、两项 CLI 定向失败及原始红测保留，后续通过不解释为偶发根因已经修复。真实 VSIX 改为在重载页面断言历史工具状态，MCP 在页面就绪后导航，connectors 使用 macOS 短临时路径，均为测试侧修正。历史失败根 `/var/folders/81/9fjf_p9n5f90_p5_mlsghtnr0000gp/T/tc-JWOSdE` 按约定保留；最终自有进程和正式后台身份核对见证据。未做 Rust / Go 停服失败注入，perf 仅编译；未验 Windows/Linux/arm64、收费模型及真实账号授权。17 张最终 PNG 的配套 ARIA / console 已核查、图像已逐张读回；checker 自检有且仅有其预期 console.error，普通捕获无错误。窄空窗原有禁用 composer 工具栏裁切沿用下方历史记录，不宣称全界面无裁切。
+
+下列发布与实施记录按当时快照阅读；其中“本机无 nextest / 未跑真实 MCP”等旧环境结论，不代签或覆盖本节本轮结果。
 
 ### CURRENT RELEASE：CLI 0.1.85 / EXT 0.2.3（已发布并完成制品核验）
 

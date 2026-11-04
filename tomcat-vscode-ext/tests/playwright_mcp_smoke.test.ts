@@ -35,10 +35,12 @@ it.each(["valid", "wrong-marker", "missing-image"])("checks snapshot and image w
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-it("refuses Agent-side MCP acceptance before inspecting or installing a VSIX", async () => {
-  await expect(promisify(execFile)(process.execPath, ["--import", "tsx", "scripts/run-vscode-verify-vsix.ts", "--release-bundle", "/missing/must-not-install.vsix"], {
+it("allows Agent-side MCP acceptance to reach VSIX validation", async () => {
+  const run = promisify(execFile)(process.execPath, ["--import", "tsx", "scripts/run-vscode-verify-vsix.ts", "--release-bundle", "/missing/must-not-install.vsix"], {
     cwd: path.resolve(__dirname, ".."),
     env: { ...process.env, TOMCAT_AGENT_ACTIVE: "1", TOMCAT_RELEASE_MCP_SMOKE: "1" },
     timeout: 15_000,
-  })).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("Run MCP acceptance from an independent terminal") });
+  });
+  await expect(run).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining("ENOENT") });
+  await expect(run).rejects.not.toMatchObject({ stderr: expect.stringContaining("independent terminal") });
 });

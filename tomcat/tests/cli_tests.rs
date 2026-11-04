@@ -35,6 +35,12 @@ const CONTINUE_REQUEST: &str = "继续";
 const CONTINUE_ONCE_REQUEST: &str = "继续一次";
 const FAILED_REQUEST: &str = "第一轮会失败但应保留进度";
 
+fn isolated_cmd(home: &Path) -> Command {
+    let mut command = Command::from_std(common::serve::isolated_serve_command(home));
+    command.env("USERPROFILE", home);
+    command
+}
+
 #[allow(deprecated)]
 fn cmd() -> Command {
     let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
@@ -223,8 +229,7 @@ fn configure_session_cli_env<'a>(command: &'a mut Command, work_dir: &Path) -> &
 }
 
 fn create_session_via_cli(work_dir: &Path) -> String {
-    let output = cmd()
-        .env("HOME", work_dir)
+    let output = isolated_cmd(work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "new"])
         .output()
@@ -917,10 +922,8 @@ fn test_init_creates_config_file_in_temp_dir() {
     let models_path = dir.path().join(".tomcat").join("models.toml");
 
     info!("Arrange: temp dir at {:?}", dir.path());
-    let mut c = cmd();
-    c.args(["init"])
-        .env("HOME", dir.path())
-        .env("SHELL", "/bin/zsh");
+    let mut c = isolated_cmd(dir.path());
+    c.args(["init"]).env("SHELL", "/bin/zsh");
 
     info!("Act: execute init");
     let assert = c.assert();
@@ -994,9 +997,8 @@ fn test_doctor_with_valid_config_checks_environment() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: create valid config via init");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -1028,14 +1030,13 @@ fn test_workspace_add_list_remove_e2e() {
     let proj_canon = tomcat::infra::canonicalize(proj.path()).unwrap();
     let proj_str = proj_canon.to_str().unwrap();
 
-    cmd()
+    isolated_cmd(home.path())
         .args(["init"])
-        .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
-    cmd()
+    isolated_cmd(home.path())
         .args(["workspace", "add", proj_str])
         .env("HOME", home.path())
         .assert()
@@ -1057,7 +1058,7 @@ fn test_workspace_add_list_remove_e2e() {
         trunc(&list_out, 200)
     );
 
-    cmd()
+    isolated_cmd(home.path())
         .args(["workspace", "remove", proj_str])
         .env("HOME", home.path())
         .assert()
@@ -1086,14 +1087,13 @@ fn test_workspace_add_cwd_e2e() {
     let proj_canon = tomcat::infra::canonicalize(proj.path()).unwrap();
     let proj_str = proj_canon.to_str().unwrap();
 
-    cmd()
+    isolated_cmd(home.path())
         .args(["init"])
-        .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
-    cmd()
+    isolated_cmd(home.path())
         .args(["workspace", "add", "--cwd"])
         .current_dir(proj.path())
         .env("HOME", home.path())
@@ -1129,9 +1129,8 @@ fn test_init_auto_adds_path_to_shell_profile() {
     let zshrc = dir.path().join(".zshrc");
     let local_tomcat = dir.path().join(".local").join("bin").join("tomcat");
 
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -1164,9 +1163,8 @@ fn test_init_path_export_idempotent_in_shell_profile() {
     let zshrc = dir.path().join(".zshrc");
 
     for _ in 0..2 {
-        cmd()
+        isolated_cmd(dir.path())
             .args(["init"])
-            .env("HOME", dir.path())
             .env("SHELL", "/bin/zsh")
             .assert()
             .success();
@@ -1204,9 +1202,8 @@ fn test_init_bash_profile_sources_profile_and_bashrc() {
     let bashrc = dir.path().join(".bashrc");
     fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
 
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/bash")
         .assert()
         .success();
@@ -1242,9 +1239,8 @@ fn test_init_bash_profile_source_idempotent() {
     fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
 
     for _ in 0..2 {
-        cmd()
+        isolated_cmd(dir.path())
             .args(["init"])
-            .env("HOME", dir.path())
             .env("SHELL", "/bin/bash")
             .assert()
             .success();
@@ -1299,9 +1295,8 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
     )
     .unwrap();
 
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/bash")
         .assert()
         .success();
@@ -1500,9 +1495,8 @@ fn test_init_with_isolated_home_leaves_real_user_path_untouched() {
     let before = real_user_path();
     let dir = tempfile::tempdir().unwrap();
 
-    let output = cmd()
+    let output = isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .assert()
         .success()
         .get_output()
@@ -1778,7 +1772,8 @@ fn test_plugin_load_nonexistent_path_shows_error() {
     let _span = info_span!("test_plugin_load_nonexistent_path_shows_error").entered();
 
     info!("Arrange: load from nonexistent path");
-    let mut c = cmd();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = isolated_cmd(home.path());
     c.args(["plugin", "load", "/tmp/nonexistent_pi_plugin_xyz"]);
 
     info!("Act: execute plugin load");
@@ -1824,7 +1819,8 @@ fn test_plugin_unload_not_found_shows_message() {
     let _span = info_span!("test_plugin_unload_not_found_shows_message").entered();
 
     info!("Arrange: unload nonexistent plugin");
-    let mut c = cmd();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = isolated_cmd(home.path());
     c.args(["plugin", "unload", "nonexistent-plugin-id"]);
 
     info!("Act: execute plugin unload");
@@ -1847,7 +1843,8 @@ fn test_plugin_enable_not_found_shows_message() {
     let _span = info_span!("test_plugin_enable_not_found_shows_message").entered();
 
     info!("Arrange: enable nonexistent plugin");
-    let mut c = cmd();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = isolated_cmd(home.path());
     c.args(["plugin", "enable", "nonexistent-plugin-id"]);
 
     info!("Act: execute plugin enable");
@@ -1870,7 +1867,8 @@ fn test_plugin_disable_not_found_shows_message() {
     let _span = info_span!("test_plugin_disable_not_found_shows_message").entered();
 
     info!("Arrange: disable nonexistent plugin");
-    let mut c = cmd();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = isolated_cmd(home.path());
     c.args(["plugin", "disable", "nonexistent-plugin-id"]);
 
     info!("Act: execute plugin disable");
@@ -1997,7 +1995,7 @@ fn test_session_new_creates_session() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: temp work dir {:?}", work_dir);
-    let mut c = cmd();
+    let mut c = isolated_cmd(&work_dir);
     configure_session_cli_env(&mut c, &work_dir);
     c.args(["session", "new"]);
 
@@ -2053,8 +2051,8 @@ fn test_chat_without_config_exits_with_error() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: 无 ~/.tomcat/ 配置（HOME 指向空临时目录）");
-    let mut c = cmd();
-    c.arg("chat").env("HOME", dir.path());
+    let mut c = isolated_cmd(dir.path());
+    c.arg("chat");
 
     info!("Act: execute chat");
     let assert = c.assert();
@@ -2080,9 +2078,8 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     std::fs::create_dir_all(&work_dir).unwrap();
 
     info!("Arrange: init config in temp dir, set work_dir and IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2131,14 +2128,13 @@ fn test_chat_with_session_dir_does_not_crash() {
     std::fs::create_dir_all(&work_dir).unwrap();
 
     info!("Arrange: init config, session new, set work_dir");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
-    let mut c_new = cmd();
+    let mut c_new = isolated_cmd(dir.path());
     c_new
         .args(["session", "new"])
         .env("HOME", dir.path())
@@ -2146,7 +2142,7 @@ fn test_chat_with_session_dir_does_not_crash() {
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c_new.assert().success();
 
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
         .env("HOME", dir.path())
         .current_dir(dir.path())
@@ -2202,9 +2198,8 @@ fn test_init_then_doctor_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: init config in temp dir");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2238,7 +2233,7 @@ fn test_session_switch_nonexistent_shows_error() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: switch to nonexistent session key");
-    let mut c = cmd();
+    let mut c = isolated_cmd(&work_dir);
     configure_session_cli_env(&mut c, &work_dir);
     c.args(["session", "switch", "nonexistent-key-xyz"]);
 
@@ -2270,7 +2265,7 @@ fn test_session_delete_via_cli_removes_session() {
     let session_id = create_session_via_cli(&work_dir);
 
     info!("Act: delete the created session");
-    let mut c = cmd();
+    let mut c = isolated_cmd(&work_dir);
     configure_session_cli_env(&mut c, &work_dir);
     c.args(["session", "delete", session_id.as_str()]);
 
@@ -2300,7 +2295,7 @@ fn test_session_archive_exits_ok() {
     info!("Arrange: create session then archive");
     let session_id = create_session_via_cli(&work_dir);
 
-    let mut c = cmd();
+    let mut c = isolated_cmd(&work_dir);
     configure_session_cli_env(&mut c, &work_dir);
     c.args(["session", "archive", session_id.as_str()]);
 
@@ -2326,7 +2321,8 @@ fn test_config_set_valid_key_value_updates_config() {
     let _span = info_span!("test_config_set_valid_key_value_updates_config").entered();
 
     info!("Act: config set log.level warn");
-    let mut c = cmd();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = isolated_cmd(home.path());
     c.args(["config", "set", "log.level", "warn"]);
     let assert = c.assert();
 
@@ -2399,9 +2395,8 @@ fn test_user_first_time_setup_init_and_doctor() {
 
     info!("Arrange: fresh temp dir, no existing config");
     info!("Act: tomcat init");
-    let init_assert = cmd()
+    let init_assert = isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
@@ -2452,7 +2447,10 @@ fn test_user_sets_config_value() {
 
     info!("Arrange: no special setup needed");
     info!("Act: tomcat config set log.level warn");
-    let assert = cmd().args(["config", "set", "log.level", "warn"]).assert();
+    let home = tempfile::tempdir().unwrap();
+    let assert = isolated_cmd(home.path())
+        .args(["config", "set", "log.level", "warn"])
+        .assert();
     info!("Assert: exit 0");
     assert.success();
 }
@@ -2492,9 +2490,8 @@ fn test_user_doctor_detects_environment() {
 
     let home = tempfile::tempdir().unwrap();
     info!("Arrange: initialize default config in an owned HOME");
-    cmd()
+    isolated_cmd(home.path())
         .args(["init"])
-        .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2533,9 +2530,8 @@ fn test_init_creates_env_file() {
 
     info!("Arrange: fresh temp dir");
     info!("Act: tomcat init");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2571,9 +2567,8 @@ fn test_init_creates_env_with_correct_permissions() {
     info!("Arrange: fresh temp dir");
     info!("Act: tomcat init → check .env permissions");
 
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2597,9 +2592,8 @@ fn test_doctor_reports_all_checks() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: tomcat init first");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2630,11 +2624,7 @@ fn test_doctor_reports_all_checks() {
 #[test]
 fn test_doctor_reports_git_bash_on_windows() {
     let dir = tempfile::tempdir().unwrap();
-    cmd()
-        .args(["init"])
-        .env("HOME", dir.path())
-        .assert()
-        .success();
+    isolated_cmd(dir.path()).args(["init"]).assert().success();
 
     cmd()
         .args(["doctor"])
@@ -2675,17 +2665,15 @@ fn test_init_idempotent() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Act: tomcat init (first)");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
     info!("Act: tomcat init (second, idempotent)");
-    let assert = cmd()
+    let assert = isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
@@ -2707,9 +2695,8 @@ fn test_ensure_embedded_assets_prepares_assets_dir() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Act: tomcat init");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2730,9 +2717,8 @@ fn test_ensure_embedded_assets_idempotent() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: tomcat init");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2761,9 +2747,8 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     let dir = tempfile::tempdir().unwrap();
 
     info!("Arrange: tomcat init");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2802,9 +2787,8 @@ fn test_user_asks_pi_a_question() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2847,9 +2831,8 @@ fn test_user_asks_pi_technical_question() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2898,9 +2881,8 @@ fn test_user_asks_pi_to_run_bash_command() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -2953,9 +2935,8 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -4053,9 +4034,8 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -4218,7 +4198,7 @@ fn test_user_loads_plugin_and_lists() {
 
     info!("Arrange: plugin dir = {:?}", plugin_dir.path());
     info!("Act: tomcat plugin load");
-    let load_assert = cmd()
+    let load_assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert();
@@ -4230,7 +4210,7 @@ fn test_user_loads_plugin_and_lists() {
     load_assert.success();
 
     info!("Act: tomcat plugin list（跨进程，状态不持久）");
-    let assert = cmd()
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "list"])
         .assert();
@@ -4253,14 +4233,14 @@ fn test_user_views_plugin_info() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin first");
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert()
         .success();
 
     info!("Act: tomcat plugin info <id>");
-    let assert = cmd()
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "info", "e2e-test-plugin-info"])
         .assert();
@@ -4291,14 +4271,14 @@ fn test_user_disables_plugin() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert()
         .success();
 
     info!("Act: tomcat plugin disable <id>");
-    let assert = cmd()
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "disable", "e2e-test-plugin-disable"])
         .assert();
@@ -4321,19 +4301,19 @@ fn test_user_enables_plugin_after_disable() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load + disable plugin");
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert()
         .success();
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "disable", "e2e-test-plugin-enable"])
         .assert()
         .success();
 
     info!("Act: tomcat plugin enable <id>");
-    let assert = cmd()
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "enable", "e2e-test-plugin-enable"])
         .assert();
@@ -4356,21 +4336,21 @@ fn test_user_unloads_plugin_removes_from_list() {
         tomcat::infra::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert()
         .success();
 
     info!("Act: tomcat plugin unload <id>");
-    cmd()
+    isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "unload", "e2e-test-plugin-unload"])
         .assert()
         .success();
 
     info!("Act: tomcat plugin list");
-    let assert = cmd()
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["plugin", "list"])
         .assert();
@@ -4395,7 +4375,8 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
 
     info!("Arrange: /nonexistent/path/to/plugin 不存在");
     info!("Act: tomcat plugin load /nonexistent/path/to/plugin");
-    let assert = cmd()
+    let home = tempfile::tempdir().unwrap();
+    let assert = isolated_cmd(home.path())
         .args(["plugin", "load", "/nonexistent/path/to/plugin"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
@@ -4439,8 +4420,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     info!(
         "Act: tomcat install <package> --scope-root <project>（未传 visibility，非交互默认 scope）"
     );
-    let install_assert = cmd()
-        .env("HOME", home.path())
+    let install_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args(["install", package_src, "--scope-root", scope_root_str])
         .assert();
@@ -4460,8 +4440,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     )));
 
     info!("Act: tomcat packages --scope-root <project>");
-    let list_assert = cmd()
-        .env("HOME", home.path())
+    let list_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args(["packages", "--scope-root", scope_root_str])
         .assert();
@@ -4558,8 +4537,7 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
     let scope_root_str = scope_root.to_str().unwrap();
 
     info!("Act: tomcat install <plugin> --visibility agent");
-    let install_assert = cmd()
-        .env("HOME", home.path())
+    let install_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "install",
@@ -4586,8 +4564,7 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
     )));
 
     info!("Act: tomcat packages --visibility agent");
-    let list_assert = cmd()
-        .env("HOME", home.path())
+    let list_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "packages",
@@ -4664,8 +4641,7 @@ fn test_user_installs_agent_package_survives_scope_switch() {
     let project_b_str = project_b.to_str().unwrap();
 
     info!("Arrange: 从 project-a 安装 bare plugin 到 agent 层");
-    cmd()
-        .env("HOME", home.path())
+    isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "install",
@@ -4687,8 +4663,7 @@ fn test_user_installs_agent_package_survives_scope_switch() {
         )));
 
     info!("Act: 切到 project-b 后查看 agent 层 packages");
-    let list_assert = cmd()
-        .env("HOME", home.path())
+    let list_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "packages",
@@ -4746,8 +4721,7 @@ fn test_user_installs_bare_skill_to_global_layer() {
     let scope_root_str = scope_root.to_str().unwrap();
 
     info!("Act: tomcat install <skill> --visibility global");
-    let install_assert = cmd()
-        .env("HOME", home.path())
+    let install_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "install",
@@ -4774,8 +4748,7 @@ fn test_user_installs_bare_skill_to_global_layer() {
     )));
 
     info!("Act: tomcat packages --visibility global");
-    let list_assert = cmd()
-        .env("HOME", home.path())
+    let list_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "packages",
@@ -4847,8 +4820,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
     let scope_root_str = scope_root.to_str().unwrap();
 
     info!("Arrange: 先安装一个 scope package");
-    cmd()
-        .env("HOME", home.path())
+    isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "install",
@@ -4862,8 +4834,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         .success();
 
     info!("Act: tomcat uninstall <package> --visibility scope");
-    let uninstall_assert = cmd()
-        .env("HOME", home.path())
+    let uninstall_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "uninstall",
@@ -4919,8 +4890,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
     );
 
     info!("Act: tomcat packages --visibility scope");
-    let list_assert = cmd()
-        .env("HOME", home.path())
+    let list_assert = isolated_cmd(home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
         .args([
             "packages",
@@ -4960,9 +4930,8 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -5011,9 +4980,8 @@ fn test_user_receives_nonempty_llm_response() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -5058,8 +5026,7 @@ fn test_user_creates_new_session() {
 
     info!("Arrange: fresh work dir");
     info!("Act: tomcat session new");
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "new"])
         .assert();
@@ -5094,8 +5061,7 @@ fn test_user_lists_sessions() {
     let second_id = create_session_via_cli(&work_dir);
 
     info!("Act: tomcat session list");
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "list"])
         .assert();
@@ -5135,8 +5101,7 @@ fn test_user_switches_to_existing_session() {
     let session_id = create_session_via_cli(&work_dir);
 
     info!("Act: tomcat session switch {}", session_id);
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "switch", session_id.as_str()])
         .assert();
@@ -5159,8 +5124,7 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
 
     info!("Arrange: no session pre-created");
     info!("Act: tomcat session switch nonexistent-key-e2e");
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "switch", "nonexistent-key-e2e"])
         .assert();
@@ -5192,8 +5156,7 @@ fn test_user_deletes_session() {
     let session_id = create_session_via_cli(&work_dir);
 
     info!("Act: tomcat session delete {}", session_id);
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "delete", session_id.as_str()])
         .assert();
@@ -5226,8 +5189,7 @@ fn test_user_archives_session() {
     let session_id = create_session_via_cli(&work_dir);
 
     info!("Act: tomcat session archive {}", session_id);
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "archive", session_id.as_str()])
         .assert();
@@ -5263,8 +5225,7 @@ fn test_user_searches_sessions_by_keyword() {
 
     let current_key = current_code_session_key();
     info!("Act: tomcat session search {}", current_key);
-    let assert = cmd()
-        .env("HOME", &work_dir)
+    let assert = isolated_cmd(&work_dir)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "search", current_key.as_str()])
         .assert();
@@ -5305,15 +5266,14 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init，移除 IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
     info!("Act: tomcat chat without API key，timeout 5s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
         .env("HOME", dir.path())
         .current_dir(dir.path())
@@ -5362,9 +5322,8 @@ fn test_user_chat_skill_list_reload_use() {
     fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: init temp HOME + workspace skills");
-    cmd()
+    isolated_cmd(home.path())
         .args(["init"])
-        .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -5393,7 +5352,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     write_skill_fixture(workspace.path(), "lint", "Run repo lint checks", false);
 
     info!("Act: tomcat chat with /skill list, /skill reload, /skill use");
-    let mut c = cmd();
+    let mut c = isolated_cmd(home.path());
     c.arg("chat")
         .env("HOME", home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
@@ -5481,9 +5440,8 @@ fn test_user_skill_cli_list_reload_e2e() {
     fs::create_dir_all(&work_dir).unwrap();
 
     info!("Arrange: init temp HOME + workspace skills");
-    cmd()
+    isolated_cmd(home.path())
         .args(["init"])
-        .env("HOME", home.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -5524,7 +5482,7 @@ fn test_user_skill_cli_list_reload_e2e() {
     write_skill_fixture(workspace.path(), "lint", "Run repo lint checks", false);
 
     info!("Act: tomcat skill reload");
-    let reload = cmd()
+    let reload = isolated_cmd(home.path())
         .args(["skill", "reload"])
         .env("HOME", home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
@@ -5680,9 +5638,8 @@ fn test_user_init_then_doctor_roundtrip() {
 
     info!("Arrange: fresh temp dir");
     info!("Act: tomcat init → tomcat doctor");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -5723,9 +5680,8 @@ fn test_user_chat_resumes_last_session() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -7586,9 +7542,8 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
     info!("Arrange: tomcat init 生成配置；加载 IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    isolated_cmd(dir.path())
         .args(["init"])
-        .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();

@@ -248,7 +248,7 @@ migration warning and never create a question deadline.
 
 ## Running development checks
 
-Run commands below from `tomcat-vscode-ext` in an independent test shell. Tests keep private HOME/workspace directories and use fixed local model replies; they do not turn off Tomcat's nested-Agent protection. An Agent-hosted shell carrying `TOMCAT_AGENT_ACTIVE=1` is not a normal CLI test environment.
+Run commands below from `tomcat-vscode-ext`, including directly from an Agent-hosted shell. Test fixtures own disposable HOME/workspace/profile directories and construct child CLI environments without the inherited `TOMCAT_AGENT_ACTIVE` marker; the outer shell and Tomcat tool Bash keep their protection. Tests use fixed local model replies. Updating `~/.local/bin`, restarting the user's shared service, or modifying the real HOME are not test steps.
 
 ```sh
 npm run test:integration -- tests/serve_set_plan_mode.test.ts

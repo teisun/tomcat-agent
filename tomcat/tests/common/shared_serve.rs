@@ -64,10 +64,16 @@ impl Drop for ServiceFixture {
         }
         let result = self.command().args(["serve", "stop"]).output();
         if !matches!(&result, Ok(output) if output.status.success()) {
-            eprintln!(
-                "isolated service cleanup failed at {}: {result:?}",
+            self.0.retain_home();
+            let message = format!(
+                "isolated service cleanup failed; retaining HOME {}: {result:?}",
                 self.0.home_path.display()
             );
+            if std::thread::panicking() {
+                eprintln!("{message}");
+            } else {
+                panic!("{message}");
+            }
         }
     }
 }

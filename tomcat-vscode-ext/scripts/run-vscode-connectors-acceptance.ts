@@ -9,16 +9,8 @@ import { packageVsix } from "./package-vsix";
 import { runCommand } from "./runCommand";
 import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 import { EXTENSION_ID } from "../src/constants";
-
-const outsideAgentEnv: NodeJS.ProcessEnv = { ...process.env };
-for (const key of Object.keys(outsideAgentEnv)) {
-  // Only standalone instances with an owned disposable HOME receive this env.
-  if (key === "TOMCAT_AGENT_ACTIVE" || key.startsWith("TOMCAT__") || /_API_KEY$/i.test(key)) outsideAgentEnv[key] = undefined;
-}
-Object.assign(outsideAgentEnv, {
-  ALL_PROXY: "", HTTPS_PROXY: "", HTTP_PROXY: "", NO_PROXY: "127.0.0.1,localhost",
-  all_proxy: "", https_proxy: "", http_proxy: "", no_proxy: "127.0.0.1,localhost",
-});
+import { serveFixtureEnvironment } from "./realServeFixture";
+import { STOP_COMMAND_TIMEOUT_MS } from "../src/serveClient/sharedConnection";
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function sha256(file: string): Promise<string> { return createHash("sha256").update(await fs.readFile(file)).digest("hex"); }
 
@@ -37,7 +29,7 @@ async function seedRealServeSettings(userDataDir: string, executable: string, wo
 async function startHttpFixture(binary: string, temporaryRoot: string, artifactsRoot: string) {
   const addressFile = path.join(temporaryRoot, "mcp-bound-address");
   const child = spawn(binary, ["--port", "0", "--faults"], {
-    env: { ...outsideAgentEnv, MCP_STREAMABLE_HTTP_BOUND_ADDR_FILE: addressFile },
+    env: { ...process.env, MCP_STREAMABLE_HTTP_BOUND_ADDR_FILE: addressFile },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
@@ -92,7 +84,7 @@ async function main(): Promise<void> {
   const mcpBinary = path.resolve(process.env.TOMCAT_CONNECTORS_ACCEPT_MCP_BINARY ?? path.join(extensionRoot, "../tomcat/target/debug/test_streamable_http_server"));
   await Promise.all([fs.access(executable), fs.access(mcpBinary)]);
   // Keep macOS's AF_UNIX user-data socket below its 103-byte path limit.
-  const installRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tc-"));
+  const installRoot = await fs.mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tc-"));
   const shotsRoot = path.join(extensionRoot, "..", ".agents", "shots");
   await fs.mkdir(shotsRoot, { recursive: true });
   const artifactsRoot = process.env.TOMCAT_CONNECTORS_ACCEPT_ARTIFACTS_DIR
@@ -105,6 +97,7 @@ async function main(): Promise<void> {
   let fixture: Awaited<ReturnType<typeof startHttpFixture>> | undefined;
   const outcomes: Array<{ phase: string; status: string; error?: string }> = [];
   let failure: unknown;
+  let retainInstallRoot = false;
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
     runCommand("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
@@ -124,7 +117,7 @@ async function main(): Promise<void> {
     const cliHash = await sha256(executable);
     await fs.writeFile(path.join(artifactsRoot, "artifact-hashes.json"), JSON.stringify({
       executable, cliSha256: cliHash,
-      cliVersion: execFileSync(executable, ["--version"], { env: outsideAgentEnv, encoding: "utf8" }).trim(),
+      cliVersion: execFileSync(executable, ["--version"], { env: serveFixtureEnvironment(installRoot, process.env, true), encoding: "utf8" }).trim(),
       mcpBinary, mcpSha256: await sha256(mcpBinary), vsixPath, vsixSha256: await sha256(vsixPath),
       installedExtension: installed, extensionJsSha256: extensionHash,
       workspaceAssets: expectedAssets, installedAssets,
@@ -140,35 +133,33 @@ async function main(): Promise<void> {
       const artifacts = path.join(artifactsRoot, phase);
       await Promise.all([userDataDir, workspaceDir, homeDir, artifacts].map((directory) => fs.mkdir(directory, { recursive: true })));
       await fs.writeFile(path.join(workspaceDir, "README.md"), "# Isolated real connector acceptance\n");
-      execFileSync(executable, ["init"], { cwd: workspaceDir, env: { ...outsideAgentEnv, HOME: homeDir }, stdio: "pipe" });
-      await fs.writeFile(path.join(homeDir, ".tomcat", "mcp.json"), phase === "untrusted" || phase === "add-and-trust"
-        ? `${JSON.stringify({ mcpServers: { "always-global": { url: `${fixture.url}/mcp`, auth: "none" } } })}\n`
-        : '{"mcpServers":{}}\n');
-      if (phase === "untrusted") {
-        // Only this owned test workspace has project sources before approval.
-        const generated = await fs.readFile(path.join(homeDir, ".tomcat", "tomcat.config.toml"), "utf8");
-        const resourceDir = /^project_resource_dir\s*=\s*"([^"]+)"/m.exec(generated)?.[1] ?? ".agents";
-        if (path.isAbsolute(resourceDir) || resourceDir.split(/[\\/]/).includes("..")) throw new Error("Unsafe test resource directory");
-        const folder = path.join(workspaceDir, resourceDir);
-        await fs.mkdir(folder, { recursive: true });
-        const server = path.resolve(extensionRoot, "../tomcat/tests/fixtures/mcp/fake_stdio_server.mjs");
-        await fs.access(server);
-        await fs.writeFile(path.join(folder, "mcp.json"), `${JSON.stringify({ mcpServers: {
-          "project-one": { command: "node", args: [server] },
-          "project-two": { command: "node", args: [server] },
-        } })}\n`);
-      }
-      await seedRealServeSettings(userDataDir, executable, workspaceDir);
-      const priorAgentActive = process.env.TOMCAT_AGENT_ACTIVE;
-      const priorKey = process.env.OPENAI_API_KEY;
-      delete process.env.TOMCAT_AGENT_ACTIVE;
-      process.env.OPENAI_API_KEY = "connector-acceptance-placeholder";
+      const env = { ...serveFixtureEnvironment(homeDir, process.env, true), OPENAI_API_KEY: "connector-acceptance-placeholder" };
+      let phaseFailed = false;
       try {
+        execFileSync(executable, ["init"], { cwd: workspaceDir, env, stdio: "pipe" });
+        await fs.writeFile(path.join(homeDir, ".tomcat", "mcp.json"), phase === "untrusted" || phase === "add-and-trust"
+          ? `${JSON.stringify({ mcpServers: { "always-global": { url: `${fixture.url}/mcp`, auth: "none" } } })}\n`
+          : '{"mcpServers":{}}\n');
+        if (phase === "untrusted") {
+          // Only this owned test workspace has project sources before approval.
+          const generated = await fs.readFile(path.join(homeDir, ".tomcat", "tomcat.config.toml"), "utf8");
+          const resourceDir = /^project_resource_dir\s*=\s*"([^"]+)"/m.exec(generated)?.[1] ?? ".agents";
+          if (path.isAbsolute(resourceDir) || resourceDir.split(/[\\/]/).includes("..")) throw new Error("Unsafe test resource directory");
+          const folder = path.join(workspaceDir, resourceDir);
+          await fs.mkdir(folder, { recursive: true });
+          const server = path.resolve(extensionRoot, "../tomcat/tests/fixtures/mcp/fake_stdio_server.mjs");
+          await fs.access(server);
+          await fs.writeFile(path.join(folder, "mcp.json"), `${JSON.stringify({ mcpServers: {
+            "project-one": { command: "node", args: [server] },
+            "project-two": { command: "node", args: [server] },
+          } })}\n`);
+        }
+        await seedRealServeSettings(userDataDir, executable, workspaceDir);
         await runVsCodeGuiTests(runTests, {
           extensionDevelopmentPath: harnessRoot,
           extensionTestsPath: path.join(harnessRoot, "out/test/connectors-installed-acceptance.index.js"),
           extensionTestsEnv: {
-            ...outsideAgentEnv, HOME: homeDir, OPENAI_API_KEY: "connector-acceptance-placeholder",
+            ...env,
             TOMCAT_CONNECTORS_ACCEPT_BINARY: executable,
             TOMCAT_VSCODE_TEST_PATH: executable, TOMCAT_VSCODE_TEST_EXTRA_ARGS: "",
             TOMCAT_CONNECTORS_ACCEPT_PHASE: phase,
@@ -187,10 +178,16 @@ async function main(): Promise<void> {
         outcomes.push({ phase, status: "passed" });
       } catch (error) {
         outcomes.push({ phase, status: "failed", error: String(error) });
+        phaseFailed = true;
         throw error;
       } finally {
-        if (priorAgentActive === undefined) delete process.env.TOMCAT_AGENT_ACTIVE; else process.env.TOMCAT_AGENT_ACTIVE = priorAgentActive;
-        if (priorKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = priorKey;
+        try {
+          execFileSync(executable, ["serve", "stop"], { env, cwd: workspaceDir, timeout: STOP_COMMAND_TIMEOUT_MS, stdio: "pipe" });
+        } catch (error) {
+          retainInstallRoot = true;
+          console.error(`Private service cleanup failed; retaining ${installRoot}`, error);
+          if (!phaseFailed) throw error;
+        }
       }
     }
   } catch (error) { failure = error; throw error; }
@@ -198,7 +195,9 @@ async function main(): Promise<void> {
     try {
       await fixture?.stop();
       await fs.writeFile(path.join(artifactsRoot, "acceptance-result.json"), JSON.stringify({ outcomes, error: failure ? String(failure) : undefined }, null, 2));
-    } finally { await fs.rm(installRoot, { force: true, recursive: true }); }
+    } finally {
+      if (!retainInstallRoot) await fs.rm(installRoot, { force: true, recursive: true });
+    }
   }
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

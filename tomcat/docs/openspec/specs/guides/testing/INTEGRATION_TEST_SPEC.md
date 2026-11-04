@@ -152,7 +152,7 @@ my_project/
 *   默认过滤排除上述真实模型/外网 binary 和 case，以及明确列出的手动项。离线集成可使用固定本地服务，但其通过不能代替真实供应商链路验证。
 *   `run-integration-tests.sh` 只使用当前 shell 已导出的凭据（`TOMCAT_TEST_EXPORTED_ENV_ONLY=1`），不让 Rust helper 偷偷从 dotenv 补到与预检不同的 key。默认 Responses target 是 `idatatlas/gpt-5.6-terra`，由 `TOMCAT_E2E_OPENAI_TARGET` 覆盖，对应凭据为 `IDATATLAS_OPENAI_API_KEY`；若显式改为内置 GPT target，则使用 `OPENAI_API_KEY`，`fcodex/*` 使用 `FCODEX_OPENAI_API_KEY`。`integration-real-llm` 还包含有意固定 IDATATLAS 的 CLI/LLM/plan 交付测试，因此 target 不同于 IDATATLAS 时必须同时提供 `IDATATLAS_OPENAI_API_KEY`；只跑 `integration-openai-responses-wire` 则只要求所选 target 的凭据。DeepSeek / MiMo 的协议专项测试保留为单独目标，不进入这条通用门禁。缺凭据退出 2 并说明“未运行”，不是成功跳过。
 *   入口只给 `NO_PROXY` / `no_proxy` 追加 `127.0.0.1,localhost,::1`，避免本地 HTTP fixture 经开发机代理转发；已有排除项和真实远程供应商代理保持不变。直接使用 `cargo` 聚焦本地 HTTP 用例时也须提供 loopback 排除项，不能把代理阻塞当业务回归或通过。
-*   `run-integration-tests.sh` 在启动隔离测试前清除父 shell 的 `TOMCAT_AGENT_ACTIVE` 标记，以便 disposable CLI 可修改自己的临时 HOME；这是测试入口的限定例外，不得禁用生产 CLI guard，也不得借此修改真实 HOME。fixture 仍必须自行隔离 HOME/配置/工作区；guard 开关行为由显式开/关测试覆盖。
+*   `run-integration-tests.sh` 保留 `TOMCAT_AGENT_ACTIVE`；启动 CLI 的夹具必须在构造点绑定自有临时 HOME，再通过 `isolated_serve_command` 构造不继承该标记的子环境。未绑定 HOME 的命令保留标记，让 guard 拒绝变更操作，以暴露漏隔离；不得给无 HOME 参数的通用命令工厂解除保护。外层 Agent 与产品工具 Bash 的标记、生产 CLI guard 均不变；guard 正反例由显式开/关测试覆盖。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：

@@ -1,3 +1,5 @@
+mod common;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tomcat::{AppConfig, SessionManager};
@@ -65,6 +67,7 @@ fn session_new_still_succeeds_when_nested_env_is_absent() {
     let sessions_dir = tomcat::resolve_sessions_dir(&cfg).expect("resolve sessions dir");
 
     cmd()
+        .env_remove("TOMCAT_AGENT_ACTIVE")
         .current_dir(work_dir.path())
         .env("HOME", home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.path())
@@ -79,4 +82,48 @@ fn session_new_still_succeeds_when_nested_env_is_absent() {
             .is_some(),
         "env-absent command should preserve existing behavior and create a session"
     );
+}
+
+#[test]
+fn isolated_cli_initializes_despite_parent_agent_and_model_overrides() {
+    let home = tempfile::tempdir().expect("private home");
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    for (key, value) in [
+        ("TOMCAT_AGENT_ACTIVE", "1"),
+        ("TOMCAT__LLM__DEFAULT_MODEL", "host-sentinel-model"),
+        ("OPENAI_API_KEY", "host-sentinel-key"),
+    ] {
+        std::env::set_var(key, value);
+    }
+    for args in [vec!["init"], vec!["session", "new", "--scope", "claw"]] {
+        let output = common::serve::isolated_serve_command(home.path())
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::null())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    fn check_files(dir: &std::path::Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                check_files(&path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(!text.contains("host-sentinel-model"), "{}", path.display());
+                assert!(!text.contains("host-sentinel-key"), "{}", path.display());
+            }
+        }
+    }
+    assert!(home.path().join(".tomcat/tomcat.config.toml").is_file());
+    let mut cfg =
+        tomcat::load_config_toml_file(&home.path().join(".tomcat/tomcat.config.toml")).unwrap();
+    cfg.storage.work_dir = Some(home.path().join(".tomcat").to_string_lossy().into_owned());
+    let sessions = SessionManager::new(tomcat::resolve_sessions_dir(&cfg).unwrap());
+    assert!(sessions.current_session_id().unwrap().is_some());
+    check_files(home.path());
+    assert_eq!(std::env::var("TOMCAT_AGENT_ACTIVE").as_deref(), Ok("1"));
 }

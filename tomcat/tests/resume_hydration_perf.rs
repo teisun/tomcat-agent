@@ -7,11 +7,10 @@ use tomcat::{
     init_context_state, load_config_toml_file, resolve_sessions_dir, ContextConfig, SessionManager,
 };
 
-#[allow(deprecated)]
-fn cmd() -> Command {
-    let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
-    c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
-    c
+fn isolated_cmd(home: &std::path::Path) -> Command {
+    let mut command = Command::from_std(common::serve::isolated_serve_command(home));
+    command.env("USERPROFILE", home);
+    command
 }
 
 fn apply_idatatlas_env(command: &mut Command) {
@@ -35,9 +34,8 @@ fn setup_fixture() -> Fixture {
     let workdir = home.path().join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
 
-    cmd()
+    isolated_cmd(&home_path)
         .args(["init"])
-        .env("HOME", &home_path)
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
@@ -126,7 +124,7 @@ fn seed_boundary_session(path: &std::path::Path, old_turns: usize) {
 }
 
 fn run_resume_trace(fx: &Fixture, extra_env: &[(&str, &str)]) -> String {
-    let mut command = cmd();
+    let mut command = isolated_cmd(&fx.home_path);
     command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])

@@ -8,6 +8,21 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+#[test]
+fn stopping_one_private_service_leaves_the_other_instance_running() {
+    let first = ServiceFixture::new("http://127.0.0.1:1");
+    let second = ServiceFixture::new("http://127.0.0.1:1");
+    let first_info = first.action("start");
+    let second_info = second.action("start");
+    assert_ne!(first_info["instanceId"], second_info["instanceId"]);
+
+    assert_eq!(first.action("stop")["stopped"], true);
+    assert_eq!(first.action("status")["running"], false);
+    let unchanged = second.action("status");
+    assert_eq!(unchanged["running"], true);
+    assert_eq!(unchanged["instanceId"], second_info["instanceId"]);
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn self_install_updates_running_copy_without_restarting_until_explicit_restart() {

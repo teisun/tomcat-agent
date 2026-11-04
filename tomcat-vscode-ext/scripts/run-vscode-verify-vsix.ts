@@ -309,9 +309,8 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     }
     try { await mcpSmoke?.close(); } finally {
       try { await server?.close(); } finally {
-        try { await fixture?.cleanup(); } finally {
-          await fs.rm(installRoot, { force: true, recursive: true });
-        }
+        await fixture?.cleanup();
+        await fs.rm(installRoot, { force: true, recursive: true });
       }
     }
   }
@@ -319,7 +318,6 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
 
 async function main(): Promise<void> {
   const playwrightSmoke = process.env.TOMCAT_RELEASE_MCP_SMOKE === "1";
-  if (playwrightSmoke && process.env.TOMCAT_AGENT_ACTIVE === "1") throw new Error("Run MCP acceptance from an independent terminal; do not clear TOMCAT_AGENT_ACTIVE.");
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
   const productionSource = parseProductionSource(process.argv.slice(2));

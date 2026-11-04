@@ -22,7 +22,7 @@ type Api = { __testing: {
   getSessionState(sessionId: string): Promise<{ model: string; modelReady?: boolean }>;
   getObservedWebviewErrors(): unknown[];
   getObservedEvents(): Event[];
-  getWebviewState(): { activeSessionId: string | null; sessions: Array<{ sessionId: string; title: string | null; isPinned?: boolean }>; sessionViews: Record<string, { timeline: Event[] }> };
+  getWebviewState(): { activeSessionId: string | null; sessions: Array<{ sessionId: string; title: string | null; isPinned?: boolean }> };
   clearObservedEvents(): void;
   focusWebview(): Promise<void>;
   waitForWebviewReady(): Promise<void>;
@@ -55,9 +55,9 @@ function required(name: string): string { const value = process.env[name]; asser
 
 async function verifyBuiltinPlaywright(api: Api, sessionId: string, artifacts: string) {
   await vscode.commands.executeCommand("tomcat.openSettings");
-  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-nav-connectors" });
   const settings = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-settings-shell");
   try {
+    await settings.click("settings-nav-connectors");
     const deadline = Date.now() + 180_000;
     for (;;) {
       const state = api.__testing.getSettingsPanelState().state;
@@ -341,8 +341,8 @@ suite("Native installed release bundle", () => {
               rows.find(row => row.textContent.includes('release-denied.txt'))?.scrollIntoView({ block: 'center' });
               return rows.map(row => ({ text: row.querySelector('[data-testid="tool-row-label"]')?.textContent ?? '', error: row.classList.contains('tc-tool-row--error') }));
             })()`);
-            assert.ok(rows.some(row => row.error && row.text.includes(translate("en", "tool.failedWrite")) && row.text.includes("release-denied.txt")));
-            assert.ok(rows.some(row => !row.error && row.text.includes(translate("en", "tool.created")) && row.text.includes("release-allowed.txt")));
+            assertDeniedHistoryStatus(rows.find(row => row.text.includes(translate("en", "tool.failedWrite")) && row.text.includes("release-denied.txt"))?.error);
+            assert.equal(rows.find(row => row.text.includes(translate("en", "tool.created")) && row.text.includes("release-allowed.txt"))?.error, false);
             const file = path.join(artifacts, `denied-${phase}-${size}.png`);
             await driver.capture(file); deniedHistoryScreenshots.push(file);
           }
@@ -367,10 +367,8 @@ suite("Native installed release bundle", () => {
       await api.__testing.waitForWebviewReady();
       assert.equal((await api.__testing.getSessionState(sessionId)).model, onboardingModelId, "Saved selection must survive restart");
       await prompt("after reload", "RELEASE_RELOADED");
-      assertDeniedHistoryStatus(
-        api.__testing.getWebviewState().sessionViews[sessionId]?.timeline.find(event => event.toolCallId === "release-deny")?.isError,
-      );
-      assert.equal(api.__testing.getWebviewState().sessionViews[sessionId]?.timeline.find(event => event.toolCallId === "release-allow")?.isError, false);
+      // After reload, assert the hydrated history in the actual rendered frame,
+      // not the host's current-turn-only timeline snapshot.
       await assert.rejects(fs.stat(path.join(workspace, "release-denied.txt")), { code: "ENOENT" });
       await captureDeniedHistory("after-reload");
       const driver = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");

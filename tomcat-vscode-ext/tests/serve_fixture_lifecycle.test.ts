@@ -33,6 +33,7 @@ describe("serve fixture resource ownership", () => {
     expect(env.TOMCAT__UI__LANGUAGE).toBeUndefined();
     expect(env.TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect({ ...parent, ...env }.ANTHROPIC_API_KEY).toBeUndefined();
+    expect({ ...parent, ...env }.TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect(serveFixtureEnvironment("/fixture", {}).TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect(serveFixtureEnvironment("/fixture", {}).SHELL).toBeUndefined();
   });

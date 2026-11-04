@@ -23,6 +23,12 @@ pub struct ServeFixture {
     with_test_keys: bool,
 }
 
+impl ServeFixture {
+    pub fn retain_home(&mut self) {
+        self._home.disable_cleanup(true);
+    }
+}
+
 // A standalone test instance owns a disposable HOME and workspace. Do not let
 // parent-agent markers, configuration overrides, proxies or real keys escape
 // into it; this never mutates the parent process environment or real config.
