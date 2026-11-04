@@ -331,6 +331,26 @@ fn unknown_fields_are_ignored_without_rewriting_the_file() {
 }
 
 #[test]
+fn parse_errors_report_location_without_echoing_sensitive_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("mcp.json");
+    for raw in [
+        "{\n  \"mcpServers\": {\"test\": {\"args\": \"SENSITIVE_SENTINEL\"}}\n}",
+        "{\n  \"mcpServers\": {\"test\": {\"toolFilter\": {\"SENSITIVE_SENTINEL\": true}}}\n}",
+        "{\n  \"mcpServers\": \"SENSITIVE_SENTINEL\",\n}",
+    ] {
+        std::fs::write(&path, raw).unwrap();
+        let error = super::read_mcp_file(&path).expect_err("invalid configuration");
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(rendered.contains("line"), "{rendered}");
+            assert!(rendered.contains("column"), "{rendered}");
+            assert!(!rendered.contains("SENSITIVE_SENTINEL"), "{rendered}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+}
+
+#[test]
 fn unknown_fields_inside_tool_filter_remain_errors() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let mut cfg = AppConfig::default();
@@ -343,7 +363,8 @@ fn unknown_fields_inside_tool_filter_remain_errors() {
     let error = load_servers(&cfg, None)
         .expect_err("toolFilter must keep rejecting unknown fields")
         .to_string();
-    assert!(error.contains("unknownRule"), "{error}");
+    assert!(error.contains("Data at line 1 column"), "{error}");
+    assert!(!error.contains("unknownRule"), "{error}");
     assert_eq!(std::fs::read_to_string(path).expect("read source"), raw);
 }
 

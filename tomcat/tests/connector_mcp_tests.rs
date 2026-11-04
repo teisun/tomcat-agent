@@ -140,6 +140,82 @@ async fn wait_for_deferred_tool(ctx: &ChatContext, name: &str, present: bool) {
 }
 
 #[tokio::test]
+async fn stdio_startup_failures_are_actionable_and_do_not_echo_secrets() {
+    use std::time::Duration;
+    use tomcat::core::connector::mcp::{
+        config::{ConfiguredMcpServer, McpConfigSource},
+        transport::{McpTransport, StdioTransport},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let cases = vec![
+        (
+            temp.path().join("missing").to_string_lossy().into_owned(),
+            vec!["SECRET_ARGUMENT".to_string()],
+            "program_not_found",
+        ),
+        (
+            "node".to_string(),
+            vec!["-e".to_string(), "process.exit(1)".to_string()],
+            "exited",
+        ),
+    ];
+    #[cfg(unix)]
+    let cases = {
+        use std::os::unix::fs::PermissionsExt;
+        let mut cases = cases;
+        let executable = temp.path().join("not-executable");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        cases.push((
+            executable.to_string_lossy().into_owned(),
+            vec![],
+            "permission_denied",
+        ));
+        cases
+    };
+    for (command, args, phase) in cases {
+        let server = ConfiguredMcpServer {
+            config_key: "mcp:startup".into(),
+            name: "startup".into(),
+            source: McpConfigSource::Global,
+            config: serde_json::from_value(serde_json::json!({
+                "command": command, "args": args, "env": {"SECRET_ENV": "SECRET_VALUE"}
+            }))
+            .unwrap(),
+        };
+        let cleanup = tokio_util::task::TaskTracker::new();
+        let failure = tokio::time::timeout(
+            Duration::from_secs(5),
+            StdioTransport::new(None).connect_cancellable(
+                &server,
+                CancellationToken::new(),
+                cleanup.clone(),
+            ),
+        )
+        .await
+        .unwrap()
+        .expect_err("startup should fail");
+        cleanup.close();
+        tokio::time::timeout(Duration::from_secs(5), cleanup.wait())
+            .await
+            .unwrap();
+        assert_eq!(failure.phase, phase);
+        assert!(!format!("{failure:?}").contains("SECRET_"));
+        let english: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+        let key = format!("mcp.phase.{phase}");
+        let suggestion = english[&key].as_str().expect("English source suggestion");
+        for rendered in [
+            failure.to_string(),
+            failure.to_app_error("startup").to_string(),
+        ] {
+            assert!(rendered.contains(suggestion), "{rendered}");
+            assert!(!rendered.contains("SECRET_"), "{rendered}");
+        }
+    }
+}
+
+#[tokio::test]
 #[serial(env_lock)]
 async fn pending_project_server_is_absent_until_project_trusted() {
     const API_KEY_ENV: &str = "TOMCAT_CONNECTOR_PROJECT_TEST_KEY";

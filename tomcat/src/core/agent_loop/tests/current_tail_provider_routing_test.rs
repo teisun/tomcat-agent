@@ -86,6 +86,37 @@ fn over_budget_agent(
 }
 
 #[tokio::test]
+async fn transport_recovery_failed_pre_request_compaction_is_not_a_main_request_failure() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (bus, _) = capture_notices();
+    let (mut agent, mut messages) = over_budget_agent(
+        Arc::new(RecordingChatLlmProvider::failing(
+            "fixture",
+            calls.clone(),
+            || {
+                crate::infra::error::llm_error(
+                    "fixture",
+                    crate::infra::error::LlmErrorStage::Connect,
+                    "refused",
+                )
+            },
+        )),
+        None,
+        "main-x",
+        bus,
+    );
+    agent.main_request_failed = true; // a previous attempt must not contaminate this one
+    let result =
+        super::super::request_retry::run_request_once(&mut agent, &mut messages, 1, 1, 1).await;
+    assert!(
+        matches!(result, Err(super::super::types::LoopError::Fatal(ref error))
+        if crate::infra::error::llm_stage(error) == Some(crate::infra::error::LlmErrorStage::Connect))
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert!(!agent.main_request_failed);
+}
+
+#[tokio::test]
 async fn collapse_falls_back_to_session_model_when_compaction_model_fails() {
     let main_calls = Arc::new(Mutex::new(Vec::new()));
     let compaction_calls = Arc::new(Mutex::new(Vec::new()));

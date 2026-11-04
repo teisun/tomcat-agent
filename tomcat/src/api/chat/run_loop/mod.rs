@@ -1029,6 +1029,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         skill_set: Some(ctx.scope_services.skill_set.clone()),
         ephemeral_tail_provider: Some(runtime_tail_provider(ctx)),
     };
+    let main_provider = main_call.provider_impl.clone();
     let mut agent_loop = AgentLoop::new(
         main_call,
         ctx.global_services.primitive.clone(),
@@ -1139,6 +1140,15 @@ async fn run_chat_turn_with_message_and_tool_definitions(
             .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, &context_config))
     });
     if let AgentRunOutcome::Failed(error) = &outcome {
+        if agent_loop.main_request_failed
+            && crate::infra::error::llm_stage(error)
+                == Some(crate::infra::error::LlmErrorStage::Connect)
+            && crate::infra::error::llm_http_status(error).is_none()
+        {
+            ctx.global_services
+                .llm_resolver
+                .report_connect_failure(&main_provider);
+        }
         let _ = rehydrate::recover_context_state_after_failed_turn(
             ctx,
             &context_config,

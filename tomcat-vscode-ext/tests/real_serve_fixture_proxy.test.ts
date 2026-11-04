@@ -10,6 +10,24 @@ import { ensureTomcatBinary, setupServeFixture, spawnScriptedOpenAiStreamServer,
 afterEach(() => vi.unstubAllEnvs());
 
 describe("window proxy input and isolated configuration", () => {
+  it("keeps ordinary cold model fixtures offline but leaves release first-install MCP absent", async () => {
+    for (const missingMcpConfig of [false, true]) {
+      const runCli = vi.fn(async () => undefined);
+      const fixture = await setupRealServeFixture("http://fixture.invalid", "openai", {
+        binary: "not-executed", coldStart: true, missingMcpConfig, runCli,
+      });
+      try {
+        expect(runCli).not.toHaveBeenCalled();
+        const mcp = path.join(fixture.homePath, ".tomcat/mcp.json");
+        if (missingMcpConfig) await expect(stat(mcp)).rejects.toMatchObject({ code: "ENOENT" });
+        else expect(JSON.parse(await readFile(mcp, "utf8"))).toEqual({ mcpServers: {} });
+        for (const key of ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "npm_config_cache"]) {
+          expect(fixture.env[key]?.startsWith(fixture.homePath)).toBe(true);
+        }
+      } finally { await fixture.cleanup(); }
+    }
+  });
+
   it("requires one explicit selection, never falls back, and prefers explicit test configuration", () => {
     const env = { HTTPS_PROXY: "http://window.invalid:8080", HTTP_PROXY: "http://other.invalid:8080", NO_PROXY: "*" };
     const before = { ...env };

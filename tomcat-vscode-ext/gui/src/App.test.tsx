@@ -390,6 +390,33 @@ describe("inline user-message editing in App", () => {
 });
 
 describe("inline model configuration", () => {
+  it("guides an empty window to Open Folder without failure actions, while preserving generic degraded recovery", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const detail = translate("en", "bridge.workspaceRequired");
+    await emitState({ channel: "state", content: {
+      ...snapshot, activeSessionId: null, sessions: [], sessionViews: {}, ready: false,
+      connectionStatus: "degraded", connectionFailure: { kind: "workspace_required", detail },
+    }, messageId: "workspace-required" });
+    const loading = within(screen.getByTestId("loading-state"));
+    expect(loading.getByText(detail)).toBeTruthy();
+    expect(loading.queryByText(translate("en", "chat.degraded"))).toBeNull();
+    expect(loading.queryByRole("alert")).toBeNull();
+    expect(loading.queryByTestId("retry-connection")).toBeNull();
+    expect(loading.queryByTestId("view-connection-logs")).toBeNull();
+    expect(loading.getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(loading.getByRole("button", { name: translate("en", "host.action.openProjectFolder") }));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openFolder" }));
+    await emitState({ channel: "state", content: {
+      ...snapshot, ready: false, connectionStatus: "degraded",
+      connectionFailure: { kind: "bootstrap", detail: "unknown_session" },
+    }, messageId: "real-bootstrap-error" });
+    expect(loading.getByText(translate("en", "chat.degraded"))).toBeTruthy();
+    expect(loading.getByTestId("retry-connection")).toBeTruthy();
+    expect(loading.getByTestId("view-connection-logs")).toBeTruthy();
+    expect(loading.queryByTestId("open-project-folder")).toBeNull();
+  });
+
   it("offers the shared-service restart with its consequence instead of retry on version mismatch", async () => {
     const { postMessage } = mount();
     const snapshot = approvalDraftSnapshot("s1");

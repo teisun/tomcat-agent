@@ -261,6 +261,15 @@ impl ConnectorRegistry {
         Ok(())
     }
 
+    /// Reread this registry's configuration, then reserve only the requested source.
+    pub(crate) fn request_reload(
+        &self,
+        identifier: &str,
+    ) -> Result<mcp::manager::ReloadReceipt, AppError> {
+        self.mcp.reload_configuration(&self.config)?;
+        self.mcp.request_reconnect(identifier)
+    }
+
     /// Explicit user reload also retries stopped/failed sources with a fresh
     /// recovery budget. Keep healthy connections, unlike a forced restart.
     pub async fn reload_and_reconnect(&self) -> Result<(), AppError> {

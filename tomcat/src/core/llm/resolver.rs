@@ -462,6 +462,9 @@ pub trait LlmResolver: Send + Sync {
     /// Model deletion updates only the selection-related configuration in a live process.
     /// Stateless/test resolvers intentionally retain their existing behavior.
     fn reload_config(&self, _config: AppConfig) {}
+    /// Refresh connection resources on the next use after a terminal local connect failure.
+    /// Stateless/custom resolvers deliberately need not implement this hook.
+    fn report_connect_failure(&self, _provider: &Arc<dyn LlmProvider>) {}
 }
 
 pub struct DefaultLlmResolver {
@@ -640,10 +643,26 @@ impl DefaultLlmResolver {
         runtime: &LlmRuntimeConfig,
     ) -> Result<Arc<ProviderRoute>, AppError> {
         let mut routes = self.routes.lock();
-        if let Some(route) = routes.get(key) {
-            return Ok(route.clone());
-        }
-        let route = Arc::new(ProviderRoute::new(runtime, key.base_url.as_deref())?);
+        let route = if let Some(route) = routes.get(key) {
+            if !route
+                .needs_refresh
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(route.clone());
+            }
+            // Keep the old route and stale marker if rebuilding fails.
+            let refreshed =
+                Arc::new(route.with_refreshed_client(runtime, key.base_url.as_deref())?);
+            let host = key
+                .base_url
+                .as_deref()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .and_then(|url| url.host_str().map(str::to_owned));
+            tracing::info!(api = %key.api, host = ?host, "refreshed LLM client after local connect failure");
+            refreshed
+        } else {
+            Arc::new(ProviderRoute::new(runtime, key.base_url.as_deref())?)
+        };
         routes.insert(key.clone(), route.clone());
         Ok(route)
     }
@@ -800,6 +819,24 @@ impl DefaultLlmResolver {
 }
 
 impl LlmResolver for DefaultLlmResolver {
+    fn report_connect_failure(&self, provider: &Arc<dyn LlmProvider>) {
+        // Match the exact call, not today's model/credential selection. Keep the
+        // same providers -> routes lock order as resolve_cached_provider.
+        let mut providers = self.providers.lock();
+        let Some(key) = providers.iter().find_map(|(key, cached)| {
+            std::ptr::addr_eq(Arc::as_ptr(cached), Arc::as_ptr(provider)).then(|| key.route.clone())
+        }) else {
+            return; // Unknown or late report from an already retired provider.
+        };
+        let routes = self.routes.lock();
+        if let Some(route) = routes.get(&key) {
+            route
+                .needs_refresh
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        providers.retain(|model, _| model.route != key);
+    }
+
     fn resolve_metadata(
         &self,
         scene: LlmScene,

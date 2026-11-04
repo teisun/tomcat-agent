@@ -1,5 +1,6 @@
 export const en = {
   "host.webviewUnresponsive": "The Tomcat panel has repeatedly stopped responding. Tasks continue in the background.",
+  "host.action.openProjectFolder": "Open project folder",
   "host.reloadWebview": "Reload panel",
   "host.webviewRebuildFailed": "Tomcat could not rebuild the panel. Tasks were not interrupted. Try hiding and reopening the Tomcat view.",
   "error.unknown": "An unexpected error occurred.",

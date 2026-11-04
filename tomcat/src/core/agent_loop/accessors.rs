@@ -79,6 +79,7 @@ impl AgentLoop {
             completion_guard_injections: 0,
             silent_reply_allowed: false,
             last_reply_silent: false,
+            main_request_failed: false,
         }
     }
 
@@ -265,6 +266,7 @@ impl AgentLoop {
             completion_guard_injections: 0,
             silent_reply_allowed: false,
             last_reply_silent: false,
+            main_request_failed: false,
         }
     }
 

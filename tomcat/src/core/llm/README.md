@@ -137,6 +137,24 @@ supported_reasoning_levels                    └─ 按 catalog model id 存储
 - **base fallback**：当对主 `base_url` 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
 - **Token 统计**：`ChatResponse.usage` / `StreamEvent::Usage` 提供单次 usage；会话级汇总由调用方使用 `SessionTokenUsage` 累加，并写入 SessionEntry（当 003 可用时）。
 
+### 2.1 本地连接最终失败后的 Client 更换
+
+```text
+主聊天请求最终 Failed + Connect + 无 HTTP 状态码
+  → 按本轮 provider 指针找到 route（共享 Client 与并发名额的一组模型）
+  → 标为待刷新，移除该 route 的 provider 缓存
+下次 Retry / Resume / 新消息 resolve
+  → 重新读取当前代理并建 Client + 沿用同一个 Semaphore
+```
+
+健康请求继续复用连接；当前失败不额外重放、不增加重试预算，不改会话历史、工具结果或提示缓存键。报告未知/已淘汰 provider 无作用；重建失败保留待刷新标记，下次继续尝试。日志只记协议和主机，不输出密钥或 URL 凭据。
+
+401、429、有 HTTP 状态码的网关 503（即使正文说 upstream connect）、读流失败、取消和中途重试成功都不触发。title、compaction、子代理自身失败不报告；主请求前的压缩失败也不会误报。Anthropic 的发送错误先判 `is_connect()`，再判 timeout，与 OpenAI 分类一致。
+
+更换整个 provider 会重置 Anthropic 在该 provider 内学到的 thinking 格式/前缀兼容结果，下一请求可能再走一次已有探测；Files 懒加载适配器也会重建。并发名额不重置，旧请求和新请求共用原预算。若将来实测兼容重探测成为用户可见问题，再评估更细粒度的传输替换。
+
+这只修复本地 Client 的旧代理快照，不修复代理停机、错误配置或上游故障。子进程 `transport_recovery` 红绿测试证明“未报告仍用旧代理，报告后到达新代理”，不证明现场旧会话已恢复，也不证明现场一定发生过端口切换。
+
 ## 3. 会话级模型配置
 
 - `ChatRequest.model_override: Option<String>` 与 SessionEntry.model_override 约定一致；为 None 时使用请求的 model 字段（通常由上层从 `ResolvedCall.model` 或 SessionEntry 填入）。

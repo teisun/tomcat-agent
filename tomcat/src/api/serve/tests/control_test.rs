@@ -156,6 +156,132 @@ async fn serve_initialize_control_request_sets_ready_state() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn reload_connector_rereads_disk_and_preserves_unrelated_ready_source() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let path = temp.path().join("mcp.json");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+    let sibling_pid = temp.path().join("sibling.pid");
+    let target_pid = temp.path().join("target.pid");
+    let mut config = serde_json::json!({"mcpServers": {
+        "target": {"command": temp.path().join("missing")},
+        "sibling": {"command": "node", "args": [fixture, "--pid-file", sibling_pid]}
+    }});
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_config(temp, cfg).await;
+    let registry = slot
+        .ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .unwrap();
+    let manager = registry.mcp_manager();
+    let context = ConnectorContext {
+        workspace_root: manager
+            .workspace_root()
+            .map(|path| path.to_string_lossy().into_owned()),
+    };
+    registry.spawn_connect_all().await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !manager
+            .statuses()
+            .iter()
+            .any(|s| s.name == "sibling" && s.state.code() == "connected")
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let sibling_before = manager
+        .statuses()
+        .into_iter()
+        .find(|s| s.name == "sibling")
+        .unwrap();
+    let sibling_pid_before = fs::read(&sibling_pid).unwrap();
+    let target_key = manager
+        .statuses()
+        .into_iter()
+        .find(|s| s.name == "target")
+        .unwrap()
+        .config_key;
+    config["mcpServers"]["target"] = serde_json::json!({
+        "command": "node", "args": [fixture, "--pid-file", target_pid]
+    });
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    for phase in ["changed", "broken", "removed"] {
+        if phase == "broken" {
+            fs::write(&path, r#"{"mcpServers":"SECRET_RELOAD_VALUE"}"#).unwrap();
+        } else if phase == "removed" {
+            config["mcpServers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("target");
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        let before = manager
+            .statuses()
+            .into_iter()
+            .find(|s| s.name == "target")
+            .unwrap();
+        handle_command(
+            state.clone(),
+            ServeCommand::ReloadConnector {
+                id: Some(phase.into()),
+                config_key: target_key.clone(),
+                context: context.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let frames = wait_for_line(&buffer, |f| f["id"] == phase).await;
+        let reply = frames.iter().find(|f| f["id"] == phase).unwrap();
+        assert_eq!(reply["success"], phase == "changed", "{reply}");
+        if phase == "changed" {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !manager
+                    .statuses()
+                    .iter()
+                    .any(|s| s.name == "target" && s.state.code() == "connected")
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!fs::read(&target_pid).unwrap().is_empty());
+        } else if phase == "broken" {
+            let after = manager
+                .statuses()
+                .into_iter()
+                .find(|s| s.name == "target")
+                .unwrap();
+            assert_eq!(after.generation, before.generation);
+            assert_eq!(after.state.code(), "connected");
+            assert!(reply["error"].as_str().unwrap().contains("line"));
+            assert!(!reply.to_string().contains("SECRET_RELOAD_VALUE"));
+        } else {
+            assert!(!manager.statuses().iter().any(|s| s.name == "target"));
+            assert!(reply["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        }
+        let sibling = manager
+            .statuses()
+            .into_iter()
+            .find(|s| s.name == "sibling")
+            .unwrap();
+        assert_eq!(sibling.state.code(), "connected");
+        assert_eq!(sibling.generation, sibling_before.generation);
+        assert_eq!(fs::read(&sibling_pid).unwrap(), sibling_pid_before);
+    }
+    registry.logout_server("sibling").unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_connector_commands_keep_list_light_and_tools_on_demand() {
     const CONNECTOR_TEST_API_KEY_ENV: &str = "TOMCAT_SERVE_CONNECTOR_TEST_API_KEY";
 

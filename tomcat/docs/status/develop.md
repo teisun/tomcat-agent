@@ -1,6 +1,64 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-03 23:06 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-04 10:18 +0800 | ACTIVE | develop | - |
+
+### CURRENT WORK：空窗口首启、默认 MCP 与旧连接恢复（本机范围验收完成，未发布）
+
+```text
+代码与定向回归 → 用户独立终端真实 VSIX A→B → PNG、ARIA、console 已读回
+             └→ Rust 挂起用例修复并补验；parallel 387 / serial 89 → 扩展 Serve 10/10 → 本机验收完成
+```
+
+- **范围**：Rust 发出 `scope_requires_cwd`，扩展只显示打开文件夹引导；普通启动锁内补建缺失 MCP、保留已有文件；spawn 建议/JSON 脱敏/Reload 重读；主聊天最终本地 Connect 无状态码时，下次 resolve 换 Client、同 route provider 缓存失效、保留原 Semaphore。历史、工具结果和重试额度不改；未升级 wire 版本。
+- **证据边界**：有工作区、跑过 init 或预写空 `mcp.json` 的旧夹具，**不能代签真新用户首启**。`verify:vsix -- --release-bundle <本次VSIX>` 现新增无 cwd 空窗口 A、同 HOME 有文件夹 B、自定义 MCP 保留子场景。普通冷模型夹具仍预写空 MCP 防止测试启动 npx。仅包模式跑该画像；无参数 fake Serve 不算数。
+- **定向证据**：`1793722060066-uoq0ff` connection 29；`1793722712195-esetde` transport_recovery 5 / resolver 23 / Anthropic 48 / builtin 6 / serve control 10 通过（有重叠，不累加总数）。子进程 HTTPS_PROXY 红绿只证明 Client 冻结及报告后请求抵达新代理，不证明现场旧会话恢复。
+- **审查后的修正**：Reload 收口到 `ConnectorRegistry::request_reload`，用接收方自己的 config；补主请求失败标记，避免前置 compaction 失败误刷新；代理子进程有 30 秒总预算且超时终止；新 `mcp_startup_tests` 已登记门禁。测试复用现有框架，不新增诊断协议、代理 watcher 或重试机制。
+- **失败记录不抹掉**：初次 connector 批次 94 通过/1 个 builtin 路径断言失败（macOS `/var` 与 `/private/var`），修正后 builtin 6/6；GUI `openFolder` 类型漏同步、MCP 测试调用私有 i18n、测试 `err().expect()` 的 Clippy 问题均已修正。额外脚本类型检查最初使用错误的 TS6 命令参数，改为下表的 ESNext/Bundler 配置后通过；这不是产品运行失败。一个误写模块过滤器的 platform 检查运行 0 例，不计通过，之后正确路径执行 3 例。
+
+| 检查批次 | 结果与证据 |
+| --- | --- |
+| 扩展 `npm run gate:fast` | `1793723349554-mbvh3z`：lint、宿主 918/918、GUI 890/890 通过（含 Connectors 23）；随后 harness tsc 通过。整条包装命令后续因额外脚本 tsc 参数失败，不把其总退出码写成 0。 |
+| 夹具纯单元部分 | `1793723173176-yvqx64`：`real_serve_fixture_proxy` 按 describe 过滤，7 通过/1 个真实 Serve 用例未执行；runCli 为 mock，不启动/停止服务。 |
+| VSIX runner 类型检查（推导检查） | `1793723974878-ac4fsv`：`tsc --ignoreConfig --noEmit --strict --skipLibCheck --esModuleInterop --resolveJsonModule --types node,vscode --target ES2022 --module ESNext --moduleResolution Bundler scripts/run-vscode-verify-vsix.ts scripts/realServeFixture.ts`，exit 0。 |
+| MCP 二进制测试 | `1793723200847-q46rdv`：connector 9/9、普通启动补建 2/2；后者保留 Agent 标记，在隔离 HOME 下只运行允许的 session list。 |
+| 主聊天及重载边界 | `1793723974811-ihjtrw`：reload 1/1、chat suite 53/53、测试分组登记 1/1；该包装命令后续 Clippy 失败，修正见下项。 |
+| 静态检查与补验 | `1793724530920-avcngj`：定向 Clippy、带总预算代理红绿 1/1、platform 通用 3/3、fmt，exit 0。`1793724577993-m02yzy`：`cargo clippy --tests -- -D warnings`、fmt、解析脱敏 1/1，exit 0。 |
+| 最终加强的代理配置断言 | `1793724960481-a9zoza`：确认非法代理返回 `config.proxyInvalid` 的英文源错误，而不只判断 is_err；定向测试 1/1、`cargo clippy --tests -- -D warnings` 和 fmt 全部通过，exit 0。 |
+| 资源与 diff | `1793724609485-m4f4dk`：中英 JSON 可解析、3 个新诊断 key 均非空、`git diff --check`，exit 0。 |
+| 用户独立终端 Rust 门禁 | `rust-gate.log`：all-targets Clippy 通过；doctest exit0（0例，不计用例通过）；parallel 387通过/27跳过、serial 89通过/3跳过。库批次因下述旧用例挂起而 SIGTERM，原 gate-fast 总体失败保留，不称整条门禁一次全绿。 |
+| 扩展真实 Serve 补验 | 用户独立终端，2026-11-04 08:13；`serve-integration.log:11-22`：`serve_error_recovery` 2/2（自动Retry/Resume保留原输入与工具结果）、`real_serve_fixture_proxy` 8/8（含真实Native代理请求），共10通过、exit_code=0。构建使用当前CLI 0.1.83。 |
+| stdin 挂起修复补验 | `1793749764757-ifrh5s`：所属 `api::chat::permission::cwd_lazy::tests` 16/16、`cargo clippy --tests -- -D warnings`、fmt，exit0；`1793750639339-i7afdz`：显式关闭stdin与真实PTY输入分别1/1、exit0，Agent标记保留。仅改一个测试，复用未受影响成功结果。 |
+
+**真实 VSIX 已验收**：用户独立终端执行了 `.agents/scripts/verify-bootstrap-1793747829.sh`。`vsix.log` 的 A 空窗口、B 同 HOME 配模型并对话、自定义 MCP 保留、旧数据升级四轮均 exit 0；本次包的 SHA256 与准备记录一致。已逐张读回 `visual/` 下 27 份 PNG、配套 ARIA 和 console：A 仅引导与打开文件夹按钮、无警告，设置可用；B 已补建 Playwright 配置并使用包内 CLI 完成对话；自定义 MCP 逐字保留。26 份组件 console 的捕获范围 `errors=[]`；全工作台另有测试 harness 的 Marketplace 查询 404 及 VS Code 警告，不声称全宿主零告警。390px 窗口产生的 169px 侧栏中，原有禁用 composer 工具栏有裁切，引导按钮仍完整可用；本次未改 composer 布局。
+
+**Rust 门禁发现的既有测试问题**：`dismisses_and_forwards_when_stdin_not_tty` 原先假定 stdin 大概率不是终端。外部门禁的 PID14664 实际持有 `/dev/ttys001`，调用栈停在 `cwd_lazy::read_choice_from_stdin → read_line`（`rust-lib-hang.sample.txt`）。对照该二进制 `--list` / `--list --ignored` 的3480例：父批次3474已通过、5忽略，唯一未结束的是此例。首次3475成功/4忽略的统计误把在子进程成功的 ignored 辅助用例 `session_io_worker` 算入父批次，此处已校正。保留原日志并只终止该挂起测试进程后，用户已启动的门禁继续 doctest/integration；原 lib 的 SIGTERM 失败不改写。只修改该用例：终端下以显式空 stdin 的子进程运行相同断言，30秒超时且 kill-on-drop；产品权限逻辑和 Agent 标记不变。所属模块16例、显式空stdin与真实PTY各1例及Clippy/fmt均通过，原挂起已补齐；不重跑不受影响用例，也不改写原 SIGTERM 记录。
+
+**本轮必需验收已齐**：受影响的扩展真实 Serve 两文件已由用户独立终端补跑，10/10且exit0；原包装脚本因Rust库中断而未运行第三段，此次只补缺项，不重跑已通过VSIX或未受影响测试。原计划各功能与不触发边界、离线隔离、真实首启A/B、自定义配置保留及文档均已核对。**未覆盖范围**：Windows PATH 分类及原生首启仍留到发布前补验；不宣称现场旧会话已恢复或新发布已生效。
+
+**用户追加的真实 Playwright MCP 已取证（2026-11-04）**：独立终端运行 `.agents/scripts/verify-playwright-mcp.sh`，同一验收 VSIX 安装进 VS Code 1.106.0 的隔离 HOME/profile，实际使用包内 CLI。`.agents/acceptance/playwright-mcp-9kWtT0/visual/` 留存自动生成的 `@playwright/mcp@0.0.79 --headless` 配置；Settings 显示 Connected / 24 tools；发现、描述、导航、页面快照、截图、console、关闭共7次工具调用均 `isError=false`。页面快照含随机标记，9个本地模型请求的最后一份确含1280×720、28409字节PNG，测试页console为0错误/0警告。只有模型指令使用本地脚本，MCP和浏览器是真实进程，网页为隔离本地页面，不代签公网网站或真实收费模型。
+
+**追加验收的失败与限制保留**：VS Code 内测试1 passing/exit0，但外层原命令exit1：验收收集器误要求导航结果内联正文，实际返回快照链接。已改为校验导航URL、快照随机标记和真实PNG回流；原始请求及证明数据逐字不变，离线重核 `1793753735893-yklvub` exit0，哈希与原失败见 `visual/verified/postcheck.json`；没有将原run改写为全绿或重跑窗口。收集器5例、启动环境23例、打包14例及相应类型检查通过；启动环境旧断言只认一次launch，现逐个检查A/B两次且保留Agent标记。13组PNG/ARIA/console已读回：最终MCP功能图为连接面板与浏览器返回图；其余为准备/调试。窄窗口把Settings挤至2px，聊天侧栏169px有裁切，不能作为窄屏UI通过证据；MCP专项删除无关的整窗390px缩放，不修改产品布局。细节见该目录README。收尾 `npx tsc` 曾SIGSEGV、根因未确定，原 `1793754145164-y5862q` 不计通过；掉线恢复后同源码直接调用本地TypeScript，`1793758113155-iarfj5` 类型/diff通过，`1793758098484-e38nc2` 制品/原始证据哈希与13组三联完整性通过。
+
+**验收包**：`1793747849607-abnzpj` 构建本次 CLI、`1793748045212-igeau7` 构建并打包 darwin-x64 VSIX 均通过。`1793748165278-647pjp` 确认包内 CLI SHA256 与本次构建一致、版本和平台正确。制品位于 `.agents/acceptance/bootstrap-1793747829/`；这是验收用 Debug 包，不是发布包。独立终端入口保留 Agent 保护且已验证会拒绝 Agent 启动。下方保留分步命令供后续复验；此次有效的 VSIX 结果无需重跑。
+
+后续在独立终端复验的命令（本次无需重复；当前计划是 Intel macOS，若设置了 `CARGO_TARGET_DIR`，将下方 CLI 路径改为对应目录）：
+
+```sh
+cd /Users/yankeben/workspace/tomcat-agent/tomcat &&
+bash scripts/run-integration-tests.sh gate-fast &&
+cargo build --bin tomcat
+```
+
+```sh
+cd /Users/yankeben/workspace/tomcat-agent/tomcat-vscode-ext &&
+npm run test:integration -- tests/serve_error_recovery.test.ts tests/real_serve_fixture_proxy.test.ts &&
+npm run package:vsix -- --target darwin-x64 --bundle-binary ../tomcat/target/debug/tomcat --out /tmp/tomcat-first-launch.vsix &&
+npm run verify:vsix -- --release-bundle /tmp/tomcat-first-launch.vsix
+```
+
+真实窗口证据已按 runner 输出目录读回；不得拿无参数 fake Serve、旧包或只有 Ready 状态代签。
+
+- **交付边界**：基于 `37321560` 的本次本地提交包含首启、MCP、旧连接恢复及相关测试/文档，共57个文件；按用户要求，提交阶段只做三类变更区域、差异、空白与提交格式核对，不重跑测试、构建或视觉验收，上方证据均为此前实施验收记录。Cov% 未测量，不填覆盖率。修复前 `.bak` 备份、`.agents/` 临时脚本和验收产物仅本地保留；未推送、升版、安装到在用环境或发布，未停止/重启真实共享服务。旧 `tomcat.path` 仍可能指向未修复程序；PATH 变化需用户显式重启（停止所有任务）。后续 VSIX 必须包含本次 CLI。具体行为见 [MCP 架构](../architecture/mcp-client.md)、[LLM README](../../src/core/llm/README.md) 与中英用户指南。
 
 ### WINDOWS TARGETED ACCEPTANCE：共享后台与 ACP 的 Windows 缺口补验（2026-11-02）
 
@@ -53,7 +111,7 @@ feature/shared-serve-acp S=2b76074a ─┴─> 本地 no-ff 合并
 - **资料检查边界**：自动看板逐字汇总当前 develop 加 7 个 feature 分支。`git diff --check` 报告的看板四处行尾空格原样来自 `feature/transcript-rich-render` 的 status 第 264/268/269/278 行；保留原始失败，不修改他人分支或手工改生成结果。四份上游补丁与原样技能附件也保持字节；最终空白检查只精确排除这些保真资料及聚合看板，其余代码/说明仍检查，不关闭全局规则。
 - **版本与安全边界**：CLI `0.1.81`、扩展 `0.1.97`、bundled CLI `0.1.81`，未升版。只用隔离 HOME/profile；未安装、发布或停止/重启在用服务，未修改用户配置、代理和凭据，未移除 Agent 保护。保留源分支及其它 worktree；未推送、打标签或清理用户工作。Cov% 未测量。
 
-#### 推送前必须补齐 / 需单独决策
+### 推送前必须补齐 / 需单独决策
 
 | 项目 | 未完成原因与后续动作 |
 | --- | --- |
@@ -65,7 +123,7 @@ feature/shared-serve-acp S=2b76074a ─┴─> 本地 no-ff 合并
 
 日志在 `~/.tomcat/agents/main/tool-results/bash-<task-id>.log`；本机视觉制品位于 `.agents/acceptance/shared-serve-review/` 与 `.agents/shots/shared-serve-review/`，不纳入 Git。临时回看服务已停止。下方保留 2026-10-22 的历史验收，**旧 SHA 的云端成功不代表本轮通过**。
 
-#### 此前接入验收（2026-10-22，仅历史记录）
+### 此前接入验收（2026-10-22，仅历史记录）
 
 ```text
 Paperclip / Multica → 标准 ACP → 共享 Tomcat 后台
@@ -178,6 +236,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0/P1，2026-11-04，首启/MCP/旧连接恢复，本次本地提交]** 空窗口引导、默认配置补建与保留、MCP诊断/脱敏/重载、仅最终本地连接失败后懒换Client均已实施，相关源码、回归和真实VSIX夹具完整纳入；此前本机验收与原始失败见顶部 CURRENT WORK。本次按用户要求不重跑测试或构建，不将本地提交等同于已发布。
 - **[2026-11-03，write-plans 结构整理，本次本地提交]** 将技术设计、文字与图示指导移到独立 `references/writing-standards.md`，入口先读工作流再读写作规范和结构；章节表、局部骨架与小改动示例统一独立标题及层级，问题与需求按适用条件包含根因、方案说明、可选 UI 图、六列决策表和测试章节，删除可选章节模板并精简工作流措辞。提示词契约测试同步覆盖标题/骨架及已移除条款，技能物化测试补新附件加载检查；四个技能文档、两个 Rust 测试及两处 status 全部纳入。仅做差异、空白与提交范围检查；按用户要求不跑测试或构建，不声称新增用例通过，Cov% 未测量；未升版、安装、重启、推送或发布。
 - [✓] **[P1，2026-11-02，计划执行就绪]** write-plans 的 Final Check 与计划 reviewer 增加执行就绪检查：先核实关键前提、优先等效自动化，在规划阶段问清可预见的风险操作并记录授权边界，执行时不重复确认已同意事项。同步 review brief、单条提示词契约测试与职责文档；五个实现文件及分支状态/汇总看板纳入本次本地提交。
 - [✓] **[执行就绪的提交前验收证据]** 提示词模块与技能物化/发现/加载回归共 33 passed、0 failed（`1793625169364-y9ujje`）；格式与 diff 检查通过（`1793625242644-m4h9li`），五个场景已作条款走查。两次断线仅留编译日志，结果未知；新增测试的一处格式问题已修正，原失败记录保留。按用户要求本次提交不重跑测试或构建，Cov% 未测量；不推送、不安装、不重启。
@@ -224,6 +283,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- **2026-11-04 首启/MCP/连接恢复**：磁盘会话列表在缺项目scope时返回既有 `scope_requires_cwd`；webview新增 `openFolder` intent并使用 `workspace_required` 展示引导。`LlmResolver::report_connect_failure` 提供默认空实现，默认resolver仅对最终主请求本地Connect失败刷新传输缓存；`ConnectorRegistry::request_reload` 先重读配置再预约目标。普通启动补建缺失 `mcp.json`，已有字节不改；无新增配置键、依赖、存储格式或wire版本。
 - **2026-11-03 write-plans 结构整理**：仅改变内置计划技能的写作/结构约定及配套测试；新增技能附件 `references/writing-standards.md`，`references/plan-structure.md` 保留章节骨架、决策表与测试设计。未修改工具实现、权限、计划状态机、持久化格式、跨进程协议或依赖。
 - **2026-11-02 计划执行就绪**：仅调整写作/评审提示词契约；不改执行器、`ask_question` 实现、工具权限、状态机或审计存储。reviewer 保持建议性输出及原 `<review>` 格式，不代用户决定或授权。
 - **2026-11-02 Unix 安装入口**：`install_user_command` 的签名不变；Unix 不再保留内容不同的普通入口，软链一律迁移为副本。`init`/`self-install` 安装当前程序的快照，后续仅编译不会自动刷新，需再次执行安装；macOS 通过根目录 `./scripts/dev-install.sh` 完成编译与安装，不改 PATH、配置、凭据或服务生命周期。
@@ -264,6 +324,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
+| 首启/MCP/旧连接恢复的交付范围（2026-11-04） | 本次提交不重跑测试，复用上方分批实施验收；Windows新分支、公网网站和真实收费模型仍未验证；已有窄侧栏裁切与宿主告警未修，npx检查进程SIGSEGV根因未定但同源码本地TypeScript补验通过 | 本次只本地提交，不升版、推送或发布；发布前补相应平台验证，原失败日志与离线重核证据保留 |
 | 旧式动态插件串会话（未修复） | 第二会话发现资源会向第一会话追加消息；复现补丁为 `.agents/acceptance/shared-serve-review/legacy-dynamic-discovery.repro.patch` | 需另定初始化会话归属并修复；本轮 CI/发布通过不代表该遗留问题已关闭 |
 | 执行就绪检查的效果边界（2026-11-02） | 已验证条款与加载链路，未进行真实模型行为评测，不承诺 100% 无人值守 | 生效取决于运行包含新资产的 CLI 并在新会话加载，同名技能覆盖规则不变；新风险或超出授权仍需确认 |
 | 命令入口整改的跨平台验证（2026-11-03 云端已补齐） | `e2f9ae6e` 与 `93a467a7` 的三系统 Rust、Windows 扩展/命令包装器及真实窗口 CI 均通过 | 仍不冒充个人 Windows 设备验证；本机未重新安装或重启服务 |

@@ -976,7 +976,7 @@ pub(crate) async fn handle_command(
                 }
                 ListSessionsScope::Disk => {
                     let session_manager = super::scoped_session_manager(&state)
-                        .ok_or_else(|| AppError::Config("unknown_session".into()))?;
+                        .ok_or_else(|| AppError::Config("scope_requires_cwd".into()))?;
                     let current_session_id = session_manager.current_session_id()?;
                     let sessions = session_manager
                     .list_sessions()?
@@ -2447,7 +2447,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let receipt = match connector.mcp_manager().request_reconnect(&config_key) {
+            let receipt = match connector.request_reload(&config_key) {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     send_error(

@@ -6,6 +6,7 @@
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
   connector_mcp_tests
+  mcp_startup_tests
   nested_cli_guard_tests
   prompt_size_budget
   event_tests

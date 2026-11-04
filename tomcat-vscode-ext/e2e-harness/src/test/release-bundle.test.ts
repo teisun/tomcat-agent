@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import * as vscode from "vscode";
 import { assertDeniedHistoryStatus } from "./release-bundle-findings";
+import type { InstalledConnectorApi } from "./connectors-installed-acceptance.test";
 
 const extensionRoot = path.resolve(__dirname, "../../..");
 const { translate } = require(path.join(extensionRoot, "out/shared/i18n")) as { translate(locale: string, key: string): string };
@@ -13,6 +14,8 @@ const onboardingModelName = "deepseek-v4-flash";
 const onboardingModelId = `localhost/${onboardingModelName}`;
 const utilityModelName = "deepseek-v4-pro";
 type Api = { __testing: {
+  getSettingsPanelState: InstalledConnectorApi["__testing"]["getSettingsPanelState"];
+  sendSettingsDomAction: InstalledConnectorApi["__testing"]["sendSettingsDomAction"];
   getResolvedExecutable(): { executable: string; found: boolean; source: string };
   getServeProcessId(): number | undefined;
   getPromptHistory(): Array<{ actions: string[] }>;
@@ -49,6 +52,56 @@ const capture = require(path.join(extensionRoot, "out/test/suite/support/workben
   SettingsFrameDriver: { connectFromEnvironment(selector: string): Promise<FrameDriver> };
 };
 function required(name: string): string { const value = process.env[name]; assert.ok(value, `Missing ${name}`); return value; }
+
+async function verifyBuiltinPlaywright(api: Api, sessionId: string, artifacts: string) {
+  await vscode.commands.executeCommand("tomcat.openSettings");
+  await api.__testing.sendSettingsDomAction({ kind: "clickTestId", testId: "settings-nav-connectors" });
+  const settings = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-settings-shell");
+  try {
+    const deadline = Date.now() + 180_000;
+    for (;;) {
+      const state = api.__testing.getSettingsPanelState().state;
+      const connector = state.connectors?.find(entry => entry.name === "playwright");
+      if (connector?.state === "connected") { assert.ok(connector.toolCount > 0); break; }
+      if (connector?.state === "failed" || Date.now() >= deadline) {
+        await fs.writeFile(path.join(artifacts, "mcp-settings-failure.json"), JSON.stringify(state, null, 2));
+        await settings.capture(path.join(artifacts, "mcp-settings-failure.png"));
+        throw new Error(`Default Playwright did not connect: ${JSON.stringify(connector)}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await settings.click("connector-card-playwright");
+    await settings.waitForSnapshot(snapshot => snapshot.text.includes("browser_navigate") && snapshot.text.includes("browser_take_screenshot"), "Real Playwright tool catalog must render");
+    const state = api.__testing.getSettingsPanelState().state;
+    for (const name of ["browser_navigate", "browser_snapshot", "browser_take_screenshot"]) {
+      assert.ok(state.connectorTools?.some(tool => tool.rawName === name && tool.enabled));
+    }
+    await fs.writeFile(path.join(artifacts, "mcp-settings.json"), JSON.stringify(state, null, 2));
+    // This is MCP functionality evidence, not a workbench responsive-layout test.
+    // Shrinking the whole workbench to 390px can leave this editor only 2px wide.
+    await settings.setViewport(1440, 900);
+    await settings.capture(path.join(artifacts, "mcp-connected-desktop.png"));
+  } finally { settings.close(); }
+  await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  await api.__testing.focusWebview();
+  api.__testing.clearObservedEvents();
+  const idle = api.__testing.waitForEvent({ type: "agent_idle", sessionId, timeoutMs: 180_000 });
+  void idle.catch(() => undefined);
+  await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "real-mcp-smoke", data: { sessionId, text: "Use the built-in Playwright MCP to open the acceptance page, read it and return a screenshot." } });
+  assert.equal((await idle).outcome, "completed");
+  const events = api.__testing.getObservedEvents();
+  await fs.writeFile(path.join(artifacts, "mcp-events.json"), JSON.stringify(events, null, 2));
+  for (const id of ["mcp-search", "mcp-describe", "mcp-navigate", "mcp-snapshot", "mcp-screenshot", "mcp-console", "mcp-close"]) {
+    assert.ok(events.some(event => event.type === "tool_execution_end" && event.toolCallId === id && event.isError === false), `${id} must execute successfully through the real MCP; see mcp-events.json`);
+  }
+  const chat = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  try {
+    await chat.waitForSnapshot(snapshot => snapshot.text.includes("MCP_BROWSER_SMOKE_COMPLETE"), "MCP turn must finish");
+    await chat.setViewport(1440, 900);
+    await chat.capture(path.join(artifacts, "mcp-chat-desktop.png"));
+  } finally { chat.close(); }
+  assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
+}
 
 async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
   const sessionId = required("TOMCAT_RELEASE_UPGRADE_SESSION");
@@ -130,7 +183,7 @@ async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
 
 suite("Native installed release bundle", () => {
   test("uses its bundled CLI through real Serve, model, policy gates, stop and reload", async function () {
-    this.timeout(240_000);
+    this.timeout(process.env.TOMCAT_RELEASE_MCP_SMOKE === "1" ? 600_000 : 240_000);
     const artifacts = required("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
     const events: Event[] = [];
     const deniedHistoryScreenshots: string[] = [];
@@ -155,6 +208,17 @@ suite("Native installed release bundle", () => {
         return;
       }
       const sessionId = await api.__testing.createFreshWebviewSession(workspace);
+      const mcpPath = path.join(required("HOME"), ".tomcat/mcp.json");
+      if (process.env.TOMCAT_RELEASE_CUSTOM_MCP !== undefined) {
+        assert.equal(await fs.readFile(mcpPath, "utf8"), process.env.TOMCAT_RELEASE_CUSTOM_MCP);
+        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", customMcpPreserved: true, resolved }, null, 2));
+        return;
+      }
+      if (process.env.TOMCAT_RELEASE_NEW_USER === "1") {
+        const mcp = JSON.parse(await fs.readFile(mcpPath, "utf8"));
+        assert.equal(mcp.mcpServers.playwright.command, "npx");
+        assert.match(mcp.mcpServers.playwright.args[1], /^@playwright\/mcp@/);
+      }
       const configPath = path.join(required("HOME"), ".tomcat/tomcat.config.toml");
       for (const name of ["tomcat.config.toml", "models.toml", ".env"]) {
         await assert.rejects(fs.stat(path.join(path.dirname(configPath), name)), { code: "ENOENT" });
@@ -254,6 +318,11 @@ suite("Native installed release bundle", () => {
       }
       await prompt("hello", "RELEASE_BUNDLE_READY", true);
       assert.equal(api.__testing.getServeProcessId(), firstPid, "First model request must use the original cold-start process");
+      if (process.env.TOMCAT_RELEASE_MCP_SMOKE === "1") {
+        await verifyBuiltinPlaywright(api, sessionId, artifacts);
+        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", defaultMcpConfig: JSON.parse(await fs.readFile(mcpPath, "utf8")), resolved, firstPid, sessionId, webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));
+        return;
+      }
       // The existing policy test requires startup-only permission configuration.
       // Add it only AFTER proving same-PID onboarding; reuse the same HOME and model.
       await fs.appendFile(configPath, `\n[workspace]\nworkspace_roots = [${JSON.stringify(workspace)}]\n[primitive]\nauto_confirm = false\npath_rules = [{ path = ${JSON.stringify(path.join(workspace, "release-denied.txt"))}, mode = "deny" }]\n`);

@@ -155,6 +155,9 @@ impl fmt::Display for McpFailure {
             &[],
         );
         let phase = match self.phase {
+            "program_not_found" => tr("mcp.phase.program_not_found", &[]),
+            "permission_denied" => tr("mcp.phase.permission_denied", &[]),
+            "exited" => tr("mcp.phase.exited", &[]),
             "source explicitly stopped; use Reload" => tr("mcp.phase.stopped", &[]),
             "source overridden" => tr("mcp.phase.overridden", &[]),
             phase => phase.to_string(),

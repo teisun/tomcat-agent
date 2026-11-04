@@ -543,6 +543,113 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
 #[test]
 #[serial(env_lock)]
+fn transport_recovery_evicts_only_matching_route_and_preserves_inflight_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    let mut cfg = AppConfig::default();
+    cfg.llm.max_concurrent_requests = 1;
+    std::env::set_var("ROUTE_REFRESH_TEST_KEY", "stub");
+    let text = [
+        ("a", "http://127.0.0.1:1"),
+        ("b", "http://127.0.0.1:1"),
+        ("other", "http://127.0.0.1:2"),
+    ]
+    .into_iter()
+    .map(|(id, base)| {
+        format!(
+            r#"
+[[models]]
+id = "{id}"
+api = "openai"
+provider = "test"
+api_key_env = "ROUTE_REFRESH_TEST_KEY"
+base_url = "{base}"
+"#
+        )
+    })
+    .collect::<String>();
+    std::fs::write(&path, text).unwrap();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog.clone(), model_prefs(dir.path()));
+    let foreign = DefaultLlmResolver::new(cfg, catalog, model_prefs(dir.path()));
+    let a = resolver.resolve(LlmScene::Main, Some("a")).unwrap();
+    let b = resolver.resolve(LlmScene::Main, Some("b")).unwrap();
+    let other = resolver.resolve(LlmScene::Main, Some("other")).unwrap();
+    let old_route = resolver.route_for_model("a");
+    let permit = old_route
+        .semaphore
+        .as_ref()
+        .unwrap()
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    resolver.report_connect_failure(
+        &foreign
+            .resolve(LlmScene::Main, Some("a"))
+            .unwrap()
+            .provider_impl,
+    );
+    assert_eq!(resolver.cached_provider_count(), 3);
+    resolver.report_connect_failure(&a.provider_impl);
+    resolver.report_connect_failure(&b.provider_impl); // repeated/late report is harmless
+    assert_eq!(resolver.cached_provider_count(), 1);
+    assert!(
+        Arc::ptr_eq(&old_route, &resolver.route_for_model("a")),
+        "refresh must be lazy"
+    );
+    let mut invalid = AppConfig::default();
+    invalid.llm.proxy = Some("http://[invalid".into());
+    resolver.reload_config(invalid);
+    let Err(crate::AppError::Config(message)) = resolver.resolve(LlmScene::Main, Some("a")) else {
+        panic!("invalid proxy must remain a configuration error");
+    };
+    let detail = reqwest::Proxy::all("http://[invalid")
+        .unwrap_err()
+        .without_url()
+        .to_string();
+    assert_eq!(
+        message,
+        crate::infra::i18n::tr("config.proxyInvalid", &[("detail", &detail)])
+    );
+    assert!(
+        Arc::ptr_eq(&old_route, &resolver.route_for_model("a")),
+        "failed rebuild retains stale route and budget"
+    );
+    resolver.reload_config(AppConfig::default());
+    let refreshed_a = resolver.resolve(LlmScene::Main, Some("a")).unwrap();
+    let refreshed_b = resolver.resolve(LlmScene::Main, Some("b")).unwrap();
+    let new_route = resolver.route_for_model("a");
+    assert!(!Arc::ptr_eq(&a.provider_impl, &refreshed_a.provider_impl));
+    assert!(!Arc::ptr_eq(&b.provider_impl, &refreshed_b.provider_impl));
+    assert!(!Arc::ptr_eq(&old_route, &new_route));
+    assert!(Arc::ptr_eq(&new_route, &resolver.route_for_model("b")));
+    assert!(Arc::ptr_eq(
+        old_route.semaphore.as_ref().unwrap(),
+        new_route.semaphore.as_ref().unwrap()
+    ));
+    assert!(new_route.semaphore.as_ref().unwrap().try_acquire().is_err());
+    drop(permit);
+    assert!(new_route.semaphore.as_ref().unwrap().try_acquire().is_ok());
+    resolver.report_connect_failure(&a.provider_impl); // must not invalidate the new generation
+    assert!(Arc::ptr_eq(
+        &refreshed_a.provider_impl,
+        &resolver
+            .resolve(LlmScene::Main, Some("a"))
+            .unwrap()
+            .provider_impl
+    ));
+    assert!(Arc::ptr_eq(
+        &other.provider_impl,
+        &resolver
+            .resolve(LlmScene::Main, Some("other"))
+            .unwrap()
+            .provider_impl
+    ));
+    std::env::remove_var("ROUTE_REFRESH_TEST_KEY");
+}
+
+#[test]
+#[serial(env_lock)]
 fn provider_cache_isolates_models_and_reuses_same_model_and_route() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");

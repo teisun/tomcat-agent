@@ -355,6 +355,31 @@ fn beta_header(request: &str) -> Option<&str> {
 }
 
 #[tokio::test]
+async fn transport_recovery_refused_connection_is_connect_for_streaming_and_nonstreaming() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let mut provider = binding_test_provider(&url, vec![], vec![], false);
+    provider.retry_count = 0;
+    for stream in [true, false] {
+        let error = provider
+            .chat_once_with_thinking_format(
+                &binding_test_request(None),
+                stream,
+                ThinkingFormat::Anthropic,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::infra::error::llm_stage(&error),
+            Some(LlmErrorStage::Connect)
+        );
+        assert_eq!(crate::infra::error::llm_http_status(&error), None);
+    }
+}
+
+#[tokio::test]
 async fn rejected_thinking_prefix_retries_once_with_drop_block_and_is_remembered() {
     let server = MockHttpServer::start(vec![
         ScriptedHttpResponse::json(400, PREFIX_REJECTION),

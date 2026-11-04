@@ -849,6 +849,7 @@ export type WebviewIntent =
         sessionId?: string | null;
       };
     }
+  | { messageId: string; type: "openFolder" }
   | { messageId: string; type: "retryConnection" }
   | { messageId: string; type: "restartSharedService" }
   | { messageId: string; type: "viewConnectionLogs" }
@@ -1330,6 +1331,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
+    case "openFolder":
     case "retryConnection":
     case "restartSharedService":
     case "viewConnectionLogs":

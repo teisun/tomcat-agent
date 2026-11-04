@@ -1986,9 +1986,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.bootstrap();
       this.stateStore.setConnectionStatus(this.serveConnectionStatus);
     } catch (error) {
-      let normalized = error instanceof Error ? error : new Error(String(error));
+      const normalized = error instanceof Error ? error : new Error(String(error));
       if (normalized.message === "scope_requires_cwd") {
-        normalized = new Error(t("bridge.workspaceRequired"));
+        this.stateStore.setConnectionStatus("degraded", {
+          kind: "workspace_required", detail: t("bridge.workspaceRequired"),
+        });
+        await this.postState();
+        return;
       }
       console.error("[Tomcat webview] connected, but bootstrap failed", normalized);
       this.stateStore.setConnectionStatus("degraded", { kind: "bootstrap", detail: normalized.message });
@@ -2704,6 +2708,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "openFolder":
+        await vscode.commands.executeCommand(process.platform === "darwin"
+          ? "workbench.action.files.openFileFolder" : "workbench.action.files.openFolder");
+        return;
       case "retryConnection":
         if (this.peekState().connectionStatus === "degraded") await this.retryBootstrap();
         // A rejected reconnect returns the supervisor to its fatal state, which this panel renders.

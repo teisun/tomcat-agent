@@ -182,7 +182,7 @@ describe("VS Code GUI launch environment", () => {
         ts.forEachChild(node, visit);
       };
       visit(source);
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(name === "verify-vsix" ? 2 : 1);
       const env = { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root, ELECTRON_RUN_AS_NODE: "1", TOMCAT_AGENT_ACTIVE: "1" };
       const runTests = vi.fn(async (options) => { assertClean(options.extensionTestsEnv); return 0; });
       // Evaluate the real launch expression, not a duplicate of its options.
@@ -196,16 +196,25 @@ describe("VS Code GUI launch environment", () => {
         workspaceDir: root, workspaceFile: path.join(root, "profile", "host.code-workspace"), screenshotsDir: root, reportPath: path.join(root, "report.json"),
         artifactsRoot: root, fakeServeStateDir: root, cdpPort: 12345, realObservation: false,
       };
-      const code = ts.transpileModule(`${calls[0].getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-      await vm.runInNewContext(code, locals);
-      expect(runTests).toHaveBeenCalledOnce();
-      expect(runTests.mock.calls[0][0].extensionTestsEnv.TOMCAT_AGENT_ACTIVE).toBe("1");
-      expect(runTests.mock.calls[0][0].launchArgs.filter((arg: string) => arg === "--use-inmemory-secretstorage"))
-        .toEqual(["--use-inmemory-secretstorage"]);
-      if (name === "devhost") {
-        expect(runTests.mock.calls[0][0].launchArgs).toContain(locals.workspaceFile);
-        expect(runTests.mock.calls[0][0].launchArgs).not.toContain(root);
-        expect(runTests.mock.calls[0][0].launchArgs).not.toContain(path.dirname(root));
+      for (const call of calls) {
+        runTests.mockClear();
+        const code = ts.transpileModule(`${call.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+        await vm.runInNewContext(code, locals);
+        expect(runTests).toHaveBeenCalledOnce();
+        const launched = runTests.mock.calls[0][0];
+        expect(launched.extensionTestsEnv.TOMCAT_AGENT_ACTIVE).toBe("1");
+        expect(launched.launchArgs.filter((arg: string) => arg === "--use-inmemory-secretstorage"))
+          .toEqual(["--use-inmemory-secretstorage"]);
+        if (name === "verify-vsix") {
+          const empty = launched.extensionTestsEnv.TOMCAT_RELEASE_EMPTY_WINDOW === "1";
+          expect(launched.launchArgs.includes(root)).toBe(!empty);
+          if (empty) expect(launched.extensionTestsEnv.TOMCAT_VSCODE_TEST_DEFAULT_CWD).toBeUndefined();
+        }
+        if (name === "devhost") {
+          expect(launched.launchArgs).toContain(locals.workspaceFile);
+          expect(launched.launchArgs).not.toContain(root);
+          expect(launched.launchArgs).not.toContain(path.dirname(root));
+        }
       }
     },
   );

@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { EXTENSION_ID } from "../src/constants";
 import { extractVsixLikeCursor, readVsixEntry } from "./vsix-extractable";
 import { runCommand } from "./runCommand";
+import { createPlaywrightMcpSmoke } from "./playwrightMcpSmoke";
 import { setupRealServeFixture, spawnScriptedOpenAiStreamServer, type ScriptedResponse, sseDelta, sseFinish, sseDone, sseToolCall } from "./realServeFixture";
 
 export function vscodeTargetFor(platform: NodeJS.Platform, arch: string): string {
@@ -135,7 +136,9 @@ export async function seedUpgradeData(source: string, home: string, baseUrl: str
 }
 
 type InstalledScenarioOptions = {
+  playwrightSmoke?: boolean;
   upgradeFixture?: string;
+  customMcpConfig?: string;
   production?: { source: ProductionSource; bundle?: Awaited<ReturnType<typeof inspectReleaseVsix>> };
   artifactsDir: string;
   additionalSettings?: Record<string, unknown>;
@@ -148,11 +151,14 @@ type InstalledScenarioOptions = {
 };
 
 export async function runInstalledScenario(options: InstalledScenarioOptions): Promise<void> {
+  if (options.playwrightSmoke && process.env.TOMCAT_AGENT_ACTIVE === "1") throw new Error("Run MCP acceptance from an independent terminal; the Agent guard must remain intact.");
+  const newUser = options.production?.source.kind === "bundle" && !options.upgradeFixture;
   const installRoot = await fs.mkdtemp(path.join(tempRoot, "tvsi-verify-"));
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
   let fixture: Awaited<ReturnType<typeof setupRealServeFixture>> | undefined;
   let server: Awaited<ReturnType<typeof spawnScriptedOpenAiStreamServer>> | undefined;
+  let mcpSmoke: Awaited<ReturnType<typeof createPlaywrightMcpSmoke>> | undefined;
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
@@ -200,7 +206,11 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       // Real CLI and Host; only upstream model replies are controlled.
       const responses: ScriptedResponse[] = [];
       server = await spawnScriptedOpenAiStreamServer(responses, ["deepseek-v4-flash", "deepseek-v4-pro", "claude-opus-5"]);
-      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true });
+      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true, missingMcpConfig: newUser });
+      if (options.customMcpConfig !== undefined) {
+        await fs.mkdir(path.join(fixture.homePath, ".tomcat"), { recursive: true });
+        await fs.writeFile(path.join(fixture.homePath, ".tomcat/mcp.json"), options.customMcpConfig);
+      }
       const upgrade = options.upgradeFixture ? await seedUpgradeData(options.upgradeFixture, fixture.homePath, server.baseUrl) : undefined;
       if (upgrade) {
         responses.push(
@@ -210,6 +220,9 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
           { parts: [sseToolCall("upgrade-complete", "update_plan", JSON.stringify({ ops: [{ kind: "set_status", id: "check-old-data", status: "completed", evidence: ["Legacy data loaded and user answered during execution"] }] })), sseFinish("tool_calls"), sseDone()] },
           { parts: [sseDelta("UPGRADE_EXECUTION_COMPLETE"), sseFinish("stop"), sseDone()] },
         );
+      } else if (options.playwrightSmoke) {
+        mcpSmoke = await createPlaywrightMcpSmoke();
+        responses.push({ parts: [sseDelta("RELEASE_BUNDLE_READY"), sseFinish("stop"), sseDone()] }, ...mcpSmoke.responses);
       } else {
       // Tool paths are explicit fixture-owned absolute paths. Missing relative
       // files cannot be canonicalized into workspace_roots by the real gate.
@@ -230,11 +243,20 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       }
       testEnv = { ...fixture.env };
       testEnv.TOMCAT_ONBOARDING_BASE_URL = server.baseUrl;
+      if (newUser) testEnv.TOMCAT_RELEASE_NEW_USER = "1";
+      if (options.playwrightSmoke) testEnv.TOMCAT_RELEASE_MCP_SMOKE = "1";
+      if (options.customMcpConfig !== undefined) testEnv.TOMCAT_RELEASE_CUSTOM_MCP = options.customMcpConfig;
       if (upgrade) Object.assign(testEnv, { TOMCAT_RELEASE_UPGRADE_SESSION: upgrade.sessionId, TOMCAT_RELEASE_UPGRADE_PLAN: upgrade.planId, TOMCAT_SESSION_MODE: "claw", TOMCAT__LLM__TITLE_MODEL: "gpt-5.4", TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4" });
       for (const key of Object.keys(testEnv)) if (key.startsWith("TOMCAT_VSCODE_TEST_") || key.startsWith("TOMCAT_E2E_")) testEnv[key] = undefined;
       Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
       const cliVersion = execFileSync(binary, ["--version"], { env: testEnv, encoding: "utf8" }).trim();
       if (cliVersion !== `tomcat ${metadata.tomcat.bundledCliVersion}`) throw new Error(`Bundled CLI version mismatch: ${cliVersion}`);
+      if (newUser && options.customMcpConfig === undefined) {
+        if (await fs.stat(path.join(fixture.homePath, ".tomcat/mcp.json")).then(() => true, error => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        })) throw new Error("First-install fixture must start without mcp.json");
+      }
       workspacePath = fixture.workspacePath;
       const settingsPath = path.join(userDataDir, "User/settings.json");
       const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
@@ -245,6 +267,18 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     }
 
     await fs.access(options.harnessTestsPath);
+    if (newUser && options.customMcpConfig === undefined && !options.playwrightSmoke) {
+      // Phase A has neither a workspace argument nor the harness's fallback cwd.
+      // Phase B below reuses this exact HOME and profile with a real folder.
+      await runVsCodeGuiTests(runTests, {
+        extensionDevelopmentPath: options.harnessRoot,
+        extensionTestsEnv: { ...testEnv, TOMCAT_RELEASE_EMPTY_WINDOW: "1", TOMCAT_VSCODE_TEST_DEFAULT_CWD: undefined, TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: options.artifactsDir },
+        extensionTestsPath: options.harnessTestsPath,
+        launchArgs: ["--new-window", `--extensions-dir=${extensionsDir}`, `--user-data-dir=${userDataDir}`],
+        reuseMachineInstall: true,
+        vscodeExecutablePath: resolveVsCodeExecutable(),
+      });
+    }
     await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath: options.harnessRoot,
       extensionTestsEnv: { ...testEnv, TOMCAT_E2E_SCREENSHOT: "1", TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: options.artifactsDir },
@@ -259,13 +293,18 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     });
     if (server) {
       const requests = server.capturedNonTitleRequests();
-      const expectedCount = options.upgradeFixture ? 5 : 7;
+      const expectedCount = mcpSmoke ? 1 + mcpSmoke.responses.length : options.customMcpConfig !== undefined ? 0 : options.upgradeFixture ? 5 : 7;
       if (requests.length !== expectedCount) throw new Error(`Expected ${expectedCount} real model requests, got ${requests.length}`);
       const models = requests.map(request => JSON.parse(request.split("\r\n\r\n")[1]).model);
       if (models.some(model => model !== (options.upgradeFixture ? "gpt-5.4" : "deepseek-v4-flash"))) throw new Error(`Unexpected selected models: ${JSON.stringify(models)}`);
       await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: requests.length, models }, null, 2));
+      if (mcpSmoke) await mcpSmoke.record(requests, options.artifactsDir);
     }
   } finally {
+    if (options.playwrightSmoke && server) {
+      await fs.writeFile(path.join(options.artifactsDir, "mcp-model-requests.json"), JSON.stringify(server.capturedNonTitleRequests(), null, 2)).catch(error => console.warn("Could not preserve MCP requests", error));
+      if (fixture) await fs.copyFile(path.join(fixture.homePath, ".tomcat/mcp.json"), path.join(options.artifactsDir, "materialized-mcp.json")).catch(error => console.warn("Could not preserve MCP config", error));
+    }
     if (fixture && options.production) {
       // Preserve only this disposable fixture's service log before cleanup removes its HOME.
       await fs.copyFile(
@@ -275,18 +314,23 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Could not retain shared-service log", error);
       });
     }
-    try { await server?.close(); } finally {
-      try { await fixture?.cleanup(); } finally {
-        await fs.rm(installRoot, { force: true, recursive: true });
+    try { await mcpSmoke?.close(); } finally {
+      try { await server?.close(); } finally {
+        try { await fixture?.cleanup(); } finally {
+          await fs.rm(installRoot, { force: true, recursive: true });
+        }
       }
     }
   }
 }
 
 async function main(): Promise<void> {
+  const playwrightSmoke = process.env.TOMCAT_RELEASE_MCP_SMOKE === "1";
+  if (playwrightSmoke && process.env.TOMCAT_AGENT_ACTIVE === "1") throw new Error("Run MCP acceptance from an independent terminal; do not clear TOMCAT_AGENT_ACTIVE.");
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
   const productionSource = parseProductionSource(process.argv.slice(2));
+  if (playwrightSmoke && productionSource?.kind !== "bundle") throw new Error("MCP smoke requires --release-bundle <current VSIX>");
   if (productionSource) {
     const bundle = productionSource.kind === "bundle" ? await inspectReleaseVsix(path.resolve(productionSource.value)) : undefined;
     if (productionSource.kind === "marketplace" && productionSource.value.split("@")[1] !== expectedRelease().version) throw new Error("Marketplace version must match this release");
@@ -300,8 +344,16 @@ async function main(): Promise<void> {
     const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
     await fs.mkdir(artifactsDir, { recursive: true });
     runCommand("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
-    const options = { extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
+    const options = { playwrightSmoke, extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
     await runInstalledScenario(options);
+    if (playwrightSmoke) { console.log(`Real Playwright MCP evidence: ${artifactsDir}`); return; }
+    if (productionSource.kind === "bundle") {
+      const customArtifacts = path.join(artifactsDir, "custom-mcp");
+      await fs.mkdir(customArtifacts, { recursive: true });
+      await runInstalledScenario({ ...options, artifactsDir: customArtifacts,
+        customMcpConfig: '{\n  "mcpServers": {},\n  "customNote": "preserve these bytes"\n}\n',
+      });
+    }
     // 0.1.90 never shipped for Windows, so there is no Windows data to upgrade.
     if (process.platform !== "win32") {
       const upgradeArtifacts = path.join(artifactsDir, "upgrade-v0.1.90");

@@ -279,18 +279,37 @@ impl McpTransport for StdioTransport {
         if cancel.is_cancelled() {
             return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
         }
-        let command = self.command(server).map_err(|_| {
-            McpFailure::new(FailureKind::Configuration, "child environment/program")
+        let command = self.command(server).map_err(|error| match error {
+            AppError::Io(error) => spawn_failure(&error),
+            _ => McpFailure::new(FailureKind::Configuration, "child environment/program"),
         })?;
         let transport = TokioChildProcess::new(kill_tree_on_drop(command))
-            .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
+            .map_err(|error| spawn_failure(&error))?;
         ().serve_with_ct(
             CancellationBoundedTransport::managed(transport, cleanup),
             cancel,
         )
         .await
-        .map_err(|error| McpFailure::from_initialization(&error))
+        .map_err(|error| {
+            let mut failure = McpFailure::from_initialization(&error);
+            if matches!(
+                error,
+                rmcp::service::ClientInitializeError::ConnectionClosed(_)
+            ) {
+                failure.phase = "exited";
+            }
+            failure
+        })
     }
+}
+
+fn spawn_failure(error: &std::io::Error) -> McpFailure {
+    let phase = match error.kind() {
+        std::io::ErrorKind::NotFound => "program_not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        _ => "spawn",
+    };
+    McpFailure::new(FailureKind::Configuration, phase)
 }
 
 /// Client-side Streamable HTTP transport backed by rmcp's reqwest adapter.

@@ -37,12 +37,27 @@ GitHub Release
    -> code --install-extension xxx.vsix
    -> Cmd/Ctrl+Shift+P -> Tomcat: Focus Agent Box
    -> or open the Secondary Side Bar on the right and click Tomcat Agent Box
-   -> if first-time setup appears, click Start Setup and let VS Code run tomcat init for you
+   -> open a project folder; an empty window shows Open project folder
+   -> configure a model in Tomcat Settings, then chat (no terminal init required)
 ```
 
 For which extension package to choose, how to install it, and where the bundled CLI lives after installation, see:
 
 - [`tomcat-vscode-ext/README.md`](../../tomcat-vscode-ext/README.md)
+
+### VS Code startup and browser-tool troubleshooting
+
+```text
+Empty window → Open project folder → Configure a model → Chat
+Missing browser tools → Settings / Connectors → Read the error → Fix → Reload
+```
+
+- Empty windows intentionally cannot create a project session. Use **Open project folder**, not Retry. Settings remains available. If you still see `unknown_session`, check whether `tomcat.path` points to an older CLI; this fix must be included in the running backend as well as the extension.
+- Normal startup creates missing `~/.tomcat/mcp.json` with the pinned Playwright default, even without `tomcat init`. Existing files, including empty, invalid or customized files, are never overwritten. Deleting the whole file restores the default on next startup; disable the source in Settings (or `connector.enabled=false`) to keep it off.
+- Playwright needs **Node.js 20+**, `npx` on the service's PATH and a usable browser. Program-not-found and permission-denied errors include a next step. Early exit points to Tomcat Output / `~/.tomcat/agents/<id>/serve/serve.log`. Browser installation is not automatic.
+- After editing MCP configuration, **Reload** rereads disk and reconnects that source; invalid JSON or a removed/disabled target produces an explicit error. An accepted reconnect request is not proof of readiness. JSON errors show category/line/column without quoting sensitive values.
+- Set `startup_timeout_ms = 60000` under `[connector.mcp]` in `tomcat.config.toml`, not `startupTimeoutMs` in `mcp.json`. After changing PATH, explicitly restart the shared service from the command palette; **this stops all tasks**. Reload does not refresh the service's environment.
+- After a final local connection failure without an HTTP status, the **next** Retry/Resume/message rebuilds its HTTP client using current proxy discovery. History and concurrency limits remain intact. This does not repair 401/429/503 responses, a broken proxy, stream failures or cancellation; the failing turn is not replayed automatically. Only the user's explicit restart switches an already-running old backend to a newly installed version.
 
 ### B. I mainly use the terminal
 

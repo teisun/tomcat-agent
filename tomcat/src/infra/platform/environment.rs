@@ -113,9 +113,10 @@ impl EnvironmentSnapshot {
                     return Ok(found);
                 }
             }
-            Err(AppError::Config(
-                "child program not found in the controlling connection's PATH".into(),
-            ))
+            Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "child program not found in the controlling connection's PATH",
+            )))
         }
         #[cfg(not(windows))]
         {

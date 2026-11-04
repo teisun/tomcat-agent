@@ -62,9 +62,10 @@ it("explains an empty window's missing workspace without inventing a session", a
     expect(provider.currentState()).toMatchObject({
       activeSessionId: null,
       connectionStatus: "degraded",
-      connectionFailure: { kind: "bootstrap", detail },
+      connectionFailure: { kind: "workspace_required", detail },
     });
-    expect(reportBootstrapFailure).toHaveBeenCalledWith(expect.objectContaining({ message: detail }));
+    expect(reportBootstrapFailure).not.toHaveBeenCalled();
+    expect(logging).not.toHaveBeenCalled();
   } finally {
     provider.dispose();
     logging.mockRestore();
@@ -2761,6 +2762,23 @@ describe("serve connection readiness", () => {
       sessionRouter: {} as never,
     });
   }
+
+  it("opens the native folder picker without creating or initializing a session", async () => {
+    const initialize = vi.fn(async () => ({}));
+    const provider = createProvider(initialize);
+    const execute = vi.spyOn(vscode.commands, "executeCommand").mockResolvedValue(undefined);
+    try {
+      const intent = { type: "openFolder", messageId: "open-folder" } as const;
+      expect(isWebviewIntent(intent)).toBe(true);
+      await provider.dispatchTestIntent(intent);
+      expect(execute).toHaveBeenCalledWith(process.platform === "darwin"
+        ? "workbench.action.files.openFileFolder" : "workbench.action.files.openFolder");
+      expect(initialize).not.toHaveBeenCalled();
+    } finally {
+      provider.dispose();
+      execute.mockRestore();
+    }
+  });
 
   it("validates the restart intent and invokes the existing restart owner without waiting for initialize", async () => {
     const initialize = vi.fn(async () => ({}));

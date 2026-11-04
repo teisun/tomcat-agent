@@ -37,12 +37,27 @@ GitHub Release
    -> code --install-extension xxx.vsix
    -> Cmd/Ctrl+Shift+P -> Tomcat: Focus Agent Box
    -> 或打开右侧 Secondary Side Bar 后点击 Tomcat Agent Box
-   -> 如果提示首次设置，点 Start Setup，让 VS Code 帮你跑 tomcat init
+   -> 打开项目文件夹；空窗口会显示「打开项目文件夹」
+   -> 在 Tomcat 设置里配置模型，然后开始聊（不必去终端跑 init）
 ```
 
 扩展包怎么选、怎么安装、装完后 bundled CLI 住在哪里，统一看：
 
 - [`tomcat-vscode-ext/README.zh.md`](../../tomcat-vscode-ext/README.zh.md)
+
+### VS Code 首启与浏览器工具排障
+
+```text
+空窗口 → 打开项目文件夹 → 配模型 → 对话
+没有浏览器工具 → 设置 / 连接器 → 看失败原因 → 修复 → 重新加载
+```
+
+- 空窗口尚未选项目，不能建项目会话。点**打开项目文件夹**，不用反复重试；设置页仍可用。仍显示 `unknown_session` 时，检查 `tomcat.path` 是否指向旧 CLI；扩展和实际运行的后台都要包含修复。
+- 普通启动会补建缺失的 `~/.tomcat/mcp.json`，写入固定版本的 Playwright 默认配置，不要求跑过 `tomcat init`。已有空文件、坏 JSON、自定义配置均不覆盖。删除整文件后下次启动会恢复默认；长期不用请在设置里禁用来源，或设置 `connector.enabled=false`。
+- Playwright 需要 **Node.js 20+**、服务 PATH 能找到 `npx`，以及可用浏览器。找不到程序/权限不足会给出操作建议；启动即退出请查看 Tomcat 输出和 `~/.tomcat/agents/<id>/serve/serve.log`。不会自动安装浏览器。
+- 改完 MCP 配置后点**重新加载**：先重读磁盘，再重连该来源。坏 JSON、目标被删除或禁用会明确报错；收到重连回执不等于已经可用。JSON 错误只显示类别、行列，不回显敏感值。
+- 启动超时在 `tomcat.config.toml` 的 `[connector.mcp]` 段设置 `startup_timeout_ms = 60000`，不是 `mcp.json` 的 `startupTimeoutMs`。改 PATH 后请从命令面板显式重启共享服务，**会停止所有任务**；重新加载不会刷新后台的环境变量。
+- 本地连接最终失败且没有 HTTP 状态码时，**下一次**重试/续聊/新消息才会换 HTTP Client，重新读取代理；历史和并发名额不动。它不修复 401/429/503、代理停机、读流失败或取消，也不自动重放本轮。已在运行的旧后台不会因只更新文件就自动变成新版，请由用户显式重启。
 
 ### B. 我主要在终端里使用
 

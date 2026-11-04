@@ -100,9 +100,10 @@ fn environment_program_resolution_uses_child_path_pathext_and_never_service_fall
             &[("PATHEXT".into(), ".EXE".into())].into()
         )
         .is_err());
-    assert!(EnvironmentSnapshot::default()
+    let missing = EnvironmentSnapshot::default()
         .resolve_program("cmd", root.path(), &BTreeMap::new())
-        .is_err());
+        .unwrap_err();
+    assert!(matches!(missing, AppError::Io(error) if error.kind() == std::io::ErrorKind::NotFound));
     assert!(EnvironmentSnapshot::from_values(
         [("PATH".into(), "a".into()), ("Path".into(), "b".into())].into()
     )

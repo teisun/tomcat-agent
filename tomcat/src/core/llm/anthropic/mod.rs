@@ -330,7 +330,9 @@ impl AnthropicProvider {
             .map_err(|error| {
                 llm_error_with_source(
                     PROVIDER_NAME,
-                    if error.is_timeout() {
+                    if error.is_connect() {
+                        LlmErrorStage::Connect
+                    } else if error.is_timeout() {
                         LlmErrorStage::ReadTimeout
                     } else {
                         LlmErrorStage::Send

@@ -72,9 +72,11 @@ pub fn setup_cold_serve_fixture(initialized: bool) -> ServeFixture {
             .output()
             .expect("init without credentials");
         assert!(output.status.success(), "init: {output:?}");
-        // Do not launch the optional managed MCP server in an offline fixture.
-        fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
     }
+    // Cold here describes model setup, not the optional online MCP integration.
+    // Only the release-bundle new-user acceptance leaves this file missing.
+    fs::create_dir_all(home_path.join(".tomcat")).unwrap();
+    fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
     ServeFixture {
         _home: home,
         home_path,

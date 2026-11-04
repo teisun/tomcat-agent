@@ -563,25 +563,23 @@ fn read_mcp_file(path: &Path) -> Result<McpFile, AppError> {
         return Ok(McpFile::default());
     }
     let content = std::fs::read_to_string(path)?;
-    let raw: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+    let parse_error = |error: serde_json::Error| {
+        // serde's Display may quote a credential or other invalid input value.
+        let detail = format!(
+            "{:?} at line {} column {}",
+            error.classify(),
+            error.line(),
+            error.column()
+        );
         AppError::Config(tr(
             "mcp.config.parse",
-            &[
-                ("path", &path.display().to_string()),
-                ("detail", &error.to_string()),
-            ],
+            &[("path", &path.display().to_string()), ("detail", &detail)],
         ))
-    })?;
+    };
+    let raw: serde_json::Value = serde_json::from_str(&content).map_err(&parse_error)?;
+    let parsed = serde_json::from_str(&content).map_err(parse_error)?;
     warn_about_ignored_server_keys(path, &raw);
-    serde_json::from_str(&content).map_err(|error| {
-        AppError::Config(tr(
-            "mcp.config.parse",
-            &[
-                ("path", &path.display().to_string()),
-                ("detail", &error.to_string()),
-            ],
-        ))
-    })
+    Ok(parsed)
 }
 
 /// Applies one mutation while holding a stable sidecar lock. The target itself
@@ -599,7 +597,7 @@ fn mutate_mcp_file<T>(
     Ok(result)
 }
 
-fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
+pub(super) fn acquire_mcp_file_lock(path: &Path) -> Result<File, AppError> {
     let parent = path.parent().ok_or_else(|| {
         AppError::Config(tr(
             "mcp.config.noParent",

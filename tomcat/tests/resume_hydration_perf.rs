@@ -42,6 +42,9 @@ fn setup_fixture() -> Fixture {
         .assert()
         .success();
 
+    std::fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#)
+        .expect("keep hydration benchmarks offline");
+
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());

@@ -12,6 +12,11 @@ pub fn materialize_default_mcp_json(cfg: &AppConfig) -> Result<PathBuf, AppError
     if path.exists() {
         return Ok(path);
     }
+    let _guard = super::config::acquire_mcp_file_lock(&path)?;
+    // Another process may have installed a custom configuration while we waited.
+    if path.exists() {
+        return Ok(path);
+    }
     let browser_path = get_work_dir(cfg)?.join("cache").join("playwright");
     let contents = serde_json::to_vec_pretty(&serde_json::json!({
         "mcpServers": {

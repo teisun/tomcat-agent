@@ -20,6 +20,9 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
   }
   return {
     ...env, HOME: homePath, USERPROFILE: homePath, TOMCAT_HOST_LOCALE: "en",
+    APPDATA: path.join(homePath, "AppData", "Roaming"),
+    LOCALAPPDATA: path.join(homePath, "AppData", "Local"),
+    npm_config_cache: path.join(homePath, ".npm"),
     TOMCAT__STORAGE__WORK_DIR: path.join(homePath, ".tomcat"),
     TOMCAT__CONTEXT__COMPACTION_MODEL: coldStart ? undefined : "gpt-5.4",
     TOMCAT__LLM__DEFAULT_MODEL: coldStart ? undefined : "gpt-5.4",
@@ -32,6 +35,8 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
 export type FixtureSetup = {
   binary: string;
   coldStart?: boolean;
+  /** Release-bundle first launch only: preserve the absence of mcp.json. */
+  missingMcpConfig?: boolean;
   /** Explicit test configuration only; this fixture never reads shell proxy variables. */
   llmProxy?: string;
   runCli?: (binary: string, args: string[], options: {
@@ -66,7 +71,13 @@ export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup:
   })().catch(error => { cleanupTask = undefined; throw error; });
   try {
     await mkdir(workspacePath, { recursive: true });
-    if (setup.coldStart) return { cleanup, env, homePath, workspacePath };
+    if (setup.coldStart) {
+      if (!setup.missingMcpConfig) {
+        await mkdir(path.join(homePath, ".tomcat"), { recursive: true });
+        await writeFile(path.join(homePath, ".tomcat", "mcp.json"), '{"mcpServers":{}}\n', "utf8");
+      }
+      return { cleanup, env, homePath, workspacePath };
+    }
     await runCli(binary, ["init"], { cwd: workspacePath, env, timeout: 15_000, killSignal: "SIGKILL" });
     if (proxy !== undefined) {
       // init generates this fixture's [llm] table without a proxy entry. CLI config

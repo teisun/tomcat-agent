@@ -83,6 +83,23 @@ tool_call                      tool_describe([名])   → schema(批量)◄│ (
 
 ---
 
+## 六、首次启动与故障恢复
+
+```text
+普通 CLI/serve 启动 → assets 就位 → 锁内补建缺失 mcp.json → 创建连接器注册表
+已有文件（包括空文件、坏 JSON、自定义配置）→ 不改任何字节
+Settings 的 Reload → 重读磁盘 → 只预约目标重连；配置未变的 Ready 连接保留
+```
+
+- `run_cli` 在任何注册表创建前调用 `materialize_default_mcp_json`；`init` 仍复用同一函数。补建失败只记 warn，不阻塞启动。禁用连接器不会阻止补建文件，也不会因此启用连接。
+- 默认配置固定 Playwright MCP 包版本，使用 `npx`；需要 **Node.js 20+**、可用 PATH，以及对应浏览器。Tomcat 不自动安装浏览器。删除整个 `mcp.json` 后，下次普通启动会恢复默认；长期禁用请在 Settings 禁用来源或设置 `connector.enabled=false`。
+- `program_not_found` / `permission_denied` 通过既有 phase 与 i18n 给出建议；握手前退出提示查看 Tomcat 输出和 `agents/<id>/serve/serve.log`。不额外截取 stderr，不在错误里回显 command 参数或 env。
+- JSON 解析失败仅显示类别、行、列；不回显 serde 原始错误中的配置值。Reload 遇坏 JSON 或目标删除/禁用会明确失败，不拿缓存假装成功；成功返回的是预约回执，不等于 MCP 已 Ready。
+- 启动超时在 `tomcat.config.toml` 的 **`[connector.mcp].startup_timeout_ms`** 配置，不是 `mcp.json` 的 `startupTimeoutMs`。PATH 改变后须用户显式重启共享服务；Reload 只重读 MCP 配置，不刷新服务进程环境，重启会停止所有任务。
+- 真实首装必须是无 init、无预写 MCP 配置、无默认 cwd 的 VSIX 空窗口，再用同 HOME 开文件夹。旧的“冷模型配置”夹具不能代签此场景。详见 [develop status](../status/develop.md)。
+
+---
+
 ## 一句话总结
 
 连接器模块把外部 server 的工具接入 Tomcat；**v1** 打好基座（stdio 传输 / config 即信任 / 图片回流 / 配置），但把「易变的完整工具目录放进缓存前缀」，招致缓存失稳 + token 爆炸；**v2** 以渐进式披露根治——前缀只留 3 个泛化元工具 + 1 条写死的 skill 索引，MCP 目录按需披露、复用插件 VM 做代码执行扇出。**当前以 v2 为权威，传输/信任/图片/配置仍看 v1。**

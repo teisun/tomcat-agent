@@ -428,6 +428,31 @@ async fn apply_choice_add_persistent_is_idempotent_for_session_grants() {
 
 #[tokio::test]
 async fn dismisses_and_forwards_when_stdin_not_tty() {
+    use std::io::IsTerminal;
+
+    // An interactive cargo invocation inherits the terminal. Exercise the same
+    // test in a child with explicit EOF instead of waiting for a human answer.
+    if std::io::stdin().is_terminal() {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "api::chat::permission::cwd_lazy::tests::dismisses_and_forwards_when_stdin_not_tty",
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
+            .await
+            .expect("non-TTY child timed out")
+            .expect("spawn non-TTY child");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().to_path_buf();
     let gate = make_gate(&PathBuf::from("/__nowhere__"));
@@ -440,7 +465,7 @@ async fn dismisses_and_forwards_when_stdin_not_tty() {
         PathBuf::new(),
     );
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
-    // 测试环境下 stdin 大概率不是 TTY；verify dismissed 路径生效
+    // stdin is explicitly non-TTY here, including terminal-launched test runs.
     let dec = prompt
         .confirm_decision(
             PrimitiveOperation::Read,

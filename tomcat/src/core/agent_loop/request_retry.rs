@@ -229,6 +229,7 @@ pub(super) async fn run_request_once(
     if agent.cancel_token.is_cancelled() {
         return Err(agent.make_aborted(messages, String::new()));
     }
+    agent.main_request_failed = false;
     // Join compaction publication before observing cancellation.
     let reduced = current_tail_guard::maybe_reduce_before_next_llm(agent, messages).await;
     if agent.cancel_token.is_cancelled() {
@@ -321,7 +322,9 @@ pub(super) async fn run_request_once(
     // Stream 消费（含 LLM connect + MessageStart/Update/End 发射 + cancel 抢占）
     // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
     // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
-    let outcome = stream_handler::run_chat_stream(agent, req, attempt, max_attempts).await?;
+    let outcome = stream_handler::run_chat_stream(agent, req, attempt, max_attempts).await;
+    agent.main_request_failed = outcome.is_err();
+    let outcome = outcome?;
     let super::types::StreamOutcome {
         ref content_buf,
         ref tool_calls_buf,

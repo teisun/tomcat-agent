@@ -2770,20 +2770,22 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           {!state.ready ? (
             <div className={`tc-empty-state ${state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? "tc-connection-failure" : "tc-empty-state--loading"}`} data-testid="loading-state">
               {state.connectionStatus !== "failed" && state.connectionStatus !== "degraded" ? <span className="tc-spinner" aria-hidden="true" /> : null}
-              <p>
+              {state.connectionFailure?.kind !== "workspace_required" ? <p>
                 {t(state.connectionStatus === "reconnecting" ? "connection.reconnecting"
                   : state.connectionStatus === "degraded" ? "chat.degraded"
                   : state.connectionStatus === "failed" ? "chat.failed" : "connection.connecting")}
-              </p>
+              </p> : null}
               {state.connectionStatus === "failed" || state.connectionStatus === "degraded" ? <>
-                {state.connectionFailure?.detail ? <p role="alert">{state.connectionFailure.detail}</p> : null}
+                {state.connectionFailure?.detail ? <p role={state.connectionFailure.kind === "workspace_required" ? "status" : "alert"}>{state.connectionFailure.detail}</p> : null}
                 <div className="tc-button-row">
-                  {state.connectionFailure?.kind === "version_mismatch" ? (
+                  {state.connectionFailure?.kind === "workspace_required" ? (
+                    <button type="button" className="tc-button tc-button--primary" data-testid="open-project-folder" onClick={() => postIntent(vscodeApi, "openFolder")}>{t("host.action.openProjectFolder")}</button>
+                  ) : state.connectionFailure?.kind === "version_mismatch" ? (
                     <button type="button" className="tc-button tc-button--primary" data-testid="restart-shared-service" onClick={() => postIntent(vscodeApi, "restartSharedService")}>{t("host.action.restartSharedService")}</button>
                   ) : (
                     <button type="button" className="tc-button tc-button--primary" data-testid="retry-connection" onClick={() => postIntent(vscodeApi, "retryConnection")}>{t("host.action.retry")}</button>
                   )}
-                  <button type="button" className="tc-button tc-button--secondary" data-testid="view-connection-logs" onClick={() => postIntent(vscodeApi, "viewConnectionLogs")}>{t("host.action.logs")}</button>
+                  {state.connectionFailure?.kind !== "workspace_required" ? <button type="button" className="tc-button tc-button--secondary" data-testid="view-connection-logs" onClick={() => postIntent(vscodeApi, "viewConnectionLogs")}>{t("host.action.logs")}</button> : null}
                 </div>
               </> : null}
             </div>

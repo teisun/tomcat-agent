@@ -396,6 +396,9 @@ pub struct AgentLoop {
     /// Whether the last model reply was a normal, error-free stop with no text or tools.
     /// Updated for accepted and retried replies alike; transport failures are not replies.
     pub(super) last_reply_silent: bool,
+    /// The final error came from the main request, not pre-request compaction.
+    /// Reset before every attempt; only consumed after the run has ended.
+    pub(crate) main_request_failed: bool,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {

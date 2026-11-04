@@ -5,6 +5,44 @@ use std::sync::Arc;
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn disk_sessions_require_workspace_scope_before_bootstrap() {
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (connection, output) = connect(&runtime);
+    super::super::stdin::dispatch_command(
+        connection.clone(),
+        ServeCommand::ListSessions {
+            id: Some("without-scope".into()),
+            scope: Some(ListSessionsScope::Disk),
+        },
+    )
+    .await
+    .unwrap();
+    let reply = frame(&output, |f| f["id"] == "without-scope").await;
+    assert_eq!(reply["success"], false);
+    assert_eq!(reply["error"], "scope_requires_cwd");
+    assert!(connection.current_scope().is_none());
+    assert_eq!(runtime.registry.len(), 0);
+
+    new_shared(&connection, work.path(), "new").await;
+    handle_command(
+        connection.clone(),
+        ServeCommand::ListSessions {
+            id: Some("with-scope".into()),
+            scope: Some(ListSessionsScope::Disk),
+        },
+    )
+    .await
+    .unwrap();
+    let reply = frame(&output, |f| f["id"] == "with-scope").await;
+    assert_eq!(reply["success"], true);
+    assert!(connection.current_scope().is_some());
+    assert_eq!(reply["payload"]["sessions"].as_array().unwrap().len(), 1);
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn session_bootstrap_reuses_current_without_creating_empty_sessions() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(4);

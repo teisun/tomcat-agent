@@ -314,6 +314,9 @@ fn resume_after_healed_dangling_tool_call_waits_for_user_input() {
 #[derive(Default)]
 struct ChatTurnRecorder {
     requests: Mutex<Vec<crate::ChatRequest>>,
+    stream_failures: Mutex<std::collections::VecDeque<AppError>>,
+    reported_providers: Mutex<Vec<usize>>,
+    cancel_on_stream: Mutex<Option<CancellationToken>>,
 }
 
 #[async_trait::async_trait]
@@ -349,6 +352,12 @@ impl crate::core::llm::LlmProvider for ChatTurnRecorder {
         AppError,
     > {
         self.requests.lock().unwrap().push(request);
+        if let Some(cancel) = self.cancel_on_stream.lock().unwrap().take() {
+            cancel.cancel();
+        }
+        if let Some(error) = self.stream_failures.lock().unwrap().pop_front() {
+            return Err(error);
+        }
         Ok(Box::new(tokio_stream::iter(vec![
             Ok(crate::core::llm::StreamEvent::ContentDelta {
                 delta: "Recorded reply".into(),
@@ -370,6 +379,14 @@ struct ChatTurnResolver {
 }
 
 impl crate::core::llm::LlmResolver for ChatTurnResolver {
+    fn report_connect_failure(&self, provider: &Arc<dyn crate::core::llm::LlmProvider>) {
+        self.recorder
+            .reported_providers
+            .lock()
+            .unwrap()
+            .push(Arc::as_ptr(provider) as *const () as usize);
+    }
+
     fn resolve(
         &self,
         _scene: crate::core::llm::LlmScene,
@@ -395,6 +412,81 @@ fn install_chat_turn_recorder(ctx: &mut ChatContext) -> Arc<ChatTurnRecorder> {
     });
     ctx.session_runtime.suppress_cli_output = true;
     recorder
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn transport_recovery_only_final_local_main_connect_failures_report_the_exact_provider() {
+    use crate::infra::error::{llm_error, llm_http_status_error_with_stage, LlmErrorStage};
+    let _key = EnvGuard::set("CONNECT_REPORT_TEST_KEY", "stub");
+    for (stage, status, failures, cancel, expected_reports) in [
+        (LlmErrorStage::Connect, None, 2, false, 1),
+        (LlmErrorStage::Connect, None, 1, false, 0),
+        (LlmErrorStage::Connect, None, 0, false, 0),
+        (LlmErrorStage::Connect, Some(503), 2, false, 0),
+        (LlmErrorStage::Connect, Some(401), 2, false, 0),
+        (LlmErrorStage::Connect, Some(429), 2, false, 0),
+        (LlmErrorStage::ReadTimeout, None, 2, false, 0),
+        (LlmErrorStage::BodyRead, None, 2, false, 0),
+        (LlmErrorStage::Connect, None, 2, true, 0),
+    ] {
+        let (_dir, mut ctx, _path) = checkpoint_recording_test_context("CONNECT_REPORT_TEST_KEY");
+        ctx.config.llm.agent_max_attempts = 2;
+        ctx.config.llm.agent_retry_base_delay_ms = 1;
+        let recorder = install_chat_turn_recorder(&mut ctx);
+        for _ in 0..failures {
+            recorder
+                .stream_failures
+                .lock()
+                .unwrap()
+                .push_back(match status {
+                    Some(status) => llm_http_status_error_with_stage(
+                        "fixture",
+                        stage,
+                        status,
+                        "upstream connect error",
+                    ),
+                    None => llm_error("fixture", stage, "local connect failure"),
+                });
+        }
+        let token = CancellationToken::new();
+        if cancel {
+            *recorder.cancel_on_stream.lock().unwrap() = Some(token.clone());
+        }
+        let mut context =
+            init_context_state(&ctx.session_runtime.session, &ctx.config.context, "system")
+                .unwrap();
+        let outcome = run_chat_turn(&ctx, "hello", "system", &mut context, token)
+            .await
+            .unwrap();
+        if cancel {
+            assert!(
+                matches!(outcome, AgentRunOutcome::Interrupted(_)),
+                "{outcome:?}"
+            );
+        } else if failures < 2 {
+            assert!(
+                matches!(outcome, AgentRunOutcome::Completed(_)),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(matches!(outcome, AgentRunOutcome::Failed(_)), "{outcome:?}");
+        }
+        let reports = recorder.reported_providers.lock().unwrap();
+        assert_eq!(
+            reports.len(),
+            expected_reports,
+            "stage={stage:?} status={status:?} failures={failures} cancel={cancel}"
+        );
+        if expected_reports == 1 {
+            assert_eq!(reports[0], Arc::as_ptr(&recorder) as usize);
+            assert_eq!(
+                recorder.requests.lock().unwrap().len(),
+                2,
+                "report only after retry exhaustion, no extra replay"
+            );
+        }
+    }
 }
 
 #[tokio::test]

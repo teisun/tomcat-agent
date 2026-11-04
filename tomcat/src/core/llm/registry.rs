@@ -27,9 +27,27 @@ use tokio::sync::Semaphore;
 pub(crate) struct ProviderRoute {
     pub client: reqwest::Client,
     pub semaphore: Option<Arc<Semaphore>>,
+    pub needs_refresh: std::sync::atomic::AtomicBool,
 }
 
 impl ProviderRoute {
+    pub fn with_refreshed_client(
+        &self,
+        runtime: &LlmRuntimeConfig,
+        base_url: Option<&str>,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            client: super::http_client::build_http_client(
+                runtime,
+                None,
+                base_url,
+                runtime.api_base_fallback.as_deref(),
+            )?,
+            semaphore: self.semaphore.clone(),
+            needs_refresh: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
     pub fn new(runtime: &LlmRuntimeConfig, base_url: Option<&str>) -> Result<Self, AppError> {
         Ok(Self {
             client: super::http_client::build_http_client(
@@ -40,6 +58,7 @@ impl ProviderRoute {
             )?,
             semaphore: (runtime.max_concurrent_requests > 0)
                 .then(|| Arc::new(Semaphore::new(runtime.max_concurrent_requests as usize))),
+            needs_refresh: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }

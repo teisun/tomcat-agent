@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import backendEnglish from "../../../../tomcat/assets/i18n/en.json";
 import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
 import { LocaleProvider } from "../i18n/LocaleProvider";
 import { translate } from "../../../src/shared/i18n";
@@ -82,6 +83,15 @@ function renderView(snapshot: SettingsStateSnapshot = state()) {
 const upstreamToggleError = "此工具被配置中的批量规则禁用，请打开配置文件修改。";
 
 describe("ConnectorsSettingsView", () => {
+  it("shows the backend startup diagnostic without requiring a Reload receipt", () => {
+    const snapshot = state();
+    const message = backendEnglish["mcp.phase.program_not_found"];
+    Object.assign(snapshot.connectors![0], { state: "failed", error: message });
+    renderView(snapshot);
+    fireEvent.click(screen.getByTestId("connector-card-playwright"));
+    expect(within(screen.getByRole("dialog")).getByText(message, { exact: false })).toBeTruthy();
+  });
+
   it("preserves form inputs, validation and card identity across language changes", () => {
     const snapshot = state();
     const api = { postMessage: vi.fn() };

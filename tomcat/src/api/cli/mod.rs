@@ -613,6 +613,9 @@ pub fn run_cli() -> Result<(), AppError> {
     }
     ensure_work_dir_structure(&cfg)?;
     ensure_embedded_assets(&cfg)?;
+    // Materialize before any connector registry can cache an empty configuration.
+    // Log a failure only after the logging subscriber is installed below.
+    let default_mcp = crate::core::connector::mcp::builtin::materialize_default_mcp_json(&cfg);
 
     preload_runtime_env(&cfg)?;
 
@@ -626,6 +629,10 @@ pub fn run_cli() -> Result<(), AppError> {
             None
         },
     )?;
+
+    if let Err(error) = default_mcp {
+        tracing::warn!(%error, "could not create default MCP configuration; continuing startup");
+    }
 
     crate::infra::config::warn_ignored_config_keys(&ignored_keys);
 
