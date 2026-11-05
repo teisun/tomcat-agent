@@ -453,7 +453,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, and writes frontmatter under an advisory lock. A coding plan may include one final todo with kind `acceptance`; the runtime does not append todos. The runtime then asks the user whether to run an independent advisory review, explaining its benefits, additional model usage and potentially several minutes or longer of waiting. Review runs only with explicit consent; skipping leaves the saved plan available immediately. The result is returned in the tool's `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), preserves the complete `draft` and its heading levels between the generated `## Plan` and `## Todos Board` headings (stripping only legacy wrappers), and writes frontmatter under an advisory lock. A coding plan may include one final todo with kind `acceptance`; the runtime does not append todos. The runtime then asks the user whether to run an independent advisory review, explaining its benefits, additional model usage and potentially several minutes or longer of waiting. Review runs only with explicit consent; skipping leaves the saved plan available immediately. The result is returned in the tool's `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and ask before running an advisory review (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
@@ -1306,7 +1306,7 @@ fn create_plan_parameters() -> Value {
             },
             "draft": {
                 "type": "string",
-                "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself."
+                "description": "Complete Markdown plan body, not a summary: include explanations, diagrams, decisions, tests, and acceptance as needed. Heading levels are preserved, including level-two chapters. Do NOT repeat the generated `## Goal` / `## Plan` / `## Todos Board` headings."
             },
             "todos": {
                 "type": "array",

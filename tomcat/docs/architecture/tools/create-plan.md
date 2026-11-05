@@ -33,11 +33,23 @@ Plan 模式下提交 goal / draft / todos
 | 输入 | 当前契约 |
 | --- | --- |
 | `goal` | 非空目标，参与派生身份；文件名由 runtime 决定 |
-| `draft` | 非空方案正文，规范化后写入 `## Plan`；不需要重复外层标题 |
+| `draft` | 非空的完整方案正文，不是摘要；可含二级拆解、可选章节与验收，runtime 补外壳，不需重复外层标题 |
 | `todos` | 至少一项；每项包含唯一 id、content，status 默认 pending，kind 默认 work |
 | `todos[].kind` | work 或 acceptance；规范要求 acceptance 用于最终验收，当前校验硬性限制最多一项（不按索引拦截）；runtime 不自动补建 |
 
 待办复用现有 `ops::apply_todos_ops` 和 `validate_single_acceptance` 校验。完整持久字段以 `src/core/plan_runtime/file_store.rs::PlanFileFrontmatter` 为准，不在本文另维护一份容易漂移的完整 JSON Schema。
+
+### 正文保存边界
+
+```text
+合法正文（含普通 Notes 章） → 保留层级、顺序、内部空白与空章
+开头为 Goal / Draft / Plan → 仅兼容去旧包装，保留其余正文
+                             └─ 代码围栏内的标题不参与包装识别
+```
+
+只在去外侧空白后的开头是 `## Goal`、`## Draft` 或 `## Plan` 时处理旧包装；其中 Goal 与参数相同时去重复目标，否则保留内容，Plan／Draft／Notes 只去包装标题。普通标题不降级，独立 Notes 章不剥离。反引号／波浪线围栏按开启长度与同类关闭标记匹配，未闭合时保留余下内容。
+
+正文置于生成的 `## Plan` 与自动待办章之间；无约2000字符的摘要建议。沿用 LF 换行与外侧空白处理，不承诺 CRLF 字节保真，不改变文件格式、锁或权限。
 
 持久字段的职责：
 
@@ -80,7 +92,7 @@ Plan 模式下提交 goal / draft / todos
 
 | 路径 | 证明的行为 |
 | --- | --- |
-| `src/core/tools/plan_tool/tests/create_plan_test.rs` | 非 Plan 拒绝、保存文件与 active view、多次创建、正文规范化、输入与验收 kind 校验 |
+| `src/core/tools/plan_tool/tests/create_plan_test.rs` | 非 Plan 拒绝、保存与 active view、多次创建、长正文完整往返、旧包装／围栏兼容及输入拒绝 |
 | `src/core/tools/plan_tool/tests/reviewer_test.rs::plan_review_decisions_require_explicit_consent_and_emit_exactly_one_result` | 明确同意、跳过、坏回答和终止路径；不擅自派发；一次结果 |
 | 同文件 `create_plan_succeeds_even_when_reviewer_aborts` | 评审中止不撤销已保存计划 |
 | 同文件 reviewer 锁与刷新用例 | 派发前已释放写锁，授权修改后的文件重新读取 |

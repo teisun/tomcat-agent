@@ -25,15 +25,15 @@ use super::ToolError;
 /// **D3 破坏性变更（2026-05）**：
 /// - 移除 `plan_id`：由 runtime 通过 [`derive_plan_id`] 派生（slug + hash），
 ///   LLM 传 `plan_id` 将报 [`ToolError::BadArgs`]；
-/// - `body` 重命名为 `draft`：保留为入参名，但其内容会被规范化后写入 `## Plan` 段，
-///   其它段落由模板拼接，
+/// - `body` 重命名为 `draft`：Goal 与自动待办区之间的完整方案正文，
+///   runtime 补外壳，仅兼容处理旧包装；
 ///   传 `body` 将报 [`ToolError::BadArgs`]；
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePlanArgs {
     /// 高层目标（必填）。runtime 由此派生 plan_id。
     pub goal: String,
-    /// 计划正文要点（必填）。runtime 会把它规范化后写入 `## Plan` 段。
+    /// 完整方案正文（必填），可包含二级章节。runtime 保留合法正文与层级，仅去旧包装。
     pub draft: String,
     /// 任务列表（必填，至少 1 项）。
     pub todos: Vec<TodoArg>,
@@ -69,7 +69,8 @@ impl CreatePlanArgs {
             }
             if obj.contains_key("body") {
                 return Err(ToolError::BadArgs(
-                    "create_plan field body was renamed to draft (plan-body content, saved under `## Plan`)".into(),
+                    "create_plan field body was renamed to draft (complete plan-body content)"
+                        .into(),
                 ));
             }
         }
@@ -328,10 +329,8 @@ enum DraftHeadingKind {
     Other,
 }
 
-fn top_level_heading(line: &str) -> Option<String> {
-    line.trim()
-        .strip_prefix("## ")
-        .map(|heading| heading.trim().to_string())
+fn top_level_heading(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("## ").map(str::trim)
 }
 
 fn classify_heading(heading: &str) -> DraftHeadingKind {
@@ -350,100 +349,66 @@ fn normalize_for_compare(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn push_normalized_section(
-    goal: &str,
-    heading: Option<&str>,
-    lines: &mut Vec<String>,
-    out: &mut Vec<String>,
-) {
-    let body = lines.join("\n").trim().to_string();
-    lines.clear();
-    if body.is_empty() {
-        return;
-    }
-
-    match heading {
-        None => out.push(body),
-        Some(heading) => match classify_heading(heading) {
-            DraftHeadingKind::Goal => {
-                if normalize_for_compare(&body) != normalize_for_compare(goal) {
-                    out.push(body);
-                }
-            }
-            DraftHeadingKind::Plan | DraftHeadingKind::Notes => out.push(body),
-            DraftHeadingKind::Other => out.push(format!("### {heading}\n\n{body}")),
-        },
-    }
-}
-
-fn strip_top_level_headings(draft: &str) -> String {
-    let mut out = Vec::new();
-    for line in draft.lines() {
-        match top_level_heading(line) {
-            Some(heading) => {
-                if classify_heading(&heading) == DraftHeadingKind::Other {
-                    out.push(format!("### {heading}"));
-                }
-            }
-            None => out.push(line.to_string()),
-        }
-    }
-    out.join("\n").trim().to_string()
-}
-
 fn normalize_plan_body(goal: &str, draft: &str) -> String {
     let draft = draft.trim();
-    if draft.is_empty() {
-        return String::new();
-    }
-
-    let mut saw_top_level_heading = false;
-    let mut current_heading: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut sections: Vec<String> = Vec::new();
-
-    for line in draft.lines() {
-        if let Some(heading) = top_level_heading(line) {
-            saw_top_level_heading = true;
-            push_normalized_section(
-                goal,
-                current_heading.as_deref(),
-                &mut current_lines,
-                &mut sections,
-            );
-            current_heading = Some(heading);
-        } else {
-            current_lines.push(line.to_string());
-        }
-    }
-    push_normalized_section(
-        goal,
-        current_heading.as_deref(),
-        &mut current_lines,
-        &mut sections,
-    );
-
-    if !saw_top_level_heading {
+    // Ordinary chapters, including a standalone Notes chapter, are not wrappers.
+    if !matches!(
+        draft
+            .lines()
+            .next()
+            .and_then(top_level_heading)
+            .map(classify_heading),
+        Some(DraftHeadingKind::Goal | DraftHeadingKind::Plan)
+    ) {
         return draft.to_string();
     }
 
-    let normalized = sections
-        .into_iter()
-        .filter(|section| !section.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-        .trim()
-        .to_string();
-    if !normalized.is_empty() {
-        return normalized;
+    // Keep byte ranges instead of rebuilding Markdown: only recognized legacy
+    // wrapper headings (and an exactly duplicated goal) may be removed.
+    let mut headings = Vec::new();
+    let mut fence: Option<(u8, usize)> = None;
+    let mut offset = 0;
+    for line in draft.split_inclusive('\n') {
+        let marker_line = line.trim_start_matches(' ');
+        if line.len() - marker_line.len() <= 3 {
+            if let Some(marker @ (b'`' | b'~')) = marker_line.bytes().next() {
+                let width = marker_line.bytes().take_while(|b| *b == marker).count();
+                if width >= 3 {
+                    let tail = &marker_line[width..];
+                    if let Some((open_marker, open_width)) = fence {
+                        if marker == open_marker && width >= open_width && tail.trim().is_empty() {
+                            fence = None;
+                        }
+                    } else if marker == b'~' || !tail.contains('`') {
+                        fence = Some((marker, width));
+                    }
+                    offset += line.len();
+                    continue;
+                }
+            }
+        }
+        if fence.is_none() {
+            if let Some(heading) = top_level_heading(line) {
+                headings.push((offset, offset + line.len(), classify_heading(heading)));
+            }
+        }
+        offset += line.len();
     }
 
-    let stripped = strip_top_level_headings(draft);
-    if stripped.is_empty() {
-        draft.to_string()
-    } else {
-        stripped
+    let mut out = String::new();
+    for (i, &(start, content_start, kind)) in headings.iter().enumerate() {
+        let end = headings.get(i + 1).map_or(draft.len(), |h| h.0);
+        let content = &draft[content_start..end];
+        match kind {
+            DraftHeadingKind::Goal
+                if normalize_for_compare(content) == normalize_for_compare(goal) => {}
+            DraftHeadingKind::Goal | DraftHeadingKind::Plan | DraftHeadingKind::Notes => {
+                out.push_str(content);
+            }
+            DraftHeadingKind::Other => out.push_str(&draft[start..end]),
+        }
     }
+    out.trim().to_string()
 }
 
 fn default_body(goal: &str, draft: &str) -> String {

@@ -5,6 +5,10 @@ const WRITE_PLANS_SKILL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/skills/write-plans/SKILL.md"
 ));
+const FINAL_CHECK: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/skills/write-plans/references/final-check.md"
+));
 const PLAN_WORKFLOW: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/skills/write-plans/references/tomcat-plan-workflow.md"
@@ -67,7 +71,7 @@ fn write_plans_workflow_mentions_create_plan_and_ask_question() {
 
 #[test]
 fn write_plans_and_reviewer_carry_anti_over_design_rules() {
-    let planner = WRITE_PLANS_SKILL;
+    let planner = FINAL_CHECK;
     let reviewer = load(PromptKey::ReviewerPlan);
     for (name, text) in [("write-plans", planner), ("plan reviewer", reviewer)] {
         for rule in [
@@ -91,6 +95,10 @@ fn write_plans_and_reviewer_carry_anti_over_design_rules() {
         ] {
             assert!(normalized.contains(rule), "{name} must contain {rule:?}");
         }
+        assert!(normalized.to_ascii_lowercase().contains(
+            "locks or versioning without a demonstrated concurrency or data-integrity need"
+        ));
+        assert!(!normalized.contains("for a single-user local workflow"));
     }
     let reviewer = reviewer.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(reviewer.contains("Apply this requirement to your own proposed additions as well"));
@@ -100,10 +108,7 @@ fn write_plans_and_reviewer_carry_anti_over_design_rules() {
 
 #[test]
 fn write_plans_and_reviewer_check_execution_readiness() {
-    let planner = WRITE_PLANS_SKILL
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let planner = FINAL_CHECK.split_whitespace().collect::<Vec<_>>().join(" ");
     for rule in [
         "## Execution readiness",
         "Verify premises",
@@ -188,7 +193,7 @@ fn verification_and_write_plans_keep_focused_and_acceptance_roles_separate() {
     assert!(planner.contains("one final todo with `kind=acceptance`"));
     assert!(planner.contains("intermediate verification todos use `kind=work`"));
     assert!(planner.contains("at most one `kind=acceptance`"));
-    assert!(planner.contains("| `### Acceptance` | MUST |"));
+    assert!(planner.contains("| `## Acceptance` | MUST |"));
     assert!(planner.contains("observable overall completion conditions"));
     assert!(planner.contains("expected impact radius"));
     assert!(planner.contains("not\nto the number of todos"));
@@ -236,6 +241,7 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
         ("plan workflow", PLAN_WORKFLOW),
         ("plan structure", PLAN_STRUCTURE),
         ("writing standards", WRITING_STANDARDS),
+        ("final check", FINAL_CHECK),
     ];
     for (name, text) in navigating_surfaces.iter().copied().chain([
         ("verify skill", VERIFY_SKILL),
@@ -308,8 +314,8 @@ fn write_plans_preserves_heading_and_reader_contracts() {
     assert!(WRITING_STANDARDS.contains("The following requirements apply to the plan document, not to chat replies or review reports."));
     assert!(PLAN_STRUCTURE
         .contains("The following six-column table is the only format for key decisions:"));
+    assert!(WRITING_STANDARDS.contains("in the plan itself, not only in chat"));
     for removed in [
-        "Put the complete explanation in the plan itself",
         "Do not generate empty tables for inapplicable content",
         "Omitting an OPTION chapter does not mean omitting necessary information",
         "simple content may be combined",
@@ -322,8 +328,15 @@ fn write_plans_preserves_heading_and_reader_contracts() {
             "write-plans must not restore the removed instruction: {removed}"
         );
     }
-    assert!(WRITE_PLANS_SKILL.contains("## Reader check:"));
-    assert!(WRITE_PLANS_SKILL.contains("does not require another model call or review workflow"));
+    assert!(FINAL_CHECK.contains("## Reader check:"));
+    assert!(FINAL_CHECK.contains("does not require another model call or review workflow"));
+    assert!(WRITE_PLANS_SKILL.contains(concat!(
+        "3. Start writing the plan.\n",
+        "4. After writing the plan, read [Final Check](references/final-check.md) and complete all checks."
+    )));
+    assert!(!WRITE_PLANS_SKILL.contains("# Final Check"));
+    assert!(PLAN_STRUCTURE.contains("(final-check.md#avoid-over-design)"));
+    assert!(!PLAN_STRUCTURE.contains("../SKILL.md#avoid-over-design"));
 }
 
 #[test]
@@ -336,23 +349,23 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         })
         .collect();
     let expected = [
-        ("`### Solution Breakdown and Implementation`", "MUST"),
+        ("`## Solution Breakdown and Implementation`", "MUST"),
         (
-            "`#### Issue N: Description` / `#### Requirement N: Description`",
+            "`### Issue N: Description` / `### Requirement N: Description`",
             "MUST",
         ),
         (
-            "`##### Problem Symptoms` / `##### Requirement Description`",
+            "`#### Problem Symptoms` / `#### Requirement Description`",
             "MUST",
         ),
-        ("`##### Root Cause and Evidence`", "MUST (issues only)"),
-        ("`##### Solution`", "MUST"),
-        ("`###### Solution Explanation`", "MUST"),
-        ("`###### UI Mockup`", "OPTION"),
-        ("`##### Key Decisions Table`", "MUST"),
-        ("`##### Test Cases`", "MUST"),
+        ("`#### Root Cause and Evidence`", "MUST (issues only)"),
+        ("`#### Solution`", "MUST"),
+        ("`##### Solution Explanation`", "MUST"),
+        ("`##### UI Mockup`", "OPTION"),
+        ("`#### Key Decisions Table`", "MUST"),
+        ("`#### Test Cases`", "MUST"),
         ("Other optional chapters", "OPTION"),
-        ("`### Acceptance`", "MUST"),
+        ("`## Acceptance`", "MUST"),
     ];
     assert!(
         rows.windows(expected.len()).any(|rows| rows == expected),
@@ -394,15 +407,15 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         [
             "## Goal",
             "## Plan",
-            "### Solution Breakdown and Implementation",
-            "#### Issue N: Description",
-            "##### Problem Symptoms",
-            "##### Root Cause and Evidence",
-            "##### Solution",
-            "###### Solution Explanation",
-            "##### Key Decisions Table",
-            "##### Test Cases",
-            "### Acceptance",
+            "## Solution Breakdown and Implementation",
+            "### Issue N: Description",
+            "#### Problem Symptoms",
+            "#### Root Cause and Evidence",
+            "#### Solution",
+            "##### Solution Explanation",
+            "#### Key Decisions Table",
+            "#### Test Cases",
+            "## Acceptance",
             "## Todos Board",
         ],
         "the small-issue skeleton must not collapse required headings"
@@ -416,6 +429,19 @@ fn plan_review_prompt_challenges_the_design_without_becoming_a_gate() {
     assert!(s.contains("as simple and elegant as the"));
     assert!(s.contains("does the stated verification really prove the claim"));
     assert!(s.contains("Report gaps as `concern`"));
+    for rule in [
+        "mixed responsibilities",
+        "missing flow branches",
+        "UI mockups without layout",
+        "tests without steps or expected results",
+        "do not impose a fixed template",
+        "in the relevant sections",
+        "removing superseded statements",
+    ] {
+        assert!(s.contains(rule), "missing reviewer rule: {rule}");
+    }
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("text, diagrams, decisions, and tests consistent"));
     // advisory-only 定位不变：不引入 verdict / 门禁。
     assert!(!s.contains("emit a verdict"));
 }
@@ -779,11 +805,9 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         );
     }
 
-    assert!(reviewer_plan.contains("Check that a reader without the chat history can understand"));
-    assert!(reviewer_plan.contains(
-        "what will change, why this approach was chosen, and how completion will be verified"
-    ));
-    assert!(reviewer_plan.contains("without imposing a fixed document template"));
+    assert!(reviewer_plan.contains("Check that a reader without chat history can understand"));
+    assert!(reviewer_plan.contains("the change, rationale, and verification"));
+    assert!(reviewer_plan.contains("do not impose a fixed template"));
     assert!(!reviewer_plan.contains("- Explain problems and technical solutions"));
     assert!(reviewer_plan.contains("one final `kind=Acceptance` todo"));
     for output_field in [
@@ -899,10 +923,11 @@ fn write_plans_keeps_overview_brief_and_omits_optional_chapter_templates() {
         .expect("local skeleton follows overview")
         .0
         .trim();
-    assert_eq!(
-        overview,
-        "Explain the overall flow and core design so readers can get a general understanding of the solution. Small plans do not need this chapter."
-    );
+    assert!(overview.contains("`### Solution Overview` inside `## Plan`"));
+    assert!(overview.contains("Small plans can omit it"));
+    assert!(overview.contains("Define terms on first use"));
+    assert!(!PLAN_STRUCTURE.contains("### Glossary"));
+    assert!(!PLAN_STRUCTURE.contains("###### "));
     for removed in [
         "### 3.3 Implementation and Verification Arrangements",
         "Milestones are delivery boundaries",

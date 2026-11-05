@@ -5011,9 +5011,8 @@ span.tc-attachment-strip__file-chip {
   word-break: break-word;
 }
 
-.tc-plan-preview__body h1,
-.tc-plan-preview__body h2,
-.tc-plan-preview__body h3 {
+.tc-plan-preview__body :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
   line-height: 1.3;
   margin: 1.2em 0 0.5em;
 }
@@ -5024,6 +5023,22 @@ span.tc-attachment-strip__file-chip {
 
 .tc-plan-preview__body h2 {
   font-size: 1.3em;
+}
+
+.tc-plan-preview__body h3 {
+  font-size: 1.2em;
+}
+
+.tc-plan-preview__body h4 {
+  font-size: 1.12em;
+}
+
+.tc-plan-preview__body h5 {
+  font-size: 1.06em;
+}
+
+.tc-plan-preview__body h6 {
+  font-size: 1em;
 }
 
 .tc-plan-preview__body p,
