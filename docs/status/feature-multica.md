@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-06 17:10 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-06 17:40 +0800 | ACTIVE | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -43,6 +43,19 @@ runtime绑定命令 → serve models → 原模型菜单 → 保存原ID → ACP
 - 聚焦复验：`cargo fmt --check` 与 `core::agent_loop::tests::run_basic_test` 50项通过（`1793955322007-ido3t0`）；补丁重放与目标哈希见 `1793955352036-uzmf8i`、包内 `VALIDATION.md`。
 - 以执行前1759个 Tomcat、7308个 Multica 文件哈希快照核对，本轮仅7个既有文件变化；webview/恢复/五分钟逻辑及相关测试、历史文档、Multica 主工作树全部未改，一次性副本已删除。`tests/existing-files.patch` 两处原有空白告警仍单列，不称无排除的整仓检查全绿。
 - 提交本身不重跑测试、不编译、不打包；不推送、不安装、不改真实配置或重启正式服务。
+
+### 2026-11-06：CLI 0.1.87 / 插件 0.2.5 升版与整包
+
+```text
+bump --all patch → CLI 0.1.86→0.1.87 / EXT 0.2.4→0.2.5 / bundled 0.1.87
+      ↓ release 二进制 + package:vsix
+darwin-x64 整包（内含 bin/tomcat 0.1.87）
+```
+
+- 用 `scripts/release-version.mjs bump --all patch` 仅升级一次，让新 EXT 内置新 CLI；升级前、升级后 `check` 均通过，仅五个版本文件的版本字段变化，无依赖变更。
+- 按用户要求打含内置 CLI 的 darwin-x64 整包；未构建 arm64/linux/win32，也未打不含 CLI 的纯插件包。产物在 `tomcat-vscode-ext/dist/`（已被 gitignore），不入库。
+- 首次打包因 `dist/` 目录不存在而 vsce 报 ENOENT，建目录后重打成功；不把失败那次当作通过。
+- 编译 release 二进制并打包属于本轮本地验证，不等于安装或发版；未跑测试套件、未安装、未打 tag、未创建 release。
 
 ### 🔌 INTERFACE (接口变更)
 
