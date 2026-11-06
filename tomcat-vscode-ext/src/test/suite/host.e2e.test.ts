@@ -37,6 +37,7 @@ import {
   assertWebviewResumeCardFlow,
   assertWebviewRetryRecoveryFlow,
   assertAutomaticErrorRecoveryCountdown,
+  assertRequestRetryAndPaginatedResume,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
@@ -199,6 +200,11 @@ suite("Tomcat host E2E", () => {
   test("shows running review progress and settles into pass/fail rows", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewReviewProgressFlow(api);
+  });
+
+  test("request retry feedback and paginated Resume", async function () {
+    this.timeout(120_000);
+    await assertRequestRetryAndPaginatedResume(await getTomcatExtensionApi());
   });
 
   test("automatic error recovery countdown", async function () {

@@ -1534,6 +1534,9 @@ fn model_failure_returns_an_rpc_error_not_success() {
     }]);
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![failure; 8]);
     let fx = ServiceFixture::new(&server.base_url);
+    // This checks the ACP terminal error contract, not the default retry budget.
+    // Keep the scripted server and WAIT bounded even when the default increases.
+    fx.configure(|cfg| cfg.llm.agent_max_attempts = 1);
     let mut client = spawn(&fx);
     initialize(&mut client);
     let session = new_session(&mut client, &fx.0.workspace);

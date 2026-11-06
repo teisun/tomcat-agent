@@ -515,7 +515,7 @@ Note: `tomcat config get` only shows `tomcat.config.toml`. Model connection deta
 tomcat serve --stdio
 ```
 
-`tomcat serve` is the Agent Server entry point for IDE / GUI hosts. In Phase 1, only `--stdio` is exposed:
+`tomcat serve` is the shared Agent Server entry point for IDE / GUI hosts (`start`, `status`, `stop`, `restart`). `--stdio` retains the standalone NDJSON transport:
 
 - Upstream: the host sends one NDJSON command frame per line over stdin (for example `initialize`, `prompt`, `new_session`, `interrupt`)
 - Downstream: tomcat writes only NDJSON response/event frames to stdout, without mixing in normal logs
@@ -529,6 +529,24 @@ tomcat serve --print-schema
 ```
 
 This command prints the schema directory path. That directory contains `serve.schema.json` and `serve.d.ts`.
+
+### Read the Shared-Service Model Catalog
+
+```text
+Multica runtime → its Tomcat executable + launch prefix → serve models
+                → saved configuration and credentials → ListModelsPayload
+                → existing model picker → save original ID → ACP execution
+```
+
+```bash
+tomcat serve models
+```
+
+This read-only command prints one existing `ListModelsPayload` JSON object (`models`, `defaultModelId`, `utilityModelId`, optional `warnings`). It uses the same effective storage directory, agent identity and saved-only configuration/credentials as the shared service, even when that service is stopped. It does not start a service, create a conversation, connect MCP or make a model request. Existing temporary-directory validation may still initialize the normal temp root; it is not a zero-write promise.
+
+Unlike the unchanged human-readable `tomcat model list`, it does not use shell-only model settings or provider keys. An invalid configuration produces a safe diagnostic and nonzero exit. A valid catalog can contain no usable models: Multica's Tomcat adapter then reports discovery failure and asks you to save credentials. A listed model proves local configuration/key presence, not network access, quota or provider health.
+
+Multica invokes the executable bound to that runtime, not whichever `tomcat` happens to be first on your terminal's PATH. Explicit refresh rereads newly saved settings without an adapter cache. Only IDs/providers/key-presence leave the adapter; local endpoints and key-slot metadata do not. The existing creation menu shows failure reasons and allows refresh, a manual model ID or provider default. No toast or new error protocol is added; the details-page error display remains unchanged. A CLI lacking `serve models` reports a clear failure but is not blocked from its existing default/manual ACP execution path.
 
 ### Query a Single Config Item
 

@@ -1308,6 +1308,21 @@ Windows Multica 的受管 Job
 
 **Windows CI 启动边界。** 系统代理由原 Node 脚本串行保存/设置/恢复，两个 Rust 对照用例改由现有 nextest 直接运行，而非 Node 执行裸测试 exe；真实 VS Code 仍走原启动器。nextest 的 [`runner/windows.rs::create_job`](https://github.com/nextest-rs/nextest/blob/main/nextest-runner/src/runner/windows.rs) 给测试自己的 Job 设置 `BREAKAWAY_OK`；两个用例实际查询并记录当前 Job 标志，不符合就失败。[Node 22.23.3 的 `uv__init_global_job_handle`](https://github.com/nodejs/node/blob/v22.23.3/deps/uv/src/win/process.c#L69-L121) 还设置 `SILENT_BREAKAWAY_OK`，会影响下一级 Rust 子进程的继承，所以 runner 必须直接拥有被测 Rust 进程，而不是再包一层整个 Node 脚本。按 [Windows 嵌套 Job 规则](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs)，脱离内层 Job 不代表脱离不允许脱离的外层 Job；本次没有修改 runner 的外层 Job、产品启动参数或受限宿主用例。先前自制 Node detached 包装未解决 CI 启动拒绝，已删除，恢复标准 `execFile`。若 nextest 或 runner 的 Job 条件改变，应重新核对这个测试入口，不能放宽宿主权限或跳过启动/存活断言；实际通过与否仍看同修订 CI 证据。
 
+### 6.1.1 Multica 只读目录发现
+
+```text
+创建页/刷新 → 原模型查询 → daemon 的 runtime 绑定命令
+                         → Tomcat adapter: serve models（15秒预算）
+                         → 服务同身份、saved-only 目录 → 原上报/菜单
+选择原始ID → 保存 agent.model → 原任务载荷 → ACP → 真实 model_name
+```
+
+`tomcat serve models` 复用 `ListModelsPayload`、服务身份解析、保存配置加载及目录构建；服务是否已运行不影响发现。发现不建会话、不启动服务、不调用模型或 MCP；仅保留现有配置校验的 temp 初始化。与当前 shell 视角的文本 `tomcat model list` 不同，它不回退 shell key/模型覆盖。
+
+本次 Multica **新增生产改动仅在 Tomcat adapter**：保留 runtime 的 executable/prefix 和进程树取消边界，不加发现缓存，只把有凭据的原始 ID/provider 投影为宿主模型。零可用模型、超时、命令失败或坏JSON返回 error，复用 daemon `failed/error` 和创建页现有原因/手填提示；不增加通知、错误协议、详情页分支或公共 Query 改动。目录成功不证明网络/余额可用。详情页首次失败空态、刷新失败可能保留旧列表且不显示原因，是本次接受的既有边界。
+
+新目录命令需更新**该 runtime 实际绑定**的 Tomcat；不提高已有 ACP backend 最低版本来阻断旧任务。发现本身读取最新保存目录，而正在执行的 loop 和共享服务仍按各自原配置加载边界生效。安装与重启是用户另行安排的全局操作，Agent 不代为执行。接入包的原始基线与本次增量分开列于 `tomcat-acp-host-integrations/multica-tomcat-acp-integration/VALIDATION.md`。
+
 ### 6.2 停止后继续：原会话不等于原任务续跑
 
 ```text

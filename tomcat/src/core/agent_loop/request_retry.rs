@@ -15,55 +15,32 @@ use super::reasoning_loop::{assemble_request_messages, cache_key_for, validate_r
 use super::types::{unix_ts_ms, AgentLoop, LoopError, StreamOutcome};
 use super::{current_tail_guard, stream_handler};
 use crate::core::llm::{ChatMessage, ChatRequest, MessageKind};
-use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
 use crate::infra::error::{
     is_retryable_llm_error, is_unsupported_multimodal_text, llm_empty_response_error,
     llm_http_status, llm_retry_after_ms, llm_stage, llm_summary, AppError,
 };
 use crate::infra::events::{wire, AgentEvent};
 
-const INTERACTIVE_RETRY_DELAY_CAP_MS: u64 = 8_000;
-const UNATTENDED_RETRY_DELAY_CAP_MS: u64 = 30_000;
-const UNATTENDED_TRANSIENT_MAX_ATTEMPTS: u32 = 10;
+const RETRY_DELAY_CAP_MS: u64 = 30_000;
+// Input repairs and unknown failures keep their existing safety ceiling even
+// when the configured transient retry budget is larger.
+const MAX_REPAIR_ATTEMPTS: u32 = 4;
 
-fn retry_attempt_budget(unattended: bool, interactive_max_attempts: u32) -> u32 {
-    if unattended {
-        UNATTENDED_TRANSIENT_MAX_ATTEMPTS
-    } else {
-        interactive_max_attempts
-    }
-}
-
-#[cfg(test)]
 pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
-    compute_retry_delay_with_cap_ms(
-        base_delay_ms,
-        attempt,
-        jitter_seed,
-        INTERACTIVE_RETRY_DELAY_CAP_MS,
-    )
-}
-
-fn compute_retry_delay_with_cap_ms(
-    base_delay_ms: u64,
-    attempt: u32,
-    jitter_seed: u64,
-    cap_ms: u64,
-) -> u64 {
     if attempt <= 1 || base_delay_ms == 0 {
         return 0;
     }
     let exp = base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(2)));
     let jitter_pct = 80 + (jitter_seed % 41);
-    (exp.saturating_mul(jitter_pct) / 100).min(cap_ms)
+    (exp.saturating_mul(jitter_pct) / 100).min(RETRY_DELAY_CAP_MS)
 }
 
-fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32, cap_ms: u64) -> u64 {
+fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
     let jitter_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::from(d.subsec_nanos()))
         .unwrap_or(20);
-    compute_retry_delay_with_cap_ms(base_delay_ms, attempt, jitter_seed, cap_ms)
+    compute_retry_delay_ms(base_delay_ms, attempt, jitter_seed)
 }
 
 pub(super) async fn run_request(
@@ -71,19 +48,7 @@ pub(super) async fn run_request(
     messages: &mut Vec<ChatMessage>,
     turn_index: usize,
 ) -> Result<StreamOutcome, LoopError> {
-    let unattended = agent.config.unattended_retry
-        || agent
-            .config
-            .plan_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.executing_plan_id())
-            .is_some();
-    let max_attempts = retry_attempt_budget(unattended, agent.config.max_attempts);
-    let delay_cap = if unattended {
-        UNATTENDED_RETRY_DELAY_CAP_MS
-    } else {
-        INTERACTIVE_RETRY_DELAY_CAP_MS
-    };
+    let max_attempts = agent.config.max_attempts;
     let mut last_err: Option<AppError> = None;
     let mut unsupported_multimodal_hits = 0u32;
     let mut attempt = 1;
@@ -99,9 +64,7 @@ pub(super) async fn run_request(
             let delay_ms = last_err
                 .as_ref()
                 .and_then(llm_retry_after_ms)
-                .unwrap_or_else(|| {
-                    next_retry_delay_ms(agent.config.retry_base_delay_ms, attempt, delay_cap)
-                });
+                .unwrap_or_else(|| next_retry_delay_ms(agent.config.retry_base_delay_ms, attempt));
             let error_message = last_err
                 .as_ref()
                 .map(ToString::to_string)
@@ -132,10 +95,7 @@ pub(super) async fn run_request(
             Ok(outcome) => break Ok(outcome),
             Err(error @ (LoopError::Aborted { .. } | LoopError::Fatal(_))) => break Err(error),
             Err(LoopError::Retryable(error)) => {
-                if unattended
-                    && !is_retryable_llm_error(&error)
-                    && attempt >= DEFAULT_AGENT_MAX_ATTEMPTS
-                {
+                if !is_retryable_llm_error(&error) && attempt >= MAX_REPAIR_ATTEMPTS {
                     break Err(LoopError::Fatal(error));
                 }
                 let overflow = crate::infra::error::is_context_overflow(&error);

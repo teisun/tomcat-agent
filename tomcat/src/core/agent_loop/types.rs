@@ -115,11 +115,6 @@ pub struct AgentLoopConfig {
     /// transcript。子 agent 的初始 transcript 仍显式写入相同 system 行，保证
     /// 既有审计格式不变。
     pub system_prompt: Option<String>,
-    /// Explicitly select the larger retry budget for a headless child agent.
-    ///
-    /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
-    /// receive plan-writing capabilities merely to gain a transport retry budget.
-    pub unattended_retry: bool,
     /// 单次 Reasoning Loop 最大工具轮次，网络重试不重置；默认 `usize::MAX`（不限制）；
     /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
@@ -190,7 +185,6 @@ impl Default for AgentLoopConfig {
         Self {
             max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
             system_prompt: None,
-            unattended_retry: false,
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
             thinking_level: None,

@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { LocaleProvider } from "./i18n/LocaleProvider";
 import { translate, type Locale } from "../../src/shared/i18n";
+import { recoveryFixture } from "../../src/ui/webview/tests/errorRecoveryFixture";
 import type {
   HostToWebviewFrame,
   VsCodeApiLike,
@@ -48,6 +49,88 @@ function mount(initialState?: unknown, locale?: Locale) {
     vscodeApi,
   };
 }
+
+describe("request retry feedback", () => {
+  it("projects only the active session's live attempt and removes it on idle", async () => {
+    const { unmount } = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    Object.assign(snapshot.sessionViews.s1, { busy: true, requestRetry: { attempt: 2, maxAttempts: 10 },
+      timeline: [{ type: "message", kind: "user", id: "original", text: "Original input" }] });
+    await emitState({ channel: "state", content: snapshot, messageId: "retry-live" });
+    expect(screen.getByTestId("progress-row-label").textContent).toBe(translate("en", "progress.retrying", { attempt: 2, maxAttempts: 10 }));
+    snapshot.activeSessionId = "s2";
+    await emitState({ channel: "state", content: snapshot, messageId: "retry-other" });
+    expect(screen.queryByTestId("progress-row-label")).toBeNull();
+    snapshot.activeSessionId = "s1";
+    snapshot.sessionViews.s1.requestRetry = { attempt: 3, maxAttempts: 10 };
+    await emitState({ channel: "state", content: snapshot, messageId: "retry-return" });
+    expect(screen.getAllByTestId("progress-row-label")).toHaveLength(1);
+    expect(screen.getByTestId("progress-row-label").textContent).toBe(translate("en", "progress.retrying", { attempt: 3, maxAttempts: 10 }));
+    Object.assign(snapshot.sessionViews.s1, { busy: false, requestRetry: undefined });
+    await emitState({ channel: "state", content: snapshot, messageId: "retry-idle" });
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+    unmount();
+  });
+});
+
+describe("manual recovery App to Provider", () => {
+  const cases: Array<{ name: string; overrides: Partial<WebviewSessionSnapshot> }> = [
+    { name: "ordinary idle", overrides: {} },
+    { name: "pending command", overrides: { commandPending: true } },
+    { name: "unready model", overrides: { modelReady: false } },
+  ];
+  for (const action of ["retry", "resume"] as const) it.each(cases)(`${action}: $name submits once and renders the real rejection`, async ({ overrides }) => {
+    const f = recoveryFixture(action);
+    const view = mount(undefined, "en");
+    try {
+      await f.failed();
+      f.host.stateStore.setReady(true);
+      Object.assign(f.host.stateStore.view().sessionViews.s1, { access: "control", ...overrides });
+      const rpc = action === "retry" ? f.retry : f.resume;
+      rpc.mockRejectedValueOnce(new Error("busy"));
+      if (overrides.commandPending) {
+        f.time.advance(300_000);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(rpc).not.toHaveBeenCalled(); // Automatic recovery retains the stronger idle gate.
+      }
+      let handled = Promise.resolve();
+      view.postMessage.mockImplementation(intent => {
+        if (intent.type === "recoverErrorTurn") handled = f.provider.dispatchTestIntent(intent);
+      });
+      await emitState({ channel: "state", content: f.provider.currentState(), messageId: "provider-ready" });
+      const button = screen.getByTestId("recover-error-turn");
+      expect(button).toHaveProperty("disabled", false);
+      await act(async () => { fireEvent.click(button); await handled; });
+      expect(rpc).toHaveBeenCalledExactlyOnceWith("s1", ...(action === "retry" ? ["user-1"] : []));
+      expect(action === "retry" ? f.resume : f.retry).not.toHaveBeenCalled();
+      await emitState({ channel: "state", content: f.provider.currentState(), messageId: "provider-rejected" });
+      const card = f.card();
+      expect(card).toMatchObject({ recoveryAction: action, recoveryError: expect.any(String) });
+      expect(screen.getByTestId("error-recovery-rejection").textContent).toBe(card?.type === "message" ? card.recoveryError : undefined);
+      expect(screen.getByTestId("recover-error-turn")).toHaveProperty("disabled", false);
+    } finally { view.unmount(); f.provider.dispose(); vi.restoreAllMocks(); }
+  });
+
+  it.each(["busy", "observe"] as const)("does not route an action from a %s session", async gate => {
+    const f = recoveryFixture("resume");
+    const view = mount(undefined, "en");
+    try {
+      f.host.stateStore.setReady(true);
+      Object.assign(f.host.stateStore.view().sessionViews.s1, gate === "busy" ? { busy: true } : { access: "observe" });
+      view.postMessage.mockImplementation(intent => {
+        if (intent.type === "recoverErrorTurn") void f.provider.dispatchTestIntent(intent);
+      });
+      await emitState({ channel: "state", content: f.provider.currentState(), messageId: "provider-blocked" });
+      if (gate === "busy") {
+        const button = screen.getByTestId("recover-error-turn");
+        expect(button).toHaveProperty("disabled", true);
+        fireEvent.click(button);
+      } else expect(screen.queryByTestId("recover-error-turn")).toBeNull();
+      expect(view.postMessage.mock.calls.some(([intent]) => intent.type === "recoverErrorTurn")).toBe(false);
+      expect(f.retry).not.toHaveBeenCalled(); expect(f.resume).not.toHaveBeenCalled();
+    } finally { view.unmount(); f.provider.dispose(); vi.restoreAllMocks(); }
+  });
+});
 
 describe("error recovery countdown projection", () => {
   it("routes cancel and immediate recovery from only the matching error card, retaining manual recovery after cancel", async () => {
@@ -640,6 +723,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     composerDraft: fixture.composerDraft,
     messageQueue: fixture.messageQueue,
     errorRecovery: fixture.errorRecovery,
+    requestRetry: fixture.requestRetry,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,

@@ -15,6 +15,7 @@ mod package_cmd;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod self_install_cmd;
+mod serve_models_cmd;
 mod session_cmd;
 mod skill_cmd;
 pub(crate) mod splash;
@@ -206,6 +207,8 @@ pub enum ServeSub {
     },
     /// 查看服务身份与运行状态（JSON）
     Status,
+    /// 按共享服务的已保存配置列出模型目录（JSON；不启动或连接服务）
+    Models,
     /// 停止共享服务及全部任务
     Stop,
     /// 停止全部任务并用当前版本重启服务
@@ -527,7 +530,7 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
         Commands::Serve {
             print_schema, sub, ..
         } => match sub {
-            Some(ServeSub::Status) => false,
+            Some(ServeSub::Status | ServeSub::Models) => false,
             Some(_) => true,
             None => !print_schema,
         },
@@ -579,31 +582,25 @@ pub fn run_cli() -> Result<(), AppError> {
         _ => {}
     }
 
-    if matches!(
-        cli.command.as_ref(),
-        Some(Commands::Serve {
-            sub: Some(ServeSub::Run { .. }),
-            ..
-        })
-    ) {
-        crate::infra::config::use_saved_configuration_only();
-    }
     let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
-    let (mut cfg, ignored_keys) =
-        crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?;
-    if let Some(Commands::Serve {
-        sub: Some(ServeSub::Run { work_dir, agent_id }),
-        ..
-    }) = &cli.command
-    {
-        if !work_dir.is_absolute() {
-            return Err(AppError::Config(
-                "internal service data directory must be absolute".into(),
-            ));
+    let (cfg, ignored_keys) = match cli.command.as_ref() {
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Models),
+            ..
+        }) => {
+            // This read-only path owns both config loads and their safe errors; no bootstrap.
+            return serve_models_cmd::run(config_path.as_deref());
         }
-        cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
-        cfg.agent.id = agent_id.clone();
-    }
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Run { work_dir, agent_id }),
+            ..
+        }) => crate::api::serve::service::load_saved_configuration(
+            config_path.as_deref(),
+            work_dir,
+            agent_id,
+        )?,
+        _ => crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?,
+    };
     if let Err(e) = validate_config(&cfg) {
         eprintln!(
             "{}",

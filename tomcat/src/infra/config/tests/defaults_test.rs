@@ -60,6 +60,21 @@ fn llm_files_default_expires_after_seconds_is_86400() {
 }
 
 #[test]
+fn agent_retry_defaults_and_saved_overrides() {
+    assert_eq!(AppConfig::default().llm.agent_max_attempts, 10);
+    let defaults: AppConfig = toml::from_str("[llm]\n").unwrap();
+    assert_eq!(defaults.llm.agent_max_attempts, 10);
+    assert_eq!(defaults.llm.agent_retry_base_delay_ms, 500);
+    for max_attempts in [2, 4, 12] {
+        let saved =
+            format!("[llm]\nagent_max_attempts = {max_attempts}\nagent_retry_base_delay_ms = 75\n");
+        let config: AppConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(config.llm.agent_max_attempts, max_attempts);
+        assert_eq!(config.llm.agent_retry_base_delay_ms, 75);
+    }
+}
+
+#[test]
 fn llm_timeout_defaults_match_three_layer_policy() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.llm.stream_timeout_sec, 180);

@@ -74,8 +74,9 @@ Agent Loop 编排模型请求、工具执行、Steering / FollowUp / Abort 和�
 | **Compaction / 附件降级** | 上下文压缩保留 System Prompt + 最近 N 条，对中间历史做摘要或截断，腾出空间；压缩或附件降级后仍在同一请求内再试，消耗原额度，不清零。 |
 | **Abort** | 用户停止；不再发请求，保存已收到的部分内容及已完成工具结果，按原规则收尾。 |
 
-- 交互模式：`max_attempts`（配置默认 **4**）；无人值守临时故障和空答：**10**。均**含首次**，所以10次意味着首次加最多9次重试。
-- 无人值守的其他可恢复错误：当前尝试序号达到默认交互上限4时停止，不因换错误类型再送4次。
+- CHAT、PLAN、EXEC 与子 Agent 共用 `llm.agent_max_attempts`（默认 **10**）及基础退避；均**含首次**，10次意味着首次加最多9次重试。磁盘显式保存的2/4/12等预算在所有入口统一尊重，不隐式迁移。
+- 普通指数退避上限统一为 **30秒**；上游 `Retry-After` 优先且仍可取消，不受30秒截断。
+- 输入修复及未知可恢复错误保留独立的 **4次尝试序号**上限，且不超过本次配置预算；换错误类型不清零计数。
 - 账户、鉴权、内容拒绝等明确错误仍立即结束本次执行。普通未知流错误、Parse 的范围不放宽。
 - `max_tool_rounds` 属于 Reasoning；请求重试既不刷新它，也不额外消耗一个工具轮次。`final_text` 同样跨请求重试保留。
 - provider 的 HTTP 重试不变：例如 Agent 2次 × 每次2次HTTP = 4次HTTP，不等于2次HTTP。标题、压缩、hostcall 不递归套入新循环。
@@ -124,7 +125,7 @@ run_reasoning_loop(messages):                # reasoning_loop.rs：Reasoning
         有后续请求且工具预算未耗尽 → 继续；否则正常收尾
 
 run_request(messages, turn_index):           # request_retry.rs：Request Retry
-    按当前执行模式选择额度；attempt = 1
+    使用主/子 Agent 一致的有效配置额度；attempt = 1
     每次尝试：
         非首次 → auto_retry_start；退避（可被取消）
         run_request_once：guard → 校验结构 → 组装 → 收完整个流 → 终态检查
@@ -154,6 +155,20 @@ run_request(messages, turn_index):           # request_retry.rs：Request Retry
 - RPC 拒绝或 ACK 不确定不盲目再发；已接受后仅刷新失败不重开已点击按钮。新的现场失败才允许新一轮等待，包括复用同一 errorId 的 Resume 再次失败。
 
 实现及验证入口见扩展 `docs/testing-layers.md`。
+
+### 13.3.2 请求进度、Retry 与 Resume
+
+```text
+同一请求的临时失败 → 单行「正在重试，第 N / M 次请求」
+                    → 成功/耗尽/取消/断连：清理瞬态进度
+最终失败 → 最新有效错误 + 完整工具尾部 → Resume（不复制 user）
+                        无工具且有原 user ID → Retry（copy-forward）
+                        证据不足/过期/busy → 不开放不安全动作
+```
+
+Resume 只需要当前完整、有序匹配的工具声明/结果，不要求最初 user 出现在80条历史末页；分页长度和服务端最终校验不变。Retry 仍必须确认原消息 ID。已有五分钟等待与手动按钮复用相同候选；历史重开只恢复手动入口，不重建自动等待。
+
+`requestRetry: { attempt, maxAttempts }` 只是宿主到 webview 的会话瞬态投影，不持久化、不从旧历史重建、不把子 Agent 进度混入父会话。手动恢复的启用和点击统一要求 ready、control、idle；普通发送的草稿/模型/队列门槛不再静默吞掉恢复点击，RPC 拒绝仍行内显示原因。自动恢复继续保留更严格的闲置条件。CLI/ACP 不因此新增五分钟后台计时器。
 
 > **Aborted 语义**（见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md)）：
 > - `LoopError::Aborted { partial_text, partial_messages }` 由 `make_aborted` 构造，`partial_messages = messages[start_idx..]`，天然包含本轮已完成的 `tool_result` 与（若存在）已作为 partial push 的 assistant 消息。
@@ -415,7 +430,7 @@ Steering / FollowUp / `user_with_parts` 都会改变“下一次发给 LLM 的 m
 
 - **单一事实来源**：LLM 错误分类不再靠散落的裸字符串 `contains("503")` / `contains("timeout")` 猜测；统一由 `infra/error/llm.rs` 基于 `LlmErrorStage + http_status` 提供 `is_retryable_llm_error`、`llm_connect_or_network`、`is_context_overflow` 三个判定入口。
 - **provider 重试边界**：`openai` / `openai-responses` 的 provider 层仅在**首个 delta 产出前**对流式建连故障做自动重试；一旦已经开始消费正文，后续 `BodyRead` / `Parse` 等错误必须原样上抛给 Request Retry，避免重复出字。
-- **请求重试退避**：`[llm].agent_retry_base_delay_ms` 默认500ms；指数退避叠加±20% jitter，交互封顶8s、无人值守封顶30s；已有 `Retry-After` 优先。请求额度见13.2，扩展的五分钟冷却见13.3.1。
+- **请求重试退避**：`[llm].agent_retry_base_delay_ms` 默认500ms；指数退避叠加±20% jitter，普通退避统一封顶 30s；已有 `Retry-After` 优先。请求额度见13.2，扩展的五分钟冷却见13.3.1。
 
 ---
 

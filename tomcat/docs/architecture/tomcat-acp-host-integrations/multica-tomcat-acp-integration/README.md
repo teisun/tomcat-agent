@@ -16,19 +16,21 @@ Multica daemon / task workspace
 
 ## 1. 交付内容
 
-- `new-files/server/pkg/agent/tomcat.go`：Tomcat backend 完整实现。
+- `new-files/server/pkg/agent/tomcat.go`：Tomcat backend 完整实现；`tomcat_models.go`：只读模型发现 adapter。
 - `new-files/server/migrations/`：运行时类型白名单的 up/down 示例；编号必须按公司迁移 ledger 调整。
 - `existing-files.patch`：agent factory、daemon 探测、执行环境、模型和版本登记的增量修改。
 - `tests/`：backend、daemon、执行环境、迁移和受控 ACP 集成测试。
 - `examples/runtime-profile.example.json`：无密钥 runtime profile 请求体。
 - `examples/tomcat.config.fragment.toml`、`examples/models.fragment.toml`：Tomcat 执行账号配置片段。
-- `FILES.md`：23 个来源变更路径的逐项清单。
+- `FILES.md`：来源变更路径的逐项清单（原接入与本次目录修复分开说明）。
 - `manifest.json`：来源提交和 SHA-256。
 - `LICENSE`、`NOTICE`：来源 Multica 许可证和归属文件副本。
 
 来源：Multica 基线 `06835b8f50606ca3f8bebbb5d07ac8901f831e69` → 接入提交 `e12a45e59d8bfddf2aba192f163899a9eb290a3b`。Tomcat 依赖代码为 `401b6f0cbd8be8478b5453815450f7ce6ada00e7`。
 
-核心实现确实只有一个 backend 文件；其余生产修改是把它接入已有 runtime、daemon、执行环境和模型流程。不能只复制 `tomcat.go` 后认为集成完成。
+本次目录修复以 Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树为来源，**只把 Tomcat adapter 目录能力与必要测试重放到上述原基线**，没有把后来整个宿主版本倒入旧包。Tomcat 新能力来自 `1f0fbf0c` 基线上的本次工作树（未提交），需要 `serve models`，不能只凭同为 `0.1.86` 判断已具备。原 backend、daemon/execenv 接线与许可证保持原来源；实际文件和补丁以 `manifest.json` 的SHA-256为准。
+
+核心执行仍是 `tomcat.go`；只读目录能力位于 `tomcat_models.go`。原接入需要的 runtime、daemon、execenv 接线仍完整保留；**本次目录修复新增生产改动仅限 `server/pkg/agent/models.go` 的 Tomcat 分支与 `tomcat_models.go`**，不改业务页面、daemon/API/查询/缓存/通知或调度。不能只复制 `tomcat.go` 后认为集成完成。
 
 ## 2. 合并前必须核对
 
@@ -134,6 +136,24 @@ Tomcat 正式共享后台使用保存的 `llm.proxy` 或系统代理；Multica a
 
 `AGENTS.md` 和 `.agents/skills` 由 Multica 既有 execenv 写入/清理。不要把 runtime brief 拼进 prompt，也不要为了测试给 agent custom env 设置 HOME；daemon 的 HOME、Tomcat 数据目录和模型凭据应在服务账号/部署层安排。
 
+### 5.1 发现模型与错误反馈
+
+```text
+创建页/显式刷新 → 原 Query/daemon → runtime executable + prefix + serve models
+                                  → 保存目录/凭据 → 原 ListModelsPayload
+Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agent.model → ACP
+失败 → adapter error → 原 daemon failed/error → 创建页原有失败原因/手填提示
+```
+
+在 daemon 的实际账号与目录下执行 `tomcat serve models`，而不是开发者 shell 中的另一份 `tomcat`。该命令不用已运行服务，不建会话、不调用模型/MCP；保留配置校验可能初始化常规temp目录的既有边界。文本 `tomcat model list` 的shell视角不变。目录包含 `models/defaultModelId/utilityModelId` 及可选warnings；adapter只消费ID/provider/keyPresent，不把端点、Key槽或偏好传到服务端。
+
+- 保存/删除凭据或修改目录后点刷新；adapter不加缓存，不要求重启daemon。
+- 目录只证明本地配置及凭据存在，不证明网关、余额或网络可用。
+- 零可用模型、坏配置/JSON、15秒超时、旧命令不支持都报告错误，不伪造空成功或假模型。
+- 创建页复用现有错误标题、原因、刷新、手填ID和默认路径；不新增toast。详情页首次失败可能空态、刷新失败可能保留旧列表而无原因，保持原状。
+- 默认仍按 agent.model → daemon默认 → Tomcat默认；不把目录第一项强行写成选择。旧CLI发现会报错，但不提高现有ACP最低版本、也不禁止已有手填/default任务。
+- 升级实际runtime绑定的standalone/bundled路径；构建成功不等于安装，安装不等于运行服务已切换。正式安装、PATH和重启由用户另行安排，重启会停止全部共享任务。用户已有 `scripts/start-tomcat.mjs` 及启动文档不在本包中覆盖。
+
 ## 6. 取消、恢复和 Windows
 
 - 单任务取消关闭 ACP forwarder stdin，等待 Tomcat 清理确认；超时才杀掉 backend 自己拥有的进程树，并明确记录共享服务清理未确认。不能把强杀写成“服务内所有工具已停止”。
@@ -178,7 +198,11 @@ pnpm typecheck
   -run '^TestTomcatSharedServeWithHermesClient$' -count=1 -v)
 ```
 
-它使用明确的 Tomcat 二进制、隔离 HOME、本地 HTTP fixture 和假 Key，会真实启动本地服务但不调用外部模型。真实宿主验收仍需另外执行：runtime profile → 本地目录 → 新任务 → 单任务取消 → 原目录/会话继续或明确 fresh → worktree 清理。
+它使用明确的 Tomcat 二进制、隔离 HOME、本地 HTTP fixture 和假 Key，会真实启动本地服务但不调用外部模型；包含发现零请求、会话清单前后不变、原始ID选择及上游model_name验证。
+
+`tests/new-files/e2e/tomcat-model-discovery.spec.ts` 是显式opt-in的创建页旅程，使用现有 `TestApiClient`，不修改页面或mock目录API。运行前按 `VALIDATION.md` 准备独立HOME/registry/PGDATA/端口、loopback provider和本轮二进制；`--ephemeral` 本身不是隔离。测试根与证据目录通过 `TOMCAT_DISCOVERY_FIXTURE_ROOT` / `TOMCAT_DISCOVERY_EVIDENCE` 指定；未准备时skip不计通过。旧基线的页面路径/英文资源/任务载荷可能不同，此E2E源码面向记录的3c7b4cde7版本，不冒称在旧页面上已重放；旧基线接线由Go测试验证。
+
+真实宿主的其它部署验收仍需另外执行：runtime profile → 本地目录 → 新任务 → 单任务取消 → 原目录/会话继续或明确 fresh → worktree 清理。
 
 ## 8. 回退和许可证边界
 

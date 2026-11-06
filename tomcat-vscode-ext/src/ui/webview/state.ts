@@ -385,17 +385,12 @@ function systemNoteTitle(message: Record<string, unknown>): string | null {
   }
 }
 
-function toolCallIds(entry: unknown): string[] {
+function hasToolCalls(entry: unknown): boolean {
   if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) {
-    return [];
+    return false;
   }
   const calls = entry.message.tool_calls ?? entry.message.toolCalls;
-  if (!Array.isArray(calls)) {
-    return [];
-  }
-  return calls.flatMap((call) =>
-    isRecord(call) && typeof call.id === "string" && call.id.trim() ? [call.id] : [],
-  );
+  return Array.isArray(calls) && calls.length > 0;
 }
 
 function toolResultId(entry: unknown): string | null {
@@ -406,13 +401,7 @@ function toolResultId(entry: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-/**
- * Error entries have no direct turn id. The transcript's linear ordering is the durable
- * relation: find the nearest user input, then inspect tool calls in that turn. No calls
- * means replaying the prompt is safe (Retry); all calls paired with results means the
- * transcript itself is ready for a no-input Resume. Incomplete calls are Batch 7's
- * pending-tool recovery and deliberately receive no misleading button here.
- */
+/** Later inputs, assistant output, or errors supersede an earlier failure. */
 function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
   for (let index = errorIndex + 1; index < entries.length; index += 1) {
     const entry = entries[index];
@@ -422,15 +411,47 @@ function isCurrentErrorEntry(entries: unknown[], errorIndex: number): boolean {
     // A later user or assistant row means this failure has already been superseded by a
     // newer attempt. A post-error tool result is hydration repair, not a new turn, and must
     // leave this error visible so the user can still Resume.
-    if (isUserOrAssistantMessageEntry(entry)) {
+    if (isUserOrAssistantMessageEntry(entry) && !isToolMediaEntry(entry)) {
       return false;
     }
   }
   return true;
 }
 
+/** Mirrors the server's has_complete_tail_tool_results guard, using the raw
+ * tail before skipping superseded messages. A paginated-out user is irrelevant;
+ * the owning assistant and exactly ordered results must still be present. */
+function hasCompleteTailToolResults(entries: unknown[]): boolean {
+  const resultIds: string[] = [];
+  let sawRawTail = false;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    const role = messageRole(entry);
+    if (role === null || isToolMediaEntry(entry)) continue;
+    if (!sawRawTail) {
+      if (role !== "tool" || isSupersededMessageEntry(entry)) return false;
+      sawRawTail = true;
+    }
+    if (isSupersededMessageEntry(entry)) continue;
+    if (role === "tool") {
+      const id = toolResultId(entry);
+      if (!id) return false;
+      resultIds.push(id);
+    } else if (role === "assistant" && isRecord(entry) && isRecord(entry.message)) {
+      const calls = entry.message.tool_calls ?? entry.message.toolCalls;
+      return Array.isArray(calls) && calls.length > 0 && calls.length === resultIds.length
+        && calls.every((call, offset) => isRecord(call) && typeof call.id === "string"
+          && call.id.trim().length > 0 && call.id === resultIds[resultIds.length - 1 - offset]);
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
 function buildErrorRecoveryActions(
   entries: unknown[],
+  rawEntries: unknown[],
   sessionBusy: boolean,
   dismissedErrorIds: ReadonlySet<string>,
 ): Map<string, ErrorRecovery> {
@@ -450,6 +471,10 @@ function buildErrorRecoveryActions(
     ) {
       continue;
     }
+    if (hasCompleteTailToolResults(rawEntries)) {
+      actions.set(errorId, { action: "resume" });
+      continue;
+    }
     let userIndex = errorIndex - 1;
     while (userIndex >= 0 && (messageRole(entries[userIndex]) !== "user" || isToolMediaEntry(entries[userIndex]))) {
       userIndex -= 1;
@@ -458,25 +483,12 @@ function buildErrorRecoveryActions(
       continue;
     }
     const targetUserMessageId = historyEntryId(entries[userIndex]);
-    const calls = new Set<string>();
-    const results = new Set<string>();
-    // Hydration may repair a dangling tool call by appending its synthetic result after the
-    // error anchor. Scan through the current history tail so that repaired Shape C becomes
-    // a truthful Resume instead of an unrecoverable dead end.
-    for (let index = userIndex + 1; index < entries.length; index += 1) {
-      for (const callId of toolCallIds(entries[index])) calls.add(callId);
-      if (messageRole(entries[index]) === "tool") {
-        const resultId = toolResultId(entries[index]);
-        if (resultId) results.add(resultId);
-      }
-    }
-    if (calls.size === 0 && targetUserMessageId) {
+    // Retry copies the original input; unlike Resume it requires that input's
+    // durable ID and must not replay any tool calls in this turn.
+    const hasToolActivity = entries.slice(userIndex + 1).some((entry) =>
+      hasToolCalls(entry) || messageRole(entry) === "tool");
+    if (!hasToolActivity && targetUserMessageId) {
       actions.set(errorId, { action: "retry", targetUserMessageId });
-    } else if (calls.size > 0 && [...calls].every((callId) => results.has(callId))) {
-      actions.set(errorId, {
-        action: "resume",
-        targetUserMessageId: targetUserMessageId ?? undefined,
-      });
     }
   }
   return actions;
@@ -2700,6 +2712,7 @@ export class WebviewStateStore {
   setReady(ready: boolean): void {
     this.state.ready = ready;
     this.state.connectionStatus = ready ? "ready" : "connecting";
+    if (!ready) for (const session of Object.values(this.state.sessionViews)) delete session.requestRetry;
   }
 
   setConnectionStatus(status: WebviewConnectionStatus, failure: WebviewStateSnapshot["connectionFailure"] =
@@ -2707,6 +2720,7 @@ export class WebviewStateStore {
     this.state.connectionFailure = failure;
     this.state.connectionStatus = status;
     this.state.ready = status === "ready";
+    if (!this.state.ready) for (const session of Object.values(this.state.sessionViews)) delete session.requestRetry;
   }
 
   /**
@@ -2818,6 +2832,7 @@ export class WebviewStateStore {
     const nextBusy = effectiveBusy(payload.busy, payload.interrupted);
     if (trustBusy) {
       session.busy = nextBusy;
+      if (!nextBusy) delete session.requestRetry;
       this.syncTabBusy(payload.sessionId, nextBusy);
     }
     session.model = payload.model ?? null;
@@ -3215,6 +3230,7 @@ export class WebviewStateStore {
         }
         return NO_SESSION_RENDER_MUTATION;
       case "turn_end": {
+        delete session.requestRetry;
         const summaryTitle =
           "summaryTitle" in frame && typeof frame.summaryTitle === "string"
             ? frame.summaryTitle
@@ -3240,11 +3256,13 @@ export class WebviewStateStore {
         return sessionRenderMutation(session.sessionId);
       }
       case "agent_start":
+        delete session.requestRetry;
         session.busy = true;
         this.syncTabBusy(session.sessionId, true);
         clearActiveAssistant(runtime);
         return sessionRenderMutation(session.sessionId);
       case "agent_end":
+        delete session.requestRetry;
         clearActiveAssistant(runtime);
         {
           const recovery = currentTurnRecoveryAction(session);
@@ -3265,6 +3283,7 @@ export class WebviewStateStore {
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_interrupted":
+        delete session.requestRetry;
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         abortRunningCodeReviewRows(session);
@@ -3273,6 +3292,7 @@ export class WebviewStateStore {
         }
         return sessionRenderMutation(session.sessionId);
       case "agent_idle":
+        delete session.requestRetry;
         session.busy = false;
         this.syncTabBusy(session.sessionId, false);
         settleRunningTools(session);
@@ -3311,9 +3331,13 @@ export class WebviewStateStore {
         );
         return sessionRenderMutation(session.sessionId);
       case "auto_retry_start":
+        if (!session.busy) return NO_SESSION_RENDER_MUTATION;
+        session.requestRetry = { attempt: frame.attempt, maxAttempts: frame.maxAttempts };
+        return sessionRenderMutation(session.sessionId);
       case "auto_retry_end":
-        // Transcript-only diagnostics; an exhausted retry surfaces as agent_end's error card.
-        return NO_SESSION_RENDER_MUTATION;
+        if (!session.requestRetry) return NO_SESSION_RENDER_MUTATION;
+        delete session.requestRetry;
+        return sessionRenderMutation(session.sessionId);
       case "sub_agent_start":
         if (frame.subagentType !== "code_reviewer") {
           pushMessage(
@@ -3659,6 +3683,7 @@ export class WebviewStateStore {
     const branchSummaryTexts = buildBranchSummaryTextLookup(renderableEntries);
     const errorRecoveryActions = buildErrorRecoveryActions(
       renderableEntries,
+      runtime.historyEntries,
       session.busy,
       runtime.dismissedErrorIds,
     );

@@ -308,8 +308,8 @@ func TestTomcatRegistrationAndInputValidation(t *testing.T) {
 			t.Fatalf("accepted cwd %q", cwd)
 		}
 	}
-	catalog, err := ListModels(context.Background(), "tomcat", NewCommand("must-not-run", nil))
-	if err != nil || len(catalog.Models) != 0 || !ModelSelectionSupported("tomcat") {
+	catalog, err := ListModels(context.Background(), "tomcat", NewCommand(filepath.Join(t.TempDir(), "missing-tomcat"), nil))
+	if err == nil || len(catalog.Models) != 0 || !ModelSelectionSupported("tomcat") {
 		t.Fatalf("catalog=%+v err=%v", catalog, err)
 	}
 	if LaunchHeader("tomcat") != "tomcat acp" {

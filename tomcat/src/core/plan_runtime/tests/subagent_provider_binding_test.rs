@@ -36,7 +36,7 @@ use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::NoopStore;
 use crate::infra::config::{AppConfig, ContextConfig, LlmFilesConfig};
 use crate::infra::error::{llm_error, llm_http_status_error, AppError, LlmErrorStage};
-use crate::infra::event_bus::DefaultEventBus;
+use crate::infra::event_bus::{DefaultEventBus, EventBus};
 use crate::infra::TracingAuditRecorder;
 use crate::AllowAllConfirmation;
 use crate::{
@@ -520,6 +520,8 @@ fn reviewer_deps(fx: &BindingFixture, model_override: Option<&str>) -> ProdRevie
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
         checkpoint_store: Arc::new(NoopStore),
         context_config: ContextConfig::default(),
+        agent_max_attempts: AppConfig::default().llm.agent_max_attempts,
+        agent_retry_base_delay_ms: AppConfig::default().llm.agent_retry_base_delay_ms,
         refresh_mutation_stamp: true,
         llm_files_config: LlmFilesConfig::default(),
         sessions_dir: fx.agent_trail_dir.join("sessions"),
@@ -550,6 +552,8 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
         checkpoint_store: Arc::new(NoopStore),
         context_config: ContextConfig::default(),
+        agent_max_attempts: AppConfig::default().llm.agent_max_attempts,
+        agent_retry_base_delay_ms: AppConfig::default().llm.agent_retry_base_delay_ms,
         refresh_mutation_stamp: true,
         llm_files_config: LlmFilesConfig::default(),
         sessions_dir: fx.agent_trail_dir.join("sessions"),
@@ -571,6 +575,100 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
         plan_runtime: Arc::downgrade(&fx.plan_runtime),
         model_override: None,
         fallback_model: "deepseek-v4-flash".into(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn all_subagents_honor_configured_retry_budget_and_delay() {
+    let _g = home_lock().lock().unwrap();
+    for (role, budget) in [
+        ("plan", 2u32),
+        ("code", 4),
+        ("explorer", 12),
+        ("verifier", 2),
+    ] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            name: "fcodex".into(),
+            requests: requests.clone(),
+            streams: Mutex::new(
+                (0..=budget)
+                    .map(|_| {
+                        RecordingStreamPlan::Immediate(vec![Err(llm_http_status_error(
+                            "fcodex",
+                            503,
+                            "temporary failure",
+                        ))])
+                    })
+                    .collect(),
+            ),
+        });
+        let (unused, unused_requests) = RecordingProvider::success("deepseek", "unused");
+        let fx = build_fixture(provider, unused, requests.clone(), unused_requests, false);
+        let bus = Arc::new(DefaultEventBus::new());
+        let retries = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = retries.clone();
+        bus.on(
+            crate::infra::wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |event| {
+                captured.lock().push(event.payload);
+                Ok(())
+            }),
+        );
+        let mut deps = reviewer_deps(&fx, None);
+        deps.agent_max_attempts = budget;
+        deps.agent_retry_base_delay_ms = 37;
+        deps.event_bus = bus.clone();
+        match role {
+            "plan" => {
+                ProdPlanReviewerDispatcher::new("retry_test", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n", true)
+                    .await;
+            }
+            "code" => {
+                ProdCodeReviewerDispatcher::new("retry_test", deps)
+                    .dispatch(
+                        "binding_plan",
+                        "## Goal\nbinding\n",
+                        &super::sample_frontmatter(),
+                        &crate::core::plan_runtime::CodeReviewDispatchInfo {
+                            round: 1,
+                            review_attempt_id: "binding_plan:1".into(),
+                            tool_call_id: "tc-retry".into(),
+                            is_incremental: false,
+                            delta_file_count: 0,
+                        },
+                    )
+                    .await;
+            }
+            "explorer" => {
+                ProdExplorerDispatcher::new("retry_test", deps)
+                    .dispatch(&ExplorerTask {
+                        id: "retry".into(),
+                        prompt: "look around".into(),
+                    })
+                    .await;
+            }
+            "verifier" => {
+                let mut deps = verifier_deps(&fx);
+                deps.agent_max_attempts = budget;
+                deps.agent_retry_base_delay_ms = 37;
+                deps.event_bus = bus;
+                ProdVerifierDispatcher::new("retry_test", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n")
+                    .await;
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(requests.lock().len(), budget as usize, "{role}");
+        let retries = retries.lock();
+        assert_eq!(retries.len(), (budget - 1) as usize, "{role}");
+        assert!(
+            retries.iter().all(|event| event["maxAttempts"] == budget),
+            "{role}"
+        );
+        let first_delay = retries[0]["delayMs"].as_u64().unwrap();
+        assert!((29..=44).contains(&first_delay), "{role}: {first_delay}");
     }
 }
 

@@ -261,8 +261,10 @@ fn nested_guard_separates_service_status_from_lifecycle_commands() {
         let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", action]).unwrap();
         assert_blocked(cli.command.unwrap());
     }
-    let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", "status"]).unwrap();
-    assert_allowed(cli.command.unwrap());
+    for action in ["status", "models"] {
+        let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", action]).unwrap();
+        assert_allowed(cli.command.unwrap());
+    }
 }
 
 #[test]

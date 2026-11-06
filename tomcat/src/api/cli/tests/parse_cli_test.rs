@@ -11,6 +11,29 @@
 use super::super::*;
 
 #[test]
+fn cli_parse_serve_models_is_a_readonly_json_subcommand() {
+    let cli = Cli::try_parse_from(["tomcat", "serve", "models"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Models),
+            ..
+        })
+    ));
+    for flag in ["--stdio", "--ws", "--print-schema"] {
+        assert!(Cli::try_parse_from(["tomcat", "serve", flag, "models"]).is_err());
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["tomcat", "model", "list"])
+            .unwrap()
+            .command,
+        Some(Commands::Model {
+            sub: ModelSub::List
+        })
+    ));
+}
+
+#[test]
 fn cli_parse_acp() {
     let cli = Cli::try_parse_from(["tomcat", "acp"]).unwrap();
     assert!(matches!(

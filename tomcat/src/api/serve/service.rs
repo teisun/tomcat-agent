@@ -132,9 +132,33 @@ pub(crate) fn run(action: ServeSub, cfg: &AppConfig) -> Result<(), AppError> {
                 stop(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: stop phase failed"))?;
                 print_json(&ensure_running(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: start phase failed"))?)
             }
+            ServeSub::Models => unreachable!("models handled before runtime bootstrap"),
             ServeSub::Run { .. } => run_service(cfg).await,
         }
     })
+}
+
+/// The connecting client's identity, resolved before a service changes its working directory.
+pub(crate) fn client_identity(cfg: &AppConfig) -> Result<(PathBuf, String), AppError> {
+    Ok((crate::get_work_dir(cfg)?, cfg.agent.id.clone()))
+}
+
+/// Service startup and offline catalog discovery deliberately ignore ambient model/key overrides.
+pub(crate) fn load_saved_configuration(
+    config_path: Option<&Path>,
+    work_dir: &Path,
+    agent_id: &str,
+) -> Result<(AppConfig, Vec<String>), AppError> {
+    if !work_dir.is_absolute() {
+        return Err(AppError::Config(
+            "internal service data directory must be absolute".into(),
+        ));
+    }
+    crate::infra::config::use_saved_configuration_only();
+    let (mut cfg, ignored) = crate::infra::config::load_config_with_ignored_keys(config_path)?;
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    cfg.agent.id = agent_id.to_owned();
+    Ok((cfg, ignored))
 }
 
 pub(super) fn service_command(cfg: &AppConfig) -> Result<Command, AppError> {
@@ -154,11 +178,12 @@ pub(super) fn service_command(cfg: &AppConfig) -> Result<Command, AppError> {
         command.env_remove(key);
     }
     // Carry the resolved data directory across the cwd change, including relative configurations.
+    let (work_dir, agent_id) = client_identity(cfg)?;
     command
         .args(["serve", "run", "--work-dir"])
-        .arg(crate::get_work_dir(cfg)?)
+        .arg(work_dir)
         .arg("--agent-id")
-        .arg(&cfg.agent.id);
+        .arg(agent_id);
     Ok(command)
 }
 

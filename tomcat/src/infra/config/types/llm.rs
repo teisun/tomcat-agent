@@ -145,6 +145,7 @@ pub struct LlmConfig {
     pub retry_count: u32,
     /// 每次逻辑模型请求的尝试上限（含首次）；provider 内部 HTTP 重试不变。
     /// 压缩、空答、附件降级仍消耗当前请求额度；下一份可接受回复才开启新额度。
+    /// 所有会话模式与子 Agent 统一默认 10 次，显式保存的值保持有效。
     #[serde(default = "default_agent_max_attempts")]
     pub agent_max_attempts: u32,
     /// Agent 单请求重试的指数退避基础延迟（毫秒）。
@@ -381,7 +382,7 @@ fn default_llm_retry_count() -> u32 {
     3
 }
 
-pub const DEFAULT_AGENT_MAX_ATTEMPTS: u32 = 4;
+pub const DEFAULT_AGENT_MAX_ATTEMPTS: u32 = 10;
 pub const DEFAULT_AGENT_RETRY_BASE_DELAY_MS: u64 = 500;
 pub const DEFAULT_LLM_STREAM_TIMEOUT_SEC: u64 = 180;
 pub const DEFAULT_LLM_NON_STREAM_STALE_TIMEOUT_SEC: u64 = 300;

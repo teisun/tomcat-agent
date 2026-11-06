@@ -16,6 +16,10 @@
 - [ ] daemon 服务环境拥有正确 HOME、Tomcat 数据目录、模型配置和 Key。
 - [ ] `tomcat serve status`、模型设置和代理配置在同一执行账号下检查。
 - [ ] 没有把 `HOME/PATH/TMP/MULTICA_*` 通过 agent custom_env 注入。
+- [ ] 模型目录使用实际runtime的 `serve models`，不创建临时ACP会话或调用付费模型；缺凭据模型不展示。
+- [ ] 零模型/旧命令/坏配置/超时经原failed/error到创建页原因提示；默认/手填路径仍可用，无新增toast或页面生产改动。
+- [ ] 保存/删除凭据后显式刷新可见最新目录；保存的是原始ID，ACP执行使用对应model_name。
+- [ ] 已读取桌面/窄屏PNG、ARIA及console；目录成功没有被当作网关/额度健康证明。
 
 ## C. 受控 Multica 旅程
 

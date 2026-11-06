@@ -1543,32 +1543,16 @@ pub(crate) async fn handle_command(
                 }
             };
             let catalog = resolve_model_catalog_snapshot(&state)?;
-            let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
-            let default_model_id = config.llm.default_model.trim().to_string();
-            let utility_model_id = config
-                .llm
-                .title_model
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let payload = list_models_payload(&config, &catalog, Some(&state.shared_model_prefs));
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.active_session_id(),
-                Some(
-                    serde_json::to_value(ListModelsPayload {
-                        models,
-                        default_model_id,
-                        utility_model_id,
-                        warnings: catalog.diagnostics().to_vec(),
-                    })
-                    .map_err(|error| {
-                        AppError::Config(crate::infra::i18n::tr(
-                            "serve.serializeFailed",
-                            &[("name", "list_models"), ("detail", &error.to_string())],
-                        ))
-                    })?,
-                ),
+                Some(serde_json::to_value(payload).map_err(|error| {
+                    AppError::Config(crate::infra::i18n::tr(
+                        "serve.serializeFailed",
+                        &[("name", "list_models"), ("detail", &error.to_string())],
+                    ))
+                })?),
             )))?;
         }
         ServeCommand::UpsertModel { id, model } => {
@@ -2805,6 +2789,30 @@ fn resolve_connector_registry_for_context(
         workspace_root.as_deref(),
         state.child_environment(),
     )
+}
+
+/// One catalog projection for the Native/ACP command and offline `serve models`.
+/// Offline discovery does not load the preference store (loading can create/repair files).
+pub(crate) fn list_models_payload(
+    config: &AppConfig,
+    catalog: &crate::core::llm::ModelCatalog,
+    prefs: Option<&crate::ModelPrefsStore>,
+) -> ListModelsPayload {
+    ListModelsPayload {
+        models: match prefs {
+            Some(prefs) => list_model_views_with_prefs(catalog, prefs),
+            None => crate::core::llm::list_model_views(catalog),
+        },
+        default_model_id: config.llm.default_model.trim().to_owned(),
+        utility_model_id: config
+            .llm
+            .title_model
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        warnings: catalog.diagnostics().to_vec(),
+    }
 }
 
 fn resolve_model_catalog_snapshot(

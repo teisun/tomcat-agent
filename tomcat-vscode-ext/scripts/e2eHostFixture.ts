@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { TEST_DEFAULT_CWD_ENV, TEST_HISTORY_PAGE_GATE_FILE } from "../src/constants";
+import { longFailedToolHistory } from "../src/ui/webview/tests/recoveryHistory";
 
 export interface HostE2eFixture {
   attachmentRootDir: string;
@@ -1850,6 +1851,19 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("request retry feedback showcase")) {
+    send({ type: "auto_retry_start", sessionId, attempt: 2, maxAttempts: 10, delayMs: 1000, errorMessage: "overloaded" });
+    // Remain in-flight until the journey uses the existing interrupt path.
+    return;
+  }
+
+  if (text.includes("long resume card showcase")) {
+    session.longResumeShowcase = true;
+    session.history.push(...${JSON.stringify(longFailedToolHistory().full.messages.slice(1))});
+    finishTurn(sessionId, "Upstream overloaded");
+    return;
+  }
+
   if (text.includes("resume card showcase")) {
     const tool = {
       args: { path: "README.md" },
@@ -2711,7 +2725,9 @@ function handleCommand(frame) {
         Number.isInteger(requestedCursor) && requestedCursor > 0
           ? Math.min(requestedCursor, session.history.length)
           : session.history.length;
-      const start = Math.max(0, endExclusive - requestedLimit);
+      let start = Math.max(0, endExclusive - requestedLimit);
+      // This fixture has one call per assistant; reproduce serve's atomic leading group.
+      if (session.longResumeShowcase && start > 0 && session.history[start]?.message?.role === "tool") start -= 1;
       const messages = session.history.slice(start, endExclusive).map(entry => {
         if (entry.message?.role !== "tool" || !Array.isArray(entry.message.content)) return entry;
         return {...entry,message:{...entry.message,content:entry.message.content.map(part => {

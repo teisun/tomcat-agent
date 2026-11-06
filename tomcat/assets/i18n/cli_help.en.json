@@ -100,6 +100,7 @@
   "tomcat.serve.start": "Start or reuse the local shared service",
   "tomcat.serve.start.foreground": "Run in the current terminal",
   "tomcat.serve.status": "Show service identity and running status as JSON",
+  "tomcat.serve.models": "List the shared service's saved model catalog as JSON without starting or connecting to the service",
   "tomcat.serve.stop": "Stop the shared service and all tasks",
   "tomcat.serve.restart": "Stop all tasks and restart with the current version",
   "tomcat.serve.run": "Internal service process entry point",

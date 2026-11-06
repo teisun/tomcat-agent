@@ -140,6 +140,7 @@ export const zhCN = {
   "todo.progress": "待办（{current}/{total}）",
   "todo.activeProgress": "{content}（{current}/{total}）",
   "progress.working": "仍在处理中",
+  "progress.retrying": "正在重试，第 {attempt} / {maxAttempts} 次请求",
   "attachment.pending": "待发送附件",
   "attachment.history": "已附加图片",
   "attachment.open": "打开 {name}",

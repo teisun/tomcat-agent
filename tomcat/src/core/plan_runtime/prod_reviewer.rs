@@ -68,6 +68,8 @@ pub struct ProdReviewerDeps {
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
+    pub agent_max_attempts: u32,
+    pub agent_retry_base_delay_ms: u64,
     /// 每个子 Agent 的 read 去重表必须独立；这里只传同一份配置，而非共享状态。
     pub refresh_mutation_stamp: bool,
     pub llm_files_config: LlmFilesConfig,
@@ -305,6 +307,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let max_attempts = deps.agent_max_attempts;
+        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
         let binding = runtime.main_call;
         let transcript_model = binding.catalog_id().to_string();
 
@@ -352,12 +356,10 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         system_text.push_str(skill_prompt);
                     }
                     let cfg = AgentLoopConfig {
-                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        max_attempts,
                         system_prompt: Some(system_text.clone()),
-                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms:
-                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+                        retry_base_delay_ms,
                         thinking_level,
                         speed,
                         session_id: child_session_id.clone(),
@@ -566,6 +568,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let max_attempts = deps.agent_max_attempts;
+        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
         let binding = runtime.main_call;
         let transcript_model = binding.catalog_id().to_string();
 
@@ -630,12 +634,10 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         system_text.push_str(skill_prompt);
                     }
                     let cfg = AgentLoopConfig {
-                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        max_attempts,
                         system_prompt: Some(system_text.clone()),
-                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms:
-                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+                        retry_base_delay_ms,
                         thinking_level,
                         speed,
                         session_id: child_session_id.clone(),
@@ -931,6 +933,8 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let max_attempts = deps.agent_max_attempts;
+        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
         let binding = runtime.main_call;
         let transcript_model = binding.catalog_id().to_string();
 
@@ -988,12 +992,10 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         turns_limit
                     );
                     let cfg = AgentLoopConfig {
-                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        max_attempts,
                         system_prompt: Some(system_text.clone()),
-                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms:
-                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+                        retry_base_delay_ms,
                         thinking_level,
                         speed,
                         session_id: child_session_id.clone(),

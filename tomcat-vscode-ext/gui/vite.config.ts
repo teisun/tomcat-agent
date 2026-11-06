@@ -34,6 +34,7 @@ export default defineConfig({
     },
   },
   test: {
+    alias: { vscode: path.resolve(__dirname, "../tests/stubs/vscode.ts") },
     environment: "jsdom",
     globals: true,
     /**

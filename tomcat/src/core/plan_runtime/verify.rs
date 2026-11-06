@@ -245,6 +245,8 @@ pub struct ProdVerifierDeps {
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
+    pub agent_max_attempts: u32,
+    pub agent_retry_base_delay_ms: u64,
     /// 与根会话相同的 read-stamp 刷新策略；状态本身在每个子 Agent 内独立。
     pub refresh_mutation_stamp: bool,
     pub llm_files_config: LlmFilesConfig,
@@ -389,6 +391,8 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
+        let max_attempts = deps.agent_max_attempts;
+        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
         let binding = runtime.main_call;
         let transcript_model = binding.catalog_id().to_string();
         let mut system_text = format!(
@@ -440,12 +444,10 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                     let initial_message_sink = transcript_sink.clone();
 
                     let cfg = AgentLoopConfig {
-                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        max_attempts,
                         system_prompt: Some(system_text.clone()),
-                        unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms:
-                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+                        retry_base_delay_ms,
                         thinking_level,
                         speed,
                         session_id: child_session_id.clone(),
