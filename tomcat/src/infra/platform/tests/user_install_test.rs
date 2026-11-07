@@ -295,8 +295,16 @@ fn finish_interrupted_copy(mut child: CopyChild, bin: &Path, entry: &Path) {
         );
         let staged = std::fs::read_dir(bin).unwrap().any(|item| {
             let item = item.unwrap();
-            item.file_name().to_string_lossy().ends_with(".tmp")
-                && item.metadata().unwrap().len() >= 1024
+            if !item.file_name().to_string_lossy().ends_with(".tmp") {
+                return false;
+            }
+            // Observe bytes through a fresh handle while the writer is open,
+            // rather than relying on a directory entry's cached file size.
+            let mut bytes = [0; 1024];
+            std::fs::File::open(item.path())
+                .and_then(|mut file| file.read_exact(&mut bytes))
+                .is_ok()
+                && bytes == [b'n'; 1024]
         });
         if staged {
             break;
@@ -310,6 +318,16 @@ fn finish_interrupted_copy(mut child: CopyChild, bin: &Path, entry: &Path) {
     child.0.kill().unwrap();
     assert!(!child.0.wait().unwrap().success());
     assert_eq!(std::fs::read(entry).unwrap(), b"complete old executable");
+    // A hard kill may retain an unpublished .tmp, never an early parked .old.
+    let name = file_name(entry);
+    let prefix = format!(".{name}.");
+    let remaining = sorted_file_names(bin);
+    assert!(
+        remaining
+            .iter()
+            .all(|file| file == &name || (file.starts_with(&prefix) && file.ends_with(".tmp"))),
+        "unexpected files after interruption: {remaining:?}"
+    );
     let source = bin.parent().unwrap().join("repair-source");
     std::fs::write(&source, b"complete new executable").unwrap();
     install_user_command(&source, bin, "tomcat").unwrap();
