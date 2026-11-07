@@ -20,7 +20,7 @@ export async function prepareMulticaDiscovery(source: string, output: string) {
     const archive = path.join(root, "source.tar");
     await exec("git", ["-C", source, "archive", "--format=tar", `--output=${archive}`, revision, "server"]);
     const sourceArchiveSha256 = await hash(archive);
-    await exec("tar", ["-xf", archive, "-C", root]);
+    await exec("tar", ["-xf", path.basename(archive)], { cwd: root });
     const moduleRoot = path.join(root, "server");
     const probeRoot = path.join(moduleRoot, "cmd/tomcat-discovery-acceptance");
     await fs.mkdir(probeRoot);

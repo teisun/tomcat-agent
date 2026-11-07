@@ -278,6 +278,8 @@ fn is_stale_tomcat_target_export(line: &str) -> bool {
 
 #[cfg(unix)]
 fn prune_stale_lines(content: &str) -> String {
+    // Only our marker establishes ownership; unmarked target paths may be
+    // deliberate user settings and must survive automatic maintenance.
     let lines = content.lines().collect::<Vec<_>>();
     let mut result = Vec::with_capacity(lines.len());
     let mut changed = false;
@@ -292,11 +294,6 @@ fn prune_stale_lines(content: &str) -> String {
         {
             changed = true;
             index += 2;
-            continue;
-        }
-        if is_stale_tomcat_target_export(line) {
-            changed = true;
-            index += 1;
             continue;
         }
         result.push(line);

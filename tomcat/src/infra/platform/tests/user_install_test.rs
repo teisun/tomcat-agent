@@ -502,24 +502,26 @@ fn path_export_targets_cover_shell_profiles() {
 
 #[cfg(unix)]
 #[test]
-fn prune_stale_lines_removes_only_target_exports() {
+fn prune_stale_lines_removes_only_marked_target_exports() {
     let content = r#"
 # Added by tomcat init
 export PATH="/tmp/project/target/release:$PATH"
 # Added by tomcat init
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="/usr/local/bin:$PATH"
+export PATH="/tmp/user-tool/target/release:$PATH"
 # Added by tomcat init
 export PATH="/tmp/project/target/debug/deps:$PATH"
 "#;
     let pruned = prune_stale_lines(content);
     assert!(
-        !pruned.contains("/target/release") && !pruned.contains("/target/debug/deps"),
+        !pruned.contains("/tmp/project/target/"),
         "target exports should be removed, got:\n{pruned}"
     );
     assert!(
         pruned.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
-            && pruned.contains("export PATH=\"/usr/local/bin:$PATH\""),
+            && pruned.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && pruned.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "valid exports should remain, got:\n{pruned}"
     );
 }
@@ -570,6 +572,7 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
             "# Added by tomcat init",
             "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
             "export PATH=\"/usr/local/bin:$PATH\"",
+            "export PATH=\"/tmp/user-tool/target/release:$PATH\"",
         ]
         .join("\n"),
     )
@@ -590,7 +593,7 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
 
     let bashrc_content = std::fs::read_to_string(&bashrc).unwrap();
     assert!(
-        !bashrc_content.contains("/target/"),
+        !bashrc_content.contains("/tmp/project/target/"),
         "stale target exports should be pruned, got:\n{bashrc_content}"
     );
     assert_eq!(
@@ -601,7 +604,8 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
         "stable export should appear exactly once, got:\n{bashrc_content}"
     );
     assert!(
-        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && bashrc_content.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "user exports must be preserved, got:\n{bashrc_content}"
     );
 }

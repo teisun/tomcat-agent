@@ -1543,7 +1543,7 @@ fn test_init_bash_profile_source_idempotent() {
     );
 }
 
-/// bash 场景下，init 会先清理旧的 target/* PATH 垃圾，再补一条稳定的 ~/.local/bin。
+/// bash：init 只清理带 Tomcat 标记的旧 target/* PATH 行，保留用户导出并补稳定入口。
 #[cfg(unix)]
 #[test]
 fn test_init_prunes_stale_target_paths_from_shell_profile() {
@@ -1560,6 +1560,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
             "# Added by tomcat init",
             "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
             "export PATH=\"/usr/local/bin:$PATH\"",
+            "export PATH=\"/tmp/user-tool/target/release:$PATH\"",
         ]
         .join("\n"),
     )
@@ -1573,7 +1574,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
 
     let bashrc_content = fs::read_to_string(&bashrc).unwrap();
     assert!(
-        !bashrc_content.contains("/target/"),
+        !bashrc_content.contains("/tmp/project/target/"),
         "expected stale target exports to be pruned, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1586,7 +1587,8 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
         trunc(&bashrc_content, 500)
     );
     assert!(
-        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && bashrc_content.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "expected user-managed PATH lines to survive prune, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1686,6 +1688,13 @@ fn test_self_install_add_to_path_is_idempotent_without_bootstrap() {
     let work = home.path().join(".tomcat");
     fs::create_dir(&work).unwrap();
     fs::write(work.join("tomcat.config.toml"), "[broken configuration").unwrap();
+    for name in [".zprofile", ".zshrc"] {
+        fs::write(
+            home.path().join(name),
+            "# Added by tomcat init\nexport PATH=\"/tmp/project/target/debug:$PATH\"\nexport PATH=\"/tmp/user-tool/target/release:$PATH\"\n",
+        )
+        .unwrap();
+    }
     for key in ["cli.selfInstall.updated", "cli.selfInstall.unchanged"] {
         let output = common::serve::isolated_serve_command(home.path())
             .args(["self-install", "--add-to-path"])
@@ -1702,6 +1711,8 @@ fn test_self_install_add_to_path_is_idempotent_without_bootstrap() {
     }
     for name in [".zprofile", ".zshrc"] {
         let profile = fs::read_to_string(home.path().join(name)).unwrap();
+        assert!(!profile.contains("/tmp/project/target/"));
+        assert!(profile.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""));
         assert_eq!(
             profile
                 .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
