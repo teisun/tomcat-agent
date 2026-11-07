@@ -221,6 +221,10 @@ jobs:
             fi
             cargo test --locked --test nested_cli_guard_tests nested_models_is_allowed_but_service_lifecycle_and_installation_remain_blocked
           } 2>&1 | tee "../.agents/acceptance/cli-discovery/${{ matrix.target }}/installer-tests.log"
+      - name: Verify schema generation leaves the caller HOME untouched
+        run: |
+          set -euo pipefail
+          npm run test:integration -- tests/gen_wire_home_isolation.test.ts 2>&1 | tee "../.agents/acceptance/cli-discovery/${{ matrix.target }}/schema-home-isolation.log"
       - name: Build fixed Multica and Tomcat-owned path observer in a disposable source copy
         run: node --import tsx scripts/multicaCliDiscovery.ts ../.agents/multica-source "../.agents/acceptance/cli-discovery/${{ matrix.target }}"
       - name: Build real native CLI and extension

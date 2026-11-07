@@ -14,16 +14,25 @@ const checkOnly = process.argv.includes("--check");
 
 function runPrintSchema(schemaOutDir: string): void {
   const cargoCommand = resolveCargoCommand();
+  // Schema export bootstraps ordinary Tomcat data too. Own it inside the
+  // existing disposable output directory; preserve the toolchain and Agent guard.
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("TOMCAT__")) delete env[key];
+  }
+  Object.assign(env, {
+    HOME: schemaOutDir, USERPROFILE: schemaOutDir,
+    CARGO_HOME: process.env.CARGO_HOME || path.join(os.homedir(), ".cargo"),
+    RUSTUP_HOME: process.env.RUSTUP_HOME || path.join(os.homedir(), ".rustup"),
+    TOMCAT__SERVE__SCHEMA_OUT_DIR: schemaOutDir,
+  });
   const result = spawnSync(
     cargoCommand,
     ["run", "--bin", "tomcat", "--", "serve", "--print-schema"],
     {
       cwd: tomcatCliRoot,
       encoding: "utf8",
-      env: {
-        ...process.env,
-        TOMCAT__SERVE__SCHEMA_OUT_DIR: schemaOutDir,
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
