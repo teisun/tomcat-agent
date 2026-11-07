@@ -20,7 +20,6 @@ type CommandRunner = (
 type FileExists = (targetPath: string, platform: NodeJS.Platform) => Promise<boolean>;
 
 export interface ResolveTomcatExecutableOptions {
-  bundledPath?: string;
   commandRunner?: CommandRunner;
   configuredPath?: string;
   env?: NodeJS.ProcessEnv;
@@ -34,7 +33,7 @@ export interface ResolvedTomcatExecutable {
   executable: string;
   found: boolean;
   source:
-    | "bundled"
+    | "user-bin"
     | "common-path"
     | "config"
     | "default"
@@ -132,6 +131,11 @@ async function lookupOnLoginShellPath(
   return undefined;
 }
 
+function userExecutablePath(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+  const home = env.HOME ?? env.USERPROFILE;
+  return home ? path.join(home, ".local", "bin", platform === "win32" ? "tomcat.exe" : TOMCAT_EXECUTABLE_NAME) : undefined;
+}
+
 function commonInstallPaths(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
@@ -139,13 +143,11 @@ function commonInstallPaths(
   const home = env.HOME ?? env.USERPROFILE ?? "";
   if (platform === "win32") {
     return unique([
-      home ? path.join(home, ".local", "bin", "tomcat.exe") : undefined,
       home ? path.join(home, "bin", "tomcat.exe") : undefined,
     ]);
   }
 
   return unique([
-    home ? path.join(home, ".local", "bin", TOMCAT_EXECUTABLE_NAME) : undefined,
     home ? path.join(home, "bin", TOMCAT_EXECUTABLE_NAME) : undefined,
     "/opt/homebrew/bin/tomcat",
     "/usr/local/bin/tomcat",
@@ -211,12 +213,12 @@ export async function resolveTomcatExecutable(
     };
   }
 
-  const bundledPath = options.bundledPath?.trim();
-  if (bundledPath && await fileExists(bundledPath, platform)) {
+  const userPath = userExecutablePath(platform, env);
+  if (userPath && await fileExists(userPath, platform)) {
     return {
-      executable: bundledPath,
+      executable: userPath,
       found: true,
-      source: "bundled",
+      source: "user-bin",
     };
   }
 

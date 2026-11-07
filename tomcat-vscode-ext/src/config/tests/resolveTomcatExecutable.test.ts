@@ -24,7 +24,6 @@ describe("resolveTomcatExecutable", () => {
 
   it("keeps an explicit configured path", async () => {
     const resolved = await resolveTomcatExecutable({
-      bundledPath: "/bundled/tomcat",
       commandRunner: async () => "",
       configuredPath: "/custom/bin/tomcat",
       fileExists: async (targetPath) => targetPath === "/custom/bin/tomcat",
@@ -38,25 +37,21 @@ describe("resolveTomcatExecutable", () => {
     });
   });
 
-  it("prefers the bundled executable after explicit config is ruled out", async () => {
+  it("prefers the user command over an older PATH entry without spawning a locator", async () => {
+    const installed = path.join("/Users/tester", ".local", "bin", "tomcat");
+    const commandRunner = vi.fn(async () => { throw new Error("must not run a locator"); });
     const resolved = await resolveTomcatExecutable({
-      bundledPath: "/extension/bin/tomcat",
-      commandRunner: async () => {
-        throw new Error("should not reach PATH when bundled exists");
-      },
-      fileExists: async (targetPath) => targetPath === "/extension/bin/tomcat",
+      env: { HOME: "/Users/tester", PATH: "/old/bin" },
+      commandRunner,
+      fileExists: async () => true,
+      platform: "darwin",
     });
-
-    expect(resolved).toEqual({
-      executable: "/extension/bin/tomcat",
-      found: true,
-      source: "bundled",
-    });
+    expect(resolved).toEqual({ executable: installed, found: true, source: "user-bin" });
+    expect(commandRunner).not.toHaveBeenCalled();
   });
 
-  it("falls through to PATH discovery when the bundled executable is absent", async () => {
+  it("falls through to external PATH discovery when the user command is absent", async () => {
     const resolved = await resolveTomcatExecutable({
-      bundledPath: "/extension/bin/tomcat",
       commandRunner: async () => { throw new Error("unexpected command"); },
       env: { PATH: "/missing:/usr/local/bin" },
       fileExists: async (candidate) => candidate === "/usr/local/bin/tomcat",
@@ -106,8 +101,24 @@ describe("resolveTomcatExecutable", () => {
     expect(resolved).toEqual({
       executable: installed,
       found: true,
-      source: "common-path",
+      source: "user-bin",
     });
+  });
+
+  it("does not replace an invalid explicit override with the user command", async () => {
+    const resolved = await resolveTomcatExecutable({
+      env: { HOME: "/test-home" }, configuredPath: "/invalid/custom-tomcat", pathWasConfigured: true,
+      fileExists: async candidate => candidate !== "/invalid/custom-tomcat",
+    });
+    expect(resolved).toEqual({ executable: "/invalid/custom-tomcat", found: false, source: "config" });
+  });
+
+  it("uses HOME ahead of USERPROFILE like the CLI installer", async () => {
+    const executable = path.join("/owned-home", ".local", "bin", "tomcat.exe");
+    expect(await resolveTomcatExecutable({
+      env: { HOME: "/owned-home", USERPROFILE: "/other-home" }, platform: "win32",
+      fileExists: async candidate => candidate === executable,
+    })).toEqual({ executable, found: true, source: "user-bin" });
   });
 
   it("returns the default command when discovery fails", async () => {
@@ -175,15 +186,14 @@ describe("resolveTomcatExecutable", () => {
   });
 
   describe("on win32", () => {
-    it("accepts a bundled tomcat.exe without the POSIX execute bit", async () => {
+    it("accepts a user-installed tomcat.exe without the POSIX execute bit", async () => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-resolve-"));
-      const bundledPath = path.join(dir, "tomcat.exe");
+      const executable = path.join(dir, ".local", "bin", "tomcat.exe");
       try {
-        await fs.writeFile(bundledPath, "MZ", { mode: 0o644 });
-
-        await expect(
-          resolveTomcatExecutable({ bundledPath, env: {}, platform: "win32" }),
-        ).resolves.toEqual({ executable: bundledPath, found: true, source: "bundled" });
+        await fs.mkdir(path.dirname(executable), { recursive: true });
+        await fs.writeFile(executable, "MZ", { mode: 0o644 });
+        await expect(resolveTomcatExecutable({ env: { HOME: dir }, platform: "win32" }))
+          .resolves.toEqual({ executable, found: true, source: "user-bin" });
       } finally {
         await fs.rm(dir, { force: true, recursive: true });
       }
@@ -191,11 +201,11 @@ describe("resolveTomcatExecutable", () => {
 
     it("scans PATH in order and skips the POSIX login-shell lookup", async () => {
       const commandRunner = vi.fn(async () => { throw new Error("unexpected command"); });
-      const installed = "C:\\Users\\tester\\.local\\bin\\tomcat.exe";
+      const installed = "C:\\External\\tomcat.exe";
       const checked: string[] = [];
       const resolved = await resolveTomcatExecutable({
         commandRunner,
-        env: { PATH: '; "C:\\missing dir" ;C:\\Users\\tester\\.local\\bin;C:\\other', USERPROFILE: "C:\\Users\\tester" },
+        env: { PATH: '; "C:\\missing dir" ;C:\\External;C:\\other' },
         fileExists: async (candidate) => { checked.push(candidate); return candidate === installed; },
         platform: "win32",
       });
@@ -216,7 +226,7 @@ describe("resolveTomcatExecutable", () => {
         platform: "win32",
       });
 
-      expect(resolved).toEqual({ executable: installed, found: true, source: "common-path" });
+      expect(resolved).toEqual({ executable: installed, found: true, source: "user-bin" });
     });
   });
 });

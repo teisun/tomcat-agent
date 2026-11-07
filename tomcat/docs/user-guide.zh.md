@@ -41,7 +41,9 @@ GitHub Release
    -> 在 Tomcat 设置里配置模型，然后开始聊（不必去终端跑 init）
 ```
 
-扩展包怎么选、怎么安装、装完后 bundled CLI 住在哪里，统一看：
+平台扩展会自动安装/更新统一默认入口 `~/.local/bin/tomcat`（Windows 为 `tomcat.exe`），再使用这个入口；包内文件只作安装素材。独立安装也使用同一位置，每次平台扩展激活都可能把它换回包内程序，包括更新的或同版本的开发构建，没有关闭维护的开关。Multica 沿用 PATH/登录 shell 发现；PATH 变化后请重新打开终端或桌面应用。
+
+扩展包选择、显式覆盖、卸载边界，以及设置页版本信息下方、断线也能用的**查看日志**入口，统一看：
 
 - [`tomcat-vscode-ext/README.zh.md`](../../tomcat-vscode-ext/README.zh.md)
 
@@ -105,9 +107,8 @@ tar -xzf tomcat-<tag>-<target>.tar.gz
 # 2. 若是 macOS 且文件来自浏览器下载，可先清除 quarantine
 xattr -dr com.apple.quarantine ./tomcat
 
-# 3. 安装到用户级 PATH 目录（免 sudo）
-mkdir -p "$HOME/.local/bin"
-install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
+# 3. 安装当前程序并配置用户 PATH（不跑模型向导）
+./tomcat self-install --add-to-path
 
 # 4. 初始化
 "$HOME/.local/bin/tomcat" init
@@ -123,8 +124,8 @@ Windows 没有一键安装脚本，请从 Release 页面下载 `tomcat-<tag>-x86
 # 1. 解压（Windows 10 及以上自带 tar）
 tar -xzf tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz
 
-# 2. 初始化：把 tomcat.exe 复制到 %USERPROFILE%\.local\bin，并把该目录加入用户 PATH
-.\tomcat.exe init
+# 2. 复制到 %USERPROFILE%\.local\bin 并配置用户 PATH，不跑模型向导
+.\tomcat.exe self-install --add-to-path
 
 # 3. 打开一个新终端（这样才能读到新的 PATH），然后验证
 tomcat --version
@@ -193,7 +194,7 @@ cd tomcat
 
 #### 编译并更新安装副本
 
-首次使用 `tomcat init` 配好 PATH。之后 Windows 日常开发更新，在**独立 PowerShell/CMD 终端**的仓库根目录执行：
+首次使用 `tomcat init` 或 `self-install --add-to-path` 配好 PATH。之后 Windows 日常开发更新，在**独立 PowerShell/CMD 终端**的仓库根目录执行：
 
 ```powershell
 .\scripts\dev-install.cmd
@@ -201,9 +202,13 @@ cd tomcat
 
 脚本只进入 `tomcat/` 并转交 `cargo run --release --bin tomcat -- self-install`。Cargo 负责编译并运行本次实际产物，沿用 `CARGO_TARGET_DIR`；编译失败就停止，不会误装 PATH 上的旧 EXE。普通 `cargo build` 和测试构建不安装。项目规则 `.cursor/rules/windows-dev-update.mdc` 为读取项目规则的 Agent 标明这个入口。
 
-`self-install` 只把当前可执行文件安装到 `~/.local/bin`，不跑初始化向导、不修改 PATH、配置或凭据，也不重启服务；尚未初始化或配置损坏时也可用。安装失败返回非零退出码；没有改动时，不会谎报“已更新”。Unix 会把已有软链迁移为独立副本；内容不同的普通文件通过同目录临时副本和原子 rename 替换，运行中的进程继续使用旧文件。Windows 沿用现有机制：运行中的旧副本改名为 `*.old`，替换失败尽力回滚，后续安装尝试清理停放文件；这不是事务式升级。Tomcat Agent 工具会被嵌套调用保护拒绝，请在独立终端执行，不要删除保护标记来绕过。
+不带参数的 `self-install` 只把当前可执行文件安装到 `~/.local/bin`，不跑初始化向导、不修改 PATH、配置或凭据，也不重启服务；尚未初始化或配置损坏时也可用。`self-install --add-to-path` 额外确保用户 PATH，不要求先配模型。文件安装失败时非零退出、不继续写 PATH；PATH 失败也非零退出并给出手动步骤，已安装的程序保留。Windows 隔离 HOME 不允许改真实账户的 PATH。
 
-**换文件不等于换后台。** 安装后在 VS Code 主输入框发送 `/restart`；输入框不可用时用命令面板的“Tomcat: 重启共享服务（停止所有任务）”，也可在独立终端执行 `tomcat serve restart`。这会停止共享服务的所有任务，包括其他窗口/宿主的任务。关窗或 Reload 仍只断开本窗口。显式 `tomcat.path` 和 VSIX 内置程序保持原有优先级，更新 `~/.local/bin` 只影响使用该入口的扩展。macOS 在独立终端的仓库根目录执行 `./scripts/dev-install.sh`，编译并更新独立的命令副本；清理 `target/` 不再影响入口，仅重新编译不会刷新副本。需要后台使用更新后的程序时，再显式重启。
+两个平台都先把同目录临时副本写完整并落盘，再发布到入口。Unix 把已有软链替换成独立副本，普通文件通过原子 rename 替换；Windows 把运行中的旧副本停放为 `*.old`，再发布完整新副本，失败尽力回滚，后续安装尝试清理停放副本。强行结束进程可能留下未发布的 `.tmp`，或在 Windows 两次改名之间暂缺入口；再次安装会修复入口。这不是事务升级，也不承诺零残留。运行中的进程继续使用旧程序。Tomcat Agent 工具仍受嵌套调用保护，请在独立终端执行，不能删除保护标记。
+
+**换文件不等于换后台。** 需要切换时，由你在 VS Code 主输入框发送 `/restart`；输入框不可用时用命令面板的“Tomcat: 重启共享服务（停止所有任务）”，也可在独立终端执行 `tomcat serve restart`。这会停止共享服务的所有任务，包括其他窗口/宿主的任务。关窗或 Reload 仍只断开本窗口。VS Code 现在默认使用用户级入口；显式非默认 `tomcat.path` 仍优先，包内文件只作安装素材。
+
+macOS 在独立终端的仓库根目录执行 `./scripts/dev-install.sh`，编译并更新同一个用户级命令副本。清理 `target/` 不影响它，仅重新编译不会刷新副本。**下次平台扩展激活时，可能把这个开发副本换回包内构建。** 要持续使用开发构建，请让它留在构建目录，用 `tomcat.path` / `MULTICA_TOMCAT_PATH` 指定，终端直接运行完整路径；这些覆盖不关闭标准入口的维护。
 
 ### 工作目录
 

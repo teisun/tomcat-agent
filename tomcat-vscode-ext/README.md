@@ -35,7 +35,27 @@ code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 
 On Windows, download `tomcat-vscode-ext-<version>-win32-x64.vsix` and pass its full path, for example in PowerShell: `code --install-extension "$env:USERPROFILE\Downloads\tomcat-vscode-ext-<version>-win32-x64.vsix"`.
 
-Reload VS Code after installation. VS Code unpacks the bundle into its extension directory; the CLI does not run from the downloaded VSIX or your Downloads folder.
+Reload VS Code after installation. VS Code unpacks the bundle into its extension directory; the bundled CLI is **installation material**, not the default runtime executable.
+
+## One default CLI for VS Code, Multica and terminals
+
+```text
+Platform VSIX ── automatic installation/update ──┐
+Standalone or development installation ─────────┴─> ~/.local/bin/tomcat[.exe]
+                                                        ↑
+                                              VS Code / Multica / terminal
+```
+
+- Every activation of a platform package installs or aligns this user-level entry with its bundled program, including replacing a newer standalone/development build or a different build with the same version. Identical content is left unchanged. There is **no automatic-maintenance switch** in the UI or configuration.
+- Activation makes the UI and logs available without waiting; the first runtime CLI operation waits for the installation attempt and executable selection. Maintenance has a 30-second timeout, does not ask for confirmation, show installation notifications, or open Output automatically.
+- Installation copies the program and ensures the user PATH; it does not configure models, copy credentials/sessions, or restart running services. PATH failure is logged as a nonzero/partial result: VS Code may still use the absolute user-level path, but external discovery is not yet established.
+- Open a fresh terminal or desktop application after PATH changes. Existing processes keep their old environment. Multica uses its existing PATH/login-shell discovery, without an automatically injected `MULTICA_TOMCAT_PATH`.
+- Closing VS Code or uninstalling the extension leaves the user-level CLI installed. A pure extension has no installation material and logs that maintenance was skipped; an existing CLI is still required.
+- To keep using a development build, leave it in the build directory and explicitly set `tomcat.path` for VS Code or `MULTICA_TOMCAT_PATH` for Multica. These select a runtime; they do not disable maintenance of the standard entry. Different VS Code hosts should use matching extension versions, or each activation may replace the entry with that host's bundled build.
+
+For installation diagnostics, open **Tomcat Settings → General → View Logs**, below the version information at the lower left (alongside versions in the narrow layout). This opens the existing **Tomcat** Output channel, even while installation is pending or the CLI/service is unavailable. It preserves raw CLI output and exit details; it does not add cross-restart log history.
+
+**Updating the file does not update a running backend.** Existing connections are not deliberately interrupted, and incompatible service versions still fail the existing version check. Choose when to use `/restart` or **Restart Shared Service (Stops All Tasks)**; maintenance never does that for you.
 
 ## Model services, costs and data
 
@@ -164,9 +184,9 @@ Sidebar spacing is configured in VS Code Settings: search `tomcat.layout` (User 
 
 Resolution order, in plain English:
 
-- `tomcat.path` wins if you explicitly set it.
-- Bundled VSIX packages prefer the bundled CLI by default.
-- Pure extension installs fall back to `PATH` / shell discovery.
+- An explicitly configured, non-default `tomcat.path` wins; an invalid override reports an error rather than switching sources.
+- Otherwise, use the standard user-level CLI (`user-bin`), not the bundled installation material.
+- If that entry is absent, retain existing external `PATH` / login-shell / common-location discovery. There is no implicit bundled runtime fallback.
 
 ## Commands
 
@@ -220,9 +240,9 @@ If VS Code says the VSIX is not compatible:
 
 If the extension cannot find Tomcat:
 
-1. Prefer the bundled VSIX for your platform.
-2. Otherwise, run `tomcat --version` in a terminal.
-3. If that fails, fix your `PATH` or set `tomcat.path`.
+1. Open **Tomcat Settings → General → View Logs** below the version information. It works without a CLI connection; read the `[cli-install]` steps and exit code.
+2. Use the platform VSIX for automatic installation, or verify a separately installed CLI with `tomcat --version` in a fresh terminal.
+3. Follow any manual PATH instructions in the log. Check an explicit `tomcat.path` override rather than expecting an invalid override to fall back.
 
 If Tomcat was found but cannot connect:
 
@@ -234,7 +254,7 @@ If commands fail on Windows with "Running commands on Windows requires Git for W
 1. Install Git for Windows: `winget install --id Git.Git -e`.
 2. Restart VS Code so the extension sees the new `PATH`. WSL's `bash.exe` is not used.
 
-Unsupported keys in `tomcat.config.toml` are ignored with a startup warning instead of preventing Serve from connecting. Known keys with invalid values still fail. Old connection fields are not automatically migrated; use the existing model setup flow if needed. Bundled/pure CLI resolution and explicitly configured `tomcat.path` remain unchanged.
+Unsupported keys in `tomcat.config.toml` are ignored with a startup warning instead of preventing Serve from connecting. Known keys with invalid values still fail. Old connection fields are not automatically migrated; use the existing model setup flow if needed. Configuration compatibility does not change the executable selection order above.
 
 If Tomcat exits during a conversation:
 

@@ -40,6 +40,7 @@ fn nested_models_is_allowed_but_service_lifecycle_and_installation_remain_blocke
         vec!["serve", "stop"],
         vec!["serve", "restart"],
         vec!["self-install"],
+        vec!["self-install", "--add-to-path"],
     ] {
         let output = run(&args);
         assert!(!output.status.success());

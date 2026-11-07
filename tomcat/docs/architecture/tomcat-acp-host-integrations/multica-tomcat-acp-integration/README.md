@@ -152,7 +152,9 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 - 零可用模型、坏配置/JSON、15秒超时、旧命令不支持都报告错误，不伪造空成功或假模型。
 - 创建页复用现有错误标题、原因、刷新、手填ID和默认路径；不新增toast。详情页首次失败可能空态、刷新失败可能保留旧列表而无原因，保持原状。
 - 默认仍按 agent.model → daemon默认 → Tomcat默认；不把目录第一项强行写成选择。旧CLI发现会报错，但不提高现有ACP最低版本、也不禁止已有手填/default任务。
-- 升级实际runtime绑定的standalone/bundled路径；构建成功不等于安装，安装不等于运行服务已切换。正式安装、PATH和重启由用户另行安排，重启会停止全部共享任务。用户已有 `scripts/start-tomcat.mjs` 及启动文档不在本包中覆盖。
+- 使用统一入口版本的 Tomcat 时，默认入口是执行账号的 `~/.local/bin/tomcat[.exe]`；VS Code 包内文件只作安装/更新素材，不再维护 standalone/bundled 两条默认运行路径。显式 `tomcat.path` / `MULTICA_TOMCAT_PATH` 覆盖仍保留。
+- 构建成功不等于安装，安装不等于运行服务已切换。正式安装、PATH 和重启由用户另行安排；重启会停止全部共享任务，插件维护不会自动重启后台。
+- Multica 使用原生命令 `multica daemon start --profile local-tomcat` 和已有 PATH/登录 shell 发现，不再需要 Tomcat 专用启动脚本。先检查已保存 profile 的 daemon 状态，启动后再确认 `running` 且包含 Tomcat；发现成功不等于注册或接单成功。本迁移包不执行登录、安装或 daemon 启停。
 
 ## 6. 取消、恢复和 Windows
 

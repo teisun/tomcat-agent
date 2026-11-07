@@ -636,7 +636,7 @@
   "cli.init.testBinary": "  ⚠ 检测到 cargo test 的临时构建产物，跳过 PATH 自动配置以避免写入悬空 target/deps 路径",
   "cli.init.commandLink": "  ✓ 已建立稳定命令入口: {path}",
   "cli.init.linkFailed": "  ⚠ 无法建立稳定命令入口（{detail}）；后续仍可继续初始化",
-  "cli.init.pathAdded": "  ✓ 已把 {dir} 加入用户 PATH\n    请打开新的终端窗口后再运行 tomcat",
+  "cli.init.pathAdded": "  ✓ 用户 PATH 已包含 {dir}\n    新打开的终端即可运行 tomcat",
   "cli.init.pathManual": "  ⚠ 无法自动配置 PATH，请手动执行：",
   "cli.init.pathManualWindows": "  ⚠ 无法自动配置 PATH，请手动把下面的目录加入用户 PATH：\n    {dir}\n    设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量 Path → 编辑 → 新建",
   "cli.init.homeMissing": "  ⚠ 无法确定 HOME 目录，请手动执行：",

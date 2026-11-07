@@ -1543,7 +1543,7 @@ fn test_init_bash_profile_source_idempotent() {
     );
 }
 
-/// bash 场景下，init 会先清理旧的 target/* PATH 垃圾，再补一条稳定的 ~/.local/bin。
+/// bash：init 只清理带 Tomcat 标记的旧 target/* PATH 行，保留用户导出并补稳定入口。
 #[cfg(unix)]
 #[test]
 fn test_init_prunes_stale_target_paths_from_shell_profile() {
@@ -1560,6 +1560,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
             "# Added by tomcat init",
             "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
             "export PATH=\"/usr/local/bin:$PATH\"",
+            "export PATH=\"/tmp/user-tool/target/release:$PATH\"",
         ]
         .join("\n"),
     )
@@ -1573,7 +1574,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
 
     let bashrc_content = fs::read_to_string(&bashrc).unwrap();
     assert!(
-        !bashrc_content.contains("/target/"),
+        !bashrc_content.contains("/tmp/project/target/"),
         "expected stale target exports to be pruned, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1586,7 +1587,8 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
         trunc(&bashrc_content, 500)
     );
     assert!(
-        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && bashrc_content.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "expected user-managed PATH lines to survive prune, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1674,6 +1676,101 @@ fn test_self_install_without_config_or_with_broken_config_is_idempotent() {
         original_path,
         "self-install must not configure PATH"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_self_install_add_to_path_is_idempotent_without_bootstrap() {
+    let home = tempfile::Builder::new()
+        .prefix("cli-path-中文 ")
+        .tempdir()
+        .unwrap();
+    let work = home.path().join(".tomcat");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("tomcat.config.toml"), "[broken configuration").unwrap();
+    for name in [".zprofile", ".zshrc"] {
+        fs::write(
+            home.path().join(name),
+            "# Added by tomcat init\nexport PATH=\"/tmp/project/target/debug:$PATH\"\nexport PATH=\"/tmp/user-tool/target/release:$PATH\"\n",
+        )
+        .unwrap();
+    }
+    for key in ["cli.selfInstall.updated", "cli.selfInstall.unchanged"] {
+        let output = common::serve::isolated_serve_command(home.path())
+            .args(["self-install", "--add-to-path"])
+            .env("SHELL", "/bin/zsh")
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let entry = home.path().join(".local/bin/tomcat");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&self_install_message(key, &entry))
+        );
+        assert!(fs::read(&entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    }
+    for name in [".zprofile", ".zshrc"] {
+        let profile = fs::read_to_string(home.path().join(name)).unwrap();
+        assert!(!profile.contains("/tmp/project/target/"));
+        assert!(profile.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""));
+        assert_eq!(
+            profile
+                .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+                .count(),
+            1
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(work.join("tomcat.config.toml")).unwrap(),
+        "[broken configuration"
+    );
+    assert_eq!(fs::read_dir(work).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_self_install_add_to_path_reports_partial_failure_and_keeps_the_command() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join(".zprofile")).unwrap();
+    let output = common::serve::isolated_serve_command(home.path())
+        .args(["self-install", "--add-to-path"])
+        .env("SHELL", "/bin/zsh")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let entry = home.path().join(".local/bin/tomcat");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains(&self_install_message("cli.selfInstall.updated", &entry)));
+    let en: Value = serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains(en["cli.init.pathManual"].as_str().unwrap()));
+    assert!(fs::read(entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    assert!(!home.path().join(".tomcat").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn test_self_install_add_to_path_with_isolated_home_preserves_real_path() {
+    let user_path = || {
+        windows_registry::CURRENT_USER
+            .open("Environment")
+            .and_then(|key| key.get_value("Path"))
+            .ok()
+            .map(|value| (value.ty(), String::try_from(value).ok()))
+    };
+    let before = user_path();
+    let home = tempfile::tempdir().unwrap();
+    let output = common::serve::isolated_serve_command(home.path())
+        .args(["self-install", "--add-to-path"])
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(user_path(), before);
+    let entry = home.path().join(".local/bin/tomcat.exe");
+    assert!(fs::read(entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    assert!(!home.path().join(".tomcat").exists());
 }
 
 #[test]

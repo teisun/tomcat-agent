@@ -41,7 +41,9 @@ GitHub Release
    -> configure a model in Tomcat Settings, then chat (no terminal init required)
 ```
 
-For which extension package to choose, how to install it, and where the bundled CLI lives after installation, see:
+The platform extension automatically installs/updates the shared default entry at `~/.local/bin/tomcat` (`tomcat.exe` on Windows), then uses that entry. The bundled file is installation material only. Standalone installations use the same location; every platform-extension activation can replace it, including newer or same-version development builds, with no maintenance-off switch. Multica discovers it through existing PATH/login-shell lookup; open a fresh terminal/desktop application after PATH changes.
+
+For package selection, overrides, uninstall behavior and the offline-capable **View Logs** link below the Settings version information, see:
 
 - [`tomcat-vscode-ext/README.md`](../../tomcat-vscode-ext/README.md)
 
@@ -105,9 +107,8 @@ tar -xzf tomcat-<tag>-<target>.tar.gz
 # 2. On macOS, if the file came from a browser download, clear quarantine first
 xattr -dr com.apple.quarantine ./tomcat
 
-# 3. Install into a user-level PATH directory (no sudo)
-mkdir -p "$HOME/.local/bin"
-install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
+# 3. Install the current program and configure user PATH (no model wizard)
+./tomcat self-install --add-to-path
 
 # 4. Initialize
 "$HOME/.local/bin/tomcat" init
@@ -123,8 +124,8 @@ There is no install script for Windows; download `tomcat-<tag>-x86_64-pc-windows
 # 1. Extract (tar ships with Windows 10 and later)
 tar -xzf tomcat-<tag>-x86_64-pc-windows-msvc.tar.gz
 
-# 2. Initialize: copies tomcat.exe to %USERPROFILE%\.local\bin and adds that directory to your user PATH
-.\tomcat.exe init
+# 2. Copy to %USERPROFILE%\.local\bin and configure user PATH, without the model wizard
+.\tomcat.exe self-install --add-to-path
 
 # 3. Open a new terminal so it picks up the new PATH, then verify
 tomcat --version
@@ -193,7 +194,7 @@ For the extension, `npm run gate:fast` and `npm run test:integration` run on Win
 
 #### Build and update the installed copy
 
-First run `tomcat init` once to configure PATH. For subsequent Windows development updates, run this in an **independent PowerShell/CMD terminal**, from the repository root:
+First configure PATH with `tomcat init` or `self-install --add-to-path`. For subsequent Windows development updates, run this in an **independent PowerShell/CMD terminal**, from the repository root:
 
 ```powershell
 .\scripts\dev-install.cmd
@@ -201,9 +202,13 @@ First run `tomcat init` once to configure PATH. For subsequent Windows developme
 
 The script enters `tomcat/` and delegates to `cargo run --release --bin tomcat -- self-install`. Cargo builds and runs its actual output, honoring `CARGO_TARGET_DIR`; a failed build never installs an older PATH executable. Ordinary `cargo build` and test builds do not install. The project rule `.cursor/rules/windows-dev-update.mdc` records this entry for agents that load project rules.
 
-`self-install` installs only the current executable into `~/.local/bin`; it does not run the setup wizard, change PATH/configuration/credentials, or restart services. It works before initialization and with a broken config. Installation failures exit nonzero; an unchanged entry is reported neutrally, not as an update. On Unix, existing symlinks become standalone copies; different regular files are replaced via a same-directory temporary copy and atomic rename, leaving running processes on the old file. On Windows, a running old copy is parked as `*.old`, replacement failure uses the existing best-effort rollback, and later installations try to clean parked files; this is not a transactional upgrade. Tomcat Agent tools are blocked by the nested-invocation guard—do not remove it to run this script; use an independent terminal.
+Without flags, `self-install` only installs the current executable into `~/.local/bin`; it does not run the setup wizard, change PATH/configuration/credentials, or restart services. It works before initialization and with a broken config. `self-install --add-to-path` additionally ensures the user PATH, without requiring model setup. File installation failure exits nonzero without attempting PATH; PATH failure also exits nonzero with manual steps, while keeping the installed program. Windows refuses to change the real user PATH from an isolated HOME.
 
-**Updating files does not switch the running backend.** Use `/restart` in the main VS Code composer, or **Tomcat: Restart Shared Service (Stops All Tasks)** in the Command Palette when input is disabled. A standalone terminal can also run `tomcat serve restart`. This stops every shared-service task, including those from other windows/hosts. Closing or reloading a window still only disconnects that window. Explicit `tomcat.path` settings and bundled VSIX binaries keep their existing priority; updating `~/.local/bin` only benefits extensions using that entry. On macOS, run `./scripts/dev-install.sh` from the repository root in an independent terminal to build and update the standalone command copy. Cleaning `target/` no longer breaks it; rebuilds alone do not refresh it. Restart the backend explicitly when you want it to use the updated program.
+Both platforms write and flush a complete same-directory temporary copy before publishing it. Unix replaces existing symlinks with standalone copies and atomically renames regular replacements. Windows parks a running old copy as `*.old`, publishes the prepared copy, attempts rollback on failure, and later tries to clean parked copies. A hard kill can leave an unpublished `.tmp`, or briefly leave the Windows entry absent between renames; another installation repairs the entry. This is not a transactional upgrade or a zero-orphan guarantee. Running processes keep the old program. Tomcat Agent tools remain blocked by the nested-invocation guard; use an independent terminal, never remove the marker.
+
+**Updating files does not switch the running backend.** When you choose to switch, use `/restart` in the main VS Code composer, or **Tomcat: Restart Shared Service (Stops All Tasks)** in the Command Palette when input is disabled. A standalone terminal can also run `tomcat serve restart`. This stops every shared-service task, including those from other windows/hosts. Closing or reloading a window still only disconnects that window. VS Code now defaults to the user-level entry; an explicit non-default `tomcat.path` still wins, and bundled files are installation material only.
+
+On macOS, run `./scripts/dev-install.sh` from the repository root in an independent terminal to build and update the same user-level command copy. Cleaning `target/` does not break it; rebuilds alone do not refresh it. **The next platform-extension activation can replace this development copy with its bundled build.** To keep a development build, leave it in the build directory and select it through `tomcat.path` / `MULTICA_TOMCAT_PATH`, or run its full path in the terminal; these overrides do not disable maintenance of the standard entry.
 
 ### Working Directory
 

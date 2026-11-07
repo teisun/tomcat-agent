@@ -4,7 +4,7 @@
 //! - Windows：命令入口是 exe 的副本；PATH 写进 `HKCU\Environment\Path`。不用 `setx`：它会把
 //!   PATH 截断到 1024 字符，并把 `%VAR%` 展开后写死。
 
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::canonicalize;
@@ -48,8 +48,15 @@ pub fn install_user_command(exe: &Path, dir: &Path, name: &str) -> io::Result<Op
 
     match std::fs::symlink_metadata(&entry) {
         Ok(meta) if meta.file_type().is_symlink() => replace_symlink_entry(&exe, &entry),
-        Ok(_) => refresh_regular_entry(&exe, &entry),
-        Err(_) => create_entry(&exe, &entry).map(|()| Some(entry)),
+        Ok(meta) if meta.is_file() => refresh_regular_entry(&exe, &entry),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "command entry is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_entry(&exe, &entry).map(|()| Some(entry))
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -64,60 +71,77 @@ fn replace_symlink_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>
     if canonicalize(entry).ok().as_deref() == Some(exe) {
         return Ok(None);
     }
-    std::fs::remove_file(entry)?;
     create_entry(exe, entry)?;
     Ok(Some(entry.to_path_buf()))
 }
 
-#[cfg(unix)]
 fn create_entry(exe: &Path, entry: &Path) -> io::Result<()> {
-    let tmp = entry.with_file_name(format!(
-        ".{}.{}.tmp",
-        file_name(entry),
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = std::fs::copy(exe, &tmp)
-        .and_then(|_| std::fs::File::open(&tmp)?.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, entry));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // Write and flush the complete copy before touching the public entry. The
+    // open temporary file also lets read-only source permissions be preserved.
+    let mut source = std::fs::File::open(exe)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.", file_name(entry)))
+        .suffix(".tmp")
+        .tempfile_in(entry.parent().unwrap_or_else(|| Path::new(".")))?;
+    io::copy(&mut source, tmp.as_file_mut())?;
+    tmp.as_file()
+        .set_permissions(source.metadata()?.permissions())?;
+    tmp.as_file().sync_all()?;
+
+    // Windows permits renaming a running executable, but not overwriting it.
+    // Only park the old entry after the new copy is complete and durable.
+    #[cfg(windows)]
+    let parked = {
+        let path = entry.with_file_name(format!(
+            "{}.{}{PARKED_COPY_SUFFIX}",
+            file_name(entry),
+            uuid::Uuid::new_v4().simple()
+        ));
+        match std::fs::rename(entry, &path) {
+            Ok(()) => Some(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = tmp.persist(entry).map(|_| ()).map_err(|error| error.error);
+    #[cfg(windows)]
+    if let Some(parked) = parked {
+        if result.is_err() {
+            let _ = std::fs::rename(&parked, entry);
+        } else {
+            let _ = std::fs::remove_file(parked);
+        }
     }
     result
 }
 
-#[cfg(windows)]
-fn create_entry(exe: &Path, entry: &Path) -> io::Result<()> {
-    std::fs::copy(exe, entry).map(|_| ())
-}
-
-#[cfg(unix)]
 fn refresh_regular_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>> {
-    if std::fs::read(entry)? == std::fs::read(exe)? {
+    if same_contents(entry, exe)? {
         return Ok(None);
     }
     create_entry(exe, entry)?;
     Ok(Some(entry.to_path_buf()))
 }
 
-/// 正在运行的 exe 不能覆盖或删除，但可以改名：先把旧副本改名成 `*.old` 再复制；
-/// 删不掉的 `*.old` 留给下次安装时清理。
-#[cfg(windows)]
-fn refresh_regular_entry(exe: &Path, entry: &Path) -> io::Result<Option<PathBuf>> {
-    if std::fs::read(entry)? == std::fs::read(exe)? {
-        return Ok(None);
+fn same_contents(left: &Path, right: &Path) -> io::Result<bool> {
+    let mut left = std::fs::File::open(left)?;
+    let mut right = std::fs::File::open(right)?;
+    let mut remaining = left.metadata()?.len();
+    if remaining != right.metadata()?.len() {
+        return Ok(false);
     }
-    let parked = entry.with_file_name(format!(
-        "{}.{}{PARKED_COPY_SUFFIX}",
-        file_name(entry),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::rename(entry, &parked)?;
-    if let Err(error) = std::fs::copy(exe, entry) {
-        let _ = std::fs::rename(&parked, entry);
-        return Err(error);
+    let mut left_bytes = [0; 64 * 1024];
+    let mut right_bytes = [0; 64 * 1024];
+    while remaining > 0 {
+        let count = remaining.min(left_bytes.len() as u64) as usize;
+        left.read_exact(&mut left_bytes[..count])?;
+        right.read_exact(&mut right_bytes[..count])?;
+        if left_bytes[..count] != right_bytes[..count] {
+            return Ok(false);
+        }
+        remaining -= count as u64;
     }
-    let _ = std::fs::remove_file(&parked);
-    Ok(Some(entry.to_path_buf()))
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -254,6 +278,8 @@ fn is_stale_tomcat_target_export(line: &str) -> bool {
 
 #[cfg(unix)]
 fn prune_stale_lines(content: &str) -> String {
+    // Only our marker establishes ownership; unmarked target paths may be
+    // deliberate user settings and must survive automatic maintenance.
     let lines = content.lines().collect::<Vec<_>>();
     let mut result = Vec::with_capacity(lines.len());
     let mut changed = false;
@@ -268,11 +294,6 @@ fn prune_stale_lines(content: &str) -> String {
         {
             changed = true;
             index += 2;
-            continue;
-        }
-        if is_stale_tomcat_target_export(line) {
-            changed = true;
-            index += 1;
             continue;
         }
         result.push(line);

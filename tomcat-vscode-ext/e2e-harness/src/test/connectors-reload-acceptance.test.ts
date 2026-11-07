@@ -12,7 +12,7 @@ const input = (api: InstalledConnectorApi, testId: string, value: string) => api
 const row = (api: InstalledConnectorApi, name: string) => api.__testing.getSettingsPanelState().state.connectors?.find((source) => source.name === name);
 
 async function openSettings(api: InstalledConnectorApi): Promise<SettingsDriver> {
-  const executable = api.__testing.getResolvedExecutable();
+  const executable = await api.__testing.getResolvedExecutable();
   assert.ok(executable.found);
   assert.equal(path.resolve(executable.executable), path.resolve(requiredEnv("TOMCAT_CONNECTORS_ACCEPT_BINARY")), "must use this build, not a bundled/stale/fake CLI");
   await api.__testing.executeCommand("tomcat.openSettings");

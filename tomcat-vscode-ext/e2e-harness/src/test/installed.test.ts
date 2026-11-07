@@ -35,9 +35,9 @@ type ResolvedSourceApi = {
       message: string;
       severity: string;
     }>;
-    getResolvedExecutable(): {
+    getResolvedExecutable(): Promise<{
       source: string;
-    };
+    }>;
     getWebviewState(): {
       connectionStatus?: string;
       ready: boolean;
@@ -183,7 +183,7 @@ suite("Installed Tomcat extension", () => {
     }
 
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
-    assert.equal(api.__testing.getResolvedExecutable().source, expectedSource);
+    assert.equal((await api.__testing.getResolvedExecutable()).source, expectedSource);
   });
 
   test("shows the expected onboarding prompt when requested by the host fixture", async function () {
