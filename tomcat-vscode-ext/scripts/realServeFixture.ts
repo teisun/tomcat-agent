@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { STOP_COMMAND_TIMEOUT_MS } from "../src/serveClient/sharedConnection";
 export { spawnScriptedOpenAiStreamServer, sseDelta, sseFinish, sseDone, sseToolCall } from "../src/test/suite/support/scriptedModel";
 export type { ScriptedPart, ScriptedResponse } from "../src/test/suite/support/scriptedModel";
@@ -33,6 +33,8 @@ export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.Proc
 }
 
 export type FixtureSetup = {
+  /** Explicit CLI-discovery acceptance only: the disposable hosted Windows account. */
+  runnerHome?: string;
   binary: string;
   coldStart?: boolean;
   /** Release-bundle first launch only: preserve the absence of mcp.json. */
@@ -57,9 +59,26 @@ export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup:
   }
   const binary = setup.binary;
   const runCli = setup.runCli ?? execFileAsync;
+  const missing = async (file: string) => {
+    try { await lstat(file); return false; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
+  };
+  const runnerResources = setup.runnerHome ? [path.join(setup.runnerHome, ".tomcat"), path.join(setup.runnerHome, ".local/bin/tomcat.exe")] : [];
+  const runnerParents: string[] = [];
+  if (setup.runnerHome) {
+    if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true" || process.env.RUNNER_ENVIRONMENT !== "github-hosted"
+      || !process.argv.includes("--allow-runner-path") || setup.runnerHome !== os.homedir()) {
+      throw new Error("Existing HOME is restricted to the explicitly approved disposable Windows runner account");
+    }
+    for (const file of runnerResources) if (!await missing(file)) throw new Error(`Runner fixture refuses existing resources: ${file}`);
+    for (const dir of [path.join(setup.runnerHome, ".local/bin"), path.join(setup.runnerHome, ".local")]) {
+      if (await missing(dir)) runnerParents.push(dir);
+    }
+  }
   // macOS's default per-user temp directory exceeds sockaddr_un's path limit.
-  const homePath = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tomcat-vscode-ext-"));
-  const workspacePath = path.join(homePath, "workspace");
+  const temporaryHome = await mkdtemp(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "tomcat-vscode-ext-"));
+  const homePath = setup.runnerHome ?? temporaryHome;
+  const workspacePath = path.join(temporaryHome, "workspace");
   const env = serveFixtureEnvironment(homePath, process.env, setup.coldStart);
   // Retry transient ENOTEMPTY/EBUSY during disposable fixture cleanup; permanent errors still reject.
   let cleanupTask: Promise<void> | undefined;
@@ -67,7 +86,12 @@ export async function setupRealServeFixture(baseUrl: string, api: LlmApi, setup:
     // Closing a messenger no longer owns the service process. Only this isolated
     // fixture may stop its service, and it must do so before removing its HOME.
     await runCli(binary, ["serve", "stop"], { cwd: workspacePath, env, timeout: STOP_COMMAND_TIMEOUT_MS });
-    await rm(homePath, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
+    // Never remove the runner's HOME. Only resources proved absent before this
+    // serial fixture are owned here; remove newly created parent dirs only if empty.
+    for (const resource of runnerResources) await rm(resource, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
+    for (const dir of runnerParents) await rmdir(dir);
+    for (const resource of runnerResources) if (!await missing(resource)) throw new Error(`Runner fixture cleanup failed: ${resource}`);
+    await rm(temporaryHome, { force: true, recursive: true, maxRetries: 3, retryDelay: 100 });
   })().catch(error => { cleanupTask = undefined; throw error; });
   try {
     await mkdir(workspacePath, { recursive: true });

@@ -154,6 +154,23 @@ function protocolOf(modelId: string): string | null | undefined {
 }
 
 describe("SettingsApp", () => {
+  it("keeps the footer log action available before and after a failed connection", async () => {
+    const { postMessage } = mount();
+    const logs = screen.getByRole("button", { name: en("host.action.logs") });
+    expect(within(screen.getByTestId("settings-version-footer")).getByRole("button", { name: en("host.action.logs") })).toBe(logs);
+    expect(logs).toHaveProperty("disabled", false);
+    fireEvent.click(logs);
+    expect(sent(postMessage, "viewConnectionLogs")).toHaveLength(1);
+    await emitState(readyState({ ready: false, error: "CLI installation failed", serverVersion: null }));
+    expect(screen.getByTestId("settings-view-logs")).toBe(logs);
+    expect(logs).toHaveProperty("disabled", false);
+    logs.focus();
+    expect(document.activeElement).toBe(logs);
+    fireEvent.click(logs);
+    expect(sent(postMessage, "viewConnectionLogs")).toHaveLength(2);
+    expect(sent(postMessage, "listModels")).toHaveLength(0);
+  });
+
   it("does not diagnose an old CLI before connecting and displays the local extension version", async () => {
     mount();
     await emitState(readyState({ ready: false, extensionVersion: "0.1.89", serverVersion: null, expectedCliVersion: "0.1.73", error: "broken config" }));

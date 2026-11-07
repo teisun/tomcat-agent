@@ -17,6 +17,15 @@ on:
       - "scripts/dev-install.*"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
+    inputs:
+      cli-discovery:
+        description: "Also run unified CLI + fixed Multica discovery on all four native targets (no release)"
+        type: boolean
+        default: false
+      allow-runner-path:
+        description: "Allow PATH verification in the disposable Windows hosted account; restore exact original values"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -146,6 +155,107 @@ jobs:
 
       - name: Test proxy, build selection, and isolated acceptance contracts
         run: npx vitest run --maxWorkers 4 tests/windows_system_proxy.test.ts tests/build_tomcat_binary.test.ts tests/serve_fixture_lifecycle.test.ts tests/vscode_launch_env.test.ts tests/playwright_mcp_smoke.test.ts
+
+  cli-discovery:
+    name: unified-cli native (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs['cli-discovery']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: darwin-arm64, binary: tomcat }
+          - { os: macos-15-intel, target: darwin-x64, binary: tomcat }
+          - { os: ubuntu-22.04, target: linux-x64, binary: tomcat }
+          - { os: windows-latest, target: win32-x64, binary: tomcat.exe }
+    defaults:
+      run:
+        shell: bash
+        working-directory: tomcat-vscode-ext
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require explicit disposable Windows PATH authorization
+        if: runner.os == 'Windows'
+        env:
+          ALLOW_RUNNER_PATH: ${{ inputs['allow-runner-path'] }}
+        run: test "$ALLOW_RUNNER_PATH" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+      - name: Checkout immutable Multica source (read-only build input)
+        uses: actions/checkout@v4
+        with:
+          repository: teisun/multica
+          ref: 8ea00434a47f60b92aaf1504ecb29a2b70f82d0c
+          path: .agents/multica-source
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .agents/multica-source/server/go.mod
+          cache-dependency-path: .agents/multica-source/server/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            tomcat-vscode-ext/package-lock.json
+            tomcat-vscode-ext/gui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tomcat -> target
+          key: cli-discovery-${{ matrix.target }}
+      - name: Install dependencies and prepare evidence directory
+        run: |
+          npm ci
+          npm --prefix gui ci
+          mkdir -p "../.agents/acceptance/cli-discovery/${{ matrix.target }}"
+      - name: Installer, interruption, CLI and guard checks on the native host
+        working-directory: tomcat
+        run: |
+          set -euo pipefail
+          {
+            cargo test --locked --lib user_install
+            cargo test --locked --test cli_tests self_install
+            cargo test --locked --test nested_cli_guard_tests nested_models_is_allowed_but_service_lifecycle_and_installation_remain_blocked
+          } 2>&1 | tee "../.agents/acceptance/cli-discovery/${{ matrix.target }}/installer-tests.log"
+      - name: Build fixed Multica and Tomcat-owned path observer in a disposable source copy
+        run: node --import tsx scripts/multicaCliDiscovery.ts ../.agents/multica-source "../.agents/acceptance/cli-discovery/${{ matrix.target }}"
+      - name: Build real native CLI and extension
+        run: |
+          cargo build --locked --release --manifest-path ../tomcat/Cargo.toml --bin tomcat
+          npm run build
+      - name: Package unpublished native VSIX
+        run: >-
+          npm run package:vsix -- --skip-build --target ${{ matrix.target }}
+          --bundle-binary ../tomcat/target/release/${{ matrix.binary }}
+          --out ../.agents/acceptance/cli-discovery/${{ matrix.target }}/tomcat.vsix
+      - name: Verify real VSIX, disconnected logs and scriptless Multica discovery
+        env:
+          TOMCAT_CLI_DISCOVERY_ACCEPTANCE: "1"
+          TOMCAT_MULTICA_ACCEPT_REVISION: 8ea00434a47f60b92aaf1504ecb29a2b70f82d0c
+          ACCEPT_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          export TOMCAT_MULTICA_ACCEPT_BINARY="$(node -p 'require("node:path").resolve("../.agents/acceptance/cli-discovery", process.env.ACCEPT_TARGET, process.platform === "win32" ? "multica.exe" : "multica")')"
+          export TOMCAT_MULTICA_CONFIG_PROBE="$(node -p 'require("node:path").resolve("../.agents/acceptance/cli-discovery", process.env.ACCEPT_TARGET, process.platform === "win32" ? "multica-config-probe.exe" : "multica-config-probe")')"
+          export TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR="$(node -p 'require("node:path").resolve("../.agents/shots/cli-discovery", process.env.ACCEPT_TARGET)')"
+          args=(run verify:vsix -- --release-bundle "../.agents/acceptance/cli-discovery/$ACCEPT_TARGET/tomcat.vsix")
+          if [ "$RUNNER_OS" = Windows ]; then args+=(--allow-runner-path); fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npm "${args[@]}"
+          else
+            npm "${args[@]}"
+          fi 2>&1 | tee "../.agents/acceptance/cli-discovery/$ACCEPT_TARGET/native-vsix.log"
+      - name: Preserve native receipts and PNG, ARIA, console, cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-discovery-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            .agents/acceptance/cli-discovery/**/*.json
+            .agents/acceptance/cli-discovery/**/*.log
+            .agents/shots/cli-discovery/**
+          if-no-files-found: error
+          include-hidden-files: true
 
   shared-service-windows:
     name: shared service OS proxy and real VS Code (windows)

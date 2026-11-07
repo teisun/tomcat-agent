@@ -188,6 +188,7 @@ export type SettingsHostFrame = {
 };
 
 export type SettingsIntent =
+  | { messageId: string; type: "viewConnectionLogs" }
   | { messageId: string; type: "setUiLanguage"; data: { language: LanguagePreference } }
   | {
       messageId: string;
@@ -390,6 +391,7 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
         (isRecord(value.data) &&
           (value.data.route === undefined || value.data.route === null || isSettingsRoute(value.data.route)))
       );
+    case "viewConnectionLogs":
     case "listModels":
     case "listProviderKeys":
       return true;

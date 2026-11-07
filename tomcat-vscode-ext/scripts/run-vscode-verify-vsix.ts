@@ -19,6 +19,8 @@ import { EXTENSION_ID } from "../src/constants";
 import { extractVsixLikeCursor, readVsixEntry } from "./vsix-extractable";
 import { runCommand } from "./runCommand";
 import { createPlaywrightMcpSmoke } from "./playwrightMcpSmoke";
+import { verifyMulticaDiscovery } from "./multicaCliDiscovery";
+import { withWindowsUserPath } from "./windowsUserPath";
 import { setupRealServeFixture, spawnScriptedOpenAiStreamServer, type ScriptedResponse, sseDelta, sseFinish, sseDone, sseToolCall } from "./realServeFixture";
 
 export function vscodeTargetFor(platform: NodeJS.Platform, arch: string): string {
@@ -136,6 +138,8 @@ export async function seedUpgradeData(source: string, home: string, baseUrl: str
 }
 
 type InstalledScenarioOptions = {
+  runnerHome?: string;
+  cliInstallFailure?: boolean;
   playwrightSmoke?: boolean;
   upgradeFixture?: string;
   production?: { source: ProductionSource; bundle?: Awaited<ReturnType<typeof inspectReleaseVsix>> };
@@ -150,6 +154,7 @@ type InstalledScenarioOptions = {
 };
 
 export async function runInstalledScenario(options: InstalledScenarioOptions): Promise<void> {
+  const cliDiscovery = process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1";
   const newUser = options.production?.source.kind === "bundle" && !options.upgradeFixture;
   const installRoot = await fs.mkdtemp(path.join(tempRoot, "tvsi-verify-"));
   const extensionsDir = path.join(installRoot, "extensions");
@@ -204,9 +209,17 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       // Real CLI and Host; only upstream model replies are controlled.
       const responses: ScriptedResponse[] = [];
       server = await spawnScriptedOpenAiStreamServer(responses, ["deepseek-v4-flash", "deepseek-v4-pro", "claude-opus-5"]);
-      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true, missingMcpConfig: newUser });
+      fixture = await setupRealServeFixture(server.baseUrl, "openai", { binary, coldStart: true, missingMcpConfig: newUser && !cliDiscovery, runnerHome: options.runnerHome });
+      if (cliDiscovery && process.platform !== "win32") fixture.env.SHELL = "/bin/bash";
+      if (options.cliInstallFailure) {
+        const entry = path.join(fixture.homePath, ".local/bin", process.platform === "win32" ? "tomcat.exe" : "tomcat");
+        await fs.mkdir(entry, { recursive: true });
+        await fs.writeFile(path.join(entry, "keep"), "owned directory must survive failed installation");
+      }
       const upgrade = options.upgradeFixture ? await seedUpgradeData(options.upgradeFixture, fixture.homePath, server.baseUrl) : undefined;
-      if (upgrade) {
+      if (cliDiscovery) {
+        // Installation/connection acceptance never sends a model request.
+      } else if (upgrade) {
         responses.push(
           { parts: [sseToolCall("upgrade-start", "start_plan", JSON.stringify({ plan_id: upgrade.planId })), sseFinish("tool_calls"), sseDone()] },
           { parts: [sseToolCall("upgrade-write", "write", JSON.stringify({ path: path.join(fixture.homePath, ".tomcat/temp/upgrade-execution.txt"), content: "upgraded execution" })), sseFinish("tool_calls"), sseDone()] },
@@ -236,6 +249,9 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       }
       }
       testEnv = { ...fixture.env };
+      if (cliDiscovery) testEnv.TOMCAT_CLI_DISCOVERY_ACCEPTANCE = "1";
+      if (cliDiscovery && process.platform === "win32" && !options.runnerHome && !options.cliInstallFailure) testEnv.TOMCAT_CLI_INSTALL_EXPECT_PARTIAL = "1";
+      if (options.cliInstallFailure) testEnv.TOMCAT_CLI_INSTALL_EXPECT_FAILURE = "1";
       testEnv.TOMCAT_ONBOARDING_BASE_URL = server.baseUrl;
       if (newUser) testEnv.TOMCAT_RELEASE_NEW_USER = "1";
       if (options.playwrightSmoke) testEnv.TOMCAT_RELEASE_MCP_SMOKE = "1";
@@ -244,7 +260,7 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
       const cliVersion = execFileSync(binary, ["--version"], { env: testEnv, encoding: "utf8" }).trim();
       if (cliVersion !== `tomcat ${metadata.tomcat.bundledCliVersion}`) throw new Error(`Bundled CLI version mismatch: ${cliVersion}`);
-      if (newUser) {
+      if (newUser && !cliDiscovery) {
         if (await fs.stat(path.join(fixture.homePath, ".tomcat/mcp.json")).then(() => true, error => {
           if (error.code === "ENOENT") return false;
           throw error;
@@ -255,12 +271,13 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
       Object.assign(settings, { "security.workspace.trust.enabled": false, "telemetry.telemetryLevel": "off", "extensions.autoUpdate": false, "extensions.autoCheckUpdates": false, "update.mode": "none" });
       delete settings["tomcat.path"];
+      if (options.cliInstallFailure) settings["tomcat.path"] = path.join(fixture.workspacePath, "definitely-missing-tomcat");
       await fs.writeFile(settingsPath, JSON.stringify(settings));
       await fs.writeFile(path.join(options.artifactsDir, "release-artifact.json"), JSON.stringify({ source: options.production.source, ...options.production.bundle, installed, cliSha256, cliVersion, binaryArchitecture, nativeMachine, nodeArch: process.arch, platform: process.platform, osRelease: os.release() }, null, 2));
     }
 
     await fs.access(options.harnessTestsPath);
-    if (newUser && !options.playwrightSmoke) {
+    if (newUser && !options.playwrightSmoke && !cliDiscovery) {
       // Phase A has neither a workspace argument nor the harness's fallback cwd.
       // Phase B below reuses this exact HOME and profile with a real folder.
       await runVsCodeGuiTests(runTests, {
@@ -286,12 +303,24 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     });
     if (server) {
       const requests = server.capturedNonTitleRequests();
+      if (cliDiscovery) {
+        if (server.capturedRequests().length !== 0) throw new Error("Discovery acceptance must not make any model request");
+        await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: 0 }));
+      } else {
       const expectedCount = mcpSmoke ? 1 + mcpSmoke.responses.length : options.upgradeFixture ? 5 : 7;
       if (requests.length !== expectedCount) throw new Error(`Expected ${expectedCount} real model requests, got ${requests.length}`);
       const models = requests.map(request => JSON.parse(request.split("\r\n\r\n")[1]).model);
       if (models.some(model => model !== (options.upgradeFixture ? "gpt-5.4" : "deepseek-v4-flash"))) throw new Error(`Unexpected selected models: ${JSON.stringify(models)}`);
       await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: requests.length, models }, null, 2));
       if (mcpSmoke) await mcpSmoke.record(requests, options.artifactsDir);
+      }
+    }
+    if (cliDiscovery && fixture && options.production?.bundle && !options.cliInstallFailure) {
+      if (process.platform === "win32" && !options.runnerHome) {
+        await fs.writeFile(path.join(options.artifactsDir, "multica-discovery.json"), JSON.stringify({ status: "not-run", reason: "Isolated HOME cannot configure the real Windows user PATH; full discovery requires --allow-runner-path" }));
+      } else {
+        await verifyMulticaDiscovery(fixture, options.production.bundle.cliSha256, options.artifactsDir);
+      }
     }
   } finally {
     if (options.playwrightSmoke && server) {
@@ -311,6 +340,21 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       try { await server?.close(); } finally {
         await fixture?.cleanup();
         await fs.rm(installRoot, { force: true, recursive: true });
+        if (cliDiscovery) {
+          const removed = [installRoot, ...(fixture ? options.runnerHome
+            ? [path.join(fixture.homePath, ".tomcat"), path.join(fixture.homePath, ".local/bin/tomcat.exe")]
+            : [fixture.homePath] : [])];
+          for (const resource of removed) {
+            const exists = await fs.lstat(resource).then(() => true, error => {
+              if (error.code === "ENOENT") return false;
+              throw error;
+            });
+            if (exists) throw new Error(`Owned acceptance resource survived cleanup: ${resource}`);
+          }
+          await fs.writeFile(path.join(options.artifactsDir, "cleanup.json"), JSON.stringify({
+            status: "passed", removed, runnerAccountHomeRetained: Boolean(options.runnerHome),
+          }, null, 2));
+        }
       }
     }
   }
@@ -320,7 +364,11 @@ async function main(): Promise<void> {
   const playwrightSmoke = process.env.TOMCAT_RELEASE_MCP_SMOKE === "1";
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
-  const productionSource = parseProductionSource(process.argv.slice(2));
+  const cliDiscovery = process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1";
+  const allowRunnerPath = process.argv.includes("--allow-runner-path");
+  if (allowRunnerPath && (!cliDiscovery || process.platform !== "win32")) throw new Error("--allow-runner-path is only for explicit Windows discovery acceptance");
+  const productionSource = parseProductionSource(process.argv.slice(2).filter(arg => arg !== "--allow-runner-path"));
+  if (cliDiscovery && (productionSource?.kind !== "bundle" || playwrightSmoke)) throw new Error("CLI discovery requires its own --release-bundle scenario");
   if (playwrightSmoke && productionSource?.kind !== "bundle") throw new Error("MCP smoke requires --release-bundle <current VSIX>");
   if (productionSource) {
     const bundle = productionSource.kind === "bundle" ? await inspectReleaseVsix(path.resolve(productionSource.value)) : undefined;
@@ -336,6 +384,25 @@ async function main(): Promise<void> {
     await fs.mkdir(artifactsDir, { recursive: true });
     runCommand("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
     const options = { playwrightSmoke, extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
+    if (cliDiscovery) {
+      const runDiscovery = async (scenario: InstalledScenarioOptions) => {
+        await runInstalledScenario(scenario);
+        const failureArtifacts = path.join(scenario.artifactsDir, "installation-failure");
+        await fs.mkdir(failureArtifacts, { recursive: true });
+        await runInstalledScenario({ ...scenario, artifactsDir: failureArtifacts, cliInstallFailure: true });
+      };
+      await runDiscovery(options);
+      if (allowRunnerPath) {
+        const accountArtifacts = path.join(artifactsDir, "runner-account");
+        await fs.mkdir(accountArtifacts, { recursive: true });
+        await withWindowsUserPath(
+          () => runDiscovery({ ...options, artifactsDir: accountArtifacts, runnerHome: os.homedir() }),
+          result => fs.writeFile(path.join(artifactsDir, "windows-path-restoration.json"), JSON.stringify(result, null, 2)),
+        );
+      }
+      console.log(`Unified CLI installation, Multica discovery and offline-log evidence: ${artifactsDir}`);
+      return;
+    }
     await runInstalledScenario(options);
     if (playwrightSmoke) { console.log(`Real Playwright MCP evidence: ${artifactsDir}`); return; }
     // 0.1.90 never shipped for Windows, so there is no Windows data to upgrade.
@@ -373,22 +440,12 @@ async function main(): Promise<void> {
     handshakeDelayMs: 15_000,
   });
   const prebuiltVsixRoot = await fs.mkdtemp(path.join(tempRoot, "tvsi-prebuilt-vsix-"));
-  const {
-    TOMCAT_VSCODE_TEST_PATH: _ignoredBundledTestPath,
-    ...bundledOnlyFixtureEnv
-  } = bundledFixture.env;
-  const {
-    TOMCAT_VSCODE_TEST_PATH: _ignoredSetupTestPath,
-    ...setupRequiredBundledEnv
-  } = setupRequiredFixture.env;
-  const {
-    TOMCAT_VSCODE_TEST_PATH: _ignoredTransientTestPath,
-    ...transientFailureBundledEnv
-  } = transientFailureFixture.env;
-  const {
-    TOMCAT_VSCODE_TEST_PATH: _ignoredSlowHandshakeTestPath,
-    ...slowHandshakeBundledEnv
-  } = slowHandshakeFixture.env;
+  // Fake CLIs deliberately reject self-install. Keep their test-only runtime
+  // overrides; real default installation is proved only by the isolated bundle scenario.
+  const bundledOnlyFixtureEnv = bundledFixture.env;
+  const setupRequiredBundledEnv = setupRequiredFixture.env;
+  const transientFailureBundledEnv = transientFailureFixture.env;
+  const slowHandshakeBundledEnv = slowHandshakeFixture.env;
 
 
   const bundledVerifyEnv: NodeJS.ProcessEnv = {
@@ -407,7 +464,7 @@ async function main(): Promise<void> {
       ].join("|"),
     TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS:
       process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS ?? "4000",
-    TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
+    TOMCAT_EXPECT_RESOLVED_SOURCE: "test-env",
     TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsDir,
   };
   const pureExtWorkspacePath = await fs.mkdtemp(path.join(tempRoot, "tvsi-pure-ext-workspace-"));
@@ -436,7 +493,7 @@ async function main(): Promise<void> {
     TOMCAT_EXPECT_PROMPT_DETAIL: "fake serve startup blocked until fixture repair",
     TOMCAT_EXPECT_PROMPT_SEVERITY: "warning",
     TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat failed to start",
-    TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
+    TOMCAT_EXPECT_RESOLVED_SOURCE: "test-env",
     TOMCAT_EXPECT_SETUP_RECOVERY: "1",
     TOMCAT_EXPECT_PROMPT_TRIGGER: "restart",
     TOMCAT_VSCODE_TEST_WARNING_ACTION: "",

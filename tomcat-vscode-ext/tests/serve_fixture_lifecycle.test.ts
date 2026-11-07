@@ -1,7 +1,8 @@
 import * as http from "node:http";
-import { mkdir, stat, readFile, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import * as path from "node:path";
+import * as os from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import { serveFixtureEnvironment, setupServeFixture, spawnScriptedOpenAiStreamServer, sseDone, sseFinish } from "./serveTestUtils";
 
@@ -63,6 +64,63 @@ describe("serve fixture resource ownership", () => {
     } finally { await fixture.cleanup(); }
     expect(runCli).toHaveBeenCalledExactlyOnceWith("not-executed", ["serve", "stop"], expect.objectContaining({ env: fixture.env, cwd: fixture.workspacePath }));
     expect(runCli).toHaveBeenLastCalledWith("not-executed", ["serve", "stop"], expect.objectContaining({ timeout: 80_000 }));
+  });
+
+  it("rejects an existing HOME without explicit hosted Windows fixture ownership", async () => {
+    const runCli = vi.fn();
+    await expect(setupServeFixture("http://127.0.0.1:1234", "openai", {
+      binary: "not-executed", coldStart: true, runnerHome: "/not-owned", runCli,
+    })).rejects.toThrow("Existing HOME is restricted");
+    expect(runCli).not.toHaveBeenCalled();
+  });
+
+  // Only platform/CI identity is simulated. Exercise the real file-ownership and
+  // cleanup code against owned files; no registry, real HOME or service is used.
+  async function inDisposableRunnerHome(run: (home: string) => Promise<void>) {
+    const home = await mkdtemp(path.join(os.tmpdir(), "runner-home-"));
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const argv = process.argv;
+    try {
+      vi.stubEnv("HOME", home); vi.stubEnv("USERPROFILE", home);
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+      process.argv = [...argv, "--allow-runner-path"];
+      vi.stubEnv("GITHUB_ACTIONS", "true"); vi.stubEnv("RUNNER_ENVIRONMENT", "github-hosted");
+      await run(home);
+    } finally {
+      Object.defineProperty(process, "platform", platform); process.argv = argv; vi.unstubAllEnvs();
+      await rm(home, { force: true, recursive: true });
+    }
+  }
+
+  it.each([".tomcat", ".local/bin/tomcat.exe"])("refuses to own an existing runner resource: %s", async resource => {
+    await inDisposableRunnerHome(async home => {
+      const file = path.join(home, resource);
+      await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, "must survive");
+      const runCli = vi.fn();
+      await expect(setupServeFixture("http://127.0.0.1:1234", "openai", {
+        binary: "not-executed", coldStart: true, runnerHome: home, runCli,
+      })).rejects.toThrow("refuses existing resources");
+      expect(await readFile(file, "utf8")).toBe("must survive");
+      expect(runCli).not.toHaveBeenCalled();
+    });
+  });
+
+  it("removes only owned runner resources, not its HOME or pre-existing files", async () => {
+    await inDisposableRunnerHome(async home => {
+      await writeFile(path.join(home, "keep"), "pre-existing account file");
+      const runCli = vi.fn(async () => undefined);
+      const fixture = await setupServeFixture("http://127.0.0.1:1234", "openai", {
+        binary: "not-executed", coldStart: true, runnerHome: home, runCli,
+      });
+      await mkdir(path.join(home, ".local/bin"), { recursive: true });
+      await writeFile(path.join(home, ".local/bin/tomcat.exe"), "fixture-owned program");
+      await fixture.cleanup(); await fixture.cleanup();
+      expect(runCli).toHaveBeenCalledExactlyOnceWith("not-executed", ["serve", "stop"], expect.objectContaining({ env: fixture.env }));
+      expect(await readFile(path.join(home, "keep"), "utf8")).toBe("pre-existing account file");
+      for (const dir of [path.join(home, ".tomcat"), path.join(home, ".local"), fixture.workspacePath]) {
+        await expect(stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    });
   });
 
   it("uses the same private home/cwd for initialization, configuration and shutdown", async () => {

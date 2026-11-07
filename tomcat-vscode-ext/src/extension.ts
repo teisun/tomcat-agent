@@ -34,6 +34,7 @@ import {
   resolveTomcatExecutable,
   type ResolvedTomcatExecutable,
 } from "./config/resolveTomcatExecutable";
+import { installUserCli } from "./config/installUserCli";
 import { VsCodeIde } from "./ide/VsCodeIde";
 import {
   hasAnyModelAdminCapability,
@@ -227,7 +228,7 @@ export interface TomcatExtensionApi {
       TomcatWebviewViewProvider["getObservedWebviewErrors"]
     >;
     getPromptHistory(): PromptRecord[];
-    getResolvedExecutable(): ResolvedTomcatExecutable;
+    getResolvedExecutable(): Promise<ResolvedTomcatExecutable>;
     getServeProcessId(): number | undefined;
     getLastContextSearchIntent(): Extract<
       WebviewIntent,
@@ -568,15 +569,8 @@ export async function openExtensionGuide(
   await vscode.window.showTextDocument(document, { preview: true });
 }
 
-async function resolveExecutable(
-  context: vscode.ExtensionContext,
-): Promise<ResolvedTomcatExecutable> {
-  const bundledPath = await ensureBundledExecutable(
-    context,
-    bundledExecutableCandidate(context.extensionPath),
-  );
+async function resolveExecutable(): Promise<ResolvedTomcatExecutable> {
   return resolveTomcatExecutable({
-    bundledPath,
     configuredPath: getTomcatConfiguration().get<string>(
       "path",
       TOMCAT_EXECUTABLE_NAME,
@@ -630,7 +624,12 @@ export async function activate(
     await rawShowFile(displayPath, line);
     observedFileOpens.push({ line, path: displayPath });
   };
-  let resolvedExecutable = await resolveExecutable(context);
+  const installation = ensureBundledExecutable(context, bundledExecutableCandidate(context.extensionPath))
+    .then(executable => installUserCli(executable, message => appendOutput(output, "cli-install", message)))
+    .catch(error => appendOutput(output, "cli-install", `${new Date().toISOString()} Failed to prepare bundled CLI: ${String(error)}`));
+  let resolvedExecutable: ResolvedTomcatExecutable = {
+    executable: TOMCAT_EXECUTABLE_NAME, found: false, source: "default",
+  };
 
   const messenger = new TomcatMessenger({
     env: { TOMCAT_HOST_LOCALE: vscode.env.language ?? "en" },
@@ -718,7 +717,8 @@ export async function activate(
   };
 
   const applyRuntimeConfiguration = async (): Promise<void> => {
-    resolvedExecutable = await resolveExecutable(context);
+    await installation;
+    resolvedExecutable = await resolveExecutable();
     messenger.updateOptions({
       cwd: getDefaultCwd(),
       executable: resolvedExecutable.executable,
@@ -732,7 +732,8 @@ export async function activate(
     void maybeShowExecutableWarning();
   };
 
-  await applyRuntimeConfiguration();
+  const runtimeReady = applyRuntimeConfiguration();
+  void runtimeReady.catch(error => appendOutput(output, "error", `runtime configuration: ${String(error)}`));
 
   supervisor = new ServeConnectionSupervisor({
     initialize: (timeoutMs) => initializeServe(messenger, timeoutMs),
@@ -798,6 +799,7 @@ export async function activate(
   });
 
   const ensureInitialized = async (): Promise<InitializeResult> => {
+    await runtimeReady;
     const result = await supervisor.whenReady();
     if (result.sessionId) {
       sessionRouter.setBootstrapSessionId(result.sessionId);
@@ -845,7 +847,7 @@ export async function activate(
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
     openSettings: (route) => settingsPanel.reveal(route ?? "general"),
-    reconnectServe: async () => { await supervisor.reconnect(); },
+    reconnectServe: async () => { await runtimeReady; await supervisor.reconnect(); },
     restartServe: async () => { await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND); },
     showConnectionLogs: () => output.show(true),
     refreshPlanPreview: (planId, path, state) =>
@@ -865,6 +867,7 @@ export async function activate(
   void webviewProvider.setServeConnectionState(supervisor.currentState.status);
   settingsPanel = new SettingsPanel({
     ensureInitialized,
+    showConnectionLogs: () => output.show(true),
     expectedCliVersion,
     extensionUri: context.extensionUri,
     extensionVersion,
@@ -1359,7 +1362,7 @@ export async function activate(
       getObservedWebviewErrors: () =>
         webviewProvider.getObservedWebviewErrors(),
       getPromptHistory: () => [...promptHistory],
-      getResolvedExecutable: () => resolvedExecutable,
+      getResolvedExecutable: async () => { await runtimeReady; return resolvedExecutable; },
       getServeProcessId: () => messenger.pid,
       getLastContextSearchIntent: () =>
         webviewProvider.getLastContextSearchIntent(),

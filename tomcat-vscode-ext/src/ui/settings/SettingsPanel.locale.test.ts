@@ -7,7 +7,7 @@ import type { InitializeResult } from "../../serveClient/initialize";
 const init = (): InitializeResult => ({ attachmentRoot: null, capabilities: ["set_ui_language"], protocolVersion: 2, sessionId: null, serverVersion: "test", uiPreferences: { language: "auto", effective: "en", envOverride: false } });
 function create(ensureInitialized = async () => init()) {
   const request = vi.fn().mockResolvedValue({ success: true, payload: { language: "zh-CN", effective: "zh-CN", envOverride: false } });
-  const panel = new SettingsPanel({ ensureInitialized, expectedCliVersion: null, extensionVersion: null, extensionUri: vscode.Uri.file("/tmp/locale-test"), messenger: { request } as never });
+  const panel = new SettingsPanel({ showConnectionLogs: vi.fn(), ensureInitialized, expectedCliVersion: null, extensionVersion: null, extensionUri: vscode.Uri.file("/tmp/locale-test"), messenger: { request } as never });
   return { panel, request };
 }
 afterEach(() => setLocale("en"));
@@ -15,7 +15,7 @@ afterEach(() => setLocale("en"));
 describe("Settings language persistence", () => {
   it("does not mistake a disconnect for a failed language save", async () => {
     let exit!: () => void;
-    const panel = new SettingsPanel({ ensureInitialized: async () => init(), expectedCliVersion: null, extensionVersion: null,
+    const panel = new SettingsPanel({ showConnectionLogs: vi.fn(), ensureInitialized: async () => init(), expectedCliVersion: null, extensionVersion: null,
       extensionUri: vscode.Uri.file("/tmp/locale-test"), messenger: { onExit: (listener: () => void) => { exit = listener; return { dispose() {} }; } } as never });
     try {
       await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready-exit", data: { route: "general" } });

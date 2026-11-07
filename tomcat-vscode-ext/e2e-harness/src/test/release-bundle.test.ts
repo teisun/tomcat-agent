@@ -16,7 +16,7 @@ const utilityModelName = "deepseek-v4-pro";
 type Api = { __testing: {
   getSettingsPanelState: InstalledConnectorApi["__testing"]["getSettingsPanelState"];
   sendSettingsDomAction: InstalledConnectorApi["__testing"]["sendSettingsDomAction"];
-  getResolvedExecutable(): { executable: string; found: boolean; source: string };
+  getResolvedExecutable(): Promise<{ executable: string; found: boolean; source: string }>;
   getServeProcessId(): number | undefined;
   getPromptHistory(): Array<{ actions: string[] }>;
   getSessionState(sessionId: string): Promise<{ model: string; modelReady?: boolean }>;
@@ -49,6 +49,7 @@ type FrameDriver = {
 };
 const capture = require(path.join(extensionRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
   captureWorkbenchArtifacts(file: string): Promise<void>;
+  WorkbenchFindDriver: { connectFromEnvironment(): Promise<{ waitForVisibleText(text: string): Promise<void>; close(): void }> };
   SettingsFrameDriver: { connectFromEnvironment(selector: string): Promise<FrameDriver> };
 };
 function required(name: string): string { const value = process.env[name]; assert.ok(value, `Missing ${name}`); return value; }
@@ -181,8 +182,53 @@ async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
   } finally { chat.close(); }
 }
 
+async function assertCliInstallationAndLogs(api: Api, artifacts: string, failed: boolean, resolved: Awaited<ReturnType<Api["__testing"]["getResolvedExecutable"]>>) {
+  const firstPid = api.__testing.getServeProcessId();
+  if (!failed) assert.ok(firstPid, "the user-level CLI must have started the real shared service");
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+  await vscode.commands.executeCommand("tomcat.openSettings");
+  const settings = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-settings-shell");
+  try {
+    await settings.waitForSnapshot(snapshot => snapshot.buttons.some(button => button.testId === "settings-view-logs" && !button.disabled)
+      && api.__testing.getSettingsPanelState().state.ready === !failed, "Footer logs must remain usable with the real connection state");
+    assert.equal(await settings.evaluate<boolean>(`!!document.querySelector('[data-testid="settings-version-footer"] [data-testid="settings-view-logs"]')`), true);
+    for (const [name, width, height] of [["desktop", 1440, 900], ["narrow", 390, 844]] as const) {
+      await settings.setViewport(width, height);
+      await settings.capture(path.join(artifacts, `cli-settings-${name}.png`));
+    }
+    await settings.setViewport(1440, 900);
+    await settings.click("settings-view-logs");
+    const workbench = await capture.WorkbenchFindDriver.connectFromEnvironment();
+    try { await workbench.waitForVisibleText("[cli-install]"); } finally { workbench.close(); }
+    const output = vscode.workspace.textDocuments.find(document => document.uri.scheme === "output" && document.getText().includes("[cli-install]"));
+    assert.ok(output, "the existing Tomcat output channel must contain raw installation diagnostics");
+    const text = output.getText();
+    assert.ok(text.includes("self-install --add-to-path"));
+    if (failed) {
+      assert.match(text, /code=1/);
+      assert.equal(api.__testing.getSettingsPanelState().state.ready, false);
+      const entry = path.join(required("HOME"), ".local/bin", process.platform === "win32" ? "tomcat.exe" : "tomcat");
+      assert.equal(await fs.readFile(path.join(entry, "keep"), "utf8"), "owned directory must survive failed installation");
+    } else {
+      const partialPath = process.env.TOMCAT_CLI_INSTALL_EXPECT_PARTIAL === "1";
+      assert.match(text, partialPath ? /code=1/ : /self-install exited with code 0/);
+      if (partialPath) assert.doesNotMatch(text, /self-install exited with code 0/);
+      assert.equal(api.__testing.getServeProcessId(), firstPid, "viewing logs must not restart or disconnect the service");
+    }
+    await fs.writeFile(path.join(artifacts, "cli-install-output.log"), text);
+    await capture.captureWorkbenchArtifacts(path.join(artifacts, "cli-output.png"));
+    assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
+    await fs.writeFile(path.join(artifacts, "cli-discovery-host.json"), JSON.stringify({ status: "passed", installationFailure: failed,
+      partialPath: process.env.TOMCAT_CLI_INSTALL_EXPECT_PARTIAL === "1", resolved, firstPid, platform: process.platform, architecture: process.arch, vscode: vscode.version,
+      prompts: api.__testing.getPromptHistory(), webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));
+  } finally { settings.close(); }
+}
+
 suite("Native installed release bundle", () => {
-  test("uses its bundled CLI through real Serve, model, policy gates, stop and reload", async function () {
+  test(process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1"
+    ? "checks automatic user CLI installation and settings log access"
+    : "installs and runs the user CLI through real Serve, model, policy gates, stop and reload", async function () {
     this.timeout(process.env.TOMCAT_RELEASE_MCP_SMOKE === "1" ? 600_000 : 240_000);
     const artifacts = required("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
     const events: Event[] = [];
@@ -191,17 +237,28 @@ suite("Native installed release bundle", () => {
     try {
       console.log("Release acceptance: activating the installed extension");
       const api = await support.getTomcatExtensionApi();
-      console.log("Release acceptance: activation completed; checking the bundled executable");
+      console.log("Release acceptance: activation completed; checking the user executable");
       testing = api.__testing;
       const workspace = required("TOMCAT_VSCODE_TEST_DEFAULT_CWD");
-      const resolved = api.__testing.getResolvedExecutable();
-      assert.equal(resolved.source, "bundled");
+      const resolved = await api.__testing.getResolvedExecutable();
+      if (process.env.TOMCAT_CLI_INSTALL_EXPECT_FAILURE === "1") {
+        assert.equal(resolved.source, "config");
+        assert.equal(resolved.found, false, "the deliberately invalid override must not run the bundled installation source");
+        await assertCliInstallationAndLogs(api, artifacts, true, resolved);
+        return;
+      }
+      assert.equal(resolved.source, "user-bin");
       assert.equal(resolved.found, true);
-      assert.equal(await fs.realpath(resolved.executable), await fs.realpath(required("TOMCAT_EXPECT_RELEASE_BINARY")));
+      assert.equal(await fs.realpath(resolved.executable), await fs.realpath(path.join(required("HOME"), ".local", "bin", process.platform === "win32" ? "tomcat.exe" : "tomcat")));
+      assert.notEqual(await fs.realpath(resolved.executable), await fs.realpath(required("TOMCAT_EXPECT_RELEASE_BINARY")));
       assert.equal(createHash("sha256").update(await fs.readFile(resolved.executable)).digest("hex"), required("TOMCAT_EXPECT_RELEASE_CLI_SHA256"));
       assert.equal(process.arch, required("TOMCAT_EXPECT_RELEASE_HOST_ARCH"), "Electron and verifier must share the native architecture");
       await api.__testing.focusWebview();
       await api.__testing.waitForWebviewReady();
+      if (process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1") {
+        await assertCliInstallationAndLogs(api, artifacts, false, resolved);
+        return;
+      }
       if (process.env.TOMCAT_RELEASE_UPGRADE_SESSION) {
         const upgrade = await assertLegacyUpgradeWorkflow(api, artifacts);
         await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", upgrade, resolved, architecture: process.arch, platform: process.platform, vscode: vscode.version, webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));

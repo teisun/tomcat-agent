@@ -24,6 +24,10 @@ export function SettingsShell({ state, vscodeApi, children }: {
       <div className="tc-settings-shell__version" data-testid="settings-version-footer">
         <div>{t("settings.extensionVersion", { version: version(state.extensionVersion) })}</div>
         <div>{t("settings.serveVersion", { version: state.ready ? version(state.serverVersion) : t("settings.waitingForConnection") })}</div>
+        <button className="tc-link-button" data-testid="settings-view-logs" type="button"
+          onClick={() => vscodeApi.postMessage({ type: "viewConnectionLogs", messageId: `settings-logs-${Date.now()}` })}>
+          {t("host.action.logs")}
+        </button>
       </div>
     </aside>
     {children}
