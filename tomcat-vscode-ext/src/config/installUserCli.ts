@@ -41,6 +41,7 @@ export async function installUserCli(
     };
     log(failure.stdout ?? "");
     log(failure.stderr ?? "");
-    log(`${new Date().toISOString()} CLI installation failed: ${failure.message ?? String(error)} (code=${failure.code ?? "unknown"}, signal=${failure.signal ?? "none"}, killed=${failure.killed ?? false})`);
+    const summary = String(failure.message ?? error).split(/\r?\n/, 1)[0];
+    log(`${new Date().toISOString()} CLI installation failed: ${summary} (code=${failure.code ?? "unknown"}, signal=${failure.signal ?? "none"}, killed=${failure.killed ?? false})`);
   }
 }

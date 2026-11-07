@@ -636,7 +636,7 @@
   "cli.init.testBinary": "  ⚠ Running a temporary cargo test binary; skipping PATH setup to avoid a dangling target/deps entry",
   "cli.init.commandLink": "  ✓ Stable command installed: {path}",
   "cli.init.linkFailed": "  ⚠ Could not install the stable command ({detail}); setup can continue",
-  "cli.init.pathAdded": "  ✓ Added {dir} to your user PATH\n    Open a new terminal window before running tomcat",
+  "cli.init.pathAdded": "  ✓ User PATH includes {dir}\n    Newly opened terminals can run tomcat",
   "cli.init.pathManual": "  ⚠ Could not configure PATH automatically; run:",
   "cli.init.pathManualWindows": "  ⚠ Could not configure PATH automatically. Add this folder to your user PATH:\n    {dir}\n    Settings → System → About → Advanced system settings → Environment Variables → user variable Path → Edit → New",
   "cli.init.homeMissing": "  ⚠ Could not locate HOME; run:",

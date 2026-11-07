@@ -36,7 +36,7 @@ describe("automatic user CLI installation", () => {
     expect(log.mock.calls.flat().join("\n")).toContain("automatic installation skipped");
   });
   it.each([
-    { code: 1, message: "PATH setup failed", stdout: "file installed", stderr: "manual PATH steps" },
+    { code: 1, message: "Command failed: <exe> self-install --add-to-path\nmanual PATH steps", stdout: "file installed", stderr: "manual PATH steps" },
     { code: "ENOENT", message: "cannot spawn" },
     { code: null, signal: "SIGTERM", killed: true, message: "installation timed out", stdout: "copy started" },
   ])("logs failures without rejecting activation or inventing success: $message", async failure => {
@@ -44,10 +44,13 @@ describe("automatic user CLI installation", () => {
     const run = vi.fn().mockRejectedValue(failure);
     await expect(installUserCli(executable, log, run)).resolves.toBeUndefined();
     const text = log.mock.calls.flat().join("\n");
-    expect(text).toContain(failure.message);
+    expect(text).toContain(failure.message.split(/\r?\n/, 1)[0]);
     expect(text).not.toContain("exited with code 0");
     if ("stdout" in failure) expect(text).toContain(failure.stdout);
-    if ("stderr" in failure) expect(text).toContain(failure.stderr);
+    if ("stderr" in failure) {
+      expect(log).toHaveBeenCalledWith(failure.stderr);
+      expect(text.match(/manual PATH steps/g)).toHaveLength(1);
+    }
     if ("killed" in failure) expect(text).toContain("killed=true");
   });
 });
