@@ -757,6 +757,14 @@ pub enum ServeCommand {
         #[serde(default)]
         params: NewSessionParams,
     },
+    /// Internal ACP-only controller policy change; never deserializable from Native wire.
+    #[serde(skip)]
+    #[schemars(skip)]
+    SetInteractionPolicy {
+        id: Option<String>,
+        session_id: Option<String>,
+        setting: crate::core::plan_runtime::interaction::InteractionPolicySetting,
+    },
     /// Internal ACP load with an explicit cwd, through the same admission/cleanup queue.
     /// Not a native wire command or an ACP extension.
     #[serde(skip)]
@@ -977,6 +985,7 @@ impl ServeCommand {
             | Self::RunSlashCommand { id, .. }
             | Self::GetInstructionCatalog { id, .. }
             | Self::SetPlanMode { id, .. }
+            | Self::SetInteractionPolicy { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
             | Self::SetSpeed { id, .. }
@@ -1035,6 +1044,7 @@ impl ServeCommand {
             | Self::RunSlashCommand { session_id, .. }
             | Self::GetInstructionCatalog { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
+            | Self::SetInteractionPolicy { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
             | Self::SetSpeed { session_id, .. }
@@ -1125,6 +1135,7 @@ impl ServeCommand {
             Self::RunSlashCommand { .. } => "run_slash_command",
             Self::GetInstructionCatalog { .. } => "get_instruction_catalog",
             Self::SetPlanMode { .. } => "set_plan_mode",
+            Self::SetInteractionPolicy { .. } => "internal_set_interaction_policy",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",
             Self::SetSpeed { .. } => "set_speed",

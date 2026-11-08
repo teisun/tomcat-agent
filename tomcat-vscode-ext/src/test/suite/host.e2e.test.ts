@@ -68,7 +68,7 @@ suite("Tomcat host E2E", () => {
   });
 
   (process.env.TOMCAT_E2E_EXTERNAL_OBSERVATION ? test : test.skip)("external host observation: existing host session and project boundary", async function () {
-    this.timeout(90_000);
+    this.timeout(240_000); // A peer devhost stays open while the answering window builds and starts.
     await assertExternalHostObservation(getTomcatExtensionApi);
   });
 

@@ -157,6 +157,17 @@ describe("error recovery countdown projection", () => {
 });
 
 describe("read-only session observation", () => {
+  it("keeps the existing question card answerable without enabling task controls", async () => {
+    const { postMessage } = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    Object.assign(snapshot.sessionViews.s1, { access: "observe", ownedByThisFrontend: false, busy: true });
+    await emitState({ channel: "state", content: snapshot, messageId: "observer-question" });
+    expect(screen.getByTestId("observer-notice").textContent).toBe(translate("en", "session.observerCanAnswer"));
+    expect(screen.getByTestId("pending-question-panel")).toBeTruthy();
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
+    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
+    expect(postMessage.mock.calls.some(([message]) => ["prompt", "interrupt", "buildPlan"].includes(message.type))).toBe(false);
+  });
   it("locks write actions while busy and idle, keeps reading available, and restores a writable session", async () => {
     const { postMessage } = mount(undefined, "en");
     const snapshot = approvalDraftSnapshot("s1");

@@ -936,6 +936,7 @@ export const zhCN = {
   "session.running": "运行中",
   "session.readOnly": "只读观察",
   "session.readOnlyFrom": "只读观察 · 来自 {source}",
+  "session.observerCanAnswer": "旁观中；可回答当前问题，不能发送任务或停止执行。",
   "session.acpClient": "ACP 客户端",
   "session.pin": "置顶会话",
   "session.unpin": "取消置顶",

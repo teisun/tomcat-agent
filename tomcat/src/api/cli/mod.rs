@@ -176,6 +176,8 @@ pub enum Commands {
         /// 本连接控制会话的私有技能目录（绝对路径）
         #[arg(long)]
         skills_dir: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        options: crate::api::acp::AcpLaunchOptions,
     },
     /// 共享服务管理；--stdio 保留独立进程协议
     #[command(args_conflicts_with_subcommands = true)]
@@ -680,10 +682,14 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Model { sub } => run_model(sub, &cfg),
         Commands::Claw { resume } => run_claw(resume, &cfg),
         Commands::Code { resume } => run_code(resume, &cfg),
-        Commands::Acp { skills_dir } => crate::api::acp::run(
+        Commands::Acp {
+            skills_dir,
+            options,
+        } => crate::api::acp::run(
             &cfg,
             client_environment.expect("ACP environment captured before bootstrap"),
             skills_dir,
+            options.provided(),
         ),
         Commands::Serve {
             sub: Some(action), ..

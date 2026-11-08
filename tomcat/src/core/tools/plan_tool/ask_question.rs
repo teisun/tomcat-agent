@@ -41,16 +41,43 @@ pub async fn execute_for_tool(
     tool_call_id: Option<&str>,
 ) -> Result<serde_json::Value, ToolError> {
     let questions = parse_and_validate_questions(raw_args)?;
-    let result = panel
-        .ask_with_identity(
-            AskQuestionIdentity {
-                session_id: runtime.current_session_id(),
-                tool_call_id: tool_call_id.map(str::to_owned),
-            },
-            questions.clone(),
-            termination,
+    let recommended = runtime.interaction_policy().questions
+        == crate::core::plan_runtime::QuestionPolicy::Recommended;
+    let result = if let Some(result) = termination.result() {
+        result
+    } else if recommended {
+        AskQuestionResult::answered(
+            questions
+                .iter()
+                .map(|question| {
+                    // Input validation established exactly one recommendation per question.
+                    let option = question
+                        .options
+                        .iter()
+                        .find(|option| option.recommended)
+                        .unwrap();
+                    crate::core::plan_runtime::Answer {
+                        question_id: question.id.clone(),
+                        option_ids: vec![option.id.clone()],
+                        custom_text: None,
+                        skipped: false,
+                        picked_recommended: true,
+                    }
+                })
+                .collect(),
         )
-        .await;
+    } else {
+        panel
+            .ask_with_identity(
+                AskQuestionIdentity {
+                    session_id: runtime.current_session_id(),
+                    tool_call_id: tool_call_id.map(str::to_owned),
+                },
+                questions.clone(),
+                termination,
+            )
+            .await
+    };
     if matches!(result.outcome, AskQuestionOutcome::Answered) {
         validate_answers(&questions, &result)?;
     } else if !result.answers.is_empty() {
@@ -59,7 +86,10 @@ pub async fn execute_for_tool(
             result.outcome
         )));
     }
-    let payload = answer_to_json(&result);
+    let mut payload = answer_to_json(&result);
+    if recommended && result.outcome == AskQuestionOutcome::Answered {
+        payload["answer_source"] = serde_json::json!("policy_recommended");
+    }
     write_ask_question_transcript(runtime, &questions, &payload, tool_call_id);
     Ok(payload)
 }
@@ -144,7 +174,10 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Result<(), ToolError> {
+pub(crate) fn validate_answers(
+    questions: &[Question],
+    result: &AskQuestionResult,
+) -> Result<(), ToolError> {
     if result.answers.len() != questions.len() {
         return Err(ToolError::Internal(format!(
             "Panel returned {} answers for {} questions",

@@ -11,7 +11,7 @@ use crate::core::tools::plan_tool::tests::common::{
 async fn completion_publication_preserves_an_intervening_accepted_update() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let runtime = PlanRuntime::new("session-a");
+    let runtime = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let id = fresh_planning_plan(&runtime);
     mark_plan_executing(&runtime, &id, "session-a");
     let path = plan_path_for_id(&id).unwrap();

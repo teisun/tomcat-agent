@@ -954,6 +954,7 @@ export const en = {
   "session.running": "running",
   "session.readOnly": "Read-only observation",
   "session.readOnlyFrom": "Read-only observation · From {source}",
+  "session.observerCanAnswer": "Observing · You can answer the current question, but cannot send tasks or stop execution.",
   "session.acpClient": "ACP client",
   "session.pin": "Pin session",
   "session.unpin": "Unpin session",

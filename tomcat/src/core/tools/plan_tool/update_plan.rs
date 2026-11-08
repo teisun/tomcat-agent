@@ -8,7 +8,7 @@
 //!   - `set_status: in_progress` 仅 `executing` 允许，所有非执行状态一律拒。
 //! - 跨 session 编辑规则：
 //!   - 目标 plan `state ∈ {planning, pending}`：允许（协作改稿）
-//!   - 目标 plan `state == executing` 且 `session_key != current_session_key`：拒
+//!   - 目标 plan `state == executing` 且不属于当前会话：拒（session_id 优先）。
 //! - 写盘后 EXEC 由 `NextAction` 统一裁决：至少一个 todo 且全部终态时计划完成。
 //!   LLM 可将唯一的最终验收 todo 标为 `Acceptance`；其变为 `in_progress` 时结果
 //!   返回 `load_skill(verify)` 提示，验收范围与重跑判断由该 skill 按实际 diff 决定。
@@ -102,7 +102,7 @@ pub(crate) async fn execute_at_path(
 
     let tx = match update_plan_locked(&path, runtime.lock_timeout_ms(), |plan| {
         let plan_state_before = plan.frontmatter.state;
-        enforce_cross_session_policy(runtime, &plan.frontmatter, plan_state_before)?;
+        enforce_cross_session_policy(runtime, plan)?;
         enforce_state_matrix(plan_state_before, &args.ops)?;
         enforce_executing_work_content_is_frozen(
             plan_state_before,
@@ -283,18 +283,19 @@ pub(crate) fn resolve_target_plan_path(
 
 fn enforce_cross_session_policy(
     runtime: &PlanRuntime,
-    fm: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-    state: PlanFileState,
+    plan: &crate::core::plan_runtime::file_store::PlanFile,
 ) -> Result<(), ToolError> {
-    if !matches!(state, PlanFileState::Executing) {
+    if plan.frontmatter.state != PlanFileState::Executing {
         return Ok(());
     }
-    let target_key = fm.session_key.as_deref().unwrap_or("");
-    if target_key != runtime.session_key() {
+    if !runtime.owns_executing_plan(plan) {
         return Err(ToolError::CrossSessionDenied(format!(
-            "plan {} is executing in session {target_key}; current session {} cannot write it",
-            fm.plan_id,
-            runtime.session_key()
+            "plan {} is executing in another session; current session {} cannot write it",
+            plan.frontmatter.plan_id,
+            runtime
+                .current_session_id()
+                .as_deref()
+                .unwrap_or(runtime.session_key())
         )));
     }
     Ok(())

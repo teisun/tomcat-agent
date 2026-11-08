@@ -4,6 +4,8 @@
 mod adapter;
 mod events;
 mod forwarder;
+mod launch;
+pub use launch::AcpLaunchOptions;
 mod permissions;
 
 pub(crate) use forwarder::run;
@@ -42,6 +44,7 @@ pub(crate) async fn run_connection<R, W>(
     output: W,
     environment: crate::infra::platform::EnvironmentSnapshot,
     skills_dir: Option<std::path::PathBuf>,
+    options: Option<AcpLaunchOptions>,
 ) -> Result<(), AppError>
 where
     R: AsyncBufRead + Unpin + Send + 'static,
@@ -50,6 +53,7 @@ where
     let (input, commands) = tokio::sync::mpsc::unbounded_channel();
     let replies = Arc::new(Replies::new(input.clone()));
     let route = replies.clone();
+    let (mode_changes, mut changed_modes) = tokio::sync::mpsc::unbounded_channel::<String>();
     let writer = serve::writer::spawn_writer_with_encoder(
         Box::pin(output),
         // Hosts persist these deltas as the result; dropped text cannot be recovered.
@@ -68,6 +72,11 @@ where
                 let Some(session_id) = event["sessionId"].as_str() else {
                     return Ok(None);
                 };
+                if event["type"] == "session.agent_mode.changed"
+                    && route.prompts.lock().contains_key(session_id)
+                {
+                    let _ = mode_changes.send(session_id.to_owned());
+                }
                 events::event_update(&event)
                     .map(|update| events::notification(session_id, update))
                     .transpose()
@@ -81,6 +90,7 @@ where
         Some(crate::core::session::SessionOrigin::Acp { client_name: None }),
         environment,
         skills_dir,
+        options,
     );
     let _cancel_on_drop = state.lifetime.clone().drop_guard();
     let native = tokio::spawn(serve::stdin::run_command_stream(
@@ -122,6 +132,30 @@ where
         input,
         replies: replies.clone(),
     };
+    // The encoder must never wait for replies delivered by that same encoder.
+    let notifying = adapter.clone();
+    let notifications = tokio::spawn(async move {
+        loop {
+            let result: Result<(), AppError> = tokio::select! {
+                _ = notifying.state.lifetime.cancelled() => break,
+                session_id = changed_modes.recv() => {
+                    let Some(session_id) = session_id else { break };
+                    async {
+                        let options = notifying.config_options(&session_id).await
+                            .map_err(|error| AppError::Config(error.to_string()))?;
+                        let update = serde_json::from_value(serde_json::json!({
+                            "sessionUpdate": "config_option_update", "configOptions": options,
+                        }))?;
+                        let line = events::notification(&session_id, update)?;
+                        notifying.state.writer.send(OutFrame::Acp { session_id: Some(session_id), line })
+                    }.await
+                }
+            };
+            if let Err(error) = result {
+                tracing::warn!(%error, "ACP configuration notification failed");
+            }
+        }
+    });
     let close_state = state.clone();
     let close_replies = replies.clone();
     let outcome = {
@@ -144,6 +178,8 @@ where
     };
     state.lifetime.cancel();
     replies.close();
+    notifications.abort();
+    let _ = notifications.await;
     let cleanup = native
         .await
         .map_err(|e| AppError::Config(format!("ACP command worker failed: {e}")))

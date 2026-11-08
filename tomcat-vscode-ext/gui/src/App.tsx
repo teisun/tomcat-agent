@@ -2923,7 +2923,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <div className="tc-footer" data-testid="composer-footer">
         {readOnly ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
-          {activeSession?.origin
+          {activePendingApproval ? t("session.observerCanAnswer") : activeSession?.origin
             ? t("session.readOnlyFrom", { source: activeSession.origin.clientName?.trim() || t("session.acpClient") })
             : t("session.readOnly")}
         </div> : null}

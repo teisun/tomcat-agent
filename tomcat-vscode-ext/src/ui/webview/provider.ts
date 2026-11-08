@@ -110,6 +110,7 @@ const HISTORY_ATTACHMENT_MODE = "reference" as const;
 const ATTACHMENT_ROOT_MEMENTO_KEY = "tomcat.attachmentRoot";
 
 type PendingQuestion = {
+  promise?: Promise<AskQuestionWireResponse>;
   request: AskQuestionWireRequest;
   resolve(response: AskQuestionWireResponse): void;
   sessionId: string;
@@ -1094,29 +1095,34 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     signal?: AbortSignal,
   ): Promise<AskQuestionWireResponse> {
     const ownerSessionId = sessionId ?? request.sessionId ?? this.peekState().activeSessionId;
-    if (!ownerSessionId || this.draftCoordinator.isRetired(ownerSessionId)) {
+    if (!ownerSessionId || this.draftCoordinator.isRetired(ownerSessionId) || signal?.aborted) {
       return {
         requestId: request.requestId,
         result: { answers: [], cancelled: true, outcome: "host_disconnected" },
       };
     }
+    const key = `${ownerSessionId}\0${request.requestId}`;
+    const existing = this.pendingQuestions.get(key);
+    if (existing?.promise) return existing.promise;
     let pending!: PendingQuestion;
     const responsePromise = new Promise<AskQuestionWireResponse>((resolve) => {
       pending = { request, resolve, sessionId: ownerSessionId, settled: false };
       this.pendingQuestions.set(`${ownerSessionId}\0${request.requestId}`, pending);
     }).then((response) => {
-      if (this.draftCoordinator.isRetired(ownerSessionId)) return response;
-      this.finalizedQuestionResults.set(`${ownerSessionId}\0${request.requestId}`, {
-        request,
-        response,
-        sessionId: ownerSessionId,
-      });
-      this.stateStore.resolveApproval(request.requestId, response.result);
+      if (this.draftCoordinator.isRetired(ownerSessionId) || this.pendingQuestions.get(key) !== pending) return response;
+      const observing = this.peekState().sessionViews[ownerSessionId]?.access === "observe";
+      const answered = response.result.outcome === "answered" || (!response.result.outcome && !response.result.cancelled);
+      if (!observing || answered) {
+        this.finalizedQuestionResults.set(key, { request, response, sessionId: ownerSessionId });
+      }
+      // Submission is not proof of which window won. Only serve may publish the accepted result.
+      this.stateStore.resolveApproval(request.requestId, observing ? undefined : response.result);
       return response;
     }).finally(() => {
-      this.pendingQuestions.delete(`${ownerSessionId}\0${request.requestId}`);
+      if (this.pendingQuestions.get(key) === pending) this.pendingQuestions.delete(key);
       void this.postState();
     });
+    pending.promise = responsePromise;
     const abort = () => this.finalizePendingQuestion(pending, "host_disconnected");
     signal?.addEventListener("abort", abort, { once: true });
 
@@ -1154,6 +1160,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   ): void {
     if (pending.settled) return;
     pending.settled = true;
+    if (this.peekState().sessionViews[pending.sessionId]?.access === "observe") {
+      // End only this window's card. A reissued request may already be queued on reconnect.
+      this.pendingQuestions.delete(`${pending.sessionId}\0${pending.request.requestId}`);
+      this.stateStore.resolveApproval(pending.request.requestId);
+    }
     pending.resolve({
       requestId: pending.request.requestId,
       result: { answers: [], cancelled: true, outcome },
@@ -2104,7 +2115,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           });
           this.stateStore.resolveApproval(
             finalized.request.requestId,
-            finalized.response.result,
+            this.peekState().sessionViews[finalized.sessionId]?.access === "observe" ? undefined : finalized.response.result,
           );
         }
         await this.postState();
@@ -2926,10 +2937,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           });
           return;
         }
+        const response = normalizeAskQuestionResponse(intent.data.requestId, intent.data.result);
+        if (this.peekState().sessionViews[pending.sessionId]?.access === "observe") {
+          // The existing Skip button skips every question; it must not cancel the ACP task.
+          if (response.result.outcome === "skipped") response.result = {
+            outcome: "answered", cancelled: false,
+            answers: pending.request.questions.map(question => ({ questionId: question.id, optionIds: [], pickedRecommended: false, skipped: true })),
+          };
+          if (response.result.cancelled || (response.result.outcome && response.result.outcome !== "answered")) {
+            await this.postEvent({ type: "answerQuestionResult", sessionId: pending.sessionId, requestId: intent.data.requestId, accepted: false });
+            return;
+          }
+        }
         pending.settled = true;
-        pending.resolve(
-          normalizeAskQuestionResponse(intent.data.requestId, intent.data.result),
-        );
+        pending.resolve(response);
         return;
       }
     }

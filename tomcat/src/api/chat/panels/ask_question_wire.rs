@@ -17,14 +17,21 @@ use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
 
+type RequestFinalizer = Arc<dyn Fn(&str) + Send + Sync>;
+
 struct ResponseListenerGuard {
     event_bus: Arc<dyn EventBus>,
     listener_id: EventListenerId,
+    request_id: String,
+    finalizer: Option<RequestFinalizer>,
 }
 
 impl Drop for ResponseListenerGuard {
     fn drop(&mut self) {
         self.event_bus.off(self.listener_id);
+        if let Some(finalizer) = &self.finalizer {
+            finalizer(&self.request_id);
+        }
     }
 }
 
@@ -270,6 +277,7 @@ pub struct EventBusAskQuestionPanel {
     request_emitter: ScopedEventEmitter,
     next_request_seq: AtomicU64,
     request_id_prefix: String,
+    request_finalizer: Option<RequestFinalizer>,
 }
 
 impl EventBusAskQuestionPanel {
@@ -280,6 +288,7 @@ impl EventBusAskQuestionPanel {
             request_id_instance: Uuid::new_v4().simple().to_string(),
             next_request_seq: AtomicU64::new(0),
             request_id_prefix: "askq".to_string(),
+            request_finalizer: None,
         }
     }
 
@@ -290,6 +299,12 @@ impl EventBusAskQuestionPanel {
 
     pub fn with_request_id_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.request_id_prefix = prefix.into();
+        self
+    }
+
+    /// Retire a host route when its panel future ends, including cancellation/drop.
+    pub(crate) fn with_request_finalizer(mut self, finalizer: RequestFinalizer) -> Self {
+        self.request_finalizer = Some(finalizer);
         self
     }
 
@@ -349,6 +364,8 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
         let _listener_guard = ResponseListenerGuard {
             event_bus: Arc::clone(&self.event_bus),
             listener_id,
+            request_id: request_id.clone(),
+            finalizer: self.request_finalizer.clone(),
         };
 
         let request = AskQuestionWireRequest {

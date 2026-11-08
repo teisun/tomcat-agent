@@ -39,6 +39,31 @@ function askFrame(requestId: string, sessionId: string) {
 }
 
 describe("TomcatMessenger control roundtrip", () => {
+  it("deduplicates a live request but accepts the same request after its old handler was aborted", async () => {
+    const child = new FakeConnection();
+    const messenger = await createReadyMessenger({ executable: "tomcat", connectFactory: createConnectionFactory(child) });
+    const calls: AbortSignal[] = [];
+    const pending = [deferred<AskQuestionResult>(), deferred<AskQuestionResult>()];
+    messenger.registerAskQuestionHandler((_request, _frame, context) => {
+      calls.push(context.signal);
+      return pending[calls.length - 1].promise;
+    });
+    try {
+      child.emitStdout(askFrame("same-question", "s1"));
+      child.emitStdout(askFrame("same-question", "s1"));
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      child.emitStdout(JSON.stringify({ type: "control_cancel", requestId: "same-question", sessionId: "s1", payload: { reason: "resolved" } }) + "\n");
+      child.emitStdout(askFrame("same-question", "s1"));
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[0].aborted).toBe(true);
+      const answer = { answers: [], outcome: "answered" as const, cancelled: false };
+      pending[0].resolve(answer);
+      pending[1].resolve(answer);
+      let output = "";
+      await vi.waitFor(() => { output += child.readStdin(); expect(output).toContain("control_response"); });
+      expect(output.trim().split("\n")).toHaveLength(1);
+    } finally { messenger.dispose(); }
+  });
   it("settles an outbound initialize cancellation immediately without cancelling another ID", async () => {
     vi.useFakeTimers();
     const child = new FakeConnection();

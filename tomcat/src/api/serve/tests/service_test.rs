@@ -84,6 +84,62 @@ impl HandshakeFixture {
 }
 
 #[tokio::test]
+async fn acp_handshake_echoes_only_the_supplied_launch_defaults() {
+    let mut fx = HandshakeFixture::new();
+    let options = json!({"mode":"plan", "planReview":"auto", "questionPolicy":"recommended", "planStart":"auto"});
+    fx.send(&json!({"service":"tomcat","protocolVersion":1,"clientVersion":"any","protocol":"acp","acpOptions":options})).await;
+    let hello = fx.next().await;
+    assert!(hello.get("error").is_none());
+    assert_eq!(hello["acpOptions"], options);
+    fx.client.shutdown().await.unwrap();
+    fx.task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn acp_launch_defaults_cannot_silently_connect_to_an_old_service() {
+    for echo in [
+        None,
+        Some(json!({"mode":"chat"})),
+        Some(json!({"mode":"plan"})),
+    ] {
+        let (_root, cfg, mut listener, info) = probe_fixture();
+        let expected = echo == Some(json!({"mode":"plan"}));
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(listener.accept().await.unwrap());
+            let hello: Value = read_json(&mut stream).await.unwrap();
+            assert_eq!(hello["acpOptions"]["mode"], "plan");
+            let mut reply = serde_json::to_value(info).unwrap();
+            if let Some(echo) = echo {
+                reply["acpOptions"] = echo;
+            }
+            write_json(&mut stream, &reply).await.unwrap();
+        });
+        let options = crate::api::acp::AcpLaunchOptions {
+            mode: Some(crate::core::session::AgentMode::Plan),
+            ..Default::default()
+        };
+        let result = super::open_management(
+            &cfg,
+            ConnectionHello {
+                acp_options: Some(options),
+                ..ConnectionHello::new(ConnectionProtocol::Acp)
+            },
+        )
+        .await;
+        if expected {
+            assert!(result.is_ok());
+        } else {
+            let error = result.err().unwrap().to_string();
+            assert!(
+                error.contains("restart") && error.contains("all tasks will stop"),
+                "{error}"
+            );
+        }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 #[serial_test::serial(env_lock)]
 async fn native_waits_for_environment_then_acknowledges_before_initialize() {
     // Contradict the connection's locale without changing the library suite's English locale.

@@ -58,7 +58,9 @@ plan_id / path / active plan
 
 ## 3. 目标与会话边界
 
-解析顺序为 `plan_id → path → runtime.active_plan()`；三者都没有时报错。不要依赖另一个会话的 active plan。执行中计划必须匹配当前 `session_key`，检查位于文件事务内部；非执行计划可由其他会话修订。
+解析顺序为 `plan_id → path → runtime.active_plan()`；三者都没有时报错。不要依赖另一个会话的 active plan。执行中计划复用 `PlanRuntime::owns_executing_plan`：文件有 `session_id` 时优先匹配会话 ID；只有旧文件没有它时，才回退到 `session_key`。检查位于文件事务内部，同项目但不同会话不能互改执行进度；非执行计划仍可由其他会话修订。
+
+同机、同 HOME 的交接复用 `~/.tomcat/plans/` 中的标准 PlanFile。收到文件路径后先读取其中的 `plan_id`，再调用 `start_plan(plan_id)`，继续更新同一文件；不从附件重造计划，不给 `start_plan` 新增路径参数。旧 planner 恢复或刷新缓存时，不绑定另一会话正在执行的计划，因此也不会在停放/取消时把 coder 的计划改回 pending。
 
 LLM 入口在读计划和创建锁文件前，通过原有 PrimitiveExecutor 路径授权流程检查 Write；显式 deny/readonly 不可绕过，未知目录复用已有确认/SessionGrants。默认 plans 目录沿用 AgentPlansDir 的授权，不重复询问。批准后的规范化路径直接进入事务，不在审批等待后重新选取 active plan。内嵌的自定义 executor 若不实现 `authorize_write_path`，该原生更新入口默认拒绝；内部可信 Rust 调用 `execute` 仍共用同一个事务实现。
 
@@ -73,7 +75,7 @@ LLM 入口在读计划和创建锁文件前，通过原有 PrimitiveExecutor 路
 | --- | --- | --- |
 | planning | 允许 | 拒绝 |
 | pending | 允许 | 拒绝；先 build |
-| executing | 仅 owning session_key | 允许，仍受内容冻结/并行数量限制 |
+| executing | 仅执行归属匹配的会话（session_id 优先） | 允许，仍受内容冻结/并行数量限制 |
 | completed | 允许；出现非终态工作时 reopen 为 pending | 拒绝；reopen 后仍需 build |
 
 至少一个 todo 且全部为 completed/cancelled 时，文件可派生为 completed；空列表不视为完成。这是当前文件状态规则，不限定为旧的 `AgentMode::Executing`。已完成文件新增 pending 工作会回到 pending，并沿用当前会话模式。

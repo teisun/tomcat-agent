@@ -827,6 +827,7 @@
   "plan.review.accept": "审查计划",
   "plan.review.skip": "跳过，直接打开",
   "plan.review.skipped": "用户选择跳过审查，计划未经独立审查。",
+  "plan.review.policySkipped": "按会话策略跳过审查，计划未经独立审查。",
   "plan.review.interrupted": "审查已中断，已保存的计划仍可查看。",
   "plan.review.unavailable": "独立审查尚未配置，计划已保存。",
   "planTool.rejected": "当前模式 {mode} 不允许调用 {tool}：{guidance}",

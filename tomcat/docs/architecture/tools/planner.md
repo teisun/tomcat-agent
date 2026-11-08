@@ -22,6 +22,23 @@ Build 不再“进入 EXEC”。它是从 Plan 回到 Chat、并开始推进一�
 
 CLI 显示 `u[Chat]>` 或 `u[Plan]>`，Chat 绑定 executing/pending 计划时显示 `u[Chat·plan:executing]>` / `u[Chat·plan:pending]>`。
 
+## ACP 启动、策略与跨会话交接
+
+```text
+宿主自定义参数 → tomcat acp → 握手确认 → new/load 应用 → 标准 configOptions
+                                             │
+planner（Plan）→ 保存/评审 → 人工批准 → coder（Chat）start_plan(plan_id)
+                                             └─ 更新同一 PlanFile
+```
+
+ACP 使用 `agent_mode`、`plan_review`、`question_policy`、`plan_start` 四个标准 config options，分别对应 CLI `--mode`、`--plan-review`、`--question-policy`、`--plan-start`。模式值只有 chat/plan；启动未指定模式时恢复已保存模式，新会话默认 Chat。交互策略属于当前控制连接，不属于计划文件；重绑时回到新连接的启动配置或默认 ask/manual/ask。
+
+`start_plan` 是现有 `/plan build` 生命周期的工具入口，不是第三种模式：Chat 直接按已获授权的目标开工；Plan 默认再询问，显式 `--plan-start=auto` 才省略这一问。保存或自动评审不等于要求实施，仍只有收到明确实施任务时才调用它。开工后照常受工具权限控制。
+
+同机、同 HOME、标准 plans 目录内可从路径读取 `plan_id` 再交接，不增加路径参数或哈希协议。执行归属优先按 session_id 判定；旧 planner 恢复后不能绑定或停放另一 coder 的执行中计划。详情见 [update_plan](./update-plan.md)、[create_plan](./create-plan.md) 与 [共享服务接入](../shared-serve-and-acp-host-integration.md)。
+
+一体化智能体可在同一任务内写计划、评审并实施；后续任务若仍携带 `--mode=plan`，new/load 会重新进入 Plan。本轮不额外扩展跨任务续接语义。
+
 ## 2026-05 Active Binding 补充（历史）
 
 当前 `/plan` 命令族的稳定契约如下：

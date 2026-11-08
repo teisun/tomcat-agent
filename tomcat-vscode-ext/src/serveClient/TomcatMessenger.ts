@@ -885,6 +885,7 @@ export class TomcatMessenger {
 
   private handleControlFrame(frame: ControlRequestFrame | ControlResponseFrame | ControlCancelFrame): void {
     if (frame.type === "control_request") {
+      if (this.activeControlRequests.get(frame.requestId)?.signal.aborted === false) return;
       for (const listener of this.controlRequestListeners) {
         listener(frame);
       }

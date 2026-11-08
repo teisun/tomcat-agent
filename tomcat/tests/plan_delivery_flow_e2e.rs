@@ -48,7 +48,7 @@ async fn delivery_e2e_completes_via_llm_authored_acceptance_todo() {
     let home = test_home();
     std::env::set_var("HOME", home.path());
 
-    let runtime = PlanRuntime::new("delivery-e2e");
+    let runtime = PlanRuntime::new_with_session_id("delivery-e2e", "delivery-e2e-session");
     runtime.enter_plan().expect("enter plan mode");
     let created = create_plan::execute(
         &runtime,

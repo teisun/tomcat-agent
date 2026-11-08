@@ -68,7 +68,7 @@ fn create_plan_keeps_only_llm_authored_todos_and_enforces_one_acceptance() {
 async fn reviewer_feedback_can_add_one_acceptance_todo_and_trigger_verify_hint() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let runtime = PlanRuntime::new("session");
+    let runtime = PlanRuntime::new_with_session_id("session", "sid-session");
     runtime.enter_plan().unwrap();
     let out = create_plan::execute(
         &runtime,
@@ -139,7 +139,7 @@ async fn reviewer_feedback_can_add_one_acceptance_todo_and_trigger_verify_hint()
 async fn update_plan_rejects_a_second_acceptance_and_completes_when_all_todos_are_terminal() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let runtime = PlanRuntime::new("session");
+    let runtime = PlanRuntime::new_with_session_id("session", "sid-session");
     let code_reviewer = std::sync::Arc::new(MockCodeReviewerDispatcher::new(Vec::new()));
     runtime.attach_code_reviewer(code_reviewer.clone());
     runtime.enter_plan().unwrap();

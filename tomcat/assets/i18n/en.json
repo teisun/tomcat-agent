@@ -831,6 +831,7 @@
   "plan.review.accept": "Review plan",
   "plan.review.skip": "Skip and open",
   "plan.review.skipped": "The user skipped review. This plan has not been independently reviewed.",
+  "plan.review.policySkipped": "Review was skipped by the session policy. This plan has not been independently reviewed.",
   "plan.review.interrupted": "Review was interrupted. The saved plan is still available.",
   "plan.review.unavailable": "Independent review is unavailable. The plan has been saved.",
   "planTool.rejected": "Calling {tool} is not allowed in mode {mode}: {guidance}",

@@ -255,7 +255,21 @@ pub async fn execute_for_tool(
     use crate::infra::i18n::tr;
     let mut out = execute(runtime, args)?;
     let plan_id = out["plan_id"].as_str().unwrap_or("").to_string();
-    let summary = if let Some(panel) = runtime.ask_question_panel() {
+    use crate::core::plan_runtime::PlanReviewPolicy;
+    let policy = runtime.interaction_policy().review;
+    let summary = if termination.reason().is_some() {
+        let summary = PlanReviewSummary::interrupted();
+        runtime.record_plan_review(&plan_id, &summary, 0);
+        summary
+    } else if policy == PlanReviewPolicy::Auto {
+        runtime.dispatch_reviewer(&plan_id, allow_review_edit).await
+    } else if policy == PlanReviewPolicy::Skip {
+        let mut summary = PlanReviewSummary::skipped();
+        summary.reviewer_stop_reason = "policy_skipped".into();
+        summary.summary = tr("plan.review.policySkipped", &[]);
+        runtime.record_plan_review(&plan_id, &summary, 0);
+        summary
+    } else if let Some(panel) = runtime.ask_question_panel() {
         let result = panel
             .ask_with_identity(
                 AskQuestionIdentity {

@@ -7,7 +7,7 @@ use crate::core::plan_runtime::verify::{normalize_for_gate, VerifyCheck, VerifyS
 async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     rt.set_max_code_review_rounds(0);
     let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
     rt.attach_verifier(verifier.clone());
@@ -52,7 +52,7 @@ async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
 async fn dispatch_verifier_without_dispatcher_returns_placeholder_summary() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");
 
@@ -70,7 +70,7 @@ async fn dispatch_verifier_without_dispatcher_returns_placeholder_summary() {
 async fn dispatch_verifier_uses_attached_dispatcher_when_called_explicitly() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![fail_verify()]));
     rt.attach_verifier(verifier.clone());
     let plan_id = fresh_planning_plan(&rt);

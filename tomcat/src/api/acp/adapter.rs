@@ -218,6 +218,7 @@ impl Adapter {
                 let id = response
                     .session_id
                     .ok_or_else(|| failed("missing_session_id"))?;
+                self.apply_initial_mode(&id).await?;
                 let options = self.config_options(&id).await?;
                 json(acp::NewSessionResponse::new(id).config_options(options))
             }
@@ -236,32 +237,97 @@ impl Adapter {
                 })
                 .await?;
                 self.replay(&id).await?;
+                self.apply_initial_mode(&id).await?;
                 let options = self.config_options(&id).await?;
                 json(acp::LoadSessionResponse::new().config_options(options))
             }
             "session/set_config_option" => {
                 let request: acp::SetSessionConfigOptionRequest = decode(request.params)?;
-                if request.config_id.to_string() != "model" {
-                    return Err(invalid("unknown_config_option"));
-                }
-                let model = request
+                let value = request
                     .value
                     .as_value_id()
-                    .ok_or_else(|| invalid("model must be a model ID"))?
+                    .ok_or_else(|| invalid("configuration must be a select value"))?
                     .to_string();
+                let config_id = request.config_id.to_string();
                 let session_id = request.session_id.to_string();
-                self.call(|id| ServeCommand::SetModel {
-                    id: Some(id),
-                    session_id: Some(session_id.clone()),
-                    model,
-                })
-                .await?;
+                if config_id == "model" {
+                    self.call(|id| ServeCommand::SetModel {
+                        id: Some(id),
+                        session_id: Some(session_id.clone()),
+                        model: value,
+                    })
+                    .await?;
+                } else if config_id == "agent_mode" {
+                    self.set_mode(&session_id, parse_choice(&value)?).await?;
+                } else {
+                    use crate::core::plan_runtime::interaction::InteractionPolicySetting;
+                    let setting = match config_id.as_str() {
+                        "plan_review" => InteractionPolicySetting::Review(parse_choice(&value)?),
+                        "question_policy" => {
+                            InteractionPolicySetting::Questions(parse_choice(&value)?)
+                        }
+                        "plan_start" => InteractionPolicySetting::Start(parse_choice(&value)?),
+                        _ => return Err(invalid("unknown_config_option")),
+                    };
+                    self.call(|id| ServeCommand::SetInteractionPolicy {
+                        id: Some(id),
+                        session_id: Some(session_id.clone()),
+                        setting,
+                    })
+                    .await?;
+                }
                 json(acp::SetSessionConfigOptionResponse::new(
                     self.config_options(&session_id).await?,
                 ))
             }
             _ => Err(acp::Error::method_not_found()),
         }
+    }
+
+    async fn apply_initial_mode(&self, session_id: &str) -> acp::Result<()> {
+        if let Some(mode) = self.state.acp_options.and_then(|options| options.mode) {
+            self.set_mode(session_id, mode).await.map_err(|error| {
+                tracing::warn!(%session_id, %error, "ACP initial mode configuration failed");
+                failed("session_config_failed")
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn set_mode(
+        &self,
+        session_id: &str,
+        mode: crate::core::session::AgentMode,
+    ) -> acp::Result<()> {
+        let slot = self
+            .state
+            .registry
+            .get(session_id)
+            .ok_or_else(|| failed("unknown_session"))?;
+        if !self.state.controls(&slot) {
+            return Err(failed("read_only_session"));
+        }
+        let state = self
+            .call(|id| ServeCommand::GetState {
+                id: Some(id),
+                session_id: Some(session_id.to_owned()),
+            })
+            .await?
+            .payload
+            .unwrap_or_default();
+        if state["agentMode"] != mode.as_str() {
+            self.call(|id| ServeCommand::SetPlanMode {
+                id: Some(id),
+                session_id: Some(session_id.to_owned()),
+                action: match mode {
+                    crate::core::session::AgentMode::Chat => SetPlanModeAction::Exit,
+                    crate::core::session::AgentMode::Plan => SetPlanModeAction::Enter,
+                },
+                plan_id: None,
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     async fn call<C: Into<QueuedCommand> + Send>(
@@ -381,7 +447,10 @@ impl Adapter {
         })
     }
 
-    async fn config_options(&self, session_id: &str) -> acp::Result<Vec<acp::SessionConfigOption>> {
+    pub(super) async fn config_options(
+        &self,
+        session_id: &str,
+    ) -> acp::Result<Vec<acp::SessionConfigOption>> {
         let state = self
             .call(|id| ServeCommand::GetState {
                 id: Some(id),
@@ -411,13 +480,31 @@ impl Adapter {
                 })
             })
             .collect::<Vec<_>>();
-        Ok(vec![acp::SessionConfigOption::select(
-            "model",
-            "Model",
-            current.to_owned(),
-            choices,
-        )
-        .category(acp::SessionConfigOptionCategory::Model)])
+        use crate::core::plan_runtime::{PlanReviewPolicy, PlanStartPolicy, QuestionPolicy};
+        Ok(vec![
+            acp::SessionConfigOption::select("model", "Model", current.to_owned(), choices)
+                .category(acp::SessionConfigOptionCategory::Model),
+            acp::SessionConfigOption::select(
+                "agent_mode",
+                "Session Mode",
+                state["agentMode"]
+                    .as_str()
+                    .ok_or_else(|| failed("missing_session_mode"))?
+                    .to_owned(),
+                vec![
+                    acp::SessionConfigSelectOption::new("chat", "Chat"),
+                    acp::SessionConfigSelectOption::new("plan", "Plan"),
+                ],
+            )
+            .category(acp::SessionConfigOptionCategory::Mode),
+            policy_option::<PlanReviewPolicy>("plan_review", "Plan Review", &state["planReview"])?,
+            policy_option::<QuestionPolicy>(
+                "question_policy",
+                "Question Policy",
+                &state["questionPolicy"],
+            )?,
+            policy_option::<PlanStartPolicy>("plan_start", "Plan Start", &state["planStart"])?,
+        ])
     }
 
     async fn history_page(&self, session_id: &str, cursor: Option<String>) -> acp::Result<Value> {
@@ -478,6 +565,37 @@ impl Adapter {
         }
         Ok(())
     }
+}
+
+fn parse_choice<T: clap::ValueEnum>(value: &str) -> acp::Result<T> {
+    T::from_str(value, false).map_err(invalid)
+}
+
+fn policy_option<T: clap::ValueEnum>(
+    id: &str,
+    name: &str,
+    current: &Value,
+) -> acp::Result<acp::SessionConfigOption> {
+    let current = current
+        .as_str()
+        .ok_or_else(|| failed(format!("missing_{id}")))?;
+    parse_choice::<T>(current)?;
+    let options = T::value_variants()
+        .iter()
+        .filter_map(|value| value.to_possible_value())
+        .map(|value| {
+            acp::SessionConfigSelectOption::new(
+                value.get_name().to_owned(),
+                value.get_name().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(acp::SessionConfigOption::select(
+        id.to_owned(),
+        name.to_owned(),
+        current.to_owned(),
+        options,
+    ))
 }
 
 fn validate_setup(

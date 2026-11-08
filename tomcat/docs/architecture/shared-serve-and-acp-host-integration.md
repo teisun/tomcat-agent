@@ -111,7 +111,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 连接 | 一个客户端与服务的一条通信链路 | 【新增】`ServeConnection`、连接 ID、输出队列 | ID 只在当前服务实例有效；握手环境只存内存 | 一根连接线。 |
 | 背压 | 客户端读取速度赶不上服务输出 | 每连接独立 writer；内部仍按 sessionId 分缓冲 | 原生沿现有合并/丢增量/提示策略；ACP 只合并、不丢正文；不因慢读断开，区别于真实 EOF 或写失败 | 原生直播可降级，宿主结果不能缺字。 |
 | 控制者 | 有权给某会话派活的连接 | slot 的控制绑定，注册表统一维护，只在服务内存中 | 每会话最多一个；断线清空绑定并取消，原任务停完才能交接 | 当前点菜的人。 |
-| 旁观者 | 只能读消息和状态的连接 | 连接的当前显示 sessionId + slot 控制绑定 | 打开已加载会话不重建执行上下文、不接手控制；只改本连接显示，不参与写命令 | 只看不动。 |
+| 旁观者 | 只读执行状态、可回答当前问题的连接 | 连接的当前显示 sessionId + slot 控制绑定 | 打开已加载会话不重建执行上下文、不接手控制；只改本连接显示，不参与写命令 | 只看不动。 |
 | 会话 | 可跨多次 prompt 保留的对话 | `SessionManager`、`SessionSlot`、原 transcript | load 是读历史继续，不是接回旧 RPC | 一份对话记录。 |
 | 进程 cwd | 操作系统记录的进程当前工作目录 | `std::env::current_dir()`；由启动者设置 | 共享 serve 固定在自己的数据目录，不随请求全局切换 | 服务自己落脚的地方。 |
 | 会话 cwd | 本次对话的项目工作目录 | 既有 `SessionEntry.cwd`、JSONL 头 `cwd`；运行时 `SessionSlot.cwd` 与 `ChatContext.scope_services.agent_workspace_dir` | 共享模式由客户端明确提供、校验并绑定；据此生成模型上下文，不自动授权 | 这份任务在哪干活。 |
@@ -502,13 +502,13 @@ Tomcat：正在检查……（持续增长）
 工具：读取文件 ✓  运行测试 …
 --------------------------------------------------
 只读观察 · 来自 multica-agent-sdk
-输入/发送/停止置灰；不向本窗口路由可作答的批准请求
+输入/发送/停止置灰；可回答当前问题，工具权限批准仍只发控制者
 
 控制方断开：正在停止 -> 已取消 / 停止失败
 服务断开：状态待确认 [重新连接 / 重启服务]
 ```
 
-只读只加两层：**GUI 按 access 置灰，服务在命令分发入口按 §4.3 白名单拒绝旁观写命令。** GUI 沿既有 `canPromptWhenConfigured`、`canInterrupt` 加非 observe 条件，不加新组件（`tomcat-vscode-ext/gui/src/App.tsx:1555-1557`）。批准请求只路由控制连接，不为旁观另造批准卡片或拦截层。
+只读只加两层：**GUI 按 access 置灰，服务在命令分发入口按 §4.3 白名单拒绝旁观写命令。** 唯一例外是同项目、此刻正在旁观会话的 Native 连接，可通过原提问卡片回答当前 ACP 问题；不能取消问题、发任务或停止执行。权限批准仍只路由控制连接，不给旁观者控制权，也不另造卡片或批准通道。
 
 **不新增 Host 意图入口拦截。** 现有 `sessionBlocked` 处理删除/草稿退役，还会挡住打开会话（`tomcat-vscode-ext/src/ui/webview/provider.ts:1672-1674`、`tomcat-vscode-ext/src/ui/webview/provider.ts:4303`），不能把 observe 塞进这个条件；其原有保护保持不变。绕过置灰的写请求由服务拒绝，扩展沿原失败提示显示错误。
 
@@ -892,6 +892,7 @@ Tomcat 保存的凭据 --------> Tomcat 调用大模型（不从会话环境取 
 | `protocol` | string | 是 | 无 | 所有握手 | `native` / `acp` / `status` / `stop`；未知值/null 拒绝 | 这条连接接下来做什么。 |
 | `environment` | object<string,string> | ACP 客户端应传；Native hello 禁止 | ACP 省略时为空表 | ACP 连接环境 | Native 改在核对 ServiceInfo 后单独发送；ACP 空表不回退服务环境 | 敏感变量不能在认清收件人之前交出去。 |
 | `skillsDir` | string/null | 否 | null | ACP 连接 | 省略/null 不叠加；非空时须是可读绝对目录且 protocol 为 acp | 可选宿主私有技能目录。 |
+| `acpOptions` | object/null | 否 | 不设置 | ACP 连接 | 已提供的 `mode`、`planReview`、`questionPolicy`、`planStart`；仅用于本连接的会话启动配置 | 参数必须由后台确认，不能默默丢掉。 |
 
 **Native 的实际顺序：**
 
@@ -964,6 +965,8 @@ acp 的进程环境
 
 回复中的字段均由服务填写：`service`、`serverVersion`、`instanceId`、`agentId`、`endpoint` 是字符串，`protocolVersion`、`pid` 是 u32，`running` 是 boolean；没有缺省/null。`endpoint` 在 Windows 为命名管道名称。校验失败时同一对象额外带 `error` 字符串，成功时省略。客户端核对 service、端点、agent、协议和服务版本，环境值不参与日志输出。证据：`tomcat/src/api/serve/service.rs::ServiceInfo`、`open_management`、`handle_connection`。
 
+ACP 成功握手在基础 `ServiceInfo` 之外回带已接受的 `acpOptions`（客户端未提供时省略），由 relay 与请求值比对。字段及子字段按 camelCase 序列化，值见 §4.2.1。旧后台缺少或回带不匹配时，新 CLI 明确提示需要重启服务并退出，不静默忽略、不自动重启；不提升本机协议号，不增加探测请求。
+
 **ACP 中转的优雅离开也按当前实现校正。** 以下私有 close/确认记录仅用于 `tomcat acp` 中转；Native 扩展仍沿用 socket EOF 与原断连清理，不新增关闭握手。relay 在宿主 stdin EOF 后，沿**原本的本机数据连接**发送私有记录；不另建旧草案中的 `drain_connection` 管理连接。下面的 `NUL` 表示一个零字节，`LF` 表示换行，不是把这些字母作为 JSON 发送：
 
 ```text
@@ -1014,7 +1017,31 @@ ACP Schema 以官方 SDK 为准，本文不复制整套类型。已查官方 [ag
 
 MCP 子结构不自造：stdio 类型包含 name/command/args/env；HTTP 类型只在客户端协商支持时启用。SDK Schema 负责类型和可选字段的缺省/null；Tomcat 再做路径、执行权限和会话隔离校验。用量只映射可得数据，SDK 无法表达的完整性放适配器已有日志/未知费用，不造私有账单字段。
 
-`request_permission` 只处理权限，不拿它冒充结构化澄清问答。本期 ACP 不承诺原生 `ask_question` 的交互能力；未支持的澄清请求明确返回不可用错误并收口，不代答，也不永久挂起。
+`request_permission` 只处理权限，不拿它冒充结构化澄清问答。ACP 的人工问题经现有提问桥交给同项目的 Native 旁观窗口：无人打开也保留 pending 等待；迟到打开/重连补发；第一个合法 answered 答复消费请求，其余窗口只撤卡。旁观者的 cancel/终止型答复不消费问题，真实结果以服务端工具结果和 transcript 为准。ACP 冷载入只回放，下一次显式 prompt 才开跑。
+
+### 4.2.1 启动模式与会话交互策略
+
+```text
+Multica 自定义参数（原样透传）
+  → tomcat acp：clap 一次解析 → 本机握手/回带确认
+  → session/new 或 session/load：绑定控制者、应用配置，再返回
+  → 标准 configOptions / session/set_config_option / config_option_update
+```
+
+| CLI 参数 | ACP config ID | 值与默认语义 |
+| --- | --- | --- |
+| `--mode` | `agent_mode` | chat/plan；省略时新建为 Chat，载入保留保存的模式 |
+| `--plan-review` | `plan_review` | ask（默认）/auto/skip；保存后的独立评审 |
+| `--question-policy` | `question_policy` | manual（默认）/recommended；仅普通 ask_question 工具 |
+| `--plan-start` | `plan_start` | ask（默认）/auto；仅 Plan 模式下明确开工时的额外询问 |
+
+四项独立，保留既有 model 配置项。每项是标准 select，含稳定 id、name、真实 currentValue 与 value/name options；setter 返回完整配置，不增加 Native 策略 RPC，不承诺忙碌时任意热切换。
+
+`config_option_update` 仅在该会话有进行中的 prompt、模式发生变化时发送完整实际配置，复用 `replies.prompts` 判断，不新增状态；查询在 `route.event` 返回、释放锁后进行。新建、载入和客户端手动设置通过响应回带配置，不重复提醒。提醒构造或发送失败只记日志，不主动取消连接；真实断连仍沿既有生命周期取消任务。
+
+交互策略属于控制连接，不保存到计划；换连接按新启动值或默认值重置。`recommended` 不替答评审或开工确认，自动答案记录 `answer_source: "policy_recommended"`。`plan_start=auto` 不会让保存或评审自动触发开发；仍只有明确要求实施时才调用 start_plan，工具权限不变。
+
+同机、同 HOME 内，从标准 `~/.tomcat/plans/` 文件路径读取 plan_id 后交给 coder，start_plan 与 update_plan 继续处理同一文件。执行归属以 session_id 优先，旧 planner 恢复不会接管 coder 的计划。具体工具契约见 [create_plan](tools/create-plan.md)、[update_plan](tools/update-plan.md)、[ask_question](tools/ask-question.md)。
 
 ### 4.3 原生旁观：复用打开命令与消息事件
 

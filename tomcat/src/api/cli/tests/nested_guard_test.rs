@@ -115,9 +115,13 @@ fn blocked_commands() -> Vec<Commands> {
         },
         Commands::Claw { resume: false },
         Commands::Code { resume: false },
-        Commands::Acp { skills_dir: None },
+        Commands::Acp {
+            skills_dir: None,
+            options: Default::default(),
+        },
         Commands::Acp {
             skills_dir: Some("/host/skills".into()),
+            options: Default::default(),
         },
         Commands::Serve {
             sub: None,

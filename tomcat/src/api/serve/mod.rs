@@ -521,6 +521,10 @@ pub(crate) fn resume_pending_ask_question(state: &Arc<ServeState>, slot: &Arc<Se
     {
         return;
     }
+    // Consume the flag without starting a turn: ACP load is replay-only.
+    if state.is_acp() {
+        return;
+    }
     // This controller is initialized but cannot re-arm an interactive panel.
     // Consume the deferred-init flag so it cannot leave an idle slot undeletable;
     // the unanswered question stays in history for the existing new-input path.

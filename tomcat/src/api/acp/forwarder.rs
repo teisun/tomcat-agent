@@ -15,12 +15,14 @@ pub(crate) fn run(
     cfg: &AppConfig,
     environment: crate::infra::platform::EnvironmentSnapshot,
     skills_dir: Option<std::path::PathBuf>,
+    options: Option<super::AcpLaunchOptions>,
 ) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let stream = crate::api::serve::service::connect_acp(cfg, environment, skills_dir).await?;
+        let stream =
+            crate::api::serve::service::connect_acp(cfg, environment, skills_dir, options).await?;
         let input = crate::infra::platform::stdin::protocol_input()?;
         forward(stream, input, tokio::io::stdout()).await
     });
