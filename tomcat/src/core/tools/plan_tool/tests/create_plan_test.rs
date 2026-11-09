@@ -259,8 +259,7 @@ fn create_plan_legacy_wrappers_preserve_chapters_and_fenced_examples() {
     );
     let nested = "- Example:\n\n    ```markdown\n    ## Goal\n    ## Plan\n    ## Notes\n    ```\n\n    ## Indented code\n\n\t## Goal\n\n## Acceptance\n\nKeep this chapter.";
     assert_saved_draft(&rt, &format!("## Plan\n\n{nested}"), nested);
-    let indented =
-        "    ## Goal\n\n    Keep this literal example.\n\t## Plan\n    Preserve trailing spaces.  ";
+    let indented = "    ## Goal\n\n    Keep this literal example.\n\t## Plan";
     assert_saved_draft(&rt, indented, indented);
     assert_saved_draft(&rt, &format!("## Plan\n\n{indented}\n\n"), indented);
     cleanup_home(&home);

@@ -6,18 +6,15 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct SessionUsageGuard {
-    _file: File,
+    file: File,
     path: PathBuf,
-    owner_pid: u32,
 }
 
 impl Drop for SessionUsageGuard {
     fn drop(&mut self) {
-        // Command's pre-exec child may still hold a CLOEXEC copy of this open
-        // description. Only the process that acquired the lock owns its lifetime.
-        if self.owner_pid == std::process::id() {
-            let _ = FileExt::unlock(&self._file);
-        }
+        // A concurrent spawn's pre-exec child shares this open file description;
+        // closing our descriptor alone would keep the lock until that child execs.
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -51,11 +48,7 @@ impl SessionUsageGuard {
                 AppError::Io(error)
             }
         })?;
-        Ok(Self {
-            _file: file,
-            path,
-            owner_pid: std::process::id(),
-        })
+        Ok(Self { file, path })
     }
     /// Only after metadata removal. IDs are never reused and every new holder rechecks existence.
     pub(crate) fn remove_deleted_lock(&self) -> std::io::Result<()> {
@@ -71,19 +64,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn foreign_process_drop_does_not_unlock_owner() {
+    fn release_unlocks_while_a_descriptor_copy_is_alive() {
         let temp = tempfile::tempdir().unwrap();
-        let mut guard = SessionUsageGuard::shared(temp.path(), "owned-session").unwrap();
-        let inherited = guard._file.try_clone().unwrap();
-        // Exercise a copied guard's foreign-process branch with a real shared
-        // open description, without running Rust destructors after an unsafe fork.
-        guard.owner_pid = std::process::id().wrapping_add(1);
+        let guard = SessionUsageGuard::shared(temp.path(), "owned-session").unwrap();
+        // Shares the open file description, like a spawning child before exec.
+        let inherited = guard.file.try_clone().unwrap();
         drop(guard);
-        assert!(matches!(
-            SessionUsageGuard::exclusive(temp.path(), "owned-session"),
-            Err(AppError::Config(code)) if code == "session_in_use"
-        ));
-        drop(inherited);
         assert!(SessionUsageGuard::exclusive(temp.path(), "owned-session").is_ok());
+        drop(inherited);
     }
 }

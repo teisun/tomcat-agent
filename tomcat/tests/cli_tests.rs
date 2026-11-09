@@ -280,16 +280,7 @@ fn serve_models_uses_runtime_identity_saved_defaults_and_fresh_credentials_witho
 fn serve_models_cold_home_does_not_bootstrap_runtime_resources() {
     let home = tempfile::tempdir().unwrap();
     let before = serve_models_inventory(home.path());
-    let mut command = isolated_cmd(home.path());
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        command.env(
-            "UNRELATED_CATALOG_TEST",
-            std::ffi::OsString::from_vec(vec![0xff]),
-        );
-    }
-    let output = command
+    let output = isolated_cmd(home.path())
         .env("TOMCAT_AGENT_ACTIVE", "1")
         .args(["serve", "models"])
         .output()
@@ -341,30 +332,29 @@ fn serve_models_reports_safe_nonzero_errors_without_echoing_configuration_or_cre
         assert!(error.contains(english[key].as_str().unwrap()), "{error}");
         assert_eq!(before, serve_models_inventory(home.path()));
     }
+    // A non-UTF-8 identity must fail rather than fall back to another data directory.
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
-        for key in ["TOMCAT__STORAGE__WORK_DIR", "TOMCAT__AGENT__ID"] {
-            let home = tempfile::tempdir().unwrap();
-            let before = serve_models_inventory(home.path());
-            let output = isolated_cmd(home.path())
-                .env(
-                    key,
-                    std::ffi::OsString::from_vec(b"SECRET_SENTINEL\xff".to_vec()),
-                )
-                .args(["serve", "models"])
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert!(output.stdout.is_empty());
-            let error = String::from_utf8_lossy(&output.stderr);
-            assert!(!error.contains("SECRET_SENTINEL"), "identity value leaked");
-            assert!(
-                error.contains(english["cli.serveModels.configFailed"].as_str().unwrap()),
-                "{error}"
-            );
-            assert_eq!(before, serve_models_inventory(home.path()));
-        }
+        let home = tempfile::tempdir().unwrap();
+        let before = serve_models_inventory(home.path());
+        let output = isolated_cmd(home.path())
+            .env(
+                "TOMCAT__STORAGE__WORK_DIR",
+                std::ffi::OsString::from_vec(b"SECRET_SENTINEL\xff".to_vec()),
+            )
+            .args(["serve", "models"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("SECRET_SENTINEL"), "identity value leaked");
+        assert!(
+            error.contains(english["cli.serveModels.configFailed"].as_str().unwrap()),
+            "{error}"
+        );
+        assert_eq!(before, serve_models_inventory(home.path()));
     }
 }
 

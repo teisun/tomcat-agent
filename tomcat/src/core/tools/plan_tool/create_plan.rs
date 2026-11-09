@@ -367,21 +367,11 @@ fn normalize_for_compare(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
-// Boundary blank lines are padding; indentation on content lines is Markdown.
+// Drop blank boundary lines; the first content line's indentation is Markdown.
 fn trim_blank_lines(text: &str) -> &str {
-    let mut start = 0;
-    let mut end = 0;
-    let mut offset = 0;
-    for line in text.split_inclusive('\n') {
-        if !line.trim().is_empty() {
-            if end == 0 {
-                start = offset;
-            }
-            end = offset + line.trim_end_matches(['\r', '\n']).len();
-        }
-        offset += line.len();
-    }
-    &text[start..end]
+    let text = text.trim_end();
+    let first = text.len() - text.trim_start().len();
+    &text[text[..first].rfind('\n').map_or(0, |i| i + 1)..]
 }
 
 fn normalize_plan_body(goal: &str, draft: &str) -> String {
