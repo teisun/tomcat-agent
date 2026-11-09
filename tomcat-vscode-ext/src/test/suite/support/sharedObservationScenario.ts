@@ -125,6 +125,7 @@ export async function assertSharedObservationFlow(
         // read-only probes, never the recovery action or a user-visible click.
         if (!(error instanceof Error) || ![
           "CDP -32000: Cannot find context with specified id", "Failed to open CDP websocket",
+          "CDP websocket closed",
         ].includes(error.message)) throw error;
       } finally { if (chat !== candidate) candidate?.close(); }
       return false;
