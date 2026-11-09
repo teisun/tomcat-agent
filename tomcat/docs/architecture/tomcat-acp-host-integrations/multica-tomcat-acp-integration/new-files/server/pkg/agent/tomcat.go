@@ -92,13 +92,21 @@ func (b *tomcatBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 				trySend(messages, message)
 			}
 		},
-		onPromptDone: func(result hermesPromptResult) { completion <- result },
+		onPromptDone: func(result hermesPromptResult) {
+			completion <- result
+			switch result.stopReason {
+			case "end_turn", "cancelled", "max_tokens", "max_turn_requests", "refusal":
+				terminal.Store(true)
+			}
+		},
 	}
 	processDone := make(chan struct{})
 	var exitErr, scanErr error
+	var sawStdout bool
 	go func() {
 		scanner := newAgentStreamScanner(stdout)
 		for scanner.Scan() {
+			sawStdout = true
 			c.handleLine(scanner.Text())
 		}
 		scanErr = scanner.Err()
@@ -112,9 +120,9 @@ func (b *tomcatBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		defer cancel()
 		defer close(results)
 		started := time.Now()
-		result, model := b.runTomcatTurn(runCtx, c, prompt, opts, mcpServers, messages, &streaming, completion)
-		terminal.Store(true)
+		result, model := b.runTomcatTurn(runCtx, c, prompt, opts, mcpServers, messages, &streaming)
 		_ = stdin.Close()
+		cleanupError := ""
 		timer := time.NewTimer(tomcatShutdownGrace)
 		select {
 		case <-processDone:
@@ -122,10 +130,7 @@ func (b *tomcatBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			signalProcessGroup(cmd, syscall.SIGKILL)
 			_ = stdout.Close()
 			<-processDone
-			if result.Status == "completed" {
-				result.Status = "failed"
-			}
-			result.Error = strings.TrimSpace(result.Error + " tomcat shutdown timed out; shared-service cleanup was not acknowledged")
+			cleanupError = "tomcat shutdown timed out; shared-service cleanup was not acknowledged"
 		}
 		timer.Stop()
 		releaseProcessGroup(cmd)
@@ -133,9 +138,41 @@ func (b *tomcatBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		// the peer exits successfully. Do not rewrite an already completed turn.
 		lateCancel := cmd.ProcessState != nil && cmd.ProcessState.Success() &&
 			(errors.Is(exitErr, context.Canceled) || errors.Is(exitErr, context.DeadlineExceeded))
-		if result.Status == "completed" && ((exitErr != nil && !lateCancel) || scanErr != nil) {
-			result.Status = "failed"
-			result.Error = fmt.Sprintf("tomcat transport shutdown failed (process: %v, stream: %v)", exitErr, scanErr)
+		// The reader is joined: a provider response already being decoded when
+		// request selected ctx.Done must still outrank that local cancellation.
+		select {
+		case final := <-completion:
+			c.mergeUsage(final.usage)
+			if final.modelID != "" {
+				model = final.modelID
+			}
+			result.Error = ""
+			switch final.stopReason {
+			case "end_turn":
+				result.Status = "completed"
+			case "cancelled":
+				result.Status, result.Error = "aborted", "tomcat cancelled the prompt"
+			default:
+				result.Status, result.Error = "failed", fmt.Sprintf("tomcat stopped without completing the turn: %q", final.stopReason)
+			}
+		default:
+		}
+		if (exitErr != nil && !lateCancel) || scanErr != nil {
+			var exit *exec.ExitError
+			// Native Tomcat exits 2 only for argument parsing, before connecting
+			// to the shared service. Custom profile commands have no such contract.
+			if b.cfg.BuiltinRuntime && cleanupError == "" && !sawStdout && scanErr == nil &&
+				errors.As(exitErr, &exit) && exit.ExitCode() == 2 {
+				result.Error = strings.TrimSpace(result.Error + " " + fmt.Sprintf(
+					"tomcat at %s rejected its arguments (%v); compare `%s acp --help` with the configured arguments",
+					cmd.Path, exitErr, cmd.Path))
+			} else {
+				cleanupError = strings.TrimSpace(cleanupError + " " + fmt.Sprintf("tomcat transport shutdown failed (process: %v, stream: %v)", exitErr, scanErr))
+			}
+		}
+		if cleanupError != "" {
+			result.Status = "cleanup_unconfirmed"
+			result.Error = strings.TrimSpace(result.Error + " " + cleanupError)
 		}
 		if result.Error != "" {
 			result.Error = withAgentStderr(result.Error, "tomcat", stderr.Tail())
@@ -153,10 +190,10 @@ func (b *tomcatBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		// It must therefore happen after the forwarder has actually exited.
 		results <- result
 	}()
-	return &Session{Messages: messages, Result: results, TerminalObserved: terminal.Load}, nil
+	return &Session{Messages: messages, Result: results, TerminalObserved: terminal.Load, CleanupRequired: true}, nil
 }
 
-func (b *tomcatBackend) runTomcatTurn(ctx context.Context, c *hermesClient, prompt string, opts ExecOptions, mcpServers []any, messages chan<- Message, streaming *atomic.Bool, completion <-chan hermesPromptResult) (Result, string) {
+func (b *tomcatBackend) runTomcatTurn(ctx context.Context, c *hermesClient, prompt string, opts ExecOptions, mcpServers []any, messages chan<- Message, streaming *atomic.Bool) (Result, string) {
 	result := Result{Status: "failed", SessionID: opts.ResumeSessionID}
 	fail := func(method string, err error) Result {
 		switch ctx.Err() {
@@ -229,23 +266,7 @@ func (b *tomcatBackend) runTomcatTurn(ctx context.Context, c *hermesClient, prom
 	if err != nil {
 		return fail("session/prompt", err), model
 	}
-	select {
-	case final := <-completion:
-		c.mergeUsage(final.usage)
-		if final.modelID != "" {
-			model = final.modelID
-		}
-		switch final.stopReason {
-		case "end_turn":
-			result.Status = "completed"
-		case "cancelled":
-			result.Status, result.Error = "aborted", "tomcat cancelled the prompt"
-		default:
-			result.Error = fmt.Sprintf("tomcat stopped without completing the turn: %q", final.stopReason)
-		}
-	default:
-		result.Error = "tomcat returned no valid prompt result"
-	}
+	result.Error = "tomcat returned no valid prompt result"
 	return result, model
 }
 

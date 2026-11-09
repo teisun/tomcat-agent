@@ -1,8 +1,8 @@
 # Multica 资料包校验记录
 
 ```text
-06835b8f5 精确基线 → 原接入23项 → 本次adapter目录能力/必要测试
-                  → 合并后29项 → 两份patch重放 → 全文件SHA-256 → Go回归
+06835b8f5 精确基线 → 原接入23项 → 目录修复29项
+                  → 本轮adapter/清理接线31项 → patch重放 → 全文件SHA-256 → Go回归
 ```
 
 本文件区分资料包重放、当前分支受控旅程与正式部署；不代替公司分支验收。
@@ -11,8 +11,9 @@
 
 - 原基线：`06835b8f50606ca3f8bebbb5d07ac8901f831e69`。
 - 原接入：`e12a45e59d8bfddf2aba192f163899a9eb290a3b`；原Tomcat依赖：`401b6f0cbd8be8478b5453815450f7ce6ada00e7`。
-- 目录修复：Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；Tomcat `1f0fbf0c` 基线上的本次工作树，均未伪称已提交。`manifest.json.host.catalog_repair` 记录修复来源，逐文件SHA-256标识实际内容。
-- 原接入先在精确基线上重建并核对23个哈希，再只叠加目录adapter和必要测试。原daemon/API/execenv/UI生产文件不带入后来版本；本轮新增生产差异只有 `models.go` 的Tomcat分支及新增 `tomcat_models.go`。用户启动器、正式凭据、配置与运行产物不在包内。
+- 历史目录修复：Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 和 Tomcat `1f0fbf0c` 基线上的当时已审工作树，记录保留在 `manifest.json.host.catalog_repair`。
+- 本轮 adapter：已提交 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`，配套 Tomcat 源码 `9d7221317e272645128d090bc38151f943d6a2aa`；`host.adapter_refresh` 记录来源与语义回迁边界。
+- 原 29 项先在精确基线上重放且全部哈希一致，再同步 adapter 与必要宿主接线/测试，最终 31 项。相对原包，24 个原目标文件哈希不变；新增 `daemon.go`、`taskfailure/failure.go` 两个补丁目标，并更新原 `agent.go` 的清理契约、`tomcat.go` 和三份测试快照。不导入整个新版宿主，不包含新版 Pi、桌面、调度或 native CLI 停机确认协议。
 
 ## 可复核方法
 
@@ -24,7 +25,7 @@ from pathlib import Path
 bundle = Path('/absolute/path/multica-tomcat-acp-integration')
 checkout = Path('/absolute/path/disposable-replayed-baseline')
 m = json.loads((bundle / 'manifest.json').read_text())['host']
-assert m['name'] == 'multica' and len(m['files']) == 29
+assert m['name'] == 'multica' and len(m['files']) == 31
 for row in m['files']:
     assert hashlib.sha256((checkout / row['path']).read_bytes()).hexdigest() == row['sha256_after_integration'], row['path']
 for row in m['patches'] + m['licenses']:
@@ -33,7 +34,26 @@ for row in m['patches'] + m['licenses']:
 
 在该副本执行README的Go guard聚焦命令；需要真实Tomcat时使用明确的本轮产物路径与 `agentintegration` opt-in。构建或哈希成功不等于公司分支测试成功。
 
-## 本机已取得的证据（2026-11-06）
+## 本轮 adapter 同步证据（2026-11-09）
+
+| 检查 | 实际结果 | 证据与边界 |
+| --- | --- | --- |
+| 原包重放 | 原 29 项在精确基线上哈希全部一致 | `1794208555871-ipv8gi`；只作为更新前基线证据 |
+| 最终包精确重放 | 两份补丁 check/apply 成功；31/31 目标、11+7 条完整 index、许可证及 FILES 清单一致 | `1794209746670-a52vdu` exit 0；最终全新副本与实际运行测试的副本逐目标字节相同；末尾仅补默认 daemon 测试中的两目录文件保留回归，运行时代码及两份 patch 字节不变，交付时再次核对全部 31 个哈希；本机记录 `.agents/acceptance/multica-adapter-refresh-20261109/package-check.json` |
+| adapter 定向 | 执行/恢复、参数早退四分支、本地超时非终态、配置失败不拒绝恢复通过 | `1794208715072-2xk70x` exit 0；四个测试函数均有实际 RUN/PASS，不把未匹配测试当通过 |
+| 四包聚焦 race | agent、daemon、execenv、taskfailure 的目标检查分批通过 | `1794208987410-usjwpc` 的 agent/execenv/taskfailure 通过，daemon 的清理缺失/超时与共享终态检查通过；首次 daemon 包整体 exit 1，修正两处测试夹具后以 `1794209605754-2ie8io` exit 0 补验受影响两项，复用其余有效结果；不是四包全量测试 |
+| 真实目录保留 | `runTask`→真实 fixture 进程→结果分类→文件/工作树 defer，两种目录模式均通过 | `1794209975096-ypagsh` exit 0；`in_place` 与 `worktree` 均保留子进程实际写入的文件和 AGENTS.md，worktree 不自动提交/删除，保留原失败原因与错误 |
+| 导出类型影响面 | 重放后的整个 Go module `go build -p 2 ./...` 通过 | `1794209018834-2jafsl` exit 0；`go list` 确认 agent 的直接消费者为 CLI、daemon、execenv、handler；没有安装或启动应用 |
+| 受控 ACP | 四个子场景通过：四策略、人工等待取消、目录 ID/default、执行/取消/恢复 | `1794209066858-umor5v` exit 0；私有 HOME、loopback provider、假 Key；只启停私有 fixture 服务，不是外部模型或公司分支验收 |
+| 格式 | 改动 Go 快照 gofmt 干净，应用后源码与普通文件空白检查通过 | 初始检查 `1794209067299-m2l1ey` exit 0；最终包继续执行相同普通文件与应用后源码检查 |
+
+首次 race 中的两处失败均保留：原包发现测试错误地用物理规范路径比较显式配置路径，改为按旧宿主 `resolveAgentExecutablePath` 的约定核对原路径与 Command；新增取消回报测试误把无 JSON tags 的内部 `TaskCancelAck` 当作 wire，改为捕获真实的 `branch_name/error_message/failure_reason`。依据分别为旧基线 `config.go:836-849`、`agents_probe.go:118-125` 和 `client.go:541-584`。不为迎合测试改生产路径解析或回报协议，也没有删掉诊断断言。
+
+Tomcat 仓库直接对 `.patch` 文本执行 `git diff --check` 会把 unified diff 必需的上下文前缀（空格+tab、空白上下文行）报为空白问题，初始命令 `1794208987533-m68twv` exit 2。保留合法 patch 字节：普通文件用 `git diff --check -- . ':(exclude)**/*.patch'`，补丁则在精确基线实际应用后检查源码、gofmt、完整 index 与哈希；不把原始检查冒称通过。
+
+本轮没有运行迁移数据库、浏览器旅程、Windows/Linux 原生旅程或整个 Multica/Rust 门禁；未测覆盖率，未安装、重启、升版或重打 VSIX/Multica Release。受控策略测试也不等同于真实模型的独立 Review→人工批准→执行全链路。
+
+## 历史目录修复证据（2026-11-06，非本轮重跑）
 
 | 层次 | 实际结果 | 边界 |
 | --- | --- | --- |

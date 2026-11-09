@@ -12,6 +12,7 @@
 | tests | M | `scripts/agent-cli-command-names.txt` | [`tests/existing-files.patch`](tests/existing-files.patch) |
 | runtime | M | `server/internal/daemon/agents_probe.go` | [`existing-files.patch`](existing-files.patch) |
 | runtime | M | `server/internal/daemon/config.go` | [`existing-files.patch`](existing-files.patch) |
+| runtime | M | `server/internal/daemon/daemon.go` | [`existing-files.patch`](existing-files.patch) |
 | tests | M | `server/internal/daemon/config_test.go` | [`tests/existing-files.patch`](tests/existing-files.patch) |
 | runtime | M | `server/internal/daemon/execenv/context.go` | [`existing-files.patch`](existing-files.patch) |
 | runtime | M | `server/internal/daemon/execenv/runtime_config.go` | [`existing-files.patch`](existing-files.patch) |
@@ -29,6 +30,7 @@
 | tests | A | `server/pkg/agent/tomcat_integration_test.go` | [`tests/new-files/server/pkg/agent/tomcat_integration_test.go`](tests/new-files/server/pkg/agent/tomcat_integration_test.go) |
 | tests | A | `server/pkg/agent/tomcat_test.go` | [`tests/new-files/server/pkg/agent/tomcat_test.go`](tests/new-files/server/pkg/agent/tomcat_test.go) |
 | runtime | M | `server/pkg/agent/version.go` | [`existing-files.patch`](existing-files.patch) |
+| runtime | M | `server/pkg/taskfailure/failure.go` | [`existing-files.patch`](existing-files.patch) |
 | runtime | A | `server/pkg/agent/tomcat_models.go` | [`new-files/server/pkg/agent/tomcat_models.go`](new-files/server/pkg/agent/tomcat_models.go) |
 | tests | A | `server/pkg/agent/tomcat_models_test.go` | [`tests/new-files/server/pkg/agent/tomcat_models_test.go`](tests/new-files/server/pkg/agent/tomcat_models_test.go) |
 | tests | A | `server/pkg/agent/tomcat_fixture_test.go` | [`tests/new-files/server/pkg/agent/tomcat_fixture_test.go`](tests/new-files/server/pkg/agent/tomcat_fixture_test.go) |
@@ -36,14 +38,15 @@
 | tests | A | `server/internal/daemon/tomcat_models_test.go` | [`tests/new-files/server/internal/daemon/tomcat_models_test.go`](tests/new-files/server/internal/daemon/tomcat_models_test.go) |
 | tests | A | `e2e/tomcat-model-discovery.spec.ts` | [`tests/new-files/e2e/tomcat-model-discovery.spec.ts`](tests/new-files/e2e/tomcat-model-discovery.spec.ts) |
 
-共29个目标路径：保留原23项，增加上述6项；原 `tomcat_test.go` 和受控集成测试已跟随真实目录更新。E2E源码面向3c7b4cde7页面/测试API，未将该版本的UI或其它业务改动倒入旧基线。新增 `tomcat_fixture_test.go` 仅给受控协议测试提供封闭HOME/环境，避免继承开发账号；不是业务实现。
+共 31 个目标路径：原 29 项全部保留，增加 `daemon.go` 与 `taskfailure/failure.go`；现有 `agent.go` 补充清理确认契约，`tomcat.go` 同步已提交修复。普通与受控测试同步参数早退、终态/清理、启动策略和人工等待取消。E2E 仍面向 3c7b4cde7 页面/API，未把该版本 UI 倒入旧基线；`tomcat_fixture_test.go` 的封闭 HOME/环境保持不变。
 
 ## 来源
 
 - 宿主基线：`06835b8f50606ca3f8bebbb5d07ac8901f831e69`
 - 接入提交：`e12a45e59d8bfddf2aba192f163899a9eb290a3b`
-- Tomcat代码：`401b6f0cbd8be8478b5453815450f7ce6ada00e7`
-- 目录修复来源：Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；Tomcat `1f0fbf0c` 基线上的本次工作树（未提交）。`manifest.json.host.catalog_repair` 记录原来源与修复来源；逐文件SHA-256是交付内容的精确标识。
-- 原基线重放后，本轮新增生产差异仅 `server/pkg/agent/models.go` Tomcat分支和新增 `tomcat_models.go`。不包含用户启动器、daemon/API/页面/公共查询或通知增量。
+- 本轮配套 Tomcat 源码：`9d7221317e272645128d090bc38151f943d6a2aa`；原接入依赖为 `401b6f0cbd8be8478b5453815450f7ce6ada00e7`。
+- 历史目录修复来源：Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；Tomcat `1f0fbf0c` 基线上的当时工作树（当时未提交，不代表本轮状态）。`manifest.json.host.catalog_repair` 保留原修复来源；逐文件 SHA-256 是当前交付内容的精确标识。
+- 本轮 adapter 来源：Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`；`tomcat.go` 与该提交逐字节一致。共享类型、daemon 和 failure reason 仅语义回迁必要接线；不导入 Pi、桌面、实时 usage、调度或 native CLI 停机确认扩展。
+- `tomcat_test.go` 沿用该提交并将配置失败分类测试放入默认单测；daemon 按旧基线的显式路径约定检查原路径与 Command，按真实 snake_case wire 捕获取消回报，加入 handoff/清理结果/两条取消回报回归；受控集成测试按真实服务版本核对 observer 身份，保留不同版本服务测试选项。
 
 完整哈希与补丁目标文件见 `manifest.json`。

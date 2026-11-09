@@ -1,5 +1,5 @@
 {
-  "tomcat_code_revision": "401b6f0cbd8be8478b5453815450f7ce6ada00e7",
+  "tomcat_code_revision": "9d7221317e272645128d090bc38151f943d6a2aa",
   "host": {
     "name": "multica",
     "base_revision": "06835b8f50606ca3f8bebbb5d07ac8901f831e69",
@@ -55,6 +55,13 @@
         "sha256_after_integration": "0c3b3032bbf5cd9e081dc3fd0735776b12b1be9dcc10a51d4badb7c227e9ed1d"
       },
       {
+        "path": "server/internal/daemon/daemon.go",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "82bafabffd6665fd13c2cf9021f9fd803c2399135c4f74059b92d0d8bdefc877"
+      },
+      {
         "path": "server/internal/daemon/execenv/context.go",
         "status": "M",
         "group": "runtime",
@@ -94,7 +101,7 @@
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/internal/daemon/tomcat_test.go",
-        "sha256_after_integration": "d4af66ed97f3ee0bdff761d0302e9ec608ae828004ea05cce968b863b131e0ae"
+        "sha256_after_integration": "a6e54aa74867e8005f4ae0676107b200e13cf93041a0a174ce603d55317b5d56"
       },
       {
         "path": "server/internal/migrations/tomcat_migration_test.go",
@@ -122,7 +129,7 @@
         "status": "M",
         "group": "runtime",
         "delivery": "existing-files.patch",
-        "sha256_after_integration": "684d5bc105a5ec1a2a1154947d82c15ceb8d16e46ed6e73726e249da8278968a"
+        "sha256_after_integration": "56d159fa8c77b45244dbd920e8cda9a2ccd570006fd036eea59d446a73996847"
       },
       {
         "path": "server/pkg/agent/launch.go",
@@ -143,21 +150,21 @@
         "status": "A",
         "group": "runtime",
         "delivery": "new-files/server/pkg/agent/tomcat.go",
-        "sha256_after_integration": "c469f0d4cb3052441da7972dd4eba56331299edb23247fdcc8f67c2c5a95fc50"
+        "sha256_after_integration": "f26151b73090eb1f3b88aa6e9c8f8dce23f3dac7b32cfd32a53eb03516d15efc"
       },
       {
         "path": "server/pkg/agent/tomcat_integration_test.go",
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/pkg/agent/tomcat_integration_test.go",
-        "sha256_after_integration": "42cc08dcc6c700a9149171b962b79f206b95b2a549a311d612c1a1992717444b"
+        "sha256_after_integration": "83d1643f9d9e31e66d787e5048265e806787219becb95b62d08b258d9456ec20"
       },
       {
         "path": "server/pkg/agent/tomcat_test.go",
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/pkg/agent/tomcat_test.go",
-        "sha256_after_integration": "0f9a74501a81471b5b2275c7ea37506943ecbd2f9c00aa9a97226bcb487f831b"
+        "sha256_after_integration": "e3be47c3d29144ae2418e252ef37d6baca623ca077173527284a89ab9443a784"
       },
       {
         "path": "server/pkg/agent/version.go",
@@ -165,6 +172,13 @@
         "group": "runtime",
         "delivery": "existing-files.patch",
         "sha256_after_integration": "776664fdc2da4e226fd25bf26ad493962c09a5fed08c82d2c0f11a0bb3febd1b"
+      },
+      {
+        "path": "server/pkg/taskfailure/failure.go",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "45921aeca0a03ceac42b6dcba0c988da273abd908e52d26de1a6459dc00f449d"
       },
       {
         "path": "server/pkg/agent/tomcat_models.go",
@@ -212,17 +226,19 @@
     "patches": [
       {
         "path": "existing-files.patch",
-        "sha256": "d27f66610989f2d98930d94dcb35ece109181920ac21eefaf3fd01d100ad3fa3",
+        "sha256": "d893b986e870a9fc2d2a6a6076b7a15b0afce05601b184ab6537a183611021d9",
         "target_paths": [
           "packages/core/types/agent.ts",
           "server/internal/daemon/agents_probe.go",
           "server/internal/daemon/config.go",
+          "server/internal/daemon/daemon.go",
           "server/internal/daemon/execenv/context.go",
           "server/internal/daemon/execenv/runtime_config.go",
           "server/pkg/agent/agent.go",
           "server/pkg/agent/launch.go",
           "server/pkg/agent/models.go",
-          "server/pkg/agent/version.go"
+          "server/pkg/agent/version.go",
+          "server/pkg/taskfailure/failure.go"
         ]
       },
       {
@@ -252,13 +268,20 @@
     "package": "multica-tomcat-acp-integration",
     "catalog_repair": {
       "source_base_revision": "3c7b4cde72ab4c8389dcec933e2573855b04cb7e",
-      "source_state": "reviewed uncommitted catalog repair; unchanged source files retain original integration hashes",
+      "source_state": "historical reviewed working-tree catalog repair; current model adapter is unchanged and matches adapter_refresh.source_revision",
       "production_paths": [
         "server/pkg/agent/models.go",
         "server/pkg/agent/tomcat_models.go"
       ],
       "tomcat_source_base_revision": "1f0fbf0ce70bc23c7624da308bef6a0615729e89",
       "required_capability": "tomcat serve models (ListModelsPayload; saved-only service identity)"
+    },
+    "adapter_refresh": {
+      "source_revision": "5e36721c1329372d272e8c4b72f4ada2e31115a7",
+      "tomcat_source_revision": "9d7221317e272645128d090bc38151f943d6a2aa",
+      "scope": "Tomcat launch-policy tests, authoritative terminal and cleanup handoff, native argument-parse diagnostics",
+      "backport": "Original host baseline retained; only Session cleanup acknowledgement, daemon result/cancellation/worktree handling and failure reason are backported; no Pi, desktop, scheduler or native CLI shutdown-confirmation changes",
+      "test_adaptations": "Assert configured executable path and command are preserved; decode actual snake_case cancellation wire fields; move session_config_failed classification into default unit tests; observer identity follows actual service version"
     }
   }
 }

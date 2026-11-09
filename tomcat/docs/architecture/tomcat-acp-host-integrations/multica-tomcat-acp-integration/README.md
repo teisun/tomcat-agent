@@ -22,15 +22,15 @@ Multica daemon / task workspace
 - `tests/`：backend、daemon、执行环境、迁移和受控 ACP 集成测试。
 - `examples/runtime-profile.example.json`：无密钥 runtime profile 请求体。
 - `examples/tomcat.config.fragment.toml`、`examples/models.fragment.toml`：Tomcat 执行账号配置片段。
-- `FILES.md`：来源变更路径的逐项清单（原接入与本次目录修复分开说明）。
+- `FILES.md`：来源变更路径的逐项清单（区分原接入、历史目录修复和本轮 adapter 同步）。
 - `manifest.json`：来源提交和 SHA-256。
 - `LICENSE`、`NOTICE`：来源 Multica 许可证和归属文件副本。
 
-来源：Multica 基线 `06835b8f50606ca3f8bebbb5d07ac8901f831e69` → 接入提交 `e12a45e59d8bfddf2aba192f163899a9eb290a3b`。Tomcat 依赖代码为 `401b6f0cbd8be8478b5453815450f7ce6ada00e7`。
+来源：Multica 原基线 `06835b8f50606ca3f8bebbb5d07ac8901f831e69` → 原接入 `e12a45e59d8bfddf2aba192f163899a9eb290a3b`。本轮 adapter 来源为已提交的 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`；Tomcat 配套源码为 `9d7221317e272645128d090bc38151f943d6a2aa`。
 
-本次目录修复以 Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树为来源，**只把 Tomcat adapter 目录能力与必要测试重放到上述原基线**，没有把后来整个宿主版本倒入旧包。Tomcat 新能力来自 `1f0fbf0c` 基线上的本次工作树（未提交），需要 `serve models`，不能只凭同为 `0.1.86` 判断已具备。原 backend、daemon/execenv 接线与许可证保持原来源；实际文件和补丁以 `manifest.json` 的SHA-256为准。
+**保留原迁移基线，不升级整个宿主。** 此前目录修复来自 Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；本轮保留该目录实现，更新 `tomcat.go`、启动策略/取消回归，以及旧基线所需的 `Session.CleanupRequired`、daemon handoff、取消回报和工作树保留接线。文件与补丁的精确内容由 `manifest.json` 的 SHA-256 标识，不能把混合来源包说成某个完整宿主提交。
 
-核心执行仍是 `tomcat.go`；只读目录能力位于 `tomcat_models.go`。原接入需要的 runtime、daemon、execenv 接线仍完整保留；**本次目录修复新增生产改动仅限 `server/pkg/agent/models.go` 的 Tomcat 分支与 `tomcat_models.go`**，不改业务页面、daemon/API/查询/缓存/通知或调度。不能只复制 `tomcat.go` 后认为集成完成。
+本轮不引入新版 Pi 能力、桌面代码、实时 usage、调度或 native CLI 停机确认协议；模型发现实现 `tomcat_models.go` 不变。公司分支若已具备等价清理契约，应复用现有实现，不重复添加。**不能只替换 `tomcat.go`**：旧 daemon 若把取消/超时直接视为清理成功，仍可能提前清理被后台进程使用的目录。
 
 ## 2. 合并前必须核对
 
@@ -70,6 +70,8 @@ git apply /absolute/path/multica-tomcat-acp-integration/existing-files.patch
 - daemon 探测与配置增加 `MULTICA_TOMCAT_PATH`、`MULTICA_TOMCAT_MODEL`；
 - execenv 把 `AGENTS.md` 和 `.agents/skills` 接入 Tomcat 运行目录；
 - agent factory、launch 参数过滤、模型/版本登记；
+- `Session.CleanupRequired` 与 daemon 结果交接：未收到清理结果或结果为 `cleanup_unconfirmed` 时，不得自动当作取消成功；
+- `cleanup_unconfirmed` 的 task failure reason、取消确认回报，以及未确认时保留 sidecar/worktree，不自动提交或删除。
 - 迁移之外的 runtime profile API 仍复用原有流程。
 
 ### 3.3 调整迁移编号和 provider 白名单
@@ -156,10 +158,29 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 - 构建成功不等于安装，安装不等于运行服务已切换。正式安装、PATH 和重启由用户另行安排；重启会停止全部共享任务，插件维护不会自动重启后台。
 - Multica 使用原生命令 `multica daemon start --profile local-tomcat` 和已有 PATH/登录 shell 发现，不再需要 Tomcat 专用启动脚本。先检查已保存 profile 的 daemon 状态，启动后再确认 `running` 且包含 Tomcat；发现成功不等于注册或接单成功。本迁移包不执行登录、安装或 daemon 启停。
 
+### 5.2 启动策略与实际执行入口
+
+四项策略通过既有 agent 启动参数（`ExecOptions.CustomArgs`）原样传入：
+
+| 参数 | 含义 |
+| --- | --- |
+| `--mode=chat/plan` | 显式指定新建或恢复后的模式；省略遵循 Tomcat 原有规则。 |
+| `--plan-review=ask/auto/skip` | 保存后询问、自动评审或跳过评审。 |
+| `--question-policy=manual/recommended` | 人工回答或选择显式标记的推荐项；推荐答案不是开发授权。 |
+| `--plan-start=ask/auto` | 明确要求开工时保留或省去额外确认；保存计划不等于开工。 |
+
+不新增对应的 `TOMCAT_ACP_*` 环境变量，也不由 Go 改写成布尔值。manual 等待沿用同机、同 HOME、同项目的 VS Code observer；Multica 不新增答题入口，无 observer 时继续等待，取消须撤回真实待答卡片。
+
+使用这些参数前，在 daemon 的实际账号下核对实际可执行文件的 `acp --help`；本轮配套 CLI 为 `0.1.89`，原 `0.1.80` ACP 最低版本并不证明支持新策略。内建 runtime 在握手前、stdout 为空、未超时且退出码恰为 2 时，报告参数错误及实际执行路径，保留恢复引用；自定义命令、有 stdout 或其它退出码仍按清理未确认处理。
+
+同一后端只保留桌面 daemon 或一个 CLI profile 执行 Tomcat。启动前分别核对状态；更新 PATH 或安装文件不会改写已运行 daemon 继承的 `MULTICA_TOMCAT_PATH`。若仍指向旧 VS Code 扩展目录，应由用户安排切换和重启，不由本包自动安装、重启或回退到另一份二进制。
+
 ## 6. 取消、恢复和 Windows
 
 - 单任务取消关闭 ACP forwarder stdin，等待 Tomcat 清理确认；超时才杀掉 backend 自己拥有的进程树，并明确记录共享服务清理未确认。不能把强杀写成“服务内所有工具已停止”。
 - 正常完成要等 forwarder 实际退出后再交给 Multica 做 worktree 清理，避免目录提前删除。
+- daemon 原有 30 秒 handoff 不延长为 adapter 的 65 秒 grace；超过 handoff 或未交付清理结果时，以 `cleanup_unconfirmed` 阻断本次自动继续，并保留 worktree、运行时文件和诊断。不要在人工确认残留进程前重新派发到该目录。
+- 包保留旧基线 native `daemon stop` 的既有语义，不提供新版强停机确认协议。daemon 不在运行、活动任务为零或一次 stop 成功，都不能单独证明共享服务内的工具已停止。
 - 已完成的 turn 不被迟到的 cancel 改写；`session/load` 失败只有结构化 unknown session 等情况才进入宿主的 fresh/resume 拒绝流程。
 - Windows 下 Multica Job 可能不允许 Tomcat ACP 再脱离创建共享服务。执行任务前在相同账号和配置目录的独立终端执行 `tomcat serve start`，再派任务；不要修改 Job 权限绕过这个边界。
 - 这是同一台执行机器上的本地进程和本机 IPC，不是让浏览器直接访问远程 Tomcat。远程任务必须把 daemon、Tomcat 和 cwd 一起部署到目标执行机。
@@ -170,8 +191,8 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 
 ```sh
 (cd server && ../scripts/go-test-with-agent-cli-guard.sh -- \
-  go test -p 2 -parallel 2 ./pkg/agent ./internal/daemon ./internal/daemon/execenv \
-  -run '^TestTomcat' -count=1)
+  go test -p 2 -parallel 2 ./pkg/agent ./internal/daemon ./internal/daemon/execenv ./pkg/taskfailure \
+  -run '^Test(Tomcat|AllReasons|ExecuteAndDrain.*Terminal|ExecuteAndDrainDoesNotDelayBackendsWithoutATerminalBoundary|IdleWatchdogYieldsToTerminalObservedDuringCleanup|HandleTask_AcksCancel)' -count=1)
 ```
 
 迁移测试必须使用受管隔离 `DATABASE_URL`；没有数据库时的 `skip` 不是通过：
@@ -200,7 +221,7 @@ pnpm typecheck
   -run '^TestTomcatSharedServeWithHermesClient$' -count=1 -v)
 ```
 
-它使用明确的 Tomcat 二进制、隔离 HOME、本地 HTTP fixture 和假 Key，会真实启动本地服务但不调用外部模型；包含发现零请求、会话清单前后不变、原始ID选择及上游model_name验证。
+它使用明确的 Tomcat 二进制、隔离 HOME、本地 HTTP fixture 和假 Key，会真实启动并停止**私有**本地服务但不调用外部模型；包含发现零请求、会话清单前后不变、原始 ID/model_name、四项启动策略作用于同一计划，以及人工待答卡片取消后撤回。普通测试仍经过 CLI guard，不会自动发现或启动用户的 Tomcat。
 
 `tests/new-files/e2e/tomcat-model-discovery.spec.ts` 是显式opt-in的创建页旅程，使用现有 `TestApiClient`，不修改页面或mock目录API。运行前按 `VALIDATION.md` 准备独立HOME/registry/PGDATA/端口、loopback provider和本轮二进制；`--ephemeral` 本身不是隔离。测试根与证据目录通过 `TOMCAT_DISCOVERY_FIXTURE_ROOT` / `TOMCAT_DISCOVERY_EVIDENCE` 指定；未准备时skip不计通过。旧基线的页面路径/英文资源/任务载荷可能不同，此E2E源码面向记录的3c7b4cde7版本，不冒称在旧页面上已重放；旧基线接线由Go测试验证。
 

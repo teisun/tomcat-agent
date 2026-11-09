@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // The current test executable is the fake ACP peer; never discover a user's CLI.
@@ -20,6 +22,16 @@ func TestTomcatHelperProcess(t *testing.T) {
 	mode := os.Getenv("MULTICA_TOMCAT_TEST_HELPER")
 	if mode == "" {
 		return
+	}
+	switch mode {
+	case "parse-failure":
+		_, _ = fmt.Fprintln(os.Stderr, "error: unexpected argument '--fixture-unknown'")
+		os.Exit(2)
+	case "output-then-exit-2":
+		_, _ = fmt.Fprintln(os.Stdout, "non-protocol output")
+		os.Exit(2)
+	case "silent-exit-1":
+		os.Exit(1)
 	}
 	root := os.Getenv("TOMCAT_TEST_ROOT")
 	if mode == "child" {
@@ -79,7 +91,7 @@ func TestTomcatHelperProcess(t *testing.T) {
 			}
 		case "session/prompt":
 			_ = os.WriteFile(filepath.Join(root, "prompted"), []byte("yes"), 0600)
-			if mode == "wait" || mode == "hang" {
+			if mode == "wait" || mode == "hang" || mode == "cancel-shutdown-failure" {
 				if mode == "hang" {
 					self, _ := os.Executable()
 					child := exec.Command(self, "-test.run=^TestTomcatHelperProcess$")
@@ -116,7 +128,7 @@ func TestTomcatHelperProcess(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	_ = os.WriteFile(filepath.Join(root, "stopped"), []byte("yes"), 0600)
-	if mode == "shutdown-failure" {
+	if mode == "shutdown-failure" || mode == "cancel-shutdown-failure" {
 		os.Exit(94)
 	}
 	os.Exit(0)
@@ -129,7 +141,7 @@ func tomcatTestBackend(t *testing.T, mode string) (Backend, string) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	backend, err := New("tomcat", Config{ExecutablePath: self, LaunchPrefix: []string{"-test.run=^TestTomcatHelperProcess$"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Env: map[string]string{"MULTICA_TOMCAT_TEST_HELPER": mode, "TOMCAT_TEST_ROOT": root, "TOMCAT_TEST_MARKER": "host-only"}})
+	backend, err := New("tomcat", Config{BuiltinRuntime: true, ExecutablePath: self, LaunchPrefix: []string{"-test.run=^TestTomcatHelperProcess$"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Env: map[string]string{"MULTICA_TOMCAT_TEST_HELPER": mode, "TOMCAT_TEST_ROOT": root, "TOMCAT_TEST_MARKER": "host-only"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,11 +234,55 @@ func TestTomcatCompletedTurnSurvivesLateCancellation(t *testing.T) {
 	}
 }
 
+func TestTomcatArgumentParseFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, status string
+		builtin            bool
+	}{
+		{"native-parse-failure", "parse-failure", "failed", true},
+		{"custom-parse-failure", "parse-failure", "cleanup_unconfirmed", false},
+		{"output-then-exit-2", "output-then-exit-2", "cleanup_unconfirmed", true},
+		{"silent-exit-1", "silent-exit-1", "cleanup_unconfirmed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, root := tomcatTestBackend(t, tc.mode)
+			tomcat := backend.(*tomcatBackend)
+			tomcat.cfg.BuiltinRuntime = tc.builtin
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			session, err := backend.Execute(ctx, "task", ExecOptions{Cwd: root, ResumeSessionID: "tomcat-fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := tomcatResult(t, session)
+			if result.Status != tc.status || result.SessionID != "tomcat-fixture" || result.ResumeRejected {
+				t.Fatalf("result: %+v", result)
+			}
+			if session.TerminalObserved() || !session.CleanupRequired {
+				t.Fatalf("terminal=%v cleanupRequired=%v", session.TerminalObserved(), session.CleanupRequired)
+			}
+			for message := range session.Messages {
+				t.Errorf("unexpected message before initialization: %+v", message)
+			}
+			if tc.status == "failed" {
+				for _, want := range []string{tomcat.cfg.ExecutablePath, "exit status 2", "--fixture-unknown", "acp --help"} {
+					if !strings.Contains(result.Error, want) {
+						t.Errorf("error missing %q: %s", want, result.Error)
+					}
+				}
+				if reason := taskfailure.Classify(result.Error); reason != taskfailure.ReasonAgentProcessFailure {
+					t.Errorf("failure reason=%s: %s", reason, result.Error)
+				}
+			}
+		})
+	}
+}
+
 func TestTomcatFailuresAndResumeClassification(t *testing.T) {
 	for _, tc := range []struct {
 		mode, status string
 		rejected     bool
-	}{{"missing", "failed", true}, {"busy", "failed", false}, {"failure", "failed", false}, {"cancelled", "aborted", false}, {"invalid", "failed", false}, {"shutdown-failure", "failed", false}, {"bad-model", "failed", false}} {
+	}{{"missing", "failed", true}, {"busy", "failed", false}, {"failure", "failed", false}, {"cancelled", "aborted", false}, {"invalid", "failed", false}, {"shutdown-failure", "cleanup_unconfirmed", false}, {"bad-model", "failed", false}} {
 		t.Run(tc.mode, func(t *testing.T) {
 			backend, root := tomcatTestBackend(t, tc.mode)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -239,6 +295,10 @@ func TestTomcatFailuresAndResumeClassification(t *testing.T) {
 			if result.Status != tc.status || result.ResumeRejected != tc.rejected || result.Error == "" {
 				t.Fatalf("result: %+v", result)
 			}
+			wantTerminal := tc.mode == "cancelled" || tc.mode == "shutdown-failure"
+			if session.TerminalObserved() != wantTerminal || !session.CleanupRequired {
+				t.Fatalf("terminal=%v want=%v cleanupRequired=%v", session.TerminalObserved(), wantTerminal, session.CleanupRequired)
+			}
 			if _, err := os.Stat(filepath.Join(root, "stopped")); err != nil {
 				t.Fatal("result before shutdown", err)
 			}
@@ -247,7 +307,7 @@ func TestTomcatFailuresAndResumeClassification(t *testing.T) {
 }
 
 func TestTomcatCancellationWaitsForEOFExitAndKillsUnresponsiveTree(t *testing.T) {
-	for _, mode := range []string{"wait", "hang"} {
+	for _, mode := range []string{"wait", "hang", "cancel-shutdown-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			backend, root := tomcatTestBackend(t, mode)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -273,14 +333,18 @@ func TestTomcatCancellationWaitsForEOFExitAndKillsUnresponsiveTree(t *testing.T)
 			started := time.Now()
 			cancel()
 			result := tomcatResult(t, session)
-			if result.Status != "aborted" {
-				t.Fatalf("result: %+v", result)
+			wantStatus := "aborted"
+			if mode != "wait" {
+				wantStatus = "cleanup_unconfirmed"
+			}
+			if result.Status != wantStatus || session.TerminalObserved() || !session.CleanupRequired {
+				t.Fatalf("result=%+v terminal=%v cleanupRequired=%v", result, session.TerminalObserved(), session.CleanupRequired)
 			}
 			if mode == "wait" {
 				if _, err := os.Stat(filepath.Join(root, "stopped")); err != nil {
 					t.Fatal("peer was killed rather than allowed to finish", err)
 				}
-			} else {
+			} else if mode == "hang" {
 				if time.Since(started) < tomcatShutdownGrace {
 					t.Fatal("killed before grace expired")
 				}
@@ -295,6 +359,25 @@ func TestTomcatCancellationWaitsForEOFExitAndKillsUnresponsiveTree(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func TestTomcatLocalTimeoutDoesNotClaimAnAuthoritativeTerminal(t *testing.T) {
+	backend, root := tomcatTestBackend(t, "wait")
+	session, err := backend.Execute(t.Context(), "task", ExecOptions{Cwd: root, Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := tomcatResult(t, session)
+	if result.Status != "timeout" || session.TerminalObserved() || !session.CleanupRequired {
+		t.Fatalf("result=%+v terminal=%v cleanupRequired=%v", result, session.TerminalObserved(), session.CleanupRequired)
+	}
+}
+
+func TestTomcatSessionConfigFailureDoesNotRejectResume(t *testing.T) {
+	err := &acpRPCError{Method: "session/load", Code: -32603, Message: "session_config_failed"}
+	if isACPResumeRejected(err) {
+		t.Fatal("a startup configuration failure must not discard the existing session")
 	}
 }
 
