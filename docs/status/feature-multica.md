@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-08 23:31 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-09 10:10 +0800 | ACTIVE | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -18,6 +18,7 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - 整改完成：模式通知只在已有进行中 prompt 时排队，发送失败只记日志；恢复提问诊断日志，记录启动配置失败的真实原因；补齐唯一模式通知、控制者接管策略重置及消费者错误分类回归，并删除重复检查。
 - 更新架构、计划工具和规划技能说明，纳入已交付的调研及早期方案文档。早期方案是历史材料，不代表其中的数据库、专用模式 UI 或运行中切换建议已实施；当前配置指南维护在 Multica 仓库 `tomcat_config.md`。
 - 纳入此前已完成的版本同步：CLI / bundled CLI `0.1.88`、扩展 `0.2.6`，本次提交不再次升版。darwin-x64 完整 VSIX 已另行交付，构建产物保持忽略，不入库。
+- TOMC-4 通用缓存键修复：在 `PromptCacheKeyFamily::key_for` 保留不超过 64 个 UTF-8 字节的逻辑键，超长时对完整会话与请求家族取 SHA-256 小写 hex。现场 75 字节评审键、64/65 边界、Unicode、长会话后缀与家族隔离均有回归；只改派生缓存键，不改会话身份、历史、权限或 provider wire。架构说明已同步，本次源码尚未安装部署。
 
 ### 🔌 INTERFACE (接口变更)
 
@@ -25,25 +26,28 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - ACP select 配置保留 `model`，新增 `agent_mode`、`plan_review`、`question_policy`、`plan_start`，返回实际值与完整选项；Agent 执行期间自行切换模式时发送完整 `config_option_update`。
 - 共享服务 ACP 握手回显 `acpOptions`，启动模式设置失败向客户端返回固定 `session_config_failed`。Native wire 没有新增可反序列化的策略命令，权限、路径隔离和既有控制权守卫保留。
 - Multica 产品 adapter 继续原样传入自定义参数，不新增产品参数解析器、数据库字段、审批协议或轮询器。
+- `key_for` 返回值新增 64 字节上界；短键兼容，超长键与诊断日志显示稳定摘要。无新配置、依赖或协议字段，不承诺上游缓存命中率。
 
 ### 验证与提交范围
 
 | 范围 | 结果 | 证据与边界 |
 | :--- | :--- | :--- |
-| 当前交付快照 | Tomcat 68 个原变更文件、Multica 3 个原变更文件哈希一致；源码与整包基线一致 | 本轮 `1794151679400-2f39sl`，exit 0；包含明确保留、不提交的备份与生成文件 |
-| 格式与版本 | Rust fmt、版本一致性和两仓差异空白检查通过 | 本轮 `1794151679400-2f39sl`；暂存范围另含新增 Markdown 文档 |
-| 扩展快速门禁 | 扩展/GUI 类型检查、core 947 项和 GUI 904 项通过 | 本轮 `1794151679461-iwtxzt`，exit 0；预期故障用例的 stderr 不计为测试失败 |
-| Multica 静态与错误分类 | gofmt、tagged go vet、配置失败不误判会话丢失测试通过 | 本轮 `1794151679528-2ekzb0`，exit 0 |
-| Rust 标准 gate-fast | Clippy；lib 3498 passed / 7 ignored；并行集成 396 passed / 27 skipped；串行集成 92 passed / 3 skipped | 复用未变化源码的 `1794147050609-i31uzu`，exit 0；ignored/skipped 不计通过 |
-| Go 跨仓集成 | 使用开发构建的 `^TestTomcat` 受控集成通过，88.539s | 复用 `1794147050670-yl7yk6`，exit 0；私有 HOME / 本地模型 fixture，不冒充付费模型验收 |
-| 真实平台与旁观界面 | 已有人工及自动推荐协作旅程、VS Code 真宿主与旁观重连记录 | 本轮复用，不重启已停止的专用验收环境，不把本次单测称为新的视觉或安装态验收 |
+| 缓存键红绿 | 修复前 6 passed / 4 failed；修复后 10 passed / 0 failed | `cargo test --offline --locked --lib cache_key`；`1794185535184-ijrk2l` / `1794185709612-28zcen`，含现场摘要参考值与 AgentLoop 真实构造入口 |
+| Rust Clippy / doctest / 构建 | `--all-targets -- -D warnings` 通过；doc 检查退出 0（当前 0 个 doctest）；integration 前置本地 debug 构建通过 | `1794185854805-urpf98` 各阶段独立记录；构建不是部署或真实评审验收 |
+| Rust 库测试 | 3500 passed / 1 failed / 7 ignored，阶段退出 101 | 同一批次；唯一失败为 `search_files_content_mode_defaults_to_three_context_lines`，缺 rg 时走不提供上下文的既有 fallback；搜索实现和该测试未改，所有缓存键测试通过 |
+| Rust integration | 未执行（缺 cargo-nextest），阶段退出 1 | 同一批次；不安装、不复刻 runner，不将 skipped/未执行写成通过 |
+| 格式与空白 | `cargo fmt --all --check`、两仓 `git diff --check` 通过 | `1794185854980-u8mk03` 的 Rust 部分通过，但后续 Go 检查工作目录写错导致整条命令退出 1；已用 `1794185883867-a3l3kb` 在正确目录完成 Go 格式检查 |
+| Multica agent 包 | `bash scripts/test-go.sh --race --only agent` 通过，574.389s | `1794185854916-6izl5o` exit 0；含解析早退与三个反例、既有取消/强杀/恢复边界；受既有 CLI guard 保护，不调用用户 CLI |
 
-本轮对照已完成的开发/整改计划和当前差异自检，仅补充分支状态并提交既有交付内容，不声称新增独立模型代码评审。详细本机证据在 `.agents/acceptance/multica-plan-collaboration/REPORT.md` 和 `.agents/acceptance/multica-tomcat-remediation/REPORT.md`；证据目录、截图、VSIX 与旧 `.bak` 备份不作为产品源文件纳入提交。保留原文报告及用户已有修改，不执行拟议的帮助示例测试任务。
+本轮按原整改计划审查两仓差异并执行上述检查，不声称 Tomcat L3 全绿。此前插件/GUI、跨仓真实 ACP、手工答题与推荐答案协作旅程的历史证据保留在 `.agents/acceptance/multica-plan-collaboration/REPORT.md` 和 `.agents/acceptance/multica-tomcat-remediation/REPORT.md`；不以旧验收替代本次修复验收，也未重启专用或共享服务。按用户本轮授权，将本次缓存键修复、必要测试、架构说明与分支 status 提交本地；不推送、安装、重启、升版或重打整包，保留 `.multica/`、旧 `.bak` 和 Multica 的既有 `next-env.d.ts` 改动。提交前对照原计划复核暂存范围；生产代码、测试、依赖和 runner 未再修改，复用上述有效结果，保留既有失败与环境阻塞，不重复执行整套测试。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 
 | 项目 | 原因／影响 | 后续与边界 |
 | :--- | :--- | :--- |
 | 默认答题升级行为 | 未配置普通问题策略的 ACP 智能体会等待同项目 VS Code 人工回答 | 无人值守须显式 recommended；不将自动答题当作开发或工具授权 |
+| 搜索环境与既有 fallback 缺口 | PATH 中缺少 rg，库测试的上下文行断言失败；`search.rs:573-577` 已明确不支持 fallback 上下文 | 未纳入本次两文件修复，不弱化断言或静默跳过；另行补齐环境/修复搜索边界后复验 |
+| 集成测试工具 | 缺 cargo-nextest，本次 integration 未执行 | 由用户决定是否安装，再跑原 runner 的 integration 阶段；不声称全门禁通过 |
+| help 独立评审 | 当前运行中的服务未加载本次源码修复，原 help 计划尚未补独立评审 | 用户另行安排修复版安装与 `/restart` 后再补，不自动开始帮助开发 |
 | 当前后台与安装状态 | 磁盘产物或本地提交不证明正在运行的后台已更新 | 安装、重启由用户另行操作；本次不安装、不改真实配置/PATH、不重启服务、不推送或发布 |
 | 验证边界 | 覆盖率未测量；Windows/Linux/arm64 原生旅程及远端 CI 未由本轮验证 | Cov% 留空值 `-`，提交信息省略覆盖率，不宣称跨平台或所有可能测试全绿；历史失败与环境限制保留在既有证据中 |
