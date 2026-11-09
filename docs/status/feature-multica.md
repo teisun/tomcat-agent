@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-09 17:53 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-09 18:37 +0800 | ACTIVE | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -78,6 +78,16 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - Rust 全离线阶段、真实窗口/原生发现及最终合并复核仍进行中；最终结果记录后才在 develop 合并和更新看板。证据在 `.agents/acceptance/merge-multica-20261109/` 与上述任务日志。
 - 最新聚焦批次 `1794217007722-u8drfr` exit 0：完整正文/旧包装 12 项、模型目录 4 项通过，包含无关非 UTF-8 环境与身份安全失败。复核还发现边界 `trim()` 会去掉首段代码缩进，已改为只去除首尾空白行，并通过真实保存/读取回归保留首段缩进及行末空格。此前离线批次 `1794215380243-mgadh7`、`1794215963530-yqg4ma` 为切换到该最终输入而主动停止，不算完整通过；采样时库测试仍有进展，未证实死锁。
 - 旁观真实窗口 `1794216447461-a8lph4` exit 0，1/1 通过：真实鼠标选择非推荐项、宿主得到唯一非推荐答案、撤卡且任务控制继续禁用。前次 `1794215693368-ahnyvr` 的原生安装/失败分支先通过，后续旁观断言失败；原因是待答时产品切换为“可答题但不可控制”的另一条目录文案。现分别精确断言两种英文目录文案，未改产品或削弱权限断言；新桌面/窄屏 PNG 已读，四份 ARIA/console 已读，renderer errors 均为空。独立诊断中“冷 HOME 完全无目录”假设不成立（仅有内置 `.tomcat/temp`），已修正文档范围，不把此诊断误称产品失败。
+
+### 最新门禁补漏（2026-11-09）
+
+- Rust 整轮 `1794218193291-qbjeu9` exit 1：Clippy 和 doc 命令通过，integration 并发组 396 passed / 27 skipped、串行组 92 passed / 3 skipped；库测试 3501 passed / 1 failed / 7 ignored。唯一失败是会话释放后仍报 `session_in_use`，不以单跑及该组 9 项绿色覆盖整轮红灯。
+- 对照 develop，会话 guard、manager 及原测试未变；受控暂停 pre-exec 的回归 `1794219711149-aau2g3` exit 101，稳定证明被动继承的 CLOEXEC 描述符会拖延旧 guard 的解锁。现由取得锁的进程在 guard 结束时明确解锁；创建进程 ID 防止异进程副本反向解开原 owner，真正独立 pin 的另一 owner 仍阻止删除。原有锁、metadata 复核、权限和删除顺序保留，不增加重试或放宽断言。
+- 修复聚焦 `1794220230882-6drm88` exit 0：占用/删除组 10 项及模拟异进程身份的真实文件锁检查 1 项通过，包含实际 fork→pre-exec 的双向屏障，子进程在断言前放行并回收。修复后的完整 Rust 快门禁 `1794220654037-iivdyy` 仍进行中。
+- 已恢复扩展剩余组合 `1794214536501-mk1gpg` exit 0：安装态 24 passing / 6 pending；VSIX 五个专项分别 4、1、3、1、1 passing；开发态 Retry/Resume 1 passing。明确复用先前 production assets，不冒称整套从零构建；原 integration 首次五项失败及后续全文件补验记录保留。
+- 锁补漏前的旁观安装态和 native 专项 `1794218193350-6zag5r` exit 0：安装态旁观恢复 1 项、真实 CLI 自动安装与安装失败各 1 项通过，VS Code 1.106.0。相关桌面/窄屏 PNG、ARIA、console 已读取；native capture-time console 各有一条测试 harness 的 marketplace 404，未归为产品 renderer 回归，也不报告全窗口零错误。
+- 正文修复后、锁补漏前 CLI 的旧宿主受控 ACP `1794219120749-mgstd6` exit 0：四策略、人工等待取消、目录 ID/default、registered backend 执行/取消/恢复四子场景通过；自有 HOME、loopback HTTP、假 Key，无外部模型请求。不是公司分支部署或付费模型验收。
+- 同一个 DeepSeek 全流程在正文最终修复后由 `1794218390965-qpkvmd` 再次通过（1 passed / 0 skipped，107.516 秒）；本次锁修复后的同场景 `1794220654107-ap7icv` 尚进行中。只增加同一场景的回归执行次数，不新增联真场景，不宣称完整 real-llm。当前仍未合并 develop。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 

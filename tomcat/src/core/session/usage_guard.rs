@@ -8,6 +8,17 @@ use std::path::{Path, PathBuf};
 pub(crate) struct SessionUsageGuard {
     _file: File,
     path: PathBuf,
+    owner_pid: u32,
+}
+
+impl Drop for SessionUsageGuard {
+    fn drop(&mut self) {
+        // Command's pre-exec child may still hold a CLOEXEC copy of this open
+        // description. Only the process that acquired the lock owns its lifetime.
+        if self.owner_pid == std::process::id() {
+            let _ = FileExt::unlock(&self._file);
+        }
+    }
 }
 
 impl SessionUsageGuard {
@@ -40,7 +51,11 @@ impl SessionUsageGuard {
                 AppError::Io(error)
             }
         })?;
-        Ok(Self { _file: file, path })
+        Ok(Self {
+            _file: file,
+            path,
+            owner_pid: std::process::id(),
+        })
     }
     /// Only after metadata removal. IDs are never reused and every new holder rechecks existence.
     pub(crate) fn remove_deleted_lock(&self) -> std::io::Result<()> {
@@ -48,5 +63,27 @@ impl SessionUsageGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             result => result,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_process_drop_does_not_unlock_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut guard = SessionUsageGuard::shared(temp.path(), "owned-session").unwrap();
+        let inherited = guard._file.try_clone().unwrap();
+        // Exercise a copied guard's foreign-process branch with a real shared
+        // open description, without running Rust destructors after an unsafe fork.
+        guard.owner_pid = std::process::id().wrapping_add(1);
+        drop(guard);
+        assert!(matches!(
+            SessionUsageGuard::exclusive(temp.path(), "owned-session"),
+            Err(AppError::Config(code)) if code == "session_in_use"
+        ));
+        drop(inherited);
+        assert!(SessionUsageGuard::exclusive(temp.path(), "owned-session").is_ok());
     }
 }

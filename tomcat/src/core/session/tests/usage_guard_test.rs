@@ -59,6 +59,91 @@ fn usage_guard_moves_with_binding_and_does_not_release_old_on_failed_switch() {
     assert!(other.get_session_by_id(&b.session_id).unwrap().is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn releasing_usage_unlocks_passive_fork_copies_but_not_other_owners() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let owner = SessionManager::new(temp.path().into());
+    let session = owner.new_current_session(None).unwrap();
+    owner.pin_session(&session.session_id).unwrap();
+    let peer = SessionManager::new(temp.path().into());
+    peer.pin_session(&session.session_id).unwrap();
+    let deleter = SessionManager::new(temp.path().into());
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    child
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let fd = child.as_raw_fd();
+    let executable = std::env::current_exe().unwrap();
+    let spawn = std::thread::spawn(move || {
+        let _child_socket = child;
+        let mut command = Command::new(executable);
+        command
+            .arg("--list")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: the post-fork callback only uses async-signal-safe syscalls.
+        // Keep inherited descriptors alive before exec closes their CLOEXEC copies.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                for writing in [true, false] {
+                    loop {
+                        let result = if writing {
+                            libc::write(fd, (&byte as *const u8).cast(), 1)
+                        } else {
+                            libc::read(fd, (&mut byte as *mut u8).cast(), 1)
+                        };
+                        if result == 1 {
+                            break;
+                        }
+                        let error = std::io::Error::last_os_error();
+                        if result < 0 && error.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
+    let ready = parent.read_exact(&mut [0_u8]);
+    owner.release_session_usage();
+    let peer_still_blocks = matches!(
+        deleter.delete_session(&session.session_id),
+        Err(crate::AppError::Config(code)) if code == "session_in_use"
+    );
+    peer.release_session_usage();
+    let deletion = deleter.delete_session(&session.session_id);
+    // Always let the child exec and reap it before asserting, including the red run.
+    let released = parent.write_all(&[1]);
+    let status = spawn.join().unwrap().unwrap().wait().unwrap();
+    ready.unwrap();
+    released.unwrap();
+    assert!(status.success());
+    assert!(
+        peer_still_blocks,
+        "an independently pinned owner must still block deletion"
+    );
+    deletion.expect("passive pre-exec copies must not retain a released owner's usage lock");
+    assert!(deleter
+        .get_session_by_id(&session.session_id)
+        .unwrap()
+        .is_none());
+}
+
 #[test]
 fn usage_guard_rejects_unsafe_ids_and_scope_before_any_cleanup() {
     let temp = tempfile::tempdir().unwrap();
