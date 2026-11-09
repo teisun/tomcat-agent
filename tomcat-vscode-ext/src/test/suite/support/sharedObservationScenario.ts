@@ -7,6 +7,7 @@ import { TEST_PATH_ENV, TEST_DEFAULT_CWD_ENV } from "../../../constants";
 import { startAcpTestHost } from "./acpTestHost";
 import { spawnScriptedOpenAiStreamServer, sseDelta, sseToolCall, sseFinish, sseDone } from "./scriptedModel";
 import { SettingsFrameDriver } from "./workbenchFindDriver";
+import { translate } from "../../../shared/i18n";
 
 async function until(predicate: () => boolean | Promise<boolean>, description: string, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -37,6 +38,8 @@ export async function assertSharedObservationFlow(
   const model = await spawnScriptedOpenAiStreamServer([
     { parts: [sseDelta(prefix), { body: "", waitFor: hold }, sseToolCall("observer-shell", "bash", JSON.stringify({ command, cwd: "", foreground_wait_ms: 16000, run_in_background: false })), sseFinish("tool_calls"), sseDone()] },
     { parts: [sseDelta("The tool completed. The task is finished."), sseFinish("stop"), sseDone()] },
+    { parts: [sseToolCall("observer-question", "ask_question", JSON.stringify({ questions: [{ id: "observer-choice", prompt: "Choose a fixture option.", options: [{ id: "a", label: "Option A", recommended: true }, { id: "b", label: "Option B", recommended: false }] }] })), sseFinish("tool_calls"), sseDone()] },
+    { parts: [sseDelta("The observer answered the question."), sseFinish("stop"), sseDone()] },
   ], [], port);
   const host = startAcpTestHost(binary, cwd, process.env);
   let chat: SettingsFrameDriver | undefined;
@@ -71,7 +74,7 @@ export async function assertSharedObservationFlow(
     const state = () => api.__testing.getWebviewState().sessionViews[sessionId];
     await until(() => state()?.timeline.some(item => item.type === "message" && item.text === prefix) === true, "replayed prefix");
     assert.equal(state().access, "observe");
-    const readOnlyDom = async () => {
+    const readOnlyDom = async (questionPending = false) => {
       const dom = await chat!.evaluate<{ notice: string; editable: string; disabled: string[]; actions: Array<{ disabled: boolean }>; controlsFit: boolean }>(`({
         notice: document.querySelector('[data-testid="observer-notice"]')?.textContent ?? '',
         editable: document.querySelector('[data-testid="composer-input"]')?.getAttribute('contenteditable'),
@@ -79,7 +82,7 @@ export async function assertSharedObservationFlow(
         actions: [...document.querySelectorAll('[data-testid="stop-button"], [data-testid="send-button"]')].map(button => ({ disabled: button.disabled })),
         controlsFit: [...document.querySelectorAll('[data-testid="mode-select"], [data-testid="model-select"], [data-testid="stop-button"], [data-testid="send-button"]')].every(button => { const rect = button.getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth; })
       })`);
-      assert.ok(dom.notice.includes("ACP test host"));
+      assert.equal(dom.notice.trim(), translate("en", questionPending ? "session.observerCanAnswer" : "session.readOnlyFrom", { source: "ACP test host" }));
       assert.equal(dom.editable, "false");
       assert.ok(dom.controlsFit, "composer controls fit inside the panel");
       for (const id of ["mode-select", "model-select", "thinking-level-select"]) assert.ok(dom.disabled.includes(id), `${id} must be disabled`);
@@ -158,18 +161,42 @@ export async function assertSharedObservationFlow(
     assert.equal(await fs.readFile(path.join(cwd, "observer-tool.done"), "utf8"), "done");
     await until(() => !state().busy && state().timeline.some(item => item.type === "message" && item.text.includes("The task is finished.")), "tool and task completion");
     assert.ok(state().timeline.some(item => item.type === "tool" && item.toolCallId === "observer-shell" && item.status === "complete"));
+    const questionTurn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Ask the fixture question." }] }, 180_000);
+    void questionTurn.catch(() => undefined);
+    await until(() => state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), "observer can answer the host question");
+    await chat.setViewport(1440, 900);
+    await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
+    await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "wide observer question card");
+    await until(() => chat!.evaluate<boolean>("!!document.querySelector('[data-testid=\"pending-question-panel\"]')"), "question card rendered");
+    await readOnlyDom(true);
+    await chat.capture(path.join(artifacts, "observer-question-desktop.png"));
+    await chat.setViewport(390, 844);
+    await readOnlyDom(true);
+    await chat.capture(path.join(artifacts, "observer-question-narrow.png"));
+    await chat.click("approval-option-observer-choice-b");
+    await chat.click("approval-continue");
+    assert.equal((await questionTurn).stopReason, "end_turn");
+    await until(() => chat!.evaluate<boolean>("!document.querySelector('[data-testid=\"pending-question-panel\"]')"), "answered question card withdrawn");
+    const questionResult = () => state().timeline.find(item => item.type === "tool" && item.toolCallId === "observer-question" && item.status === "complete" && item.summary?.trim().startsWith("{"));
+    await until(() => !!questionResult(), "authoritative question result reaches observer");
+    const tool = questionResult();
+    assert.ok(tool?.type === "tool");
+    const answer = JSON.parse(tool.summary ?? "");
+    assert.equal(answer.outcome, "answered");
+    assert.deepEqual(answer.answers, [{ question_id: "observer-choice", option_ids: ["b"], picked_recommended: false }]);
+    await readOnlyDom();
     await host.close();
     // A stopped host is still read-only; no silent ownership transfer.
     await until(() => chat!.evaluate<boolean>("!!document.querySelector('[data-testid=\"send-button\"]') && document.body.innerText.includes('The task is finished.')"), "completed task rendered");
     await readOnlyDom();
     assert.equal(state().access, "observe");
-    assert.equal(model.capturedNonTitleRequests().length, 2);
+    assert.equal(model.capturedNonTitleRequests().length, 4);
     await assert.rejects(api.__testing.getSessionState(foreign.sessionId), /unknown_session/);
     assert.equal(api.__testing.getObservedEvents().some(event => event.sessionId === foreign.sessionId), false);
     await api.__testing.sendWebviewIntent({ messageId: "observe-return-own", type: "switchSession", data: { sessionId: ownId } });
     await until(() => chat!.evaluate<boolean>("document.querySelector('[data-testid=\"composer-input\"]')?.getAttribute('contenteditable') === 'true'"), "own session becomes writable again");
     assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "real running and completed tool", "readonly busy and idle", "own session writable"] }, null, 2));
+    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "real running and completed tool", "readonly busy and idle", "observer answers non-recommended question without task control", "own session writable"] }, null, 2));
   } finally {
     release();
     await fs.writeFile(toolRelease, "cleanup");

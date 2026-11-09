@@ -8,8 +8,29 @@ use crate::AppError;
 
 pub(super) fn run(config_path: Option<&Path>) -> Result<(), AppError> {
     // Parser errors may include configuration lines or dotenv secrets. Never forward them.
-    let config_error = |_: AppError| AppError::Config(tr("cli.serveModels.configFailed", &[]));
-    let (client, _) = config::load_config_with_ignored_keys(config_path).map_err(config_error)?;
+    let config_failed = tr("cli.serveModels.configFailed", &[]);
+    let config_error = |_: AppError| AppError::Config(config_failed.clone());
+    config::use_saved_configuration_only();
+    let (mut client, _) =
+        config::load_config_with_ignored_keys(config_path).map_err(config_error)?;
+    // Only the service identity comes from the caller. Do not deserialize or
+    // validate unrelated shell model settings before reading the saved catalog.
+    for (key, value) in std::env::vars_os() {
+        let Some(key) = key.to_str() else { continue };
+        if !key.eq_ignore_ascii_case("TOMCAT__STORAGE__WORK_DIR")
+            && !key.eq_ignore_ascii_case("TOMCAT__AGENT__ID")
+        {
+            continue;
+        }
+        let value = value
+            .into_string()
+            .map_err(|_| AppError::Config(config_failed.clone()))?;
+        if key.eq_ignore_ascii_case("TOMCAT__STORAGE__WORK_DIR") {
+            client.storage.work_dir = Some(value);
+        } else {
+            client.agent.id = value;
+        }
+    }
     let (work_dir, agent_id) = service::client_identity(&client).map_err(config_error)?;
     let (cfg, _) = service::load_saved_configuration(config_path, &work_dir, &agent_id)
         .map_err(config_error)?;

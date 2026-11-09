@@ -17,6 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/agent"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
@@ -59,10 +60,11 @@ func TestTomcatCleanupUnconfirmedPreservesLocalFiles(t *testing.T) {
 	for _, mode := range []string{localDirectoryModeInPlace, localDirectoryModeWorktree} {
 		t.Run(mode, func(t *testing.T) {
 			redirectTestHome(t, t.TempDir())
-			t.Setenv("MULTICA_AGENT_TEMP_BASE", t.TempDir())
+			tempBase := t.TempDir()
+			t.Setenv("MULTICA_AGENT_TEMP_BASE", tempBase)
 			repo := createDaemonTestRepo(t)
 			bin := filepath.Join(t.TempDir(), "tomcat-fixture")
-			if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf retained > retained.txt\nexit 1\n"), 0755); err != nil {
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf retained > retained.txt\nprintf retained > \"$TMPDIR/retained-temp\"\nprintf '%s' \"$TMPDIR\" > task-temp-path.txt\nexit 1\n"), 0755); err != nil {
 				t.Fatal(err)
 			}
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -78,6 +80,13 @@ func TestTomcatCleanupUnconfirmedPreservesLocalFiles(t *testing.T) {
 				profileLaunchSpecs: map[string]profileLaunchSpec{"profile": {path: bin, version: "0.1.89"}},
 				cfg:                Config{DaemonID: "fixture-daemon", WorkspacesRoot: t.TempDir(), AgentTimeout: 10 * time.Second, ServerBaseURL: srv.URL},
 			}
+			t.Cleanup(func() {
+				d.activeEnvRootsMu.Lock()
+				defer d.activeEnvRootsMu.Unlock()
+				for _, lock := range d.unconfirmedTaskTempLocks {
+					execenv.ReleaseTaskTempLock(lock)
+				}
+			})
 			ref, err := json.Marshal(localDirectoryRef{LocalPath: repo, DaemonID: "fixture-daemon", ExecutionMode: mode})
 			if err != nil {
 				t.Fatal(err)
@@ -95,6 +104,19 @@ func TestTomcatCleanupUnconfirmedPreservesLocalFiles(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(result.WorkDir, "AGENTS.md")); err != nil {
 				t.Fatalf("runtime brief was removed before cleanup acknowledgement: %v", err)
 			}
+			tempPath, err := os.ReadFile(filepath.Join(result.WorkDir, "task-temp-path.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Exercise the same lock-aware pruner used by another daemon, after
+			// runTask has returned and unreferenced file handles could be finalized.
+			runtime.GC()
+			if removed, _ := execenv.PruneTaskTempDirs(tempBase, 0, time.Now(), logger); removed != 0 {
+				t.Fatalf("GC removed %d unconfirmed task temp directories", removed)
+			}
+			if content, err := os.ReadFile(filepath.Join(string(tempPath), "retained-temp")); err != nil || string(content) != "retained" {
+				t.Fatalf("task temp content was removed before cleanup acknowledgement: %q, %v", content, err)
+			}
 			var preserved *worktreePreservedError
 			if mode == localDirectoryModeWorktree {
 				if !errors.As(runErr, &preserved) || result.DurableWorkDir != "" || result.BranchName != "" {
@@ -104,6 +126,24 @@ func TestTomcatCleanupUnconfirmedPreservesLocalFiles(t *testing.T) {
 				t.Fatal(runErr)
 			}
 		})
+	}
+}
+
+// A fresh attempt can lose its session id before it confirms process cleanup.
+// That uncertainty must beat the poisoned first result without reviving its id.
+func TestTomcatFreshRetryPreservesCleanupUncertainty(t *testing.T) {
+	first := agent.Result{Status: "failed", Error: "session not found", SessionID: "old-session", ResumeRejected: true}
+	firstUsage := map[string]agent.TokenUsage{"model": {InputTokens: 5}}
+	retry := agent.Result{Status: "cleanup_unconfirmed", Error: "Background processes may still be running", Usage: map[string]agent.TokenUsage{"model": {OutputTokens: 7}}}
+	result, tools := reconcileFreshRetryResult(first, firstUsage, 0, retry, 1, nil)
+	if result.Status != retry.Status || result.Error != retry.Error || result.SessionID != "" || tools != 1 {
+		t.Fatalf("fresh cleanup uncertainty lost: %+v, tools=%d", result, tools)
+	}
+	if result.Usage["model"].InputTokens != 5 || result.Usage["model"].OutputTokens != 7 {
+		t.Fatalf("attempt usage lost: %+v", result.Usage)
+	}
+	if shouldRetryWithFreshSession(result, "old-session", 0, "tomcat") {
+		t.Fatal("cleanup uncertainty permitted another retry")
 	}
 }
 

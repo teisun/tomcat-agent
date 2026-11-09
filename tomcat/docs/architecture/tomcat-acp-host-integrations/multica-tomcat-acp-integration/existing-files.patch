@@ -37,10 +37,20 @@ index d90b46c1e4b42ba72ba26d51c0cd09cbeecc02c8..8e8dca479314b102b8e1448c321f03c9
  	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode", "muse", "dim", "zeroclaw",
  }, agent.BuiltinRuntimeCommands()...)
 diff --git a/server/internal/daemon/daemon.go b/server/internal/daemon/daemon.go
-index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2cc1f41166 100644
+index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..ee5a74e3c31cd57fe361ab1545ec82733a0c86d3 100644
 --- a/server/internal/daemon/daemon.go
 +++ b/server/internal/daemon/daemon.go
-@@ -5803,6 +5803,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -684,6 +684,9 @@ type Daemon struct {
+ 	activeEnvRootsCond *sync.Cond      // signalled when an in-flight env-root GC mutation finishes
+ 	activeEnvRoots     map[string]int  // env root path -> reference count (handles reuse paths marked twice)
+ 	deletingEnvRoots   map[string]bool // env roots reserved by GC; new tasks wait until the mutation finishes
++	// Protected by activeEnvRootsMu; keep unconfirmed executions locked until
++	// this daemon exits, rather than allowing a GC sweep to remove their TMPDIR.
++	unconfirmedTaskTempLocks []*os.File
+ 
+ 	activeStoresMu   sync.Mutex
+ 	activeStoresCond *sync.Cond      // signalled when an in-flight store deletion finishes, so a blocked markActive can proceed
+@@ -5803,6 +5806,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  		taskLog.Info("discarding rejected start claim", "error", err)
  		return
  	}
@@ -54,7 +64,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  
  	// Report usage before any early return — the agent accumulates tokens
  	// whether the task completes, errors, or is cancelled mid-run by the poll
-@@ -5810,7 +5817,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -5810,7 +5820,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  	// runCtx is cancelled, so dropping this on the cancelled path silently
  	// under-reports billing.
  	if len(result.Usage) > 0 {
@@ -63,7 +73,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			taskLog.Warn("report task usage failed", "error", usageErr)
  		}
  	}
-@@ -5830,13 +5837,8 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -5830,13 +5840,8 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  		// run errors stay discarded: on a cancelled run they are expected
  		// noise (context canceled, killed process), and persisting them would
  		// stamp a bogus reason on every ordinary mid-run cancel.
@@ -79,7 +89,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
  		}
  		return
-@@ -5866,14 +5868,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -5866,14 +5871,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  		return
  	}
  
@@ -96,7 +106,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  		taskLog.Info("task cancelled during execution, discarding result",
  			"status", status, "error", err, "branch_name", result.BranchName)
  		// Same contract as the poll-cancelled path above: the transcript is
-@@ -5885,7 +5887,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -5885,7 +5890,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  		// completed/failed rows the complete/fail callback is the
  		// authoritative channel and a stale run's late ack must not touch
  		// them.
@@ -105,7 +115,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
  		}
  		return
-@@ -5923,6 +5925,23 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+@@ -5923,6 +5928,23 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
  	}
  }
  
@@ -129,7 +139,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  // worktreePreservedError marks a task error that must survive the cancel path:
  // its message names the preserved worktree holding the agent's uncommitted
  // work. Every other error on a cancelled run is expected noise (context
-@@ -8320,6 +8339,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+@@ -8320,6 +8342,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
  	// in place, leave them behind in the user's tree.
  	if env.LocalDirectory || env.LocalWorktree != nil {
  		defer func() {
@@ -139,7 +149,21 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			var cleanupErr error
  			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
  				cleanupErr = cerr
-@@ -8972,6 +8994,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+@@ -8359,6 +8384,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+ 		return TaskResult{}, fmt.Errorf("prepare task temp dir: %w", err)
+ 	}
+ 	defer func() {
++		if taskResult.FailureReason == taskfailure.ReasonProcessCleanupUnconfirmed.String() {
++			d.activeEnvRootsMu.Lock()
++			d.unconfirmedTaskTempLocks = append(d.unconfirmedTaskTempLocks, taskTempLock)
++			d.activeEnvRootsMu.Unlock()
++			taskResult.Comment += "; task temporary directory preserved at " + taskTempDir + " until daemon exit; check background processes before removal"
++			return
++		}
+ 		// Drop the execution lock before removing the directory: while it is
+ 		// held the GC sweep correctly refuses to touch this directory, so a
+ 		// removal that fails here (a file inside still open — the Windows case
+@@ -8972,6 +9004,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
  			FailureReason: failureReason,
  			Usage:         usageEntries,
  		}, nil
@@ -156,7 +180,25 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  	case "idle_watchdog":
  		// The idle watchdog force-stopped the run because the backend
  		// went silent (e.g. claude blocked on a tool call against a
-@@ -9754,14 +9786,24 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+@@ -9230,6 +9272,8 @@ func shouldRetryWithFreshSession(result agent.Result, priorSessionID string, too
+ //   - retry completed without a session id (e.g. all work via tools): take it,
+ //     but keep the id EMPTY. Never resurrect the poisoned id as a resumable
+ //     success.
++//   - retry cleanup is unconfirmed: take that result even without a new id.
++//     Never permit an older ordinary failure to authorize destructive cleanup.
+ //   - retry failed AND established no new session: keep `first`. Adopting the
+ //     second result here is exactly the bug — a second error lacking the
+ //     oversized-image markers would be classified resume-safe and the poisoned
+@@ -9245,7 +9289,7 @@ func reconcileFreshRetryResult(first agent.Result, firstUsage map[string]agent.T
+ 	case retry.SessionID != "":
+ 		retry.Usage = mergeUsage(firstUsage, retry.Usage)
+ 		return retry, retryTools
+-	case retry.Status == "completed":
++	case retry.Status == "completed" || retry.Status == "cleanup_unconfirmed":
+ 		retry.Usage = mergeUsage(firstUsage, retry.Usage)
+ 		return retry, retryTools
+ 	default:
+@@ -9754,14 +9798,24 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
  		}
  	}
  
@@ -183,7 +225,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			// The backend's wait goroutine (e.g. claude.go) translates the
  			// SIGKILL we delivered via agentCancel into Status="aborted".
  			// Re-tag it as "idle_watchdog" so runTask routes the
-@@ -9801,6 +9843,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+@@ -9801,6 +9855,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
  				// this is the real outcome, not a hang.
  				return result, toolCount.Load(), nil
  			} else if delivered {
@@ -193,7 +235,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  				// The backend's wait goroutine (e.g. claude.go) translates the
  				// SIGKILL we delivered via agentCancel into Status="aborted".
  				// Re-tag it so runTask routes the disposition through the
-@@ -9811,6 +9856,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+@@ -9811,6 +9868,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
  				}
  				return result, toolCount.Load(), nil
  			}
@@ -203,7 +245,7 @@ index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..9471d0877d20a957235d481bc3a23c2c
  			return agent.Result{
  				Status: "idle_watchdog",
  				Error:  idleWatchdogReason(time.Duration(idleWatchdogThreshold.Load())),
-@@ -9822,14 +9870,23 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+@@ -9822,14 +9882,23 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
  		// upstream runCtx fired runCancel(); context.DeadlineExceeded is the
  		// drain deadline expiring on its own.
  		if errors.Is(drainCtx.Err(), context.Canceled) {

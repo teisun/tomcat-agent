@@ -344,7 +344,11 @@ enum DraftHeadingKind {
 }
 
 fn top_level_heading(line: &str) -> Option<&str> {
-    line.trim().strip_prefix("## ").map(str::trim)
+    let content = line.trim_start_matches(' ');
+    if line.len() - content.len() > 3 {
+        return None;
+    }
+    content.strip_prefix("## ").map(str::trim)
 }
 
 fn classify_heading(heading: &str) -> DraftHeadingKind {
@@ -363,8 +367,25 @@ fn normalize_for_compare(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
+// Boundary blank lines are padding; indentation on content lines is Markdown.
+fn trim_blank_lines(text: &str) -> &str {
+    let mut start = 0;
+    let mut end = 0;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            if end == 0 {
+                start = offset;
+            }
+            end = offset + line.trim_end_matches(['\r', '\n']).len();
+        }
+        offset += line.len();
+    }
+    &text[start..end]
+}
+
 fn normalize_plan_body(goal: &str, draft: &str) -> String {
-    let draft = draft.trim();
+    let draft = trim_blank_lines(draft);
     // Ordinary chapters, including a standalone Notes chapter, are not wrappers.
     if !matches!(
         draft
@@ -422,7 +443,7 @@ fn normalize_plan_body(goal: &str, draft: &str) -> String {
             DraftHeadingKind::Other => out.push_str(&draft[start..end]),
         }
     }
-    out.trim().to_string()
+    trim_blank_lines(&out).to_string()
 }
 
 fn default_body(goal: &str, draft: &str) -> String {

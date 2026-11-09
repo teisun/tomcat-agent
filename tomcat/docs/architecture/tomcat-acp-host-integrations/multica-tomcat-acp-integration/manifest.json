@@ -59,7 +59,7 @@
         "status": "M",
         "group": "runtime",
         "delivery": "existing-files.patch",
-        "sha256_after_integration": "82bafabffd6665fd13c2cf9021f9fd803c2399135c4f74059b92d0d8bdefc877"
+        "sha256_after_integration": "30b6033984302ebe2eae24f537b4f8002c174f291c616c106b26459fd08e45c9"
       },
       {
         "path": "server/internal/daemon/execenv/context.go",
@@ -101,7 +101,7 @@
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/internal/daemon/tomcat_test.go",
-        "sha256_after_integration": "a6e54aa74867e8005f4ae0676107b200e13cf93041a0a174ce603d55317b5d56"
+        "sha256_after_integration": "973aa6f5189c4b450b9b734fb673836de0393222bc13201af1eaaea0826f5de1"
       },
       {
         "path": "server/internal/migrations/tomcat_migration_test.go",
@@ -226,7 +226,7 @@
     "patches": [
       {
         "path": "existing-files.patch",
-        "sha256": "d893b986e870a9fc2d2a6a6076b7a15b0afce05601b184ab6537a183611021d9",
+        "sha256": "ff9c97821b22a9fef3510a5009ed06de30a508f30dd1fc1b3c708daec42d6bf1",
         "target_paths": [
           "packages/core/types/agent.ts",
           "server/internal/daemon/agents_probe.go",
@@ -280,7 +280,7 @@
       "source_revision": "5e36721c1329372d272e8c4b72f4ada2e31115a7",
       "tomcat_source_revision": "9d7221317e272645128d090bc38151f943d6a2aa",
       "scope": "Tomcat launch-policy tests, authoritative terminal and cleanup handoff, native argument-parse diagnostics",
-      "backport": "Original host baseline retained; only Session cleanup acknowledgement, daemon result/cancellation/worktree handling and failure reason are backported; no Pi, desktop, scheduler or native CLI shutdown-confirmation changes",
+      "backport": "Original host baseline retained; only Session cleanup acknowledgement, daemon result/cancellation/worktree handling and failure reason are backported; local merge audit additionally preserves fresh-retry cleanup uncertainty and task-temp locks for daemon lifetime; no Pi, desktop, scheduler or native CLI shutdown-confirmation changes",
       "test_adaptations": "Assert configured executable path and command are preserved; decode actual snake_case cancellation wire fields; move session_config_failed classification into default unit tests; observer identity follows actual service version"
     }
   }

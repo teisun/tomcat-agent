@@ -34,6 +34,14 @@ for row in m['patches'] + m['licenses']:
 
 在该副本执行README的Go guard聚焦命令；需要真实Tomcat时使用明确的本轮产物路径与 `agentintegration` opt-in。构建或哈希成功不等于公司分支测试成功。
 
+## 合并前清理安全补漏（2026-11-09）
+
+- 新增回归在旧包上实测失败：fresh 重试未拿到 session ID 时丢失 `cleanup_unconfirmed`；`runTask` 返回后两个目录模式的 TMPDIR 内容已被删除。红灯任务 `1794212765994-i0awcu` 中 Go 检查退出 1（外层脚本因成功复现而退出 0）。
+- 仅修两条既有路径：fresh 结果保留清理不确定性及自身空 ID，合并两次 usage；未确认时将现有临时目录执行锁留在 daemon，防止返回时和并行 GC 删除 TMPDIR，并在原诊断中报告路径。**锁只保证 daemon 存活期；退出后沿用旧宿主 GC 语义，不新增跨重启/孤儿进程保留承诺。** 正常完成仍按原路径释放并回收。
+- 修复后的 daemon 聚焦 race 通过：`1794213108417-yj1ze9` exit 0，含原 fresh-retry 反例、两个目录模式的真实 fixture 文件保留、GC/Go finalizer、超出 handoff 和取消回报。仅 `daemon.go`、新增 daemon 测试目标及 runtime patch 的哈希变化，目标仍为 31 项；adapter 本体不变。
+- 全新精确重放 `1794213272064-evn22h` exit 0：两份补丁 check/apply、31/31 目标、18 条完整旧/新 Git blob index、FILES 与许可证通过；与实际测试副本逐目标字节相同。manifest SHA-256 `b037a7097e7352fd06cf29b5107fc5a4866190bed64ad813398d72002131d9c9`，本机记录 `.agents/acceptance/merge-multica-20261109/bundle-replay.json`。
+- 旧 ZIP 和下表历史结果不包含本次补漏，不能据此声称修复后的包已重新交付或公司分支已部署。
+
 ## 本轮 adapter 同步证据（2026-11-09）
 
 | 检查 | 实际结果 | 证据与边界 |

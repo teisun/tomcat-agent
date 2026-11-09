@@ -407,6 +407,9 @@
 | E2E-CLI-105 | 自动 | `tests/acp_stdio_e2e.rs` | 宿主停读时仍能取消后台工作 | 真实 ACP/serve + 脚本模型形成 stdout 背压 → 停读 → session/cancel → 检查进程 → 恢复读取 | 恢复读取前后台进程已退出且文件停止增长；恢复后输出完整、唯一 Cancelled 终态在最后；另一会话不受影响 |
 | E2E-VSCEXT-036 | 自动（真实安装态宿主） | `e2e-harness/src/test/installed.test.ts`；分层回归 `tests/webview_provider_flow.test.ts` | 页面重建不换会话 | 磁盘 current=A、宿主旁观 B → 替换页面文档并 ready；另测删除 B、服务重连 | B 有效时会话、只读、草稿、deadline、焦点不变且不新建；B 删除或重连时回退 A；桌面及约 390px 的 PNG/ARIA/console 读回 |
 | E2E-VSCEXT-037 | 分层自动 | `src/ui/webview/tests/dual_channel.test.ts`、`provider_error_recovery.test.ts` | 历史不重字，手动恢复不被自动重试抢跑 | hydrate X → start(X) → text/thinking delta；新 Y 正常流式；恢复 checkpoint 期间推进假时钟越过 deadline | 再次 hydrate 前 X 正文/thinking 不变，Y 正常；checkpoint 进行中或失败后旧计时器不重试，其它会话等待不受影响 |
+| E2E-MULTICA-001 | 分层自动 | `tests/acp_stdio_e2e.rs`、`tests/serve_ask_question_tests.rs`；扩展 `tests/external_session_observation.test.ts`、`src/test/suite/support/sharedObservationScenario.ts` | 自动策略与旁观答题不扩大权限 | ACP new/load → 配置四策略 → 旁观用真实鼠标答非推荐项 → 撤卡；另测重连和控制者接管 | 首轮前应用设置；只采纳一次且 picked_recommended=false；桌面/窄屏问题可答而任务控制禁用；旁观不可prompt/cancel/批准工具；评审不自动开工 |
+| E2E-MULTICA-002 | 分层自动 | `tests/cli_tests.rs::serve_models_*`；适配包 `tests/new-files/server/internal/daemon/tomcat_models_test.go` | 模型发现服从运行身份与保存配置 | 保存目录/Key → 注入非法模型配置及无关非UTF-8环境 → 发现 → 删Key再刷新；另测非UTF-8身份 | 无模型请求或服务启动；冷HOME不生成配置、模型或运行资源（允许内置空temp根）；保留原ID/default；正确反映新凭据；错误不泄露配置或身份值 |
+| E2E-MULTICA-003 | 分层自动（适配包） | `multica-tomcat-acp-integration/tests/new-files/server/internal/daemon/tomcat_test.go` | 清理未确认时不丢数据 | resume失败 → fresh清理未确认；runTask返回后运行临时目录GC | 未确认状态不被旧失败覆盖；不自动提交/删工作树；临时文件及执行锁在daemon存活期保留 |
 
 ## Story 8b — 长生命周期 VM 与有状态插件（5 条）
 
@@ -461,13 +464,13 @@
 
 ## Story 10 — Plan 模式真 LLM 全路径（最终验收待办项）
 
-> 需要 `IDATATLAS_OPENAI_API_KEY`；无 key 时用例 fixture **必须** `panic!`（与 INTEGRATION_TEST_SPEC §5.2 对齐）。默认模型来自 `TOMCAT_E2E_IDATATLAS_MODEL`，未设时为 `idatatlas/gpt-5.6-terra`。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时用例 fixture **必须** `panic!`（与 INTEGRATION_TEST_SPEC §5.2 对齐）。默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL`，未设时复用公共 DeepSeek 夹具的默认模型；主调用和 reviewer 使用同一 DeepSeek 配置，不只替换 Key 而保留旧网关。
 > 离线的 `plan_delivery_flow_e2e.rs` 与 plan-tool 单测锁定生命周期和工具契约；这里的单条 inprocess 用例验证真实 planner reviewer、主 LLM、最终验收待办项和 `verify` skill 能协作完成一次最小交付。
 > 每次真测为 `agent:main:main` 创建新的 session。`create_plan` 的 planning 阶段不绑定 session；`build_plan` 进入执行时才绑定本次真实 session。
 
 | 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
 | ---- | ---- | ------ | -------- | -------- | -------- |
-| E2E-PLAN-RL-002 | 自动（需 `IDATATLAS_OPENAI_API_KEY`） | `inprocess_full_plan_path_with_real_llm`（[`tests/plan_real_llm_inprocess_tests.rs`](../../../../tests/plan_real_llm_inprocess_tests.rs)） | 进程内驱动 `ChatContext` + `run_chat_turn`，让真实主 LLM 和 planner reviewer 完成一个最小计划 | 进入 Plan → 真 LLM 创建恰好两个 todo（一个 work、一个最终 acceptance）→ `build_plan` 绑定新 session → 真 LLM 创建并验证 `counter.py` → 将 acceptance 置为进行中，加载 `verify` skill 并完成计划 | 磁盘 `frontmatter.state == Completed`；`t1` 为 completed 的 `kind=work`；`t2` 为 completed 的唯一 `kind=acceptance`；`counter.py` 输出 `0\n`；`PlanRuntime::mode() == Chat`；transcript 有 `plan.review` 和 `load_skill`，不出现已删除 runtime gate 的 `plan.code_review` / `plan.verify` 事件；完成盘 session_id 对应本次 session |
+| E2E-PLAN-RL-002 | 自动（需 `DEEPSEEK_API_KEY`） | `inprocess_full_plan_path_with_real_llm`（[`tests/plan_real_llm_inprocess_tests.rs`](../../../../tests/plan_real_llm_inprocess_tests.rs)） | 进程内驱动 `ChatContext` + `run_chat_turn`，让真实主 LLM 和 planner reviewer 完成一个最小计划 | 进入 Plan → 真 LLM 创建恰好两个 todo（一个 work、一个最终 acceptance）→ `build_plan` 绑定新 session → 真 LLM 创建并验证 `counter.py` → 将 acceptance 置为进行中，加载 `verify` skill 并完成计划 | 磁盘 `frontmatter.state == Completed`；`t1` 为 completed 的 `kind=work`；`t2` 为 completed 的唯一 `kind=acceptance`；`counter.py` 输出 `0\n`；`PlanRuntime::mode() == Chat`；transcript 有 `plan.review` 和 `load_skill`，不出现已删除 runtime gate 的 `plan.code_review` / `plan.verify` 事件；完成盘 session_id 对应本次 session |
 
 > **planner reviewer**：`create_plan` 仍会通过真实 reviewer 提供计划建议，事件为 `plan.review`。最终交付不再由 runtime review/verify gate 决定，而由最后一个 acceptance todo 触发的 verify skill 驱动。
 

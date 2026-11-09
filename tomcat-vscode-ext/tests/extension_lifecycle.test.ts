@@ -92,13 +92,16 @@ describe("extension draft shutdown", () => {
   ])("awaits draft persistence (inFlight=$inFlight, failure=$fail)", async ({ inFlight, fail }) => {
     native.reset();
     vi.useFakeTimers();
+    vi.stubEnv(TEST_PATH_ENV, "/owned-fixture/tomcat");
+    vi.spyOn(installer, "installUserCli").mockResolvedValue();
     vi.stubEnv("PATH", "");
     // This test must never start a real Serve or access a user's runtime profile.
     const start = vi.spyOn(TomcatMessenger.prototype, "start").mockImplementation(() => {
       throw new Error("unexpected Serve startup in lifecycle test");
     });
     const factory = vi.spyOn(ComposerDraftStore, "forContext");
-    await activate(context());
+    const api = await activate(context());
+    expect(await api.__testing.getResolvedExecutable()).toEqual({ executable: "/owned-fixture/tomcat", found: true, source: "test-env" });
     const store = factory.mock.results[0].value as ComposerDraftStore;
     store.update("shutdown-session", draft => ({ ...draft, text: "last keystroke" }));
     let release!: () => void;

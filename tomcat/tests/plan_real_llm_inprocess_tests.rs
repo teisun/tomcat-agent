@@ -6,9 +6,9 @@
 //! acceptance todo、真实产物、planner review 和 transcript 顺序的主验收锚点。
 //!
 //! ## 门禁
-//! - `IDATATLAS_OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
-//! - 默认模型来自 `TOMCAT_E2E_IDATATLAS_MODEL` env，未设则
-//!   `idatatlas/gpt-5.6-terra`。
+//! - `DEEPSEEK_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
+//! - 默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL` env，未设则
+//!   使用公共 DeepSeek 测试夹具的默认模型。
 //!
 //! ## 数据目录
 //! - 每个测试进程先切到独立临时 `HOME`，把 `~/.tomcat/*` 隔离到私有 tempdir。
@@ -69,7 +69,7 @@ const TRANSIENT_LLM_RETRY_DELAY: Duration = Duration::from_secs(2);
 const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn require_api_key() {
-    let _ = common::require_idatatlas_api_key("plan_real_llm_inprocess_tests");
+    let _ = common::require_deepseek_api_key("plan_real_llm_inprocess_tests");
 }
 
 fn current_home() -> PathBuf {
@@ -98,7 +98,7 @@ fn load_user_config() -> tomcat::AppConfig {
             .to_string_lossy()
             .into_owned(),
     );
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_deepseek_app_config(&mut cfg);
     cfg
 }
 
@@ -690,7 +690,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 true,
             );
             panic!(
-                "real-llm environment failure: idatatlas connect failures persisted after {} attempts during planning; acceptance did not run to completion",
+                "real-llm environment failure: DeepSeek connect failures persisted after {} attempts during planning; acceptance did not run to completion",
                 TRANSIENT_LLM_MAX_ATTEMPTS
             );
         }
@@ -773,7 +773,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                     true,
                 );
                 panic!(
-                    "real-llm environment failure: idatatlas connect failures persisted after {} attempts during exec round {}; acceptance did not run to completion",
+                    "real-llm environment failure: DeepSeek connect failures persisted after {} attempts during exec round {}; acceptance did not run to completion",
                     TRANSIENT_LLM_MAX_ATTEMPTS,
                     exec_rounds
                 );
