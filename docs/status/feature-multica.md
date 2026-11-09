@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-09 10:10 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-09 15:07 +0800 | ACTIVE | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -17,8 +17,8 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - 同机、同 HOME 下按原 `plan_id` 交接和更新标准 plans 目录内的同一文件。文件路径由智能体读取取得 ID，不新增路径参数或 SHA 交接协议。执行归属优先使用 `session_id`；旧 planner 恢复、冷载入或写入不能接管 coder 正在执行的计划。
 - 整改完成：模式通知只在已有进行中 prompt 时排队，发送失败只记日志；恢复提问诊断日志，记录启动配置失败的真实原因；补齐唯一模式通知、控制者接管策略重置及消费者错误分类回归，并删除重复检查。
 - 更新架构、计划工具和规划技能说明，纳入已交付的调研及早期方案文档。早期方案是历史材料，不代表其中的数据库、专用模式 UI 或运行中切换建议已实施；当前配置指南维护在 Multica 仓库 `tomcat_config.md`。
-- 纳入此前已完成的版本同步：CLI / bundled CLI `0.1.88`、扩展 `0.2.6`，本次提交不再次升版。darwin-x64 完整 VSIX 已另行交付，构建产物保持忽略，不入库。
-- TOMC-4 通用缓存键修复：在 `PromptCacheKeyFamily::key_for` 保留不超过 64 个 UTF-8 字节的逻辑键，超长时对完整会话与请求家族取 SHA-256 小写 hex。现场 75 字节评审键、64/65 边界、Unicode、长会话后缀与家族隔离均有回归；只改派生缓存键，不改会话身份、历史、权限或 provider wire。架构说明已同步，本次源码尚未安装部署。
+- 版本同步至 CLI / bundled CLI `0.1.89`、扩展 `0.2.7`，对应此前各一次 patch 升级，本轮不再次递增。darwin-x64 完整 VSIX 已构建并核验包内 CLI 与 release 产物一致；产物保持忽略，不入库。用户已安装插件并重启共享服务，本机会话中已核验 CLI / serve 均为 `0.1.89`，桌面 daemon 加载 Multica 修复提交 `5e36721c1`。
+- TOMC-4 通用缓存键修复：在 `PromptCacheKeyFamily::key_for` 保留不超过 64 个 UTF-8 字节的逻辑键，超长时对完整会话与请求家族取 SHA-256 小写 hex。现场 75 字节评审键、64/65 边界、Unicode、长会话后缀与家族隔离均有回归；只改派生缓存键，不改会话身份、历史、权限或 provider wire。源码已提交并随上述构建部署；用户现已报告本机验收通过，不将用户验收等同于所有自动门禁或跨平台验证通过。
 
 ### 🔌 INTERFACE (接口变更)
 
@@ -38,8 +38,9 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 | Rust integration | 未执行（缺 cargo-nextest），阶段退出 1 | 同一批次；不安装、不复刻 runner，不将 skipped/未执行写成通过 |
 | 格式与空白 | `cargo fmt --all --check`、两仓 `git diff --check` 通过 | `1794185854980-u8mk03` 的 Rust 部分通过，但后续 Go 检查工作目录写错导致整条命令退出 1；已用 `1794185883867-a3l3kb` 在正确目录完成 Go 格式检查 |
 | Multica agent 包 | `bash scripts/test-go.sh --race --only agent` 通过，574.389s | `1794185854916-6izl5o` exit 0；含解析早退与三个反例、既有取消/强杀/恢复边界；受既有 CLI guard 保护，不调用用户 CLI |
+| 版本清单与交付包 | CLI / bundled CLI `0.1.89`，扩展 `0.2.7`；`node scripts/release-version.mjs check` 通过 | 构建与包内 CLI 字节核验见 `1794192100353-ym3mbh`；本次清单检查 `1794208016795-q35t2e`，没有再次升版或重打包 |
 
-本轮按原整改计划审查两仓差异并执行上述检查，不声称 Tomcat L3 全绿。此前插件/GUI、跨仓真实 ACP、手工答题与推荐答案协作旅程的历史证据保留在 `.agents/acceptance/multica-plan-collaboration/REPORT.md` 和 `.agents/acceptance/multica-tomcat-remediation/REPORT.md`；不以旧验收替代本次修复验收，也未重启专用或共享服务。按用户本轮授权，将本次缓存键修复、必要测试、架构说明与分支 status 提交本地；不推送、安装、重启、升版或重打整包，保留 `.multica/`、旧 `.bak` 和 Multica 的既有 `next-env.d.ts` 改动。提交前对照原计划复核暂存范围；生产代码、测试、依赖和 runner 未再修改，复用上述有效结果，保留既有失败与环境阻塞，不重复执行整套测试。
+缓存键整改的自动检查保留上表原始结果与限制；此前插件/GUI、跨仓真实 ACP、手工答题与推荐答案协作旅程的历史证据保留在 `.agents/acceptance/multica-plan-collaboration/REPORT.md` 和 `.agents/acceptance/multica-tomcat-remediation/REPORT.md`。本轮用户确认本机验收通过并授权本地提交：版本同步与 TOMC-5 help 增强分开提交，相关测试结果在源码、测试及依赖未变时复用；不重复执行有效测试，不声称 L3 全绿。Multica 源码修复已在 `5e36721c1` 提交，其工作树本轮检查干净。本轮不推送、不安装、不重启或发布；接入资料包的旧快照另行同步，不混入本次提交。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 
@@ -48,6 +49,7 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 | 默认答题升级行为 | 未配置普通问题策略的 ACP 智能体会等待同项目 VS Code 人工回答 | 无人值守须显式 recommended；不将自动答题当作开发或工具授权 |
 | 搜索环境与既有 fallback 缺口 | PATH 中缺少 rg，库测试的上下文行断言失败；`search.rs:573-577` 已明确不支持 fallback 上下文 | 未纳入本次两文件修复，不弱化断言或静默跳过；另行补齐环境/修复搜索边界后复验 |
 | 集成测试工具 | 缺 cargo-nextest，本次 integration 未执行 | 由用户决定是否安装，再跑原 runner 的 integration 阶段；不声称全门禁通过 |
-| help 独立评审 | 当前运行中的服务未加载本次源码修复，原 help 计划尚未补独立评审 | 用户另行安排修复版安装与 `/restart` 后再补，不自动开始帮助开发 |
-| 当前后台与安装状态 | 磁盘产物或本地提交不证明正在运行的后台已更新 | 安装、重启由用户另行操作；本次不安装、不改真实配置/PATH、不重启服务、不推送或发布 |
+| help 交付状态 | TOMC-5 帮助增强与定向验证已完成，待本轮独立提交；此前 `0.2.7` VSIX 构建早于该增强 | 不将源码提交当作新帮助已安装；如需交付该文案，再另行升版、构建与安装，不覆盖已交付的同版本包 |
+| 接入资料包快照 | 包内 `tomcat.go` 与测试仍为旧版本，缺少后续终态/清理边界及参数解析早退修复；模型发现文件与当前源码相同 | 以已提交源码做最小语义同步，连同必要接线、测试、说明及 manifest 哈希一起更新；不把整个新版宿主倒入公司基线 |
+| 发布与服务边界 | 本机已核验的部署状态不代表公司二开环境或其它平台完成部署 | 本轮仅本地提交，不改真实配置/PATH、不操作运行服务、不推送或公开发布 |
 | 验证边界 | 覆盖率未测量；Windows/Linux/arm64 原生旅程及远端 CI 未由本轮验证 | Cov% 留空值 `-`，提交信息省略覆盖率，不宣称跨平台或所有可能测试全绿；历史失败与环境限制保留在既有证据中 |
