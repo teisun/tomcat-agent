@@ -77,6 +77,8 @@ RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocaptu
 RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
 ```
 
+失败的 E2E 用例修复后只单独重跑该用例，不重跑整套，见 [INTEGRATION_TEST_SPEC §7.4](INTEGRATION_TEST_SPEC.md#74-全量集成测试)。
+
 ---
 
 ## §6 新功能 E2E 覆盖规则（强制）

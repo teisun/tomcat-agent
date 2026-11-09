@@ -5,7 +5,7 @@
 | 角色 | 时机 | 说明 |
 |------|------|------|
 | 工程师（Tom/Jerry/Spike） | 标 `PENDING_INTEGRATION` 前，在功能分支 | 完成 §1–§3 与 §4 全量验收 |
-| Nibbles | 合并到 `develop` 后 | 执行快门禁、全量 review 与 merge 影响面复核；不再机械复跑整套全量 |
+| Nibbles | 合并到 `develop` 后 | 执行全量 review 与 merge 影响面复核；合并结果树与已验收来源树不同时跑一次快门禁，相同则不重跑；不再机械复跑整套全量 |
 
 **TASK_BOARD_002/tasks/T2-*.md** 中 `PENDING_INTEGRATION` 状态说明引用本文档（看板索引见 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md)）。
 
@@ -15,6 +15,7 @@
 
 - **本次变更闭环**：集成测试与 E2E **暴露的问题 / bug 须在交付前修复完毕**；不得把已知失败留到后续环节「兜底」。
 - **禁止降级通过**：**不得**为通过 CI 或本地门禁而 **弱化断言**（放宽阈值、删除/注释关键 `assert`、以打印代替失败、滥用 `#[ignore]`、无评审依据跳过用例等）。单测、集成测试、E2E 均适用；与 [Constitution.md](../openspec/specs/Constitution.md) 及 [UNIT_TEST_SPEC.md](../openspec/specs/guides/testing/UNIT_TEST_SPEC.md) 一致。
+- **失败用例修复后只独立重跑**：一次验收中全量门禁只跑一次。门禁暴露的失败用例修复后，只用精确筛选单独重跑这些用例，通过即可；**不得**为修一个问题重跑整套门禁或已通过的用例。合并结果树与已验收来源树相同时，合并后也不重跑。筛选写法见 [INTEGRATION_TEST_SPEC §7.4](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#74-全量集成测试)。
 - **规范依据**：集成测试须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（含第 9、10 章门禁）；E2E 须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
 
 ---
@@ -79,7 +80,7 @@ TEST_PID=$!
      2. **完整保存终端输出日志**到 `.integration_test_output.log`。
      3. **分析日志**：定位卡住的测试用例名称、最后输出行、可能原因（死锁 / 无限循环 / 外部依赖等）。
      4. **排查与修复**：根据分析结果修复代码或测试中的问题（如加超时、修死锁、mock 外部依赖）。
-     5. **重新执行测试**：修复后再次以同样的子 Agent 模式重跑，直至全部通过或确认为已知环境限制。
+     5. **只重跑该用例**：修复后按「失败用例修复后只独立重跑」单独重跑卡住或失败的用例，直至通过或确认为已知环境限制；不重跑整套门禁。
 
 ### 日志要求
 

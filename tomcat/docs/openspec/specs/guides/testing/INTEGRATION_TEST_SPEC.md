@@ -170,6 +170,8 @@ my_project/
     命令：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
 *   **release**：不再属于默认门禁；只在确需产物时单独执行  
     命令：`./scripts/run-integration-tests.sh release`
+*   **失败用例修复后只独立重跑**：一次验收中全量门禁只跑一次。门禁暴露的失败用例修复后，只用精确筛选单独重跑这些用例，通过即可；不为修一个问题重跑整套门禁或已通过的用例。合并结果树与已验收来源树相同时，合并后也不重跑。  
+    集成：`cargo nextest run --test <binary> -E 'test(=<name>)'`（real-llm 目标加 `--profile real-llm`）；库单测：`cargo test --lib <name> -- --exact`；扩展单测：`npx vitest run <file> -t '<name>'`；VS Code 场景：`TOMCAT_E2E_GREP='<name>'`。
 
 ## 8. 最佳实践建议
 *   **不要过度 Mock**：集成测试的价值在于真实性，如果所有外部依赖都被 Mock 了，那它就变成了单元测试。
