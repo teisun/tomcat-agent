@@ -63,6 +63,301 @@ fn cmd() -> Command {
     c
 }
 
+fn serve_models_inventory(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+    ) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            // Configuration validation may create only this pre-existing builtin temp root.
+            if relative.starts_with(".tomcat/temp") {
+                continue;
+            }
+            if path.is_dir() {
+                if relative != Path::new(".tomcat") {
+                    out.insert(relative, None);
+                }
+                visit(root, &path, out);
+            } else {
+                out.insert(relative, Some(fs::read(path).unwrap()));
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+fn serve_models_seed(home: &Path, work: &Path, base_url: &str) -> AppConfig {
+    fs::create_dir_all(home.join(".tomcat")).unwrap();
+    fs::create_dir_all(work.join("assets")).unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.display().to_string());
+    cfg.llm.default_model = "team-coder".into();
+    cfg.llm.title_model = Some("team-alias".into());
+    cfg.agent.id = "catalog-agent".into();
+    cfg.ui.language = serde_json::from_value(json!("en")).unwrap();
+    fs::write(
+        home.join(".tomcat/tomcat.config.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        work.join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.6"
+provider = "team"
+api_key_env = "TEAM_API_KEY"
+model_name = "one-upstream"
+base_url = "{base_url}"
+[[models]]
+id = "team-coder"
+api = "openai"
+provider = "team"
+api_key_env = "TEAM_API_KEY"
+model_name = "one-upstream"
+base_url = "{base_url}"
+[[models]]
+id = "team-alias"
+api = "openai"
+provider = "team"
+api_key_env = "TEAM_API_KEY"
+model_name = "one-upstream"
+base_url = "{base_url}"
+[[models]]
+id = "shell-only"
+api = "openai"
+provider = "shell"
+api_key_env = "SHELL_ONLY_API_KEY"
+[[models]]
+id = "retired-partial"
+context_window = 1024
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(work.join("assets/.env"), "TEAM_API_KEY=fixture-saved-key\n").unwrap();
+    cfg
+}
+
+#[tokio::test]
+async fn serve_models_matches_the_shared_service_without_model_requests() {
+    use common::shared_serve::{output_json, NativeClient, ServiceFixture};
+    for custom_identity in [false, true] {
+        let server = MockServer::start().await;
+        let fixture = ServiceFixture::new(&server.uri());
+        let home = &fixture.0.home_path;
+        let work = home.join(if custom_identity {
+            "runtime-data"
+        } else {
+            ".tomcat"
+        });
+        let cfg = serve_models_seed(home, &work, &server.uri());
+        // Prevent a service-side MCP materialization from contacting any real provider.
+        fs::write(work.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        let before = serve_models_inventory(home);
+        let offline = output_json(
+            fixture
+                .command()
+                .env("TOMCAT_AGENT_ACTIVE", "1")
+                .env("TOMCAT__LLM__DEFAULT_MODEL", "shell-default-must-not-win")
+                .env("SHELL_ONLY_API_KEY", "shell-key-must-not-win")
+                .args(["serve", "models"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(before, serve_models_inventory(home));
+        assert_eq!(offline["defaultModelId"], cfg.llm.default_model);
+        assert_eq!(offline["utilityModelId"], "team-alias");
+        assert_eq!(
+            offline["warnings"].as_array().unwrap().len(),
+            1,
+            "{}",
+            offline["warnings"]
+        );
+        let info = output_json(
+            fixture
+                .command()
+                .env("TOMCAT__LLM__DEFAULT_MODEL", "shell-default-must-not-win")
+                .env("SHELL_ONLY_API_KEY", "shell-key-must-not-win")
+                .args(["serve", "start"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(info["agentId"], "catalog-agent");
+        let mut client = NativeClient::connect(&info).await;
+        let reply = client
+            .request(json!({"type":"list_models","id":"catalog"}))
+            .await;
+        assert_eq!(reply["success"], true, "{reply}");
+        let online = &reply["payload"];
+        for field in ["defaultModelId", "utilityModelId", "warnings"] {
+            assert_eq!(offline[field], online[field]);
+        }
+        let projection = |catalog: &Value| {
+            catalog["models"].as_array().unwrap().iter().map(|m|
+            json!({"id":m["id"],"provider":m["provider"],"keyPresent":m["keyPresent"],"modelName":m["modelName"]})
+        ).collect::<Vec<_>>()
+        };
+        assert_eq!(projection(&offline), projection(online));
+        for id in ["gpt-5.6", "team-coder", "team-alias", "shell-only"] {
+            let model = offline["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap();
+            assert_eq!(model["keyPresent"], id != "shell-only");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let text = fixture.command().args(["model", "list"]).output().unwrap();
+        assert!(text.status.success());
+        assert!(String::from_utf8_lossy(&text.stdout).contains("team-coder"));
+        assert!(serde_json::from_slice::<Value>(&text.stdout).is_err());
+    }
+}
+
+#[test]
+fn serve_models_uses_runtime_identity_saved_defaults_and_fresh_credentials_without_repairing_prefs()
+{
+    use common::shared_serve::output_json;
+    let home = tempfile::tempdir().unwrap();
+    let saved = home.path().join("saved-data");
+    let selected = home.path().join("runtime-selected-data");
+    let mut cfg = serve_models_seed(home.path(), &selected, "http://127.0.0.1:1");
+    cfg.storage.work_dir = Some(saved.display().to_string());
+    fs::write(
+        home.path().join(".tomcat/tomcat.config.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    cfg.storage.work_dir = Some(selected.display().to_string());
+    cfg.agent.id = "runtime-agent".into();
+    let prefs = tomcat::resolve_model_thinking_path(&cfg).unwrap();
+    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    fs::write(&prefs, "deliberately invalid preferences").unwrap();
+    for credential in [Some("fixture-saved-key"), Some(""), None] {
+        let path = selected.join("assets/.env");
+        match credential {
+            Some(key) => fs::write(path, format!("TEAM_API_KEY={key}\n")).unwrap(),
+            None => fs::remove_file(path).unwrap(),
+        }
+        let before = serve_models_inventory(home.path());
+        let payload = output_json(
+            isolated_cmd(home.path())
+                .env("TOMCAT_AGENT_ACTIVE", "1")
+                .env("TOMCAT__STORAGE__WORK_DIR", &selected)
+                .env("TOMCAT__AGENT__ID", "runtime-agent")
+                .env("TOMCAT__LLM__DEFAULT_MODEL", "shell-default")
+                .env("TOMCAT__LLM__STREAM_TIMEOUT_SEC", "not-a-number")
+                .env("TEAM_API_KEY", "shell-key-must-not-win")
+                .args(["serve", "models"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(payload["defaultModelId"], "team-coder");
+        let model = payload["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "team-coder")
+            .unwrap();
+        assert_eq!(
+            model["keyPresent"],
+            credential.is_some_and(|key| !key.is_empty())
+        );
+        assert!(model.get("selectedReasoningLevel").is_none());
+        assert_eq!(before, serve_models_inventory(home.path()));
+    }
+}
+
+#[test]
+fn serve_models_cold_home_does_not_bootstrap_runtime_resources() {
+    let home = tempfile::tempdir().unwrap();
+    let before = serve_models_inventory(home.path());
+    let output = isolated_cmd(home.path())
+        .env("TOMCAT_AGENT_ACTIVE", "1")
+        .args(["serve", "models"])
+        .output()
+        .unwrap();
+    let payload = common::shared_serve::output_json(output);
+    assert!(!payload["models"].as_array().unwrap().is_empty());
+    assert!(payload["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["keyPresent"] == false));
+    assert_eq!(before, serve_models_inventory(home.path()));
+}
+
+#[test]
+fn serve_models_reports_safe_nonzero_errors_without_echoing_configuration_or_credentials() {
+    let english: Value = serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+    for (file, content, key) in [
+        (
+            "tomcat.config.toml",
+            "[log]\nlevel='SECRET_SENTINEL'",
+            "cli.serveModels.configFailed",
+        ),
+        (
+            "models.toml",
+            "[[models]]\nid='SECRET_SENTINEL",
+            "cli.serveModels.catalogFailed",
+        ),
+        (
+            "assets/.env",
+            "TEAM_API_KEY='SECRET_SENTINEL",
+            "cli.serveModels.credentialsFailed",
+        ),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let work = home.path().join(".tomcat");
+        serve_models_seed(home.path(), &work, "http://127.0.0.1:1");
+        fs::write(work.join(file), content).unwrap();
+        let before = serve_models_inventory(home.path());
+        let output = isolated_cmd(home.path())
+            .env("TOMCAT_AGENT_ACTIVE", "1")
+            .args(["serve", "models"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("SECRET_SENTINEL"));
+        assert!(error.contains(english[key].as_str().unwrap()), "{error}");
+        assert_eq!(before, serve_models_inventory(home.path()));
+    }
+    // A non-UTF-8 identity must fail rather than fall back to another data directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let home = tempfile::tempdir().unwrap();
+        let before = serve_models_inventory(home.path());
+        let output = isolated_cmd(home.path())
+            .env(
+                "TOMCAT__STORAGE__WORK_DIR",
+                std::ffi::OsString::from_vec(b"SECRET_SENTINEL\xff".to_vec()),
+            )
+            .args(["serve", "models"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("SECRET_SENTINEL"), "identity value leaked");
+        assert!(
+            error.contains(english["cli.serveModels.configFailed"].as_str().unwrap()),
+            "{error}"
+        );
+        assert_eq!(before, serve_models_inventory(home.path()));
+    }
+}
+
 #[test]
 fn management_commands_fail_when_configuration_is_invalid() {
     let home = tempfile::tempdir().unwrap();
@@ -1273,7 +1568,7 @@ fn test_init_bash_profile_source_idempotent() {
     );
 }
 
-/// bash 场景下，init 会先清理旧的 target/* PATH 垃圾，再补一条稳定的 ~/.local/bin。
+/// bash：init 只清理带 Tomcat 标记的旧 target/* PATH 行，保留用户导出并补稳定入口。
 #[cfg(unix)]
 #[test]
 fn test_init_prunes_stale_target_paths_from_shell_profile() {
@@ -1290,6 +1585,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
             "# Added by tomcat init",
             "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
             "export PATH=\"/usr/local/bin:$PATH\"",
+            "export PATH=\"/tmp/user-tool/target/release:$PATH\"",
         ]
         .join("\n"),
     )
@@ -1303,7 +1599,7 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
 
     let bashrc_content = fs::read_to_string(&bashrc).unwrap();
     assert!(
-        !bashrc_content.contains("/target/"),
+        !bashrc_content.contains("/tmp/project/target/"),
         "expected stale target exports to be pruned, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1316,7 +1612,8 @@ fn test_init_prunes_stale_target_paths_from_shell_profile() {
         trunc(&bashrc_content, 500)
     );
     assert!(
-        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && bashrc_content.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "expected user-managed PATH lines to survive prune, got: {}",
         trunc(&bashrc_content, 500)
     );
@@ -1404,6 +1701,101 @@ fn test_self_install_without_config_or_with_broken_config_is_idempotent() {
         original_path,
         "self-install must not configure PATH"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_self_install_add_to_path_is_idempotent_without_bootstrap() {
+    let home = tempfile::Builder::new()
+        .prefix("cli-path-中文 ")
+        .tempdir()
+        .unwrap();
+    let work = home.path().join(".tomcat");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("tomcat.config.toml"), "[broken configuration").unwrap();
+    for name in [".zprofile", ".zshrc"] {
+        fs::write(
+            home.path().join(name),
+            "# Added by tomcat init\nexport PATH=\"/tmp/project/target/debug:$PATH\"\nexport PATH=\"/tmp/user-tool/target/release:$PATH\"\n",
+        )
+        .unwrap();
+    }
+    for key in ["cli.selfInstall.updated", "cli.selfInstall.unchanged"] {
+        let output = common::serve::isolated_serve_command(home.path())
+            .args(["self-install", "--add-to-path"])
+            .env("SHELL", "/bin/zsh")
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let entry = home.path().join(".local/bin/tomcat");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&self_install_message(key, &entry))
+        );
+        assert!(fs::read(&entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    }
+    for name in [".zprofile", ".zshrc"] {
+        let profile = fs::read_to_string(home.path().join(name)).unwrap();
+        assert!(!profile.contains("/tmp/project/target/"));
+        assert!(profile.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""));
+        assert_eq!(
+            profile
+                .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+                .count(),
+            1
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(work.join("tomcat.config.toml")).unwrap(),
+        "[broken configuration"
+    );
+    assert_eq!(fs::read_dir(work).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_self_install_add_to_path_reports_partial_failure_and_keeps_the_command() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join(".zprofile")).unwrap();
+    let output = common::serve::isolated_serve_command(home.path())
+        .args(["self-install", "--add-to-path"])
+        .env("SHELL", "/bin/zsh")
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let entry = home.path().join(".local/bin/tomcat");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains(&self_install_message("cli.selfInstall.updated", &entry)));
+    let en: Value = serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains(en["cli.init.pathManual"].as_str().unwrap()));
+    assert!(fs::read(entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    assert!(!home.path().join(".tomcat").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn test_self_install_add_to_path_with_isolated_home_preserves_real_path() {
+    let user_path = || {
+        windows_registry::CURRENT_USER
+            .open("Environment")
+            .and_then(|key| key.get_value("Path"))
+            .ok()
+            .map(|value| (value.ty(), String::try_from(value).ok()))
+    };
+    let before = user_path();
+    let home = tempfile::tempdir().unwrap();
+    let output = common::serve::isolated_serve_command(home.path())
+        .args(["self-install", "--add-to-path"])
+        .current_dir(home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(user_path(), before);
+    let entry = home.path().join(".local/bin/tomcat.exe");
+    assert!(fs::read(entry).unwrap() == fs::read(common::serve::cargo_bin_path()).unwrap());
+    assert!(!home.path().join(".tomcat").exists());
 }
 
 #[test]

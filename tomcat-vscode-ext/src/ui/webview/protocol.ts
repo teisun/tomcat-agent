@@ -381,6 +381,8 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  /** Live request attempts, including the initial request; never rebuilt from history. */
+  requestRetry?: { attempt: number; maxAttempts: number };
   errorRecovery?: { errorId: string; dueAt: number };
   access?: import("../../serveClient/sessionRouter").SessionAccess;
   origin?: import("../../serveClient/sessionRouter").SessionOrigin | null;

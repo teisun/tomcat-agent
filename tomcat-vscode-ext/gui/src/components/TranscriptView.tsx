@@ -7,6 +7,7 @@ import type {
   WebviewCheckpoint,
   WebviewMediaRoot,
   WebviewPlanFileState,
+  WebviewSessionSnapshot,
   WebviewTimelineItem,
   WebviewTodo,
 } from "../types";
@@ -124,6 +125,8 @@ export function TranscriptView({
   availableModels = [],
   buildModel = "",
   busy,
+  requestRetry,
+  errorRecoveryDisabled = busy,
   bottomSpacerHeight = 0,
   canBuildPlan,
   checkpoints = [],
@@ -165,6 +168,8 @@ export function TranscriptView({
   availableModels?: string[];
   buildModel?: string;
   busy: boolean;
+  requestRetry?: WebviewSessionSnapshot["requestRetry"];
+  errorRecoveryDisabled?: boolean;
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
   checkpoints?: WebviewCheckpoint[];
@@ -293,7 +298,7 @@ export function TranscriptView({
               onRetry={onRetryUserMessage}
               onCancelRecovery={onCancelErrorRecovery}
               recoveryDueAt={errorRecovery?.errorId === item.id ? errorRecovery.dueAt : undefined}
-              recoveryDisabled={busy}
+              recoveryDisabled={errorRecoveryDisabled}
               resolvePaths={resolvePaths}
               onZoomImage={onZoomImage}
             />
@@ -367,7 +372,7 @@ export function TranscriptView({
                 onOpenImagePreview={onOpenImagePreview}
                 onRecover={onRecoverErrorTurn}
                 onRetry={onRetryUserMessage}
-                recoveryDisabled={busy}
+                recoveryDisabled={errorRecoveryDisabled}
                 onZoomImage={onZoomImage}
               />
             ) : null}
@@ -427,7 +432,7 @@ export function TranscriptView({
     return (
       <>
         {grouped.map(renderGroupedItem)}
-        {showProgress ? <ProgressRow busy={showProgress} /> : null}
+        {showProgress ? <ProgressRow busy={showProgress} requestRetry={requestRetry} /> : null}
       </>
     );
   };
@@ -454,7 +459,7 @@ export function TranscriptView({
         <div className="tc-live-cluster" data-testid="live-cluster">
           {renderCluster(liveClusterTimeline, busy)}
         </div>
-      ) : busy ? <ProgressRow busy /> : null}
+      ) : busy ? <ProgressRow busy requestRetry={requestRetry} /> : null}
       <div
         aria-hidden="true"
         className="tc-transcript__spacer"

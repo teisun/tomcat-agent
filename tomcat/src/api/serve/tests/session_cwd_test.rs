@@ -69,6 +69,7 @@ async fn absolute_reference_reaches_model_and_reads_second_project_without_chang
         None,
         crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
         None,
+        None,
     );
     connection.initialized.store(true, Ordering::SeqCst);
     let mut slot = create_session_slot(
@@ -238,6 +239,7 @@ async fn session_cwd_reaches_model_and_tools() {
             writer,
             None,
             crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
+            None,
             None,
         );
         connection.initialized.store(true, Ordering::SeqCst);

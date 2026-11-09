@@ -11,15 +11,86 @@
 use super::super::*;
 
 #[test]
+fn cli_parse_serve_models_is_a_readonly_json_subcommand() {
+    let cli = Cli::try_parse_from(["tomcat", "serve", "models"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Models),
+            ..
+        })
+    ));
+    for flag in ["--stdio", "--ws", "--print-schema"] {
+        assert!(Cli::try_parse_from(["tomcat", "serve", flag, "models"]).is_err());
+    }
+    assert!(matches!(
+        Cli::try_parse_from(["tomcat", "model", "list"])
+            .unwrap()
+            .command,
+        Some(Commands::Model {
+            sub: ModelSub::List
+        })
+    ));
+}
+
+#[test]
+fn cli_parse_acp_session_options_are_strict_and_optional() {
+    let cli = Cli::try_parse_from([
+        "tomcat",
+        "acp",
+        "--mode=plan",
+        "--plan-review=auto",
+        "--question-policy=recommended",
+        "--plan-start=auto",
+    ])
+    .unwrap();
+    let Some(Commands::Acp { options, .. }) = cli.command else {
+        panic!("ACP command");
+    };
+    assert_eq!(options.mode, Some(crate::core::session::AgentMode::Plan));
+    assert_eq!(
+        options.plan_review,
+        Some(crate::core::plan_runtime::PlanReviewPolicy::Auto)
+    );
+    assert_eq!(
+        options.question_policy,
+        Some(crate::core::plan_runtime::QuestionPolicy::Recommended)
+    );
+    assert_eq!(
+        options.plan_start,
+        Some(crate::core::plan_runtime::PlanStartPolicy::Auto)
+    );
+    for args in [
+        vec!["--mode=invalid"],
+        vec!["--mode=exec"],
+        vec!["--mode=plan", "--mode=chat"],
+        vec!["--mode plan"],
+        vec!["--plan-review=false"],
+        vec!["--question-policy=auto"],
+        vec!["--plan-start=skip"],
+    ] {
+        assert!(Cli::try_parse_from([vec!["tomcat", "acp"], args].concat()).is_err());
+    }
+    let cli = Cli::try_parse_from(["tomcat", "acp"]).unwrap();
+    let Some(Commands::Acp { options, .. }) = cli.command else {
+        panic!("ACP command");
+    };
+    assert!(options.provided().is_none());
+}
+
+#[test]
 fn cli_parse_acp() {
     let cli = Cli::try_parse_from(["tomcat", "acp"]).unwrap();
     assert!(matches!(
         cli.command,
-        Some(Commands::Acp { skills_dir: None })
+        Some(Commands::Acp {
+            skills_dir: None,
+            ..
+        })
     ));
     let cli = Cli::try_parse_from(["tomcat", "acp", "--skills-dir", "/host/skills"]).unwrap();
     assert!(
-        matches!(cli.command, Some(Commands::Acp { skills_dir: Some(path) }) if path == std::path::Path::new("/host/skills"))
+        matches!(cli.command, Some(Commands::Acp { skills_dir: Some(path), .. }) if path == std::path::Path::new("/host/skills"))
     );
     assert!(Cli::try_parse_from(["tomcat", "acp", "--stdio"]).is_err());
 }

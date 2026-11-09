@@ -28,6 +28,25 @@ describe("Plan preview reading CSS contract", () => {
     expect(rule(".tc-plan-todos")).toContain("font-size: var(--tc-plan-reading-font-size)");
   });
 
+  it("keeps all six heading levels at least as large as body text with consistent emphasis", () => {
+    const headings = rule(".tc-plan-preview__body :is(h1, h2, h3, h4, h5, h6)");
+    expect(headings).toContain("font-weight: 600");
+    expect(headings).toContain("line-height: 1.3");
+    expect(headings).toContain("margin: 1.2em 0 0.5em");
+
+    const sizes = [1, 2, 3, 4, 5, 6].map((level) => {
+      const size = rule(`.tc-plan-preview__body h${level}`).match(/font-size:\s*([\d.]+)em/u);
+      expect(size, `h${level} must scale with the plan reading font`).not.toBeNull();
+      return Number(size?.[1]);
+    });
+    sizes.forEach((size, index) => {
+      expect(size).toBeGreaterThanOrEqual(1);
+      if (index > 0) {
+        expect(size).toBeLessThanOrEqual(sizes[index - 1]);
+      }
+    });
+  });
+
   it("keeps long content usable at narrow widths and preserves forced-color distinctions", () => {
     expect(rule(".tc-plan-preview__content")).toContain("overflow-x: hidden");
     expect(rule(".tc-plan-todo__content")).toContain("overflow-wrap: anywhere");

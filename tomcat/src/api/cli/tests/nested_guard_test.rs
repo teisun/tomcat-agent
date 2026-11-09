@@ -8,7 +8,8 @@ use crate::infra::error::AppError;
 fn blocked_commands() -> Vec<Commands> {
     vec![
         Commands::Init,
-        Commands::SelfInstall,
+        Commands::SelfInstall { add_to_path: false },
+        Commands::SelfInstall { add_to_path: true },
         Commands::Session {
             sub: SessionSub::New { scope: None },
         },
@@ -114,9 +115,13 @@ fn blocked_commands() -> Vec<Commands> {
         },
         Commands::Claw { resume: false },
         Commands::Code { resume: false },
-        Commands::Acp { skills_dir: None },
+        Commands::Acp {
+            skills_dir: None,
+            options: Default::default(),
+        },
         Commands::Acp {
             skills_dir: Some("/host/skills".into()),
+            options: Default::default(),
         },
         Commands::Serve {
             sub: None,
@@ -261,8 +266,10 @@ fn nested_guard_separates_service_status_from_lifecycle_commands() {
         let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", action]).unwrap();
         assert_blocked(cli.command.unwrap());
     }
-    let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", "status"]).unwrap();
-    assert_allowed(cli.command.unwrap());
+    for action in ["status", "models"] {
+        let cli = <Cli as clap::Parser>::try_parse_from(["tomcat", "serve", action]).unwrap();
+        assert_allowed(cli.command.unwrap());
+    }
 }
 
 #[test]

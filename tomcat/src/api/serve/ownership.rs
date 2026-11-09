@@ -85,9 +85,15 @@ pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<bo
         state
             .confirmation
             .owns_pending(request_id, state.connection_id)
-            || state
-                .ask_question
-                .owns_pending(request_id, state.connection_id)
+            || if matches!(command, ServeCommand::ControlResponse { .. }) {
+                state
+                    .ask_question
+                    .may_respond(request_id, state.connection_id)
+            } else {
+                state
+                    .ask_question
+                    .owns_pending(request_id, state.connection_id)
+            }
     } else if matches!(command, ServeCommand::LoadExternalSession { .. }) {
         // Typed internal operation only: native JSON cannot deserialize this variant.
         state.is_acp()

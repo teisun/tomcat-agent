@@ -18,7 +18,7 @@ Technical design, prose, and visual guidelines for development plans.
 
 - Give each paragraph one idea and put its main point first. Describe concrete behavior and outcomes. Use lists for steps and distinct items, and short paragraphs for reasoning.
 
-- Remove empty assurances, promotional adjectives, and sentences that add no information. Brevity must not remove necessary evidence, risks, or trade-offs.
+- Remove empty assurances, promotional adjectives, and repetition. Keep necessary context, evidence, risks, and trade-offs in the plan itself, not only in chat.
 
 ### Wording Examples
 
@@ -46,5 +46,21 @@ Technical design, prose, and visual guidelines for development plans.
 
 ### Diagram Rules
 
-- add local diagrams for complex local logic.
+- Add local diagrams for complex logic: trace relevant success/failure branches. For UI, show layout, controls, and feedback, not a list of text labels.
 - Give each diagram one main takeaway and state it in the caption. Draw the relevant actions and paths, not just boxes of component names: label arrows with verbs such as "read draft", "save settings", and "notify UI". Make added, removed, or changed paths visible; keep names and directions consistent in comparisons. An overall takeaway may connect several components or changes.
+
+### Diagram Example (Example 1)
+
+```text
+Form (keeps input) --submit--> Save entry --write--> Storage
+                                |-- success: show saved
+                                +-- failure: show reason and retry
+
++-- Edit settings ----------------+
+| Name [user input              ] |
+| Save failed; input kept         |
+|                        [Retry]  |
++--------------------------------+
+```
+
+Takeaway: a failed save keeps input. Follow with verified implementation/test paths and the four-field case in Plan Structure.

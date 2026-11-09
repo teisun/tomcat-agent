@@ -15,6 +15,7 @@ mod package_cmd;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod self_install_cmd;
+mod serve_models_cmd;
 mod session_cmd;
 mod skill_cmd;
 pub(crate) mod splash;
@@ -63,8 +64,8 @@ pub(crate) use plugin_cmd::{
 #[derive(Parser, Debug)]
 #[command(
     name = CLI_NAME,
-    about = "Tomcat Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "tomcat 是基于 rquickjs 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
+    about = "Tomcat Agent CLI — 轻量级 AI Agent 运行时",
+    long_about = "Tomcat 是基于 Rust 的轻量级 AI Agent 运行时。\n支持对话与计划、会话管理和多模型切换。\n提供工具扩展、权限控制与审计，支持浏览器辅助的前端验收。\ntomcat serve 提供多客户端共享服务，ACP 客户端可接入；详见 tomcat acp --help。",
     version
 )]
 pub struct Cli {
@@ -76,8 +77,12 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
     Init,
-    /// 仅安装或更新当前可执行文件，不改配置、PATH 或运行中的服务
-    SelfInstall,
+    /// 安装或更新当前程序；可选配置用户 PATH，不改模型配置或运行中的服务
+    SelfInstall {
+        /// 同时将用户命令目录加入 PATH
+        #[arg(long)]
+        add_to_path: bool,
+    },
     /// 检测运行环境、QuickJS 资源与配置合法性，输出修复建议
     Doctor,
     /// 配置管理：get/set/edit
@@ -166,11 +171,16 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
-    /// 以标准 ACP/stdio 接入共享服务
+    /// 通过 Agent Client Protocol（ACP）及标准输入/输出接入本机共享服务
+    #[command(
+        long_about = "通过 Agent Client Protocol（ACP）及标准输入/输出接入本机共享服务。通常由 ACP 客户端启动；标准输入/输出用于协议通信，而非交互式终端对话。实际连接会复用或按需启动共享服务；查看帮助不会建立连接。\n以下设置用于本连接控制的会话。--mode 设置初始会话模式；--plan-review、--question-policy、--plan-start 分别控制保存后的评审、普通问题回答和明确开工时的额外询问。\n自动交互策略不会绕过工具权限。保存或评审计划不等于批准实施；--plan-start=auto 也不会让保存或评审自动触发开发。"
+    )]
     Acp {
-        /// 本连接控制会话的私有技能目录（绝对路径）
+        /// 本连接控制会话使用的私有技能目录；须为绝对、可读取目录。省略时不追加连接私有目录，不因此授予工具访问权限
         #[arg(long)]
         skills_dir: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        options: crate::api::acp::AcpLaunchOptions,
     },
     /// 共享服务管理；--stdio 保留独立进程协议
     #[command(args_conflicts_with_subcommands = true)]
@@ -206,6 +216,8 @@ pub enum ServeSub {
     },
     /// 查看服务身份与运行状态（JSON）
     Status,
+    /// 按共享服务的已保存配置列出模型目录（JSON；不启动或连接服务）
+    Models,
     /// 停止共享服务及全部任务
     Stop,
     /// 停止全部任务并用当前版本重启服务
@@ -491,7 +503,7 @@ fn nested_agent_invocation_active() -> bool {
 
 fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
     match cmd {
-        Commands::Init | Commands::SelfInstall => true,
+        Commands::Init | Commands::SelfInstall { .. } => true,
         Commands::Doctor => false,
         Commands::Config { sub } => !matches!(sub, ConfigSub::Get { .. }),
         Commands::Session { sub } => matches!(
@@ -527,7 +539,7 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
         Commands::Serve {
             print_schema, sub, ..
         } => match sub {
-            Some(ServeSub::Status) => false,
+            Some(ServeSub::Status | ServeSub::Models) => false,
             Some(_) => true,
             None => !print_schema,
         },
@@ -574,36 +586,32 @@ pub fn run_cli() -> Result<(), AppError> {
 
     match cli.command.as_ref() {
         Some(Commands::Init) => return run_init(),
-        Some(Commands::SelfInstall) => return self_install_cmd::run_self_install(),
+        Some(Commands::SelfInstall { add_to_path }) => {
+            return self_install_cmd::run_self_install(*add_to_path);
+        }
         Some(Commands::Doctor) => return run_doctor(),
         _ => {}
     }
 
-    if matches!(
-        cli.command.as_ref(),
-        Some(Commands::Serve {
-            sub: Some(ServeSub::Run { .. }),
-            ..
-        })
-    ) {
-        crate::infra::config::use_saved_configuration_only();
-    }
     let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
-    let (mut cfg, ignored_keys) =
-        crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?;
-    if let Some(Commands::Serve {
-        sub: Some(ServeSub::Run { work_dir, agent_id }),
-        ..
-    }) = &cli.command
-    {
-        if !work_dir.is_absolute() {
-            return Err(AppError::Config(
-                "internal service data directory must be absolute".into(),
-            ));
+    let (cfg, ignored_keys) = match cli.command.as_ref() {
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Models),
+            ..
+        }) => {
+            // This read-only path owns both config loads and their safe errors; no bootstrap.
+            return serve_models_cmd::run(config_path.as_deref());
         }
-        cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
-        cfg.agent.id = agent_id.clone();
-    }
+        Some(Commands::Serve {
+            sub: Some(ServeSub::Run { work_dir, agent_id }),
+            ..
+        }) => crate::api::serve::service::load_saved_configuration(
+            config_path.as_deref(),
+            work_dir,
+            agent_id,
+        )?,
+        _ => crate::infra::config::load_config_with_ignored_keys(config_path.as_deref())?,
+    };
     if let Err(e) = validate_config(&cfg) {
         eprintln!(
             "{}",
@@ -650,7 +658,7 @@ pub fn run_cli() -> Result<(), AppError> {
 
     match cmd {
         Commands::Init => unreachable!("init handled before config load"),
-        Commands::SelfInstall => unreachable!("self-install handled before config load"),
+        Commands::SelfInstall { .. } => unreachable!("self-install handled before config load"),
         Commands::Doctor => unreachable!("doctor handled before config load"),
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
@@ -677,10 +685,14 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Model { sub } => run_model(sub, &cfg),
         Commands::Claw { resume } => run_claw(resume, &cfg),
         Commands::Code { resume } => run_code(resume, &cfg),
-        Commands::Acp { skills_dir } => crate::api::acp::run(
+        Commands::Acp {
+            skills_dir,
+            options,
+        } => crate::api::acp::run(
             &cfg,
             client_environment.expect("ACP environment captured before bootstrap"),
             skills_dir,
+            options.provided(),
         ),
         Commands::Serve {
             sub: Some(action), ..

@@ -52,7 +52,7 @@ export type InstalledConnectorApi = {
     captureSettingsDom(): Promise<{ html: string }>;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     getObservedWebviewErrors(): Array<{ message: string; stack?: string }>;
-    getResolvedExecutable(): { executable: string; found: boolean };
+    getResolvedExecutable(): Promise<{ executable: string; found: boolean }>;
     getSettingsPanelState(): {
       route: "connectors" | "models";
       state: {

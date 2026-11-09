@@ -1509,7 +1509,10 @@ tools（稳定排序） → system（稳定说明） → 持久化历史 → 本
   最后一个非 runtime system block（B）、倒数第二条 wire user 消息末尾（C，滚动读锚）和最后一条持久 wire
   消息末尾（D，写锚）。runtime tail 是不单独标记的 system suffix；它变化时会使下一次 Anthropic 缓存失效。
   OpenAI Chat Completions / Responses 使用按 `{session_id}:{family}` 分域的
-  `prompt_cache_key`。
+  `prompt_cache_key`。`PromptCacheKeyFamily::key_for` 保留 trim 后不超过 64 个 UTF-8 字节的逻辑键；
+  超长时对完整逻辑键取 SHA-256，输出 64 个小写十六进制字符，不截断会话或家族后缀。
+  相同输入保持稳定，短键不变；这只改变上游缓存亲和键，不修改真实会话 ID、历史或权限。
+  超长键在诊断日志中也显示摘要，不保证上游缓存命中率；Anthropic 的断点策略不变。
 - Layer 0 只在 Layer 2 boundary **成功应用后**运行一次：L0-A 落盘最后一 turn 的超大
   tool result，L0-B 替换 compactable zone 的大 tool result。Layer 1 的 preheat 本身只读
   快照，不会改写缓存；未切换 boundary 时保持历史字节不变，真正改变历史的是 Layer 2/L3

@@ -87,7 +87,7 @@ describe("release guard scripts", () => {
     const workflow = await fs.readFile(path.resolve(__dirname, "../../.github/workflows/release-ext.yml"), "utf8");
     expect(workflow).toContain("needs: [build, verify]");
     expect(workflow).toContain("fail-fast: false");
-    for (const [runner, target] of [["macos-14", "darwin-arm64"], ["macos-15-intel", "darwin-x64"], ["ubuntu-22.04", "linux-x64"], ["windows-latest", "win32-x64"]]) {
+    for (const [runner, target] of [["macos-15", "darwin-arm64"], ["macos-15-intel", "darwin-x64"], ["ubuntu-22.04", "linux-x64"], ["windows-latest", "win32-x64"]]) {
       expect(workflow).toMatch(new RegExp(`runner: ${runner}\\s+target: ${target}`));
     }
     expect(workflow).toContain('npm run verify:vsix -- --release-bundle "${vsix}"');
@@ -203,7 +203,7 @@ if (process.env.FAIL_TARGET && args.at(-1).endsWith('-' + process.env.FAIL_TARGE
       } finally {
         await fs.rm(root, { recursive: true, force: true });
       }
-    });
+    }, 30_000); // Two bounded 10s child commands plus fixture cleanup.
   }
 
   itRunsWorkflowBash("verifies the actual release download before extraction and rejects corruption or missing checksum", async () => {

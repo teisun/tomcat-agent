@@ -3,6 +3,66 @@ use crate::core::plan_runtime::panels::{
     Answer, AskQuestionResult, AskQuestionTermination, MockAskQuestionPanel,
 };
 
+#[tokio::test]
+async fn recommended_policy_uses_option_ids_without_panel_in_both_modes() {
+    use crate::core::plan_runtime::{InteractionPolicy, QuestionPolicy};
+    for plan_mode in [false, true] {
+        let rt = PlanRuntime::new("policy");
+        if plan_mode {
+            rt.enter_plan().unwrap();
+        }
+        rt.set_interaction_policy(InteractionPolicy {
+            questions: QuestionPolicy::Recommended,
+            ..Default::default()
+        });
+        let captured = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            sink.lock().push(event);
+            Ok(())
+        }));
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult::answered(vec![])]);
+        for count in 1..=4 {
+            let questions = (0..count).map(|n| serde_json::json!({
+                "id": format!("q{n}"), "prompt": "Choose",
+                "options": [{"id":"first","label":"First"}, {"id":"recommended","label":"Second", "recommended":true}]
+            })).collect::<Vec<_>>();
+            let out = ask_question::execute_for_tool(
+                &rt,
+                &panel,
+                &serde_json::json!({"questions":questions}),
+                Default::default(),
+                Some("call"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out["answer_source"], "policy_recommended");
+            assert_eq!(out["answers"].as_array().unwrap().len(), count);
+            assert_eq!(
+                out["answers"][0]["option_ids"],
+                serde_json::json!(["recommended"])
+            );
+            assert_eq!(out["answers"][0]["picked_recommended"], true);
+            assert_eq!(captured.lock().last().unwrap()["result"], out);
+        }
+        assert_eq!(panel.remaining(), 1, "policy never asks the panel");
+        let mut invalid = good_args();
+        invalid["questions"][0]["options"][1]["recommended"] = serde_json::json!(true);
+        assert!(
+            ask_question::execute(&rt, &panel, &invalid, Default::default())
+                .await
+                .is_err()
+        );
+        let termination = AskQuestionTermination::default();
+        termination.interrupt();
+        let out = ask_question::execute(&rt, &panel, &good_args(), termination)
+            .await
+            .unwrap();
+        assert_eq!(out["outcome"], "interrupted");
+        assert!(out.get("answer_source").is_none());
+    }
+}
+
 fn rt_planning() -> std::sync::Arc<PlanRuntime> {
     let rt = PlanRuntime::new("s1");
     rt.enter_plan().unwrap();

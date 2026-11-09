@@ -416,6 +416,62 @@ fn install_chat_turn_recorder(ctx: &mut ChatContext) -> Arc<ChatTurnRecorder> {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn retry_budget_is_respected_in_chat_plan_and_exec() {
+    use crate::core::plan_runtime::file_store::PlanFileState;
+    use crate::infra::error::llm_http_status_error;
+    let _key = EnvGuard::set("RETRY_POLICY_TEST_KEY", "stub");
+    for state in [
+        None,
+        Some(PlanFileState::Planning),
+        Some(PlanFileState::Executing),
+    ] {
+        for override_budget in [None, Some(4)] {
+            let (_dir, mut ctx, _path) = checkpoint_recording_test_context("RETRY_POLICY_TEST_KEY");
+            if let Some(budget) = override_budget {
+                ctx.config.llm.agent_max_attempts = budget;
+            }
+            ctx.config.llm.agent_retry_base_delay_ms = 0;
+            if let Some(state) = state {
+                ctx.session_runtime
+                    .plan_runtime
+                    .seed_active_plan_for_test("retry-policy-test".into(), state);
+            }
+            let expected = override_budget.unwrap_or(10);
+            let recorder = install_chat_turn_recorder(&mut ctx);
+            for _ in 0..=expected {
+                recorder
+                    .stream_failures
+                    .lock()
+                    .unwrap()
+                    .push_back(llm_http_status_error("fixture", 503, "temporary failure"));
+            }
+            let mut context =
+                init_context_state(&ctx.session_runtime.session, &ctx.config.context, "system")
+                    .unwrap();
+            let outcome = run_chat_turn(
+                &ctx,
+                "hello",
+                "system",
+                &mut context,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(outcome, AgentRunOutcome::Failed(_)),
+                "{state:?}: {outcome:?}"
+            );
+            assert_eq!(
+                recorder.requests.lock().unwrap().len(),
+                expected as usize,
+                "{state:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn transport_recovery_only_final_local_main_connect_failures_report_the_exact_provider() {
     use crate::infra::error::{llm_error, llm_http_status_error_with_stage, LlmErrorStage};
     let _key = EnvGuard::set("CONNECT_REPORT_TEST_KEY", "stub");

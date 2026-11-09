@@ -1551,6 +1551,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const openModelSettings = () => postIntent(vscodeApi, "openSettings", { route: "models" });
   const canPromptWhenConfigured = state.ready && !readOnly && (!activeSession?.busy || !!state.messageQueueSupported) && !commandPending && !draftForkFeedback.pending;
   const canPrompt = canPromptWhenConfigured && !modelBlocked;
+  const canRecoverErrorTurn = state.ready && !readOnly && !!activeSession && !activeSession.busy;
   const canInterrupt = state.ready && !readOnly;
   const canBuildPlan = state.ready && !readOnly && !!activeSession && !activeSession.busy && !commandPending && !modelBlocked;
   const modelAdminSupported = state.modelAdminSupported;
@@ -2348,7 +2349,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [activeSession?.sessionId, vscodeApi]);
   const handleRecoverErrorTurn = useCallback(
     (errorId: string, action: "resume" | "retry") => {
-      if (!activeSession?.sessionId || !canPrompt || activeSession.busy) {
+      if (!activeSession?.sessionId || !canRecoverErrorTurn) {
         return;
       }
       postIntent(vscodeApi, "recoverErrorTurn", {
@@ -2357,7 +2358,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         sessionId: activeSession.sessionId,
       });
     },
-    [activeSession?.sessionId, activeSession?.busy, canPrompt, vscodeApi],
+    [activeSession?.sessionId, canRecoverErrorTurn, vscodeApi],
   );
   const handleOpenImagePreview = useCallback(
     (imageId: string) => {
@@ -2815,6 +2816,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 availableModels={state.availableModels}
                 buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
+                requestRetry={activeSession.requestRetry}
+                errorRecoveryDisabled={!canRecoverErrorTurn}
                 bottomSpacerHeight={bottomSpacerHeight}
                 mediaRoots={state.mediaRoots}
                 onAnswer={handleAnswerQuestion}
@@ -2920,7 +2923,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <div className="tc-footer" data-testid="composer-footer">
         {readOnly ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
-          {activeSession?.origin
+          {activePendingApproval ? t("session.observerCanAnswer") : activeSession?.origin
             ? t("session.readOnlyFrom", { source: activeSession.origin.clientName?.trim() || t("session.acpClient") })
             : t("session.readOnly")}
         </div> : null}

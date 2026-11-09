@@ -5,8 +5,8 @@ import type { TomcatExtensionApi } from "../../../extension";
 import { readExternalObservationFixture } from "./externalObservationFixture";
 import { SettingsFrameDriver } from "./workbenchFindDriver";
 
-async function until(predicate: () => boolean | Promise<boolean>, description: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+async function until(predicate: () => boolean | Promise<boolean>, description: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -20,6 +20,7 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
   const artifacts = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
   assert.ok(file && artifacts);
   const fixture = await readExternalObservationFixture(file);
+  const submitted: Array<{ question_id: string; option_ids: string[]; picked_recommended: false }> = [];
   await fs.mkdir(artifacts, { recursive: true });
   const api = await getApi();
   await api.__testing.focusWebview();
@@ -28,6 +29,8 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
   const chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
   try {
     await chat.setViewport(1440, 900);
+    await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
+    await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "desktop observer is actually wide");
     await chat.click("session-select");
     if (!fixture.visible) {
       assert.equal(api.__testing.getWebviewState().sessions.some(row => row.sessionId === fixture.sessionId), false);
@@ -55,7 +58,8 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
           fits: [...document.querySelectorAll('[data-testid="mode-select"], [data-testid="model-select"], [data-testid="stop-button"]')].every(button => { const r = button.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })
         })`);
         assert.equal(dom.editable, "false");
-        for (const id of ["mode-select", "model-select", "thinking-level-select", "stop-button"]) assert.ok(dom.disabled.includes(id), `${id} disabled`);
+        for (const id of ["mode-select", "model-select", "thinking-level-select"]) assert.ok(dom.disabled.includes(id), `${id} disabled`);
+        assert.ok(dom.disabled.includes("stop-button") || dom.disabled.includes("send-button"), "task controls stay read-only");
         assert.ok(dom.fits);
       };
       await checkReadOnly();
@@ -64,10 +68,56 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
       await chat.setViewport(390, 844);
       await checkReadOnly();
       await chat.capture(path.join(artifacts, "observer-narrow.png"));
+      if (fixture.answer !== undefined) {
+        await until(() => state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), "current host question");
+        const card = state().timeline.find(item => item.type === "approval" && item.live && !item.resolved);
+        assert.ok(card?.type === "approval" && card.request.toolCallId, "a real question tool owns the card");
+        await chat.setViewport(1440, 900);
+        await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
+        await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "wide question card");
+        await checkReadOnly();
+        await chat.capture(path.join(artifacts, "question-pending-desktop.png"));
+        await chat.setViewport(390, 844);
+        await checkReadOnly();
+        await chat.capture(path.join(artifacts, "question-pending-narrow.png"));
+        const expectedAnswers: typeof submitted = [];
+        for (let index = 0; index < card.request.questions.length; index++) {
+          const question: (typeof card.request.questions)[number] = card.request.questions[index];
+          const option = question.options.find(candidate => !candidate.recommended);
+          assert.ok(option, "the real task must offer a non-recommended choice");
+          assert.match(question.id, /^[a-zA-Z0-9_-]+$/);
+          assert.match(option.id, /^[a-zA-Z0-9_-]+$/);
+          const answer = { question_id: question.id, option_ids: [option.id], picked_recommended: false as const };
+          expectedAnswers.push(answer);
+          if (fixture.answer) {
+            await chat.click(`approval-option-${question.id}-${option.id}`);
+            submitted.push(answer);
+            if (index + 1 < card.request.questions.length) await chat.click("approval-next-question");
+          }
+        }
+        if (fixture.answer) await chat.click("approval-continue"); // Real mouse input, never a direct reply API.
+        // Explicit false keeps a second real observer open while the answering devhost starts.
+        await until(() => chat.evaluate<boolean>("!document.querySelector('[data-testid=\"pending-question-panel\"]')"), "question card withdrawn", fixture.answer ? 30_000 : 180_000);
+        if (!fixture.answer) {
+          assert.equal(JSON.stringify(state().timeline).includes('"host_disconnected"'), false, "another window's answer only withdraws the card");
+        }
+        const completed = () => state().timeline.find(item => item.type === "tool" && item.toolCallId === card.request.toolCallId && item.toolName === "ask_question" && item.status === "complete" && item.summary?.trim().startsWith("{"));
+        await until(() => !!completed(), "authoritative serve question result");
+        const tool = completed();
+        assert.ok(tool?.type === "tool");
+        const result = JSON.parse(tool.summary ?? "");
+        assert.equal(result.outcome, "answered");
+        assert.deepEqual(result.answers, expectedAnswers);
+        await checkReadOnly();
+        await chat.capture(path.join(artifacts, "question-answered-narrow.png"));
+        await chat.setViewport(1440, 900);
+        await checkReadOnly();
+        await chat.capture(path.join(artifacts, "question-answered-desktop.png"));
+      }
       assert.equal(state().timeline.filter(item => item.type === "message" && item.text.includes(fixture.prefix)).length, 1);
     }
     assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-    await fs.writeFile(path.join(artifacts, "external-host-journey.json"), JSON.stringify({ sessionId: fixture.sessionId, workspacePath: fixture.workspacePath, visible: fixture.visible, access: api.__testing.getWebviewState().sessionViews[fixture.sessionId]?.access, webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));
+    await fs.writeFile(path.join(artifacts, "external-host-journey.json"), JSON.stringify({ sessionId: fixture.sessionId, workspacePath: fixture.workspacePath, visible: fixture.visible, submitted, access: api.__testing.getWebviewState().sessionViews[fixture.sessionId]?.access, webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));
   } finally {
     chat.close(); // Closing the observer must not cancel the external host's task.
   }

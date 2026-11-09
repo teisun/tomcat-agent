@@ -10,6 +10,92 @@ use crate::core::plan_runtime::panels::{
 };
 use crate::core::tools::plan_tool::start_plan::{self, StartPlanArgs};
 
+#[tokio::test]
+async fn start_auto_avoids_panel_but_keeps_cancellation_and_state_gates() {
+    use crate::core::plan_runtime::{InteractionPolicy, PlanStartPolicy, QuestionPolicy};
+    let _guard = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    for cancelled in [false, true] {
+        let rt = PlanRuntime::new("auto-start");
+        rt.enter_plan().unwrap();
+        rt.set_interaction_policy(InteractionPolicy {
+            start: PlanStartPolicy::Auto,
+            questions: QuestionPolicy::Manual,
+            ..Default::default()
+        });
+        let path = write_disk_plan(
+            if cancelled {
+                "auto_cancel"
+            } else {
+                "auto_start"
+            },
+            PlanFileState::Planning,
+        );
+        let termination = AskQuestionTermination::default();
+        if cancelled {
+            termination.interrupt();
+        }
+        let out = start_plan::execute_at_path(&rt, path.clone(), termination, None)
+            .await
+            .unwrap();
+        assert_eq!(out["started"], !cancelled);
+        assert_eq!(
+            rt.mode(),
+            if cancelled {
+                AgentMode::Plan
+            } else {
+                AgentMode::Chat
+            }
+        );
+        assert_eq!(
+            read_plan(&path).unwrap().frontmatter.state,
+            if cancelled {
+                PlanFileState::Planning
+            } else {
+                PlanFileState::Executing
+            }
+        );
+        if !cancelled {
+            assert!(
+                start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn recommended_questions_do_not_authorize_starting_a_plan() {
+    use crate::core::plan_runtime::{InteractionPolicy, QuestionPolicy};
+    let _guard = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("recommended-not-consent");
+    rt.enter_plan().unwrap();
+    rt.set_interaction_policy(InteractionPolicy {
+        questions: QuestionPolicy::Recommended,
+        ..Default::default()
+    });
+    let path = write_disk_plan("recommended_not_consent", PlanFileState::Planning);
+    let panel = Arc::new(MockAskQuestionPanel::new(vec![choice(
+        &["stay"],
+        None,
+        false,
+    )]));
+    rt.attach_ask_question_panel(panel.clone());
+    let out = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(out["started"], false);
+    assert_eq!(panel.remaining(), 0);
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.state,
+        PlanFileState::Planning
+    );
+    cleanup_home(&home);
+}
+
 fn choice(ids: &[&str], custom: Option<&str>, skipped: bool) -> AskQuestionResult {
     AskQuestionResult::answered(vec![Answer {
         question_id: "plan-start".into(),

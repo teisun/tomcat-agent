@@ -18,6 +18,39 @@ fn test_config(work_dir: &std::path::Path) -> AppConfig {
 }
 
 #[test]
+fn nested_models_is_allowed_but_service_lifecycle_and_installation_remain_blocked() {
+    let english: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/i18n/en.json")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        common::serve::isolated_serve_command(home.path())
+            .env("USERPROFILE", home.path())
+            .env("TOMCAT_AGENT_ACTIVE", "1")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let models = run(&["serve", "models"]);
+    assert!(models.status.success());
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&models.stdout).unwrap()["models"].is_array()
+    );
+    for args in [
+        vec!["serve", "start"],
+        vec!["serve", "stop"],
+        vec!["serve", "restart"],
+        vec!["self-install"],
+        vec!["self-install", "--add-to-path"],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains(english["cli.nestedGuard"].as_str().unwrap()));
+    }
+    assert!(!home.path().join(".tomcat/agents").exists());
+}
+
+#[test]
 fn nested_session_new_is_rejected_with_nonzero_exit_and_no_state_change() {
     let home = tempfile::tempdir().expect("home tempdir");
     let work_dir = tempfile::tempdir().expect("work dir");

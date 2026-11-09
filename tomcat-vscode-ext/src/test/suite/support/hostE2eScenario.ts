@@ -3274,6 +3274,78 @@ export async function assertWebviewReviewProgressFlow(
   assert.ok(failed.html.includes("FAIL"));
 }
 
+/** Real Chromium/Provider with scripted events and the shared paginated-history fixture. */
+export async function assertRequestRetryAndPaginatedResume(api: TomcatExtensionApi): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await api.__testing.sendWebviewIntent({ type: "ready", messageId: "retry-feedback-bootstrap" });
+  await api.__testing.sendSettingsIntent({ type: "settings.ready", messageId: "retry-feedback-settings", data: { route: "general" } });
+  const language = async (value: "en" | "zh-CN") => {
+    await api.__testing.sendSettingsIntent({ type: "setUiLanguage", messageId: `retry-feedback-${value}`, data: { language: value } });
+    await waitFor(() => api.__testing.getWebviewState().locale === value);
+  };
+  await language("en");
+  const sessionId = await createFreshWebviewSession(api, "retry-feedback-session");
+  let chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  const maximize = "workbench.action.toggleMaximizedAuxiliaryBar";
+  const capture = async (name: string) => {
+    if (process.env.TOMCAT_E2E_SCREENSHOT !== "1") return;
+    const target = transcriptVisualArtifactPath(`${name}.png`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await chat.capture(target);
+  };
+  await api.__testing.executeCommand(maximize);
+  try {
+    await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000, "Expected a wide chat viewport");
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "retry-feedback-prompt", data: { sessionId, text: "request retry feedback showcase" } });
+    await chat.waitForSnapshot(dom => dom.text.includes(translate("en", "progress.retrying", { attempt: 2, maxAttempts: 10 })), "Live retry feedback must render");
+    assert.equal(await chat.evaluate("document.querySelectorAll('[data-testid=progress-row]').length"), 1);
+    await capture("request-retry-en-desktop");
+    await language("zh-CN");
+    await chat.setViewport(448, 844);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 320 && dom.viewport.width <= 390, "Expected a narrow visible chat viewport");
+    await api.__testing.injectServeEvent({ type: "auto_retry_start", sessionId, attempt: 10, maxAttempts: 10, delayMs: 1000, errorMessage: "overloaded" });
+    await waitFor(() => chat.evaluate<boolean>("document.documentElement.lang === 'zh-CN' && document.querySelector('[data-testid=progress-row-label]')?.textContent.includes('10 / 10')"));
+    assert.equal(await chat.evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+    await capture("request-retry-zh-narrow");
+    await chat.click("stop-button");
+    await waitFor(() => !api.__testing.getWebviewState().sessionViews[sessionId].busy);
+
+    // The failure itself arrives through the fake backend's normal prompt/history path.
+    await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "long-recovery-prompt", data: { sessionId, text: "long resume card showcase" } });
+    await waitForWebviewState(api, state => state.sessionViews[sessionId]?.errorRecovery ?? undefined);
+    await chat.waitForSnapshot(dom => dom.buttons.some(b => b.testId === "recover-error-turn"), "Paginated failure must retain Resume");
+    assert.equal(api.__testing.getWebviewState().sessionViews[sessionId].timeline.some(item => item.type === "message" && item.id === "long-error" && item.recoveryAction === "resume"), true);
+    await chat.evaluate("document.querySelector('[data-testid=recover-error-turn]').scrollIntoView({block:'center'}); true");
+    await capture("paginated-resume-zh-narrow");
+    await chat.click("cancel-error-recovery");
+    await waitFor(() => !api.__testing.getWebviewState().sessionViews[sessionId].errorRecovery);
+    const other = await createFreshWebviewSession(api, "retry-feedback-other");
+    assert.notEqual(other, sessionId);
+    await api.__testing.sendWebviewIntent({ type: "switchSession", messageId: "long-recovery-return", data: { sessionId } });
+    await api.__testing.reloadWebview();
+    chat.close();
+    await api.__testing.waitForWebviewReady();
+    chat = await SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    await language("en");
+    await chat.setViewport(1440, 900);
+    await chat.waitForSnapshot(dom => dom.viewport.width >= 1000 && dom.buttons.some(b => b.testId === "recover-error-turn" && b.name === en["common.resume"]), "Reopened tail must offer manual Resume without a countdown");
+    assert.equal(api.__testing.getWebviewState().sessionViews[sessionId].errorRecovery, undefined);
+    assert.equal(await chat.evaluate("document.querySelectorAll('[data-testid=progress-row-label]').length"), 0);
+    await chat.evaluate("document.querySelector('[data-testid=recover-error-turn]').scrollIntoView({block:'center'}); true");
+    await capture("paginated-resume-en-desktop");
+    await chat.focusAndPress("recover-error-turn", "Enter");
+    await chat.waitForSnapshot(dom => dom.text.includes("same session Resume continued"), "Manual Resume must reach the backend after reload");
+    assert.equal(api.__testing.getWebviewState().activeSessionId, sessionId);
+  } finally {
+    await chat.setViewport(1440, 900);
+    await api.__testing.executeCommand(maximize);
+    chat.close();
+    await language("en");
+  }
+}
+
 /** Real extension + Chromium, fake backend; one production five-minute timer (no time override). */
 export async function assertAutomaticErrorRecoveryCountdown(api: TomcatExtensionApi): Promise<void> {
   await api.__testing.focusWebview();
@@ -4619,6 +4691,9 @@ export async function assertMultiRootContextReferences(api: TomcatExtensionApi):
     await api.__testing.reloadWebview();
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
+    // Ready precedes async bootstrap after a workspace-triggered reload. Await
+    // the existing ready workflow before a new fixture session can be selected.
+    await api.__testing.sendWebviewIntent({ type: "ready", messageId: "multi-root-bootstrap" });
     api.__testing.clearObservedWebviewErrors();
     const sessionId = await createFreshWebviewSession(api, "multi-root-context-references");
     const originalCwd = (await api.__testing.getSessionState(sessionId)).cwd;

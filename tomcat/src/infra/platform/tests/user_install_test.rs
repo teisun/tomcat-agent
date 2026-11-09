@@ -185,6 +185,215 @@ fn install_user_command_keeps_the_old_entry_when_the_copy_fails() {
     assert_eq!(sorted_file_names(&local_bin), ["tomcat"]);
 }
 
+#[test]
+fn install_user_command_compares_same_length_builds_across_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("new-exe");
+    let bin = dir.path().join("bin");
+    let mut bytes = vec![b'a'; 128 * 1024 + 1];
+    std::fs::write(&exe, &bytes).unwrap();
+    let entry = install_user_command(&exe, &bin, "tomcat").unwrap().unwrap();
+    assert!(install_user_command(&exe, &bin, "tomcat")
+        .unwrap()
+        .is_none());
+    *bytes.last_mut().unwrap() = b'b';
+    std::fs::write(&exe, &bytes).unwrap();
+    assert_eq!(
+        install_user_command(&exe, &bin, "tomcat").unwrap(),
+        Some(entry.clone())
+    );
+    assert_eq!(std::fs::read(entry).unwrap(), bytes);
+}
+
+#[test]
+fn install_user_command_never_parks_or_removes_a_directory_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("new-exe");
+    let bin = dir.path().join("bin");
+    let entry = bin.join(format!("tomcat{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&exe, b"new").unwrap();
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("keep"), b"user data").unwrap();
+    assert!(install_user_command(&exe, &bin, "tomcat").is_err());
+    assert_eq!(std::fs::read(entry.join("keep")).unwrap(), b"user data");
+    assert_eq!(
+        sorted_file_names(&bin),
+        [entry.file_name().unwrap().to_string_lossy()]
+    );
+}
+
+#[test]
+fn install_user_command_concurrent_writers_publish_only_complete_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let sources: Vec<_> = (0..4)
+        .map(|i| {
+            let file = dir.path().join(format!("source-{i}"));
+            std::fs::write(&file, vec![i; 128 * 1024]).unwrap();
+            file
+        })
+        .collect();
+    let results = std::thread::scope(|scope| {
+        let writers: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let bin = &bin;
+                scope.spawn(move || install_user_command(source, bin, "tomcat"))
+            })
+            .collect();
+        writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(results.iter().any(Result::is_ok), "{results:?}");
+    let bytes = std::fs::read(bin.join(format!("tomcat{}", std::env::consts::EXE_SUFFIX))).unwrap();
+    assert_eq!(bytes.len(), 128 * 1024);
+    assert!(bytes[0] < 4 && bytes.iter().all(|byte| *byte == bytes[0]));
+}
+
+// A pipe keeps the real copy in progress deterministically, without sleeps in
+// production, huge test binaries, or an installation-only test protocol.
+#[test]
+#[ignore = "subprocess helper for interrupted-copy tests"]
+fn interrupted_copy_child() {
+    let source = std::env::var_os("TOMCAT_COPY_TEST_SOURCE").expect("owned pipe");
+    let entry = std::env::var_os("TOMCAT_COPY_TEST_ENTRY").expect("owned entry");
+    create_entry(Path::new(&source), Path::new(&entry)).unwrap();
+}
+
+struct CopyChild(std::process::Child);
+impl Drop for CopyChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn copy_child(source: &Path, entry: &Path) -> CopyChild {
+    let test = format!(
+        "{}::interrupted_copy_child",
+        module_path!().split_once("::").unwrap().1
+    );
+    CopyChild(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", &test])
+            .env("TOMCAT_COPY_TEST_SOURCE", source)
+            .env("TOMCAT_COPY_TEST_ENTRY", entry)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+fn finish_interrupted_copy(mut child: CopyChild, bin: &Path, entry: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "copy exited before interruption"
+        );
+        let staged = std::fs::read_dir(bin).unwrap().any(|item| {
+            let item = item.unwrap();
+            if !item.file_name().to_string_lossy().ends_with(".tmp") {
+                return false;
+            }
+            // Observe bytes through a fresh handle while the writer is open,
+            // rather than relying on a directory entry's cached file size.
+            let mut bytes = [0; 1024];
+            std::fs::File::open(item.path())
+                .and_then(|mut file| file.read_exact(&mut bytes))
+                .is_ok()
+                && bytes == [b'n'; 1024]
+        });
+        if staged {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "copy never staged bytes"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    child.0.kill().unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    assert_eq!(std::fs::read(entry).unwrap(), b"complete old executable");
+    // A hard kill may retain an unpublished .tmp, never an early parked .old.
+    let name = file_name(entry);
+    let prefix = format!(".{name}.");
+    let remaining = sorted_file_names(bin);
+    assert!(
+        remaining
+            .iter()
+            .all(|file| file == &name || (file.starts_with(&prefix) && file.ends_with(".tmp"))),
+        "unexpected files after interruption: {remaining:?}"
+    );
+    let source = bin.parent().unwrap().join("repair-source");
+    std::fs::write(&source, b"complete new executable").unwrap();
+    install_user_command(&source, bin, "tomcat").unwrap();
+    assert_eq!(std::fs::read(entry).unwrap(), b"complete new executable");
+}
+
+#[cfg(unix)]
+#[test]
+fn install_user_command_interrupted_copy_keeps_the_old_entry_and_can_retry() {
+    use std::io::Write;
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let entry = bin.join("tomcat");
+    std::fs::write(&entry, b"complete old executable").unwrap();
+    let pipe = root.path().join("source-pipe");
+    let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated path inside this disposable fixture.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let mut child = copy_child(&pipe, &entry);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut writer = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe)
+        {
+            Ok(writer) => break writer,
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                assert!(child.0.try_wait().unwrap().is_none(), "copy child exited");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "copy child never opened pipe"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("open owned pipe: {error}"),
+        }
+    };
+    writer.write_all(&[b'n'; 1024]).unwrap();
+    finish_interrupted_copy(child, &bin, &entry);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn install_user_command_interrupted_copy_keeps_the_old_entry_and_can_retry() {
+    use tokio::io::AsyncWriteExt;
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let entry = bin.join("tomcat.exe");
+    std::fs::write(&entry, b"complete old executable").unwrap();
+    let pipe = format!(r"\\.\pipe\tomcat-copy-test-{}", uuid::Uuid::new_v4());
+    let mut writer = tokio::net::windows::named_pipe::ServerOptions::new()
+        .create(&pipe)
+        .unwrap();
+    let child = copy_child(Path::new(&pipe), &entry);
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer.connect())
+        .await
+        .unwrap()
+        .unwrap();
+    writer.write_all(&[b'n'; 1024]).await.unwrap();
+    finish_interrupted_copy(child, &bin, &entry);
+}
+
 fn sorted_file_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -293,24 +502,26 @@ fn path_export_targets_cover_shell_profiles() {
 
 #[cfg(unix)]
 #[test]
-fn prune_stale_lines_removes_only_target_exports() {
+fn prune_stale_lines_removes_only_marked_target_exports() {
     let content = r#"
 # Added by tomcat init
 export PATH="/tmp/project/target/release:$PATH"
 # Added by tomcat init
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="/usr/local/bin:$PATH"
+export PATH="/tmp/user-tool/target/release:$PATH"
 # Added by tomcat init
 export PATH="/tmp/project/target/debug/deps:$PATH"
 "#;
     let pruned = prune_stale_lines(content);
     assert!(
-        !pruned.contains("/target/release") && !pruned.contains("/target/debug/deps"),
+        !pruned.contains("/tmp/project/target/"),
         "target exports should be removed, got:\n{pruned}"
     );
     assert!(
         pruned.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
-            && pruned.contains("export PATH=\"/usr/local/bin:$PATH\""),
+            && pruned.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && pruned.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "valid exports should remain, got:\n{pruned}"
     );
 }
@@ -361,6 +572,7 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
             "# Added by tomcat init",
             "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
             "export PATH=\"/usr/local/bin:$PATH\"",
+            "export PATH=\"/tmp/user-tool/target/release:$PATH\"",
         ]
         .join("\n"),
     )
@@ -381,7 +593,7 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
 
     let bashrc_content = std::fs::read_to_string(&bashrc).unwrap();
     assert!(
-        !bashrc_content.contains("/target/"),
+        !bashrc_content.contains("/tmp/project/target/"),
         "stale target exports should be pruned, got:\n{bashrc_content}"
     );
     assert_eq!(
@@ -392,7 +604,8 @@ fn add_user_bin_dir_to_path_prunes_stale_target_exports_and_is_idempotent() {
         "stable export should appear exactly once, got:\n{bashrc_content}"
     );
     assert!(
-        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\"")
+            && bashrc_content.contains("export PATH=\"/tmp/user-tool/target/release:$PATH\""),
         "user exports must be preserved, got:\n{bashrc_content}"
     );
 }

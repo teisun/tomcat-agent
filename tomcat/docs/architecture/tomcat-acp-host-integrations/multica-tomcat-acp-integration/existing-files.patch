@@ -36,6 +36,240 @@ index d90b46c1e4b42ba72ba26d51c0cd09cbeecc02c8..8e8dca479314b102b8e1448c321f03c9
  	"claude", "codex", "opencode", "codearts", "deveco", "openclaw", "hermes",
  	"pi", "cursor-agent", "copilot", "kimi", "reasonix", "dsh", "kiro-cli", "codebuddy", "agy", "qodercli", "qoderclicn", "traecli", "grok", "qwen", "qwenpaw", "mcode", "muse", "dim", "zeroclaw",
  }, agent.BuiltinRuntimeCommands()...)
+diff --git a/server/internal/daemon/daemon.go b/server/internal/daemon/daemon.go
+index 3fcb1220c2f3d6c245be99cf70b6475a830940e0..ee5a74e3c31cd57fe361ab1545ec82733a0c86d3 100644
+--- a/server/internal/daemon/daemon.go
++++ b/server/internal/daemon/daemon.go
+@@ -684,6 +684,9 @@ type Daemon struct {
+ 	activeEnvRootsCond *sync.Cond      // signalled when an in-flight env-root GC mutation finishes
+ 	activeEnvRoots     map[string]int  // env root path -> reference count (handles reuse paths marked twice)
+ 	deletingEnvRoots   map[string]bool // env roots reserved by GC; new tasks wait until the mutation finishes
++	// Protected by activeEnvRootsMu; keep unconfirmed executions locked until
++	// this daemon exits, rather than allowing a GC sweep to remove their TMPDIR.
++	unconfirmedTaskTempLocks []*os.File
+ 
+ 	activeStoresMu   sync.Mutex
+ 	activeStoresCond *sync.Cond      // signalled when an in-flight store deletion finishes, so a blocked markActive can proceed
+@@ -5803,6 +5806,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 		taskLog.Info("discarding rejected start claim", "error", err)
+ 		return
+ 	}
++	if result.FailureReason == taskfailure.ReasonProcessCleanupUnconfirmed.String() && err != nil {
++		result.Comment += "; " + err.Error()
++		err = nil // Cleanup uncertainty outranks worktree-finalization errors.
++	}
++	// Keep cleanup diagnostics deliverable after the parent is cancelled.
++	finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalTaskReportTimeout)
++	defer finalCancel()
+ 
+ 	// Report usage before any early return — the agent accumulates tokens
+ 	// whether the task completes, errors, or is cancelled mid-run by the poll
+@@ -5810,7 +5820,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 	// runCtx is cancelled, so dropping this on the cancelled path silently
+ 	// under-reports billing.
+ 	if len(result.Usage) > 0 {
+-		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, result.Usage); usageErr != nil {
++		if usageErr := d.client.ReportTaskUsage(finalCtx, task.ID, result.Usage); usageErr != nil {
+ 			taskLog.Warn("report task usage failed", "error", usageErr)
+ 		}
+ 	}
+@@ -5830,13 +5840,8 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 		// run errors stay discarded: on a cancelled run they are expected
+ 		// noise (context canceled, killed process), and persisting them would
+ 		// stamp a bogus reason on every ordinary mid-run cancel.
+-		ack := TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir}
+-		var preserved *worktreePreservedError
+-		if errors.As(err, &preserved) {
+-			ack.ErrorMessage = preserved.Error()
+-			ack.FailureReason = "local_directory_error"
+-		}
+-		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, ack); ackErr != nil {
++		ack := taskCancelAcknowledgement(result, err)
++		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, ack); ackErr != nil {
+ 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+ 		}
+ 		return
+@@ -5866,14 +5871,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 		return
+ 	}
+ 
+-	_ = d.client.ReportProgress(ctx, task.ID, "Finishing task", 2, 2)
++	_ = d.client.ReportProgress(finalCtx, task.ID, "Finishing task", 2, 2)
+ 
+ 	// Final pre-completion check: if the server already moved the task to a
+ 	// terminal state (completed/failed/cancelled) or deleted the row
+ 	// outright, skip reporting — the complete/fail callbacks would fail
+ 	// anyway. Reuse shouldInterruptAgent so this guard honors the same
+ 	// signals as the in-flight watcher.
+-	if status, err := d.client.GetTaskStatus(ctx, task.ID); shouldInterruptAgent(status, err) {
++	if status, err := d.client.GetTaskStatus(finalCtx, task.ID); shouldInterruptAgent(status, err) {
+ 		taskLog.Info("task cancelled during execution, discarding result",
+ 			"status", status, "error", err, "branch_name", result.BranchName)
+ 		// Same contract as the poll-cancelled path above: the transcript is
+@@ -5885,7 +5890,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 		// completed/failed rows the complete/fail callback is the
+ 		// authoritative channel and a stale run's late ack must not touch
+ 		// them.
+-		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir}); ackErr != nil {
++		if ackErr := d.client.AckTaskCancelled(finalCtx, task.ID, taskCancelAcknowledgement(result, nil)); ackErr != nil {
+ 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+ 		}
+ 		return
+@@ -5923,6 +5928,23 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+ 	}
+ }
+ 
++func taskCancelAcknowledgement(result TaskResult, runErr error) TaskCancelAck {
++	ack := TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir}
++	var preserved *worktreePreservedError
++	if errors.As(runErr, &preserved) {
++		ack.ErrorMessage = preserved.Error()
++		ack.FailureReason = "local_directory_error"
++	}
++	if result.FailureReason == taskfailure.ReasonProcessCleanupUnconfirmed.String() {
++		ack.ErrorMessage = result.Comment
++		if preserved != nil {
++			ack.ErrorMessage += "; " + preserved.Error()
++		}
++		ack.FailureReason = result.FailureReason
++	}
++	return ack
++}
++
+ // worktreePreservedError marks a task error that must survive the cancel path:
+ // its message names the preserved worktree holding the agent's uncommitted
+ // work. Every other error on a cancelled run is expected noise (context
+@@ -8320,6 +8342,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+ 	// in place, leave them behind in the user's tree.
+ 	if env.LocalDirectory || env.LocalWorktree != nil {
+ 		defer func() {
++			if taskResult.FailureReason == taskfailure.ReasonProcessCleanupUnconfirmed.String() {
++				return // Preserve files an unconfirmed process may still use.
++			}
+ 			var cleanupErr error
+ 			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
+ 				cleanupErr = cerr
+@@ -8359,6 +8384,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+ 		return TaskResult{}, fmt.Errorf("prepare task temp dir: %w", err)
+ 	}
+ 	defer func() {
++		if taskResult.FailureReason == taskfailure.ReasonProcessCleanupUnconfirmed.String() {
++			d.activeEnvRootsMu.Lock()
++			d.unconfirmedTaskTempLocks = append(d.unconfirmedTaskTempLocks, taskTempLock)
++			d.activeEnvRootsMu.Unlock()
++			taskResult.Comment += "; task temporary directory preserved at " + taskTempDir + " until daemon exit; check background processes before removal"
++			return
++		}
+ 		// Drop the execution lock before removing the directory: while it is
+ 		// held the GC sweep correctly refuses to touch this directory, so a
+ 		// removal that fails here (a file inside still open — the Windows case
+@@ -8972,6 +9004,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
+ 			FailureReason: failureReason,
+ 			Usage:         usageEntries,
+ 		}, nil
++	case "cleanup_unconfirmed":
++		if env.LocalWorktree != nil {
++			env.LocalWorktree.AbortWithReason(errors.New(result.Error))
++		}
++		return TaskResult{
++			Status: "blocked", Comment: result.Error,
++			FailureReason: taskfailure.ReasonProcessCleanupUnconfirmed.String(),
++			SessionID:     result.SessionID, WorkDir: env.WorkDir, EnvRoot: env.RootDir,
++			Usage: usageEntries,
++		}, nil
+ 	case "idle_watchdog":
+ 		// The idle watchdog force-stopped the run because the backend
+ 		// went silent (e.g. claude blocked on a tool call against a
+@@ -9230,6 +9272,8 @@ func shouldRetryWithFreshSession(result agent.Result, priorSessionID string, too
+ //   - retry completed without a session id (e.g. all work via tools): take it,
+ //     but keep the id EMPTY. Never resurrect the poisoned id as a resumable
+ //     success.
++//   - retry cleanup is unconfirmed: take that result even without a new id.
++//     Never permit an older ordinary failure to authorize destructive cleanup.
+ //   - retry failed AND established no new session: keep `first`. Adopting the
+ //     second result here is exactly the bug — a second error lacking the
+ //     oversized-image markers would be classified resume-safe and the poisoned
+@@ -9245,7 +9289,7 @@ func reconcileFreshRetryResult(first agent.Result, firstUsage map[string]agent.T
+ 	case retry.SessionID != "":
+ 		retry.Usage = mergeUsage(firstUsage, retry.Usage)
+ 		return retry, retryTools
+-	case retry.Status == "completed":
++	case retry.Status == "completed" || retry.Status == "cleanup_unconfirmed":
+ 		retry.Usage = mergeUsage(firstUsage, retry.Usage)
+ 		return retry, retryTools
+ 	default:
+@@ -9754,14 +9798,24 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+ 		}
+ 	}
+ 
++	cleanupUnconfirmed := func() (agent.Result, int32, error) {
++		return agent.Result{
++			Status: "cleanup_unconfirmed",
++			Error:  "Runtime did not confirm process cleanup; background processes may still be running. Check them before manually rerunning this task.",
++		}, toolCount.Load(), nil
++	}
++
+ 	select {
+-	case result := <-session.Result:
++	case result, ok := <-session.Result:
+ 		stopWatchdog()
+ 		waitForDrain()
++		if !ok && session.CleanupRequired {
++			return cleanupUnconfirmed()
++		}
+ 		// terminalObserved outranks a watchdog that fired anyway: if the backend
+ 		// had already read its authoritative result, this is the real outcome and
+ 		// re-tagging it would report a completed run as a hang.
+-		if idleWatchdogFired.Load() && !terminalObserved() {
++		if idleWatchdogFired.Load() && !terminalObserved() && result.Status != "cleanup_unconfirmed" {
+ 			// The backend's wait goroutine (e.g. claude.go) translates the
+ 			// SIGKILL we delivered via agentCancel into Status="aborted".
+ 			// Re-tag it as "idle_watchdog" so runTask routes the
+@@ -9801,6 +9855,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+ 				// this is the real outcome, not a hang.
+ 				return result, toolCount.Load(), nil
+ 			} else if delivered {
++				if result.Status == "cleanup_unconfirmed" {
++					return result, toolCount.Load(), nil
++				}
+ 				// The backend's wait goroutine (e.g. claude.go) translates the
+ 				// SIGKILL we delivered via agentCancel into Status="aborted".
+ 				// Re-tag it so runTask routes the disposition through the
+@@ -9811,6 +9868,9 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+ 				}
+ 				return result, toolCount.Load(), nil
+ 			}
++			if session.CleanupRequired {
++				return cleanupUnconfirmed()
++			}
+ 			return agent.Result{
+ 				Status: "idle_watchdog",
+ 				Error:  idleWatchdogReason(time.Duration(idleWatchdogThreshold.Load())),
+@@ -9822,14 +9882,23 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
+ 		// upstream runCtx fired runCancel(); context.DeadlineExceeded is the
+ 		// drain deadline expiring on its own.
+ 		if errors.Is(drainCtx.Err(), context.Canceled) {
+-			if result, _, authoritative := awaitTerminalResult("upstream_context"); authoritative {
++			if result, delivered, authoritative := awaitTerminalResult("upstream_context"); authoritative || (delivered && result.Status == "cleanup_unconfirmed") {
+ 				return result, toolCount.Load(), nil
++			} else if session.CleanupRequired && !delivered {
++				return cleanupUnconfirmed()
+ 			}
+ 			return agent.Result{
+ 				Status: "cancelled",
+ 				Error:  "task cancelled by upstream context (server cancel or daemon shutdown)",
+ 			}, toolCount.Load(), nil
+ 		}
++		if session.CleanupRequired {
++			agentCancel()
++			if result, delivered, _ := awaitTerminalResult("drain_timeout"); delivered {
++				return result, toolCount.Load(), nil
++			}
++			return cleanupUnconfirmed()
++		}
+ 		return agent.Result{
+ 			Status: "timeout",
+ 			Error:  "agent did not produce result within drain timeout",
 diff --git a/server/internal/daemon/execenv/context.go b/server/internal/daemon/execenv/context.go
 index ac748c9a316747aef6a89e634b140bc5510ec0e4..c0caf1f29403c4a3953b1e510bbeb5c916bb961b 100644
 --- a/server/internal/daemon/execenv/context.go
@@ -63,10 +297,20 @@ index 76e6e338b7716bc1040a7a6906411c3c806b14e1..d2149cfb2320a52a589a81fe13a044a0
  	default:
  		return ""
 diff --git a/server/pkg/agent/agent.go b/server/pkg/agent/agent.go
-index cb1fb1236bd1a5854861c9a5a634cf1d06f34df4..41d3f04db5dd3869fac34998e7ac635ab36f6926 100644
+index cb1fb1236bd1a5854861c9a5a634cf1d06f34df4..2972ef4841f838654553bbe13b42db8059cfd5ae 100644
 --- a/server/pkg/agent/agent.go
 +++ b/server/pkg/agent/agent.go
-@@ -391,6 +391,7 @@ var SupportedTypes = []string{
+@@ -187,6 +187,9 @@ type Session struct {
+ 	// force-stop. The daemon's AgentToolWatchdog documentation states the
+ 	// operator-facing consequence.
+ 	InterruptBackgroundTools func() bool
++	// CleanupRequired means Result also acknowledges bounded process cleanup.
++	// Missing acknowledgement must not authorize automatic continuation.
++	CleanupRequired bool
+ 	// TerminalObserved reports whether the backend has already read its
+ 	// authoritative terminal result. Once true the run's outcome is decided and
+ 	// no liveness policy may reclassify it, however long the backend then takes
+@@ -391,6 +394,7 @@ var SupportedTypes = []string{
  	"qoder",
  	"qoderclicn",
  	"traecli",
@@ -74,7 +318,7 @@ index cb1fb1236bd1a5854861c9a5a634cf1d06f34df4..41d3f04db5dd3869fac34998e7ac635a
  	"grok",
  	"qwen",
  	"qwenpaw",
-@@ -493,6 +494,8 @@ func New(agentType string, cfg Config) (Backend, error) {
+@@ -493,6 +497,8 @@ func New(agentType string, cfg Config) (Backend, error) {
  		return &qoderBackend{cfg: cfg, defaultExecutable: qoderDefaultBinary(agentType)}, nil
  	case "traecli":
  		return &traecliBackend{cfg: cfg}, nil
@@ -83,7 +327,7 @@ index cb1fb1236bd1a5854861c9a5a634cf1d06f34df4..41d3f04db5dd3869fac34998e7ac635a
  	case "grok":
  		return &grokBackend{cfg: cfg}, nil
  	case "qwen":
-@@ -546,6 +549,7 @@ var launchHeaders = map[string]string{
+@@ -546,6 +552,7 @@ var launchHeaders = map[string]string{
  	"qoder":       "qodercli --acp",
  	"qoderclicn":  "qoderclicn --acp",
  	"traecli":     "traecli acp serve",
@@ -104,7 +348,7 @@ index 22a26feeb6f63338ae44989770511c6ce07453b3..eaa5ff89c481c469214ed2aa9bd6c377
  	"zeroclaw":    zeroclawBlockedArgs,
  }
 diff --git a/server/pkg/agent/models.go b/server/pkg/agent/models.go
-index d058d5ffcc4fbe594e56ce2723ebe3b60adccb2b..bb1da3a71b4ea0b5dfdee694e6b78dd0ddb7275d 100644
+index d058d5ffcc4fbe594e56ce2723ebe3b60adccb2b..8e258676fc0729658cf8ae6bec9e51f07f546dae 100644
 --- a/server/pkg/agent/models.go
 +++ b/server/pkg/agent/models.go
 @@ -290,6 +290,10 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
@@ -112,9 +356,9 @@ index d058d5ffcc4fbe594e56ce2723ebe3b60adccb2b..bb1da3a71b4ea0b5dfdee694e6b78dd0
  			return discoverCodebuddyModels(ctx, runtimeCmd)
  		})
 +	case "tomcat":
-+		// Preserve the configured runtime default and manual model IDs. Listing
-+		// must not start the shared service or create a throwaway conversation.
-+		return Catalog{Models: []Model{}}, nil
++		// No adapter memo: an explicit refresh must read newly saved credentials
++		// and models immediately, without changing the shared discovery cache.
++		return discoverTomcatModels(ctx, runtimeCmd)
  	case "qwen":
  		// Qwen Code has no account-independent headless model catalog. An
  		// empty list keeps the runtime default and manual model entry available
@@ -130,3 +374,25 @@ index 89affd99dffe0023d148e3d241754c4607132a6b..4c73882d4a566683632591a29916f55a
  	"zeroclaw":    "0.8.0",   // persistent ACP sessions and session/resume were added in 0.8.0
  	// opencode: honors TMPDIR/TMP/TEMP from 1.1.54. Earlier builds ignore all
  	// three when their embedded Bun runtime extracts a native module, writing
+diff --git a/server/pkg/taskfailure/failure.go b/server/pkg/taskfailure/failure.go
+index 4e50a0937ddbc53527c6218c35ed2e546014e0d0..c80f9e0705ed92f8e5163697a1ad47f92b340c57 100644
+--- a/server/pkg/taskfailure/failure.go
++++ b/server/pkg/taskfailure/failure.go
+@@ -89,6 +89,9 @@ const (
+ 	// agent timeout path.
+ 	ReasonTimeout Reason = "timeout"
+ 
++	// Process cleanup uncertainty is distinct from provider failure or cancellation.
++	ReasonProcessCleanupUnconfirmed Reason = "cleanup_unconfirmed"
++
+ 	// ReasonIterationLimit: the agent reached its per-run iteration
+ 	// cap and emitted a fallback "I reached the iteration limit"
+ 	// message. Treated as platform-side because it is a Multica-imposed
+@@ -283,6 +286,7 @@ var allReasons = []Reason{
+ 	ReasonRuntimeReconnectTimeout,
+ 	ReasonRuntimeRecovery,
+ 	ReasonTimeout,
++	ReasonProcessCleanupUnconfirmed,
+ 	ReasonIterationLimit,
+ 	ReasonAgentBlocked,
+ 	ReasonAPIInvalidRequest,

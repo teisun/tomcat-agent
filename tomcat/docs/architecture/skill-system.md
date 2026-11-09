@@ -589,10 +589,10 @@ tomcat/assets/skills/ → build.rs 显式名单 → 编译进二进制
                 其它技能：常驻清单                  write-plans：仅 PLAN 提醒指向
 ```
 
-- **正式来源**：`build.rs::BUILTIN_SKILLS` 登记 `verify`、`connectors`、`skill-creator`、`plugin-creator`、`write-plans`。新增内置技能必须登记，不是随便放一个目录就会打包。write-plans 的正文和两个附件以 `tomcat/assets/skills/write-plans/` 为维护源；构建和测试不读取试验目录 `acceptance-src/`，也不运行归档评测工具。
+- **正式来源**：`build.rs::BUILTIN_SKILLS` 登记 `verify`、`connectors`、`skill-creator`、`plugin-creator`、`write-plans`。新增内置技能必须登记，不是随便放一个目录就会打包。write-plans 的正文与四个附件（`tomcat-plan-workflow.md`、`writing-standards.md`、`plan-structure.md`、`final-check.md`）以 `tomcat/assets/skills/write-plans/` 为维护源；构建和测试不读取试验目录 `acceptance-src/`，也不运行归档评测工具。
 - **写入时机**：`src/api/chat/context.rs` 创建聊天上下文时调用 `materialize_builtin_skills`，由 `src/core/skill/builtin.rs` 将内嵌文件写到 `<work_dir>/skills/`（默认 `~/.tomcat/skills/`）。缺失文件会补齐，内容相同跳过，不同则原子替换；不是由 `tomcat init` 释放，也不会热更新正在运行的二进制。
 - **定制与禁用**：直接修改或删除托管副本，下次物化会被恢复。持久定制使用项目或 Agent 层同名技能，仍按现有发现优先级选择；全局关闭、按名禁用及 user-only 设置不被绕过。
-- **PLAN 专属指引**：共用清单渲染函数按名称排除 write-plans，但不改发现结果、`resolve`、`visible_skills()` 或 `/skill` 清单。PLAN 提醒只说先调用 `load_skill`，正文再指向工作流和写作标准两个附件；对话已有规范时可不重复加载。不增加动态清单、预算分摊或“已加载”状态。
+- **PLAN 专属指引**：共用清单渲染函数按名称排除 write-plans，但不改发现结果、`resolve`、`visible_skills()` 或 `/skill` 清单。PLAN 提醒只说先调用 `load_skill`；正文先指向工作流、写作标准与结构，第4步要求成稿后读取 Final Check 并完成检查。Final Check 从入口原文移出，除获准的锁／版本判定短语外保持原文，不重复注入。对话已有规范时可不重复加载。不增加动态清单、预算分摊或“已加载”状态。
 - **生效与权限边界**：PLAN 提醒逐请求按实时模式生成，同轮 `start_plan` 后的下一请求也不再提示加载。历史中已加载的内容不清理；清单不推荐不等于禁止显式读取，所有读取仍走权限闸门。关闭技能后沿用现有错误反馈，不自动启用或提供隐藏的备用规范。
 - **独立评审**：reviewer 继续使用自己的审查提示词，不为这项功能加载写作技能。即使原有 `expose_to_reviewer` 已开启，共用清单也不列 write-plans；工具暴露和加载权限本身不变。
 

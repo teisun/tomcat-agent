@@ -1,7 +1,4 @@
-//! `ask_question` 的 stdio 控制桥。
-//!
-//! 负责把 EventBus 上的一问一答协议转译成 `control_request` /
-//! `control_response` / `control_cancel` 帧。
+//! Translate the existing question panel to controller or same-project observer frames.
 
 use std::sync::Arc;
 
@@ -18,30 +15,25 @@ use super::controller_route::{ControlRecipient, ControllerRoute};
 use super::types::{ControlFrame, OutFrame};
 use super::writer::WriterHandle;
 
-/// Interaction support follows the current controller, not the session's origin.
+/// A controller binding resets prior automatic consent, but never removes question support.
 pub(super) fn bind_panel_for_controller(
     state: &super::ServeState,
     ctx: &crate::api::chat::ChatContext,
     session_id: &str,
 ) {
     let runtime = &ctx.session_runtime.plan_runtime;
-    if state.is_acp() {
-        // Context construction installs a terminal panel by default: actively remove it.
-        runtime.detach_ask_question_panel();
-    } else {
-        runtime.attach_ask_question_panel(
-            state
-                .ask_question
-                .panel_for_session(ctx.global_services.event_bus.clone(), session_id),
-        );
-    }
+    runtime.set_interaction_policy(state.acp_options.unwrap_or_default().interaction_policy());
+    runtime.attach_ask_question_panel(
+        state
+            .ask_question
+            .panel_for_session(ctx.global_services.event_bus.clone(), session_id),
+    );
 }
 
 struct PendingQuestion {
     recipient: ControlRecipient,
-    response_event: String,
     session_id: String,
-    tool_call_id: Option<String>,
+    request: AskQuestionWireRequest,
     event_bus: Arc<dyn EventBus>,
 }
 
@@ -49,6 +41,15 @@ struct PendingQuestion {
 pub struct ServeAskQuestionBridge {
     route: ControllerRoute,
     pending: Arc<DashMap<String, PendingQuestion>>,
+}
+
+fn question_frame(pending: &PendingQuestion) -> Result<OutFrame, AppError> {
+    Ok(OutFrame::Control(ControlFrame::request(
+        pending.request.request_id.clone(),
+        "ask_question",
+        Some(pending.session_id.clone()),
+        serde_json::to_value(&pending.request)?,
+    )))
 }
 
 impl ServeAskQuestionBridge {
@@ -66,13 +67,59 @@ impl ServeAskQuestionBridge {
     pub(super) fn owns_pending(&self, request_id: &str, connection_id: uuid::Uuid) -> bool {
         self.pending
             .get(request_id)
-            .is_some_and(|p| p.recipient.connection_id == connection_id)
+            .is_some_and(|entry| entry.recipient.connection_id == connection_id)
+    }
+
+    fn may_answer(&self, pending: &PendingQuestion, connection_id: uuid::Uuid) -> bool {
+        pending.recipient.connection_id == connection_id
+            || (pending.recipient.is_acp
+                && self.route.is_observer(&pending.session_id, connection_id))
+    }
+
+    pub(super) fn may_respond(&self, request_id: &str, connection_id: uuid::Uuid) -> bool {
+        self.pending
+            .get(request_id)
+            .is_some_and(|entry| self.may_answer(&entry, connection_id))
+    }
+
+    pub(super) fn replay_for(
+        &self,
+        connection: &super::ServeState,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        if !self.route.is_observer(session_id, connection.connection_id) {
+            return Ok(());
+        }
+        for entry in self
+            .pending
+            .iter()
+            .filter(|entry| entry.session_id == session_id && entry.recipient.is_acp)
+        {
+            // Hold the pending borrow through enqueue: resolution must enqueue its cancel after this request.
+            connection.writer.send(question_frame(&entry)?)?;
+        }
+        Ok(())
+    }
+
+    fn withdraw(&self, pending: &PendingQuestion, reason: &str, except: Option<uuid::Uuid>) {
+        if !pending.recipient.is_acp {
+            return;
+        }
+        for observer in self.route.observers(&pending.session_id) {
+            if Some(observer.connection_id) != except {
+                let _ = observer.writer.send(OutFrame::Control(ControlFrame::cancel(
+                    pending.request.request_id.clone(),
+                    Some(pending.session_id.clone()),
+                    serde_json::json!({"reason": reason}),
+                )));
+            }
+        }
     }
 
     pub fn has_pending_session(&self, session_id: &str) -> bool {
         self.pending
             .iter()
-            .any(|pending| pending.session_id == session_id)
+            .any(|entry| entry.session_id == session_id)
     }
 
     pub fn panel_for_session(
@@ -80,10 +127,16 @@ impl ServeAskQuestionBridge {
         event_bus: Arc<dyn EventBus>,
         session_id: &str,
     ) -> Arc<dyn crate::api::chat::panels::AskQuestionPanel> {
+        let bridge = self.clone();
         Arc::new(
             EventBusAskQuestionPanel::new(event_bus)
                 .with_session_id(session_id.to_string())
-                .with_request_id_prefix(format!("askq-{session_id}")),
+                .with_request_id_prefix(format!("askq-{session_id}"))
+                .with_request_finalizer(Arc::new(move |request_id| {
+                    if let Some((_, pending)) = bridge.pending.remove(request_id) {
+                        bridge.withdraw(&pending, "terminated", None);
+                    }
+                })),
         )
     }
 
@@ -92,8 +145,7 @@ impl ServeAskQuestionBridge {
         session_id: String,
         event_bus: Arc<dyn EventBus>,
     ) -> EventListenerId {
-        let route = self.route.clone();
-        let pending = Arc::clone(&self.pending);
+        let bridge = self.clone();
         let callback_bus = event_bus.clone();
         event_bus.on(
             crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
@@ -119,35 +171,45 @@ impl ServeAskQuestionBridge {
                     );
                     return Ok(());
                 }
-                let Some(recipient) = route.recipient(&session_id) else {
+                let Some(recipient) = bridge.route.recipient(&session_id) else {
                     let response = serde_json::to_value(AskQuestionWireResponse {
                         request_id: request.request_id.clone(),
                         result: AskQuestionResult::terminal(AskQuestionOutcome::HostDisconnected),
                     })?;
-                    callback_bus.emit_sync(
-                        &request.response_event,
-                        EventContext::new(request.response_event.clone(), response)
-                            .with_session_id(session_id.clone()),
-                    )?;
+                    // EventBus invokes listeners under its lock; reply after this callback returns.
+                    let bus = callback_bus.clone();
+                    let session_id = session_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = bus.emit_sync(
+                            &request.response_event,
+                            EventContext::new(request.response_event.clone(), response)
+                                .with_session_id(session_id),
+                        ) {
+                            tracing::warn!(%error, "deliver disconnected question response");
+                        }
+                    });
                     return Ok(());
                 };
-                pending.insert(
-                    request.request_id.clone(),
+                let request_id = request.request_id.clone();
+                bridge.pending.insert(
+                    request_id.clone(),
                     PendingQuestion {
-                        recipient: recipient.clone(),
-                        response_event: request.response_event.clone(),
+                        recipient,
                         session_id: session_id.clone(),
-                        tool_call_id: request.tool_call_id.clone(),
+                        request,
                         event_bus: callback_bus.clone(),
                     },
                 );
-                let frame = OutFrame::Control(ControlFrame::request(
-                    request.request_id.clone(),
-                    "ask_question",
-                    Some(session_id.clone()),
-                    ctx.payload.clone(),
-                ));
-                let _ = recipient.writer.send(frame);
+                if let Some(entry) = bridge.pending.get(&request_id) {
+                    let frame = question_frame(&entry)?;
+                    if entry.recipient.is_acp {
+                        for observer in bridge.route.observers(&session_id) {
+                            let _ = observer.writer.send(frame.clone());
+                        }
+                    } else {
+                        let _ = entry.recipient.writer.send(frame);
+                    }
+                }
                 Ok(())
             }),
         )
@@ -172,31 +234,35 @@ impl ServeAskQuestionBridge {
             return Ok(false);
         };
         let Some(entry) = self.pending.get(request_id) else {
-            tracing::debug!(
-                request_id = request_id,
-                "dropping unknown serve control_response"
-            );
+            tracing::debug!(request_id, "dropping unknown serve control_response");
             return Ok(false);
         };
-        if entry.recipient.connection_id != connection_id
+        let observer = entry.recipient.connection_id != connection_id;
+        if !self.may_answer(&entry, connection_id)
             || session_id
                 .as_deref()
                 .is_some_and(|id| id != entry.session_id)
+            || (observer && session_id.as_deref() != Some(entry.session_id.as_str()))
+            || ["sessionId", "session_id"].iter().any(|key| {
+                payload
+                    .get(*key)
+                    .is_some_and(|id| id.as_str() != Some(entry.session_id.as_str()))
+            })
         {
             tracing::warn!(
-                request_id = request_id,
+                request_id,
                 response_session_id = ?session_id,
                 pending_session_id = entry.session_id,
-                tool_call_id = ?entry.tool_call_id,
+                tool_call_id = ?entry.request.tool_call_id,
+                %connection_id,
                 "dropping ask_question response routed to the wrong session"
             );
             return Ok(false);
         }
-        // Decode with the panel's wire contract before consuming its only response route.
         let payload = if payload.get("requestId").is_some() || payload.get("request_id").is_some() {
             payload.clone()
         } else {
-            serde_json::json!({ "requestId": request_id, "result": payload })
+            serde_json::json!({"requestId": request_id, "result": payload})
         };
         let parsed = match serde_json::from_value::<AskQuestionWireResponse>(payload) {
             Ok(parsed) => parsed,
@@ -212,20 +278,42 @@ impl ServeAskQuestionBridge {
             );
             return Ok(false);
         }
-        let response = serde_json::to_value(parsed).map_err(|error| {
-            AppError::Config(crate::infra::i18n::tr(
-                "serve.questionResponseSerialize",
-                &[("detail", &error.to_string())],
-            ))
-        })?;
+        let rejection = if observer && parsed.result.outcome != AskQuestionOutcome::Answered {
+            Some("observers may only submit answers")
+        } else if parsed.result.outcome == AskQuestionOutcome::Answered
+            && crate::core::tools::plan_tool::ask_question::validate_answers(
+                &entry.request.questions,
+                &parsed.result,
+            )
+            .is_err()
+        {
+            Some("answers failed question validation")
+        } else if parsed.result.outcome != AskQuestionOutcome::Answered
+            && !parsed.result.answers.is_empty()
+        {
+            Some("terminal responses must not contain answers")
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            tracing::warn!(
+                request_id,
+                observer,
+                reason,
+                "dropping rejected ask_question response"
+            );
+            return Ok(false);
+        }
+        let response = serde_json::to_value(parsed)?;
         drop(entry);
         let Some((_, pending)) = self.pending.remove(request_id) else {
             return Ok(false);
         };
+        self.withdraw(&pending, "resolved", Some(connection_id));
         pending.event_bus.emit_sync(
-            &pending.response_event,
-            EventContext::new(pending.response_event.clone(), response)
-                .with_session_id(pending.session_id),
+            &pending.request.response_event,
+            EventContext::new(pending.request.response_event.clone(), response)
+                .with_session_id(pending.session_id.clone()),
         )?;
         Ok(true)
     }
@@ -242,18 +330,16 @@ impl ServeAskQuestionBridge {
         let ControlFrame::ControlCancel {
             request_id,
             session_id,
-            payload: _,
+            ..
         } = frame
         else {
             return Ok(false);
         };
         let Some(entry) = self.pending.get(request_id) else {
-            tracing::debug!(
-                request_id = request_id,
-                "dropping unknown serve control_cancel"
-            );
+            tracing::debug!(request_id, "dropping unknown serve control_cancel");
             return Ok(false);
         };
+        // An observer leaving is not a cancellation of the controller's question.
         if entry.recipient.connection_id != connection_id
             || session_id
                 .as_deref()
@@ -263,6 +349,8 @@ impl ServeAskQuestionBridge {
                 request_id,
                 cancel_session_id = ?session_id,
                 pending_session_id = entry.session_id,
+                tool_call_id = ?entry.request.tool_call_id,
+                %connection_id,
                 "dropping ask_question cancel routed to the wrong session"
             );
             return Ok(false);
@@ -271,81 +359,71 @@ impl ServeAskQuestionBridge {
         let Some((_, pending)) = self.pending.remove(request_id) else {
             return Ok(false);
         };
+        self.withdraw(&pending, "interrupted", None);
         let payload = serde_json::to_value(AskQuestionWireResponse {
             request_id: request_id.clone(),
-            result: crate::api::chat::panels::AskQuestionResult::terminal(
-                crate::api::chat::panels::AskQuestionOutcome::Interrupted,
-            ),
-        })
-        .map_err(|error| {
-            AppError::Config(crate::infra::i18n::tr(
-                "serve.questionCancelSerialize",
-                &[("detail", &error.to_string())],
-            ))
+            result: AskQuestionResult::terminal(AskQuestionOutcome::Interrupted),
         })?;
         pending.event_bus.emit_sync(
-            &pending.response_event,
-            EventContext::new(pending.response_event.clone(), payload)
-                .with_session_id(pending.session_id),
+            &pending.request.response_event,
+            EventContext::new(pending.request.response_event.clone(), payload)
+                .with_session_id(pending.session_id.clone()),
         )?;
         Ok(true)
     }
 
     pub fn cancel_live_session(&self, session_id: &str, reason: &str) -> usize {
-        let request_ids: Vec<String> = self
+        for entry in self
             .pending
             .iter()
-            .filter(|entry| entry.value().session_id == session_id)
-            .map(|entry| entry.key().clone())
-            .collect();
-        for request_id in &request_ids {
-            let Some(pending) = self.pending.get(request_id) else {
-                continue;
-            };
-            let _ = pending
+            .filter(|entry| entry.session_id == session_id && !entry.recipient.is_acp)
+        {
+            let _ = entry
                 .recipient
                 .writer
                 .send(OutFrame::Control(ControlFrame::cancel(
-                    request_id.clone(),
+                    entry.key().clone(),
                     Some(session_id.to_string()),
-                    serde_json::json!({ "outcome": "interrupted", "reason": reason }),
+                    serde_json::json!({"outcome":"interrupted", "reason":reason}),
                 )));
         }
         self.finalize_session(session_id, AskQuestionOutcome::Interrupted)
     }
 
     pub fn finalize_session(&self, session_id: &str, outcome: AskQuestionOutcome) -> usize {
-        let keys: Vec<String> = self
+        let keys = self
             .pending
             .iter()
-            .filter(|entry| entry.value().session_id == session_id)
+            .filter(|entry| entry.session_id == session_id)
             .map(|entry| entry.key().clone())
-            .collect();
+            .collect::<Vec<_>>();
         let mut finalized = 0;
         for request_id in keys {
             let Some((_, pending)) = self.pending.remove(&request_id) else {
                 continue;
             };
-            let payload = match serde_json::to_value(AskQuestionWireResponse {
+            self.withdraw(&pending, "terminated", None);
+            let payload = serde_json::to_value(AskQuestionWireResponse {
                 request_id,
                 result: AskQuestionResult::terminal(outcome),
-            }) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    tracing::error!(%error, "serialize ask_question terminal response failed");
-                    continue;
+            });
+            match payload {
+                Ok(payload) => {
+                    if pending
+                        .event_bus
+                        .emit_sync(
+                            &pending.request.response_event,
+                            EventContext::new(pending.request.response_event.clone(), payload)
+                                .with_session_id(pending.session_id.clone()),
+                        )
+                        .is_ok()
+                    {
+                        finalized += 1;
+                    }
                 }
-            };
-            if pending
-                .event_bus
-                .emit_sync(
-                    &pending.response_event,
-                    EventContext::new(pending.response_event.clone(), payload)
-                        .with_session_id(pending.session_id),
-                )
-                .is_ok()
-            {
-                finalized += 1;
+                Err(error) => {
+                    tracing::error!(%error, "serialize ask_question terminal response failed")
+                }
             }
         }
         finalized

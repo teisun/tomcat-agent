@@ -826,7 +826,7 @@ async fn update_plan_emits_plan_todos_event() {
     common::setup_logging();
     info!(target: "test", phase = "arrange", "隔离 HOME + PlanRuntime + transcript spy；create_plan 并提升到 executing");
     let home = setup_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let captured = attach_transcript_spy(&rt);
 
     rt.enter_plan().unwrap();

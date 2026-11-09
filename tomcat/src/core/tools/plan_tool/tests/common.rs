@@ -79,11 +79,14 @@ pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
 }
 
 pub fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
+    let session_id = rt
+        .current_session_id()
+        .expect("executing fixtures need a runtime with a session ID");
     let path = plan_path_for_id(plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some(session_key.into());
-    plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
+    plan.frontmatter.session_id = Some(session_id);
     write_plan(&path, &plan, 2000).unwrap();
     rt.set_max_code_review_rounds(0);
     rt.bind_plan_file_for_test(path);

@@ -37,6 +37,7 @@ import {
   assertWebviewResumeCardFlow,
   assertWebviewRetryRecoveryFlow,
   assertAutomaticErrorRecoveryCountdown,
+  assertRequestRetryAndPaginatedResume,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
@@ -67,7 +68,7 @@ suite("Tomcat host E2E", () => {
   });
 
   (process.env.TOMCAT_E2E_EXTERNAL_OBSERVATION ? test : test.skip)("external host observation: existing host session and project boundary", async function () {
-    this.timeout(90_000);
+    this.timeout(240_000); // A peer devhost stays open while the answering window builds and starts.
     await assertExternalHostObservation(getTomcatExtensionApi);
   });
 
@@ -199,6 +200,11 @@ suite("Tomcat host E2E", () => {
   test("shows running review progress and settles into pass/fail rows", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewReviewProgressFlow(api);
+  });
+
+  test("request retry feedback and paginated Resume", async function () {
+    this.timeout(120_000);
+    await assertRequestRetryAndPaginatedResume(await getTomcatExtensionApi());
   });
 
   test("automatic error recovery countdown", async function () {

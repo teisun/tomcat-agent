@@ -4,6 +4,77 @@ use async_trait::async_trait;
 
 use super::common::*;
 
+#[tokio::test]
+async fn review_policy_auto_skip_and_cancel_keep_plan_and_never_start() {
+    use crate::core::plan_runtime::{
+        AskQuestionTermination, InteractionPolicy, MockAskQuestionPanel, PlanReviewPolicy,
+        QuestionPolicy,
+    };
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    for (index, (review, cancelled, expected_calls)) in [
+        (PlanReviewPolicy::Auto, false, 1),
+        (PlanReviewPolicy::Skip, false, 0),
+        (PlanReviewPolicy::Ask, false, 0),
+        (PlanReviewPolicy::Auto, true, 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rt = PlanRuntime::new("policy");
+        rt.enter_plan().unwrap();
+        rt.set_interaction_policy(InteractionPolicy {
+            review,
+            questions: QuestionPolicy::Recommended,
+            ..Default::default()
+        });
+        let dispatcher = std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![ok_review()]));
+        rt.attach_plan_reviewer(dispatcher.clone());
+        let panel = std::sync::Arc::new(MockAskQuestionPanel::new(vec![
+            crate::core::plan_runtime::AskQuestionResult::answered(vec![
+                crate::core::plan_runtime::Answer {
+                    question_id: "plan-review".into(),
+                    option_ids: vec!["skip".into()],
+                    custom_text: None,
+                    skipped: false,
+                    picked_recommended: false,
+                },
+            ]),
+        ]));
+        rt.attach_ask_question_panel(panel.clone());
+        let termination = AskQuestionTermination::default();
+        if cancelled {
+            termination.interrupt();
+        }
+        let mut args = good_args_with_todo();
+        args.goal = format!("policy {index}");
+        let out = create_plan::execute_for_tool(&rt, args, false, termination, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            dispatcher.call_count.load(Ordering::Relaxed),
+            expected_calls
+        );
+        assert_eq!(
+            panel.remaining(),
+            usize::from(review != PlanReviewPolicy::Ask)
+        );
+        let path = plan_path_for_id(out["plan_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            read_plan(&path).unwrap().frontmatter.state,
+            PlanFileState::Planning
+        );
+        assert_eq!(rt.mode(), AgentMode::Plan);
+        if review == PlanReviewPolicy::Skip {
+            assert_eq!(out["review"]["reviewer_stop_reason"], "policy_skipped");
+        }
+        if cancelled {
+            assert_eq!(out["review"]["reviewer_stop_reason"], "parent_abort");
+        }
+    }
+    cleanup_home(&home);
+}
+
 fn consent_to_review(rt: &PlanRuntime) {
     use crate::core::plan_runtime::panels::{Answer, AskQuestionResult, MockAskQuestionPanel};
     rt.attach_ask_question_panel(std::sync::Arc::new(MockAskQuestionPanel::new(vec![

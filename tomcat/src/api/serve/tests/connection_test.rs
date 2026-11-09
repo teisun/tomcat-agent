@@ -910,6 +910,7 @@ fn connect(runtime: &Arc<runtime::ServeRuntime>) -> (Arc<ServeState>, SharedWrit
         None,
         crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
         None,
+        None,
     );
     state.initialized.store(true, Ordering::SeqCst);
     (state, buffer)
@@ -972,7 +973,249 @@ async fn new_shared(state: &Arc<ServeState>, cwd: &std::path::Path, id: &str) {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn ask_question_panel_follows_the_controlling_protocol() {
+async fn acp_observer_questions_wait_replay_validate_and_have_one_winner() {
+    use crate::core::plan_runtime::{AskQuestionOutcome, AskQuestionTermination};
+    use serde_json::json;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(8);
+    let host = connect_acp(&runtime);
+    new_shared(&host, work.path(), "host").await;
+    let id = host.active_session_id().unwrap();
+    let slot = runtime.registry.get(&id).unwrap();
+    let panel = slot
+        .ctx
+        .session_runtime
+        .plan_runtime
+        .ask_question_panel()
+        .unwrap();
+    let questions = serde_json::from_value(json!([{"id":"choice", "prompt":"Choose", "options":[
+        {"id":"first", "label":"First", "recommended":true}, {"id":"second", "label":"Second"}
+    ]}]))
+    .unwrap();
+    let waiting = tokio::spawn(async move {
+        panel
+            .ask(questions, AskQuestionTermination::default())
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !runtime.ask_question.has_pending_session(&id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!waiting.is_finished(), "no observers must still wait");
+    let (first, output) = connect_in_project(&runtime, work.path()).await;
+    let switch = |label: &str| ServeCommand::SwitchSession {
+        id: Some(label.into()),
+        session_id: id.clone(),
+    };
+    handle_command(first.clone(), switch("late")).await.unwrap();
+    let question = frame(&output, |value| value["subtype"] == "ask_question").await;
+    let request_id = question["requestId"].as_str().unwrap().to_owned();
+    first.disconnect().await.unwrap();
+    assert!(!waiting.is_finished());
+    let (second, second_output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(second.clone(), switch("reconnected"))
+        .await
+        .unwrap();
+    let replay = frame(&second_output, |value| value["subtype"] == "ask_question").await;
+    assert_eq!(replay["requestId"], request_id);
+    let (third, third_output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(third.clone(), switch("third"))
+        .await
+        .unwrap();
+    frame(&third_output, |value| value["subtype"] == "ask_question").await;
+    let result = |option: &str| {
+        json!({"outcome":"answered","answers":[{
+            "questionId":"choice","optionIds":[option],"pickedRecommended":false
+        }]})
+    };
+    let answer = |payload| ServeCommand::ControlResponse {
+        request_id: request_id.clone(),
+        session_id: Some(id.clone()),
+        payload,
+    };
+    super::super::stdin::dispatch_command(
+        second.clone(),
+        ServeCommand::ControlCancel {
+            request_id: request_id.clone(),
+            session_id: Some(id.clone()),
+            payload: json!({}),
+        },
+    )
+    .await
+    .unwrap();
+    for payload in [
+        json!({"outcome":"interrupted", "answers":[]}),
+        result("invalid"),
+        json!({"requestId":"wrong-request", "result":result("second")}),
+        json!({"requestId":request_id, "sessionId":"wrong-session", "result":result("second")}),
+    ] {
+        super::super::stdin::dispatch_command(second.clone(), answer(payload))
+            .await
+            .unwrap();
+        assert!(runtime.ask_question.has_pending_session(&id));
+    }
+    let answers = [
+        (second.connection_id, result("second")),
+        (third.connection_id, result("first")),
+    ];
+    let barrier = std::sync::Barrier::new(2);
+    let wins = std::thread::scope(|scope| {
+        let threads = answers
+            .iter()
+            .map(|(connection, payload)| {
+                let barrier = &barrier;
+                let bridge = &runtime.ask_question;
+                let frame =
+                    ControlFrame::response(request_id.clone(), Some(id.clone()), payload.clone());
+                scope.spawn(move || {
+                    barrier.wait();
+                    bridge
+                        .handle_control_response_from(&frame, *connection)
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(wins.iter().filter(|won| **won).count(), 1);
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answered.outcome, AskQuestionOutcome::Answered);
+    assert_eq!(
+        answered.answers[0].option_ids,
+        [if wins[0] { "second" } else { "first" }]
+    );
+    let loser = if wins[0] {
+        &third_output
+    } else {
+        &second_output
+    };
+    let withdrawn = frame(loser, |value| {
+        value["type"] == "control_cancel" && value["requestId"] == request_id
+    })
+    .await;
+    assert_eq!(withdrawn["payload"]["reason"], "resolved");
+    assert!(!runtime.ask_question.has_pending_session(&id));
+    super::super::stdin::dispatch_command(third.clone(), answer(result("first")))
+        .await
+        .unwrap();
+    assert_eq!(*slot.controller.lock(), Some(host.connection_id));
+    for connection in [second, third] {
+        connection.disconnect().await.unwrap();
+    }
+    host.disconnect().await.unwrap();
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn locally_terminated_question_retires_the_observer_route() {
+    use crate::core::plan_runtime::{AskQuestionOutcome, AskQuestionTermination};
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(4);
+    let host = connect_acp(&runtime);
+    new_shared(&host, work.path(), "host").await;
+    let id = host.active_session_id().unwrap();
+    let slot = runtime.registry.get(&id).unwrap();
+    let (observer, output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(
+        observer.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("observe".into()),
+            session_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut previous = String::new();
+    for disconnected in [false, true] {
+        let panel = slot
+            .ctx
+            .session_runtime
+            .plan_runtime
+            .ask_question_panel()
+            .unwrap();
+        let termination = AskQuestionTermination::default();
+        let signal = termination.clone();
+        let waiting = tokio::spawn(async move {
+            panel
+                .ask(
+                    serde_json::from_value(
+                        serde_json::json!([{"id":"q", "prompt":"Choose", "options":[
+                            {"id":"a", "label":"A", "recommended":true}, {"id":"b", "label":"B"}
+                        ]}]),
+                    )
+                    .unwrap(),
+                    termination,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !runtime.ask_question.has_pending_session(&id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let question = frame(&output, |frame| {
+            frame["subtype"] == "ask_question" && frame["requestId"] != previous
+        })
+        .await;
+        let request = question["requestId"].as_str().unwrap().to_owned();
+        previous = request.clone();
+        if disconnected {
+            signal.host_disconnected();
+        } else {
+            signal.interrupt();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            if disconnected {
+                AskQuestionOutcome::HostDisconnected
+            } else {
+                AskQuestionOutcome::Interrupted
+            }
+        );
+        assert!(!runtime.ask_question.has_pending_session(&id));
+        frame(&output, |frame| {
+            frame["type"] == "control_cancel" && frame["requestId"] == request
+        })
+        .await;
+    }
+    observer.disconnect().await.unwrap();
+    host.disconnect().await.unwrap();
+    let no_controller = slot
+        .ctx
+        .session_runtime
+        .plan_runtime
+        .ask_question_panel()
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        no_controller.ask(vec![], Default::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, AskQuestionOutcome::HostDisconnected);
+    assert!(!runtime.ask_question.has_pending_session(&id));
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn ask_question_panel_survives_controller_changes_without_acp_load_starting_work() {
     use serde_json::json;
 
     async fn assert_support(slot: &registry::SessionSlot, expected: bool) {
@@ -988,15 +1231,37 @@ async fn ask_question_panel_follows_the_controlling_protocol() {
         assert_eq!(snapshot.system_text().contains("- ask_question:"), expected);
     }
 
+    use crate::core::plan_runtime::{
+        InteractionPolicy, PlanReviewPolicy, PlanStartPolicy, QuestionPolicy,
+    };
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(4);
-    let host = connect_acp(&runtime);
+    let launch = crate::api::acp::AcpLaunchOptions {
+        plan_review: Some(PlanReviewPolicy::Auto),
+        question_policy: Some(QuestionPolicy::Recommended),
+        plan_start: Some(PlanStartPolicy::Auto),
+        ..Default::default()
+    };
+    let connect_auto = || {
+        let (writer, _) = spawn_buffered_writer(&runtime.cfg.serve);
+        let connection = ServeState::connect_with_source(
+            runtime.clone(),
+            writer,
+            Some(crate::core::session::SessionOrigin::Acp { client_name: None }),
+            crate::infra::platform::EnvironmentSnapshot::capture().unwrap(),
+            None,
+            Some(launch),
+        );
+        connection.initialized.store(true, Ordering::SeqCst);
+        connection
+    };
+    let host = connect_auto();
     new_shared(&host, work.path(), "host-new").await;
     let host_slot = runtime
         .registry
         .get(&host.active_session_id().unwrap())
         .unwrap();
-    assert_support(&host_slot, false).await;
+    assert_support(&host_slot, true).await;
 
     let (native, _) = connect(&runtime);
     new_shared(&native, work.path(), "native-new").await;
@@ -1012,7 +1277,11 @@ async fn ask_question_panel_follows_the_controlling_protocol() {
     };
     handle_command(host.clone(), load()).await.unwrap();
     assert_eq!(*slot.controller.lock(), Some(host.connection_id));
-    assert_support(&slot, false).await;
+    assert_support(&slot, true).await;
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.interaction_policy(),
+        launch.interaction_policy()
+    );
 
     let (next_native, output) = connect_in_project(&runtime, work.path()).await;
     for (request, takes_control) in [("observe", false), ("take-back", true)] {
@@ -1032,8 +1301,25 @@ async fn ask_question_panel_follows_the_controlling_protocol() {
             frame(&output, |f| f["id"] == request).await["payload"]["access"],
             if takes_control { "control" } else { "observe" }
         );
-        assert_support(&slot, takes_control).await;
+        assert_support(&slot, true).await;
+        assert_eq!(
+            slot.ctx.session_runtime.plan_runtime.interaction_policy(),
+            if takes_control {
+                InteractionPolicy::default()
+            } else {
+                launch.interaction_policy()
+            }
+        );
     }
+    next_native.disconnect().await.unwrap();
+    let next_host = connect_auto();
+    handle_command(next_host.clone(), load()).await.unwrap();
+    assert_eq!(*slot.controller.lock(), Some(next_host.connection_id));
+    assert_eq!(
+        slot.ctx.session_runtime.plan_runtime.interaction_policy(),
+        launch.interaction_policy()
+    );
+    next_host.disconnect().await.unwrap();
 
     // Persist a restart-interrupted question, then exercise the real cold-load path.
     let session = &slot.ctx.session_runtime.session;
@@ -1055,8 +1341,7 @@ async fn ask_question_panel_follows_the_controlling_protocol() {
     assert!(crate::api::chat::has_resumable_tail_ask_question(session).unwrap());
     let history = session.transcript_path(&id);
     let before = std::fs::read(&history).unwrap();
-    next_native.disconnect().await.unwrap();
-    cleanup_session_slot(&next_native, &slot, SlotCleanup::Close)
+    cleanup_session_slot(&next_host, &slot, SlotCleanup::Close)
         .await
         .unwrap();
     assert!(runtime.registry.get(&id).is_none());
@@ -1071,9 +1356,11 @@ async fn ask_question_panel_follows_the_controlling_protocol() {
         loaded.origin.is_none(),
         "capability must not depend on origin"
     );
-    assert_support(&loaded, false).await;
-    assert!(!loaded.resume_pending_ask_question.load(Ordering::SeqCst),
-        "an initialized non-interactive controller must not leave a deferred UI flag blocking deletion");
+    assert_support(&loaded, true).await;
+    assert!(
+        !loaded.resume_pending_ask_question.load(Ordering::SeqCst),
+        "ACP load must consume the deferred resume flag without starting a turn"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     flush(&cold_host, &output).await;
     assert!(!loaded.is_busy());

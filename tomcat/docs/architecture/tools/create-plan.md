@@ -1,4 +1,4 @@
-# `create_plan`：先保存计划，再由用户选择评审
+# `create_plan`：先保存计划，再按会话策略评审
 
 ```text
 Plan 模式下提交 goal / draft / todos
@@ -7,10 +7,10 @@ Plan 模式下提交 goal / draft / todos
 校验 → 带锁保存 PlanFile → 刷新 ActivePlan → plan.create / plan.todos
           │                              （此时计划已可使用）
           ▼
-询问是否进行独立评审：收益 + 额外模型用量 + 可能数分钟以上等待
-          ├─ 明确同意 → 同步等待 Plan Reviewer → advisory summary
-          ├─ 跳过     → user_skipped，保留计划
-          └─ 中断/断连/无交互面板 → interrupted，保留计划
+评审策略：plan_review（默认 ask）
+          ├─ ask  → 询问收益 / 模型用量 / 等待时间；明确同意才评审
+          ├─ auto → 保存后直接独立评审；回合取消则不派发
+          └─ skip → policy_skipped，保留计划且不调用模型
           │
           ▼
 工具返回 plan_id / path / state / items / review
@@ -19,7 +19,7 @@ Plan 模式下提交 goal / draft / todos
 
 ## 1. 需求背景与边界
 
-`create_plan` 将规划内容保存为 `~/.tomcat/plans/<plan_id>.plan.md`。保存和是否花费模型用量进行评审是两件事：先保存，再征求同意；不得把“建议评审”变成每次创建必跑的后台任务。
+`create_plan` 将规划内容保存为 `~/.tomcat/plans/<plan_id>.plan.md`。保存和是否花费模型用量评审是两件事：先保存，再读取本控制连接的评审策略。默认 ask 仍征求同意；显式 auto 是预先同意评审，不是用户批准开发。
 
 - 工具目录保持稳定；handler 只允许 Plan 会话模式调用。非 Plan 返回可操作的拒绝，不能把模式限制说成工具不可见。
 - runtime 从 goal 派生 `plan_id`，调用者不得传 `plan_id`、旧 `body` 或额外顶层字段。
@@ -33,11 +33,23 @@ Plan 模式下提交 goal / draft / todos
 | 输入 | 当前契约 |
 | --- | --- |
 | `goal` | 非空目标，参与派生身份；文件名由 runtime 决定 |
-| `draft` | 非空方案正文，规范化后写入 `## Plan`；不需要重复外层标题 |
+| `draft` | 非空的完整方案正文，不是摘要；可含二级拆解、可选章节与验收，runtime 补外壳，不需重复外层标题 |
 | `todos` | 至少一项；每项包含唯一 id、content，status 默认 pending，kind 默认 work |
 | `todos[].kind` | work 或 acceptance；规范要求 acceptance 用于最终验收，当前校验硬性限制最多一项（不按索引拦截）；runtime 不自动补建 |
 
 待办复用现有 `ops::apply_todos_ops` 和 `validate_single_acceptance` 校验。完整持久字段以 `src/core/plan_runtime/file_store.rs::PlanFileFrontmatter` 为准，不在本文另维护一份容易漂移的完整 JSON Schema。
+
+### 正文保存边界
+
+```text
+合法正文（含普通 Notes 章） → 保留层级、顺序、内部空白与空章
+开头为 Goal / Draft / Plan → 仅兼容去旧包装，保留其余正文
+                             └─ 代码围栏内的标题不参与包装识别
+```
+
+只在去外侧空白后的开头是 `## Goal`、`## Draft` 或 `## Plan` 时处理旧包装；其中 Goal 与参数相同时去重复目标，否则保留内容，Plan／Draft／Notes 只去包装标题。普通标题不降级，独立 Notes 章不剥离。反引号／波浪线围栏按开启长度与同类关闭标记匹配，未闭合时保留余下内容。
+
+正文置于生成的 `## Plan` 与自动待办章之间；无约2000字符的摘要建议。沿用 LF 换行与外侧空白处理，不承诺 CRLF 字节保真，不改变文件格式、锁或权限。
 
 持久字段的职责：
 
@@ -48,11 +60,15 @@ Plan 模式下提交 goal / draft / todos
 
 `write_plan` 完成并释放 advisory 文件锁后，才刷新缓存、记录事件和进入交互。保存失败时不启动评审。不要拿耗时的用户等待或模型请求占用计划写锁。
 
-## 3. 明确同意后才评审
+## 3. 会话评审策略
 
-`execute_for_tool` 复用现有问答面板，不新增确认协议。面板有两个选项：评审、跳过；展示评审收益、模型成本及等待时间。
+`tomcat acp --plan-review=ask|auto|skip` 与标准 ACP `plan_review` config option 复用同一会话策略。策略属于当前控制连接，重绑时取新连接的启动配置或默认 ask，不保存在 PlanFile。
 
-只有结果同时满足以下条件，才调用 `dispatch_reviewer`：
+- `auto`：保存并释放文件锁后直接同步调用现有 reviewer；派发前已取消则返回 interrupted。评审不可用、失败或中断都如实报告，计划保留，不自动开工。
+- `skip`：不询问、不派发，结果注明 `review.reviewer_stop_reason: "policy_skipped"`。
+- `ask`：复用现有问答面板，不新增确认协议。面板有评审、跳过两个选项，说明收益、模型成本及等待时间；普通问题的 recommended 策略不会替答。
+
+仅 ask 分支的结果同时满足以下条件，才调用 `dispatch_reviewer`：
 
 1. outcome 为 Answered，且没有已经发生的终止信号；
 2. 恰好一条回答，question id 为 `plan-review`；
@@ -80,7 +96,7 @@ Plan 模式下提交 goal / draft / todos
 
 | 路径 | 证明的行为 |
 | --- | --- |
-| `src/core/tools/plan_tool/tests/create_plan_test.rs` | 非 Plan 拒绝、保存文件与 active view、多次创建、正文规范化、输入与验收 kind 校验 |
+| `src/core/tools/plan_tool/tests/create_plan_test.rs` | 非 Plan 拒绝、保存与 active view、多次创建、长正文完整往返、旧包装／围栏兼容及输入拒绝 |
 | `src/core/tools/plan_tool/tests/reviewer_test.rs::plan_review_decisions_require_explicit_consent_and_emit_exactly_one_result` | 明确同意、跳过、坏回答和终止路径；不擅自派发；一次结果 |
 | 同文件 `create_plan_succeeds_even_when_reviewer_aborts` | 评审中止不撤销已保存计划 |
 | 同文件 reviewer 锁与刷新用例 | 派发前已释放写锁，授权修改后的文件重新读取 |
@@ -92,6 +108,6 @@ Plan 模式下提交 goal / draft / todos
 
 旧文档的“写完必审”“由 create_plan 按 ID 整盘重写”“仅 Planning 可见”“review_summary 必返”以及拟定 API/测试列表已被当前实现取代，不能用于新增产品行为。
 
-当前取舍是复用现有文件存储、问答面板和 reviewer 派发，只补保存后的明确同意。更小的替代是完全不提供独立评审，但会失去用户已可选择的能力；更复杂的自动门禁没有当前需求。只有用户明确要求自动评审或改变保存/执行契约时，才重新讨论该边界，而不是从旧文档恢复它。
+当前实现复用原文件存储、问答面板和 reviewer 派发，以 ask 为默认，显式支持 auto/skip。评审策略与 question_policy、plan_start 相互独立；不增加审批数据库、后台重试或评审通过后自动开工的门禁。
 
 关联：[`plan-runtime.md`](../plan-runtime.md)、[`planner.md`](./planner.md)、[`reviewer.md`](./reviewer.md)、[`update-plan.md`](./update-plan.md)、[`ask-question.md`](./ask-question.md)。

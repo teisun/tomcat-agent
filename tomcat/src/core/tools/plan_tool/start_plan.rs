@@ -43,7 +43,12 @@ pub async fn execute_at_path(
     termination: AskQuestionTermination,
     tool_call_id: Option<&str>,
 ) -> Result<Value, ToolError> {
-    if runtime.mode() == AgentMode::Plan {
+    if termination.reason().is_some() {
+        return Ok(json!({"started": false, "reason": "interrupted"}));
+    }
+    if runtime.mode() == AgentMode::Plan
+        && runtime.interaction_policy().start == crate::core::plan_runtime::PlanStartPolicy::Ask
+    {
         let panel = runtime.ask_question_panel().ok_or_else(|| {
             ToolError::Internal(
                 "start_plan needs a question panel in PLAN mode; use Build or /plan build instead"

@@ -57,6 +57,8 @@ pub(crate) struct ConnectionHello {
     pub environment: platform::EnvironmentSnapshot,
     #[serde(default)]
     pub skills_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_options: Option<crate::api::acp::AcpLaunchOptions>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +75,7 @@ impl ConnectionHello {
             protocol,
             environment: Default::default(),
             skills_dir: None,
+            acp_options: None,
         }
     }
 }
@@ -132,9 +135,33 @@ pub(crate) fn run(action: ServeSub, cfg: &AppConfig) -> Result<(), AppError> {
                 stop(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: stop phase failed"))?;
                 print_json(&ensure_running(cfg).await.inspect_err(|error| tracing::warn!(%error, "service restart: start phase failed"))?)
             }
+            ServeSub::Models => unreachable!("models handled before runtime bootstrap"),
             ServeSub::Run { .. } => run_service(cfg).await,
         }
     })
+}
+
+/// The connecting client's identity, resolved before a service changes its working directory.
+pub(crate) fn client_identity(cfg: &AppConfig) -> Result<(PathBuf, String), AppError> {
+    Ok((crate::get_work_dir(cfg)?, cfg.agent.id.clone()))
+}
+
+/// Service startup and offline catalog discovery deliberately ignore ambient model/key overrides.
+pub(crate) fn load_saved_configuration(
+    config_path: Option<&Path>,
+    work_dir: &Path,
+    agent_id: &str,
+) -> Result<(AppConfig, Vec<String>), AppError> {
+    if !work_dir.is_absolute() {
+        return Err(AppError::Config(
+            "internal service data directory must be absolute".into(),
+        ));
+    }
+    crate::infra::config::use_saved_configuration_only();
+    let (mut cfg, ignored) = crate::infra::config::load_config_with_ignored_keys(config_path)?;
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    cfg.agent.id = agent_id.to_owned();
+    Ok((cfg, ignored))
 }
 
 pub(super) fn service_command(cfg: &AppConfig) -> Result<Command, AppError> {
@@ -154,11 +181,12 @@ pub(super) fn service_command(cfg: &AppConfig) -> Result<Command, AppError> {
         command.env_remove(key);
     }
     // Carry the resolved data directory across the cwd change, including relative configurations.
+    let (work_dir, agent_id) = client_identity(cfg)?;
     command
         .args(["serve", "run", "--work-dir"])
-        .arg(crate::get_work_dir(cfg)?)
+        .arg(work_dir)
         .arg("--agent-id")
-        .arg(&cfg.agent.id);
+        .arg(agent_id);
     Ok(command)
 }
 
@@ -296,6 +324,7 @@ pub(crate) async fn connect_acp(
     cfg: &AppConfig,
     environment: platform::EnvironmentSnapshot,
     skills_dir: Option<PathBuf>,
+    acp_options: Option<crate::api::acp::AcpLaunchOptions>,
 ) -> Result<BufReader<LocalStream>, AppError> {
     if let Some(directory) = skills_dir.as_deref() {
         crate::core::skill::discovery::validate_connection_root(directory)?;
@@ -306,6 +335,7 @@ pub(crate) async fn connect_acp(
         ConnectionHello {
             environment,
             skills_dir,
+            acp_options,
             ..ConnectionHello::new(ConnectionProtocol::Acp)
         },
     )
@@ -343,6 +373,20 @@ async fn open_management(
         let reply: serde_json::Value = read_json(&mut stream).await?;
         if let Some(error) = reply.get("error").and_then(|v| v.as_str()) {
             return Err(AppError::Config(error.to_owned()));
+        }
+        if let Some(expected) = hello.acp_options {
+            let accepted = reply.get("acpOptions").cloned().and_then(|value| {
+                serde_json::from_value::<crate::api::acp::AcpLaunchOptions>(value).ok()
+            });
+            if accepted != Some(expected) {
+                return Err(AppError::Config(
+                    concat!(
+                        "shared service cannot accept ACP settings: ",
+                        "use `tomcat serve restart` to upgrade; all tasks will stop"
+                    )
+                    .into(),
+                ));
+            }
         }
         serde_json::from_value(reply).map_err(AppError::Serialize)
     })
@@ -532,6 +576,9 @@ async fn handle_connection(
     if let Some(error) = error {
         reply["error"] = error.into();
     }
+    if let Some(options) = hello.acp_options {
+        reply["acpOptions"] = serde_json::to_value(options)?;
+    }
     write_json(&mut stream, &reply).await?;
     if error.is_some() {
         return Ok(());
@@ -561,6 +608,7 @@ async fn handle_connection(
                 write,
                 hello.environment,
                 hello.skills_dir,
+                hello.acp_options,
             )
             .await
         }
@@ -584,8 +632,14 @@ async fn handle_connection(
             write_json(&mut stream, &serde_json::json!({"ready":true})).await?;
             let (read, write) = tokio::io::split(stream);
             let writer = spawn_writer(Box::pin(write), WriterConfig::from(&runtime.cfg.serve));
-            let connection =
-                ServeState::connect_with_source(runtime, writer.clone(), None, environment, None);
+            let connection = ServeState::connect_with_source(
+                runtime,
+                writer.clone(),
+                None,
+                environment,
+                None,
+                None,
+            );
             let result = super::stdin::run_connection_loop(connection, BufReader::new(read)).await;
             writer.close();
             result

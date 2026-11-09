@@ -111,7 +111,6 @@ async fn retries_close_once_on_fatal_overflow_or_unknown_ceiling() {
             Arc::new(MockPrimitiveExecutor),
             bus,
             AgentLoopConfig {
-                unattended_retry: true,
                 retry_base_delay_ms: 0,
                 ..Default::default()
             },

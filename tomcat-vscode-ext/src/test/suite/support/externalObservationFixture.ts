@@ -9,6 +9,7 @@ export type ExternalObservationFixture = {
   sessionId: string;
   prefix: string;
   visible: boolean;
+  answer?: boolean;
 };
 
 /** The external host owns this service and task; the devhost only connects. */
@@ -20,5 +21,7 @@ export async function readExternalObservationFixture(file: string): Promise<Exte
   assert.ok(typeof value.sessionId === "string" && value.sessionId.length > 0);
   assert.ok(typeof value.prefix === "string" && value.prefix.length > 0);
   assert.equal(typeof value.visible, "boolean");
+  assert.ok(value.answer === undefined || typeof value.answer === "boolean", "answer must be a boolean");
+  assert.ok(!value.answer || value.visible, "answer requires a visible same-project session");
   return value;
 }

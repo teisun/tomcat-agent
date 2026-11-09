@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 import { TomcatWebviewViewProvider } from "../provider";
 import { isWebviewIntent, type WebviewIntent } from "../protocol";
-import type { ServeEvent } from "../../../serveClient/wire";
-import { recoveryClock } from "./errorRecoveryClock";
+import { recoveryFixture, recoveryHistory as history } from "./errorRecoveryFixture";
+import { longFailedToolHistory } from "./recoveryHistory";
 
 const providers: TomcatWebviewViewProvider[] = [];
 afterEach(() => { providers.splice(0).forEach(p => p.dispose()); vi.restoreAllMocks(); });
@@ -14,51 +14,10 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function history(sessionId: string, action: "retry" | "resume" = "retry") {
-  return { sessionId, messages: [
-    { type: "message", id: "user-1", message: { role: "user", content: "original request", superseded: action === "retry", turn_failed: true } },
-    ...(action === "resume" ? [
-      { type: "message", id: "assistant-1", message: { role: "assistant", content: null, tool_calls: [{ id: "read-1", name: "read" }] } },
-      { type: "message", id: "tool-1", message: { role: "tool", content: "completed", tool_call_id: "read-1" } },
-    ] : []),
-    { type: "error", id: "error-1", summary: "Authentication failed", detail: "HTTP 401" },
-  ] };
-}
 function fixture(action: "retry" | "resume" = "retry") {
-  const time = recoveryClock();
-  let listener!: (event: ServeEvent) => void;
-  const retry = vi.fn().mockResolvedValue(undefined);
-  const resume = vi.fn().mockResolvedValue(undefined);
-  const restoreCheckpoint = vi.fn();
-  const getMessages = vi.fn(async (id: string) => history(id, action));
-  const provider = new TomcatWebviewViewProvider({
-    extensionUri: vscode.Uri.file("/workspace/extension"),
-    extensionMode: vscode.ExtensionMode.Development,
-    getDefaultCwd: () => "/workspace", ide: {} as never,
-    initialize: async () => ({ sessionId: "s1", capabilities: [] } as never),
-    messenger: { onEvent: (callback: typeof listener) => { listener = callback; return { dispose() {} }; } } as never,
-    sessionRouter: { retry, resume, getMessages, restoreCheckpoint,
-      switchSession: async (sessionId: string) => ({ sessionId, access: "control", origin: null }),
-    } as never,
-    errorRecoveryClock: time.clock,
-  });
-  providers.push(provider);
-  const host = provider as any;
-  host.stateStore.setActiveSession("s1");
-  host.stateStore.hydrateHistory("s1", history("s1", action));
-  vi.spyOn(host, "ensureInitialized").mockResolvedValue({ sessionId: "s1" });
-  const select = vi.spyOn(host, "ensureWebviewSession").mockImplementation(async (id: unknown) => { host.stateStore.setActiveSession(id); return id; });
-  vi.spyOn(host, "refreshSessionState").mockResolvedValue(undefined);
-  vi.spyOn(host, "refreshSessions").mockResolvedValue(undefined);
-  const emit = async (event: object) => { listener(event as ServeEvent); await host.serveEventQueue; };
-  const failed = async (id = "s1") => {
-    await emit({ type: "agent_start", sessionId: id });
-    await emit({ type: "agent_end", sessionId: id, messages: [], error: "HTTP 401" });
-    await emit({ type: "agent_idle", sessionId: id, outcome: "failed" });
-  };
-  const projection = (id = "s1") => provider.currentState().sessionViews[id]?.errorRecovery;
-  const card = () => provider.currentState().sessionViews.s1.timeline.find(item => item.type === "message" && item.id === "error-1");
-  return { provider, host, time, retry, resume, getMessages, restoreCheckpoint, emit, failed, projection, card, select };
+  const f = recoveryFixture(action);
+  providers.push(f.provider);
+  return f;
 }
 
 it("keeps a version mismatch received while hidden when the webview mounts and becomes ready", async () => {
@@ -80,6 +39,36 @@ it("keeps a version mismatch received while hidden when the webview mounts and b
   view.visible = true;
   await f.provider.dispatchTestIntent({ type: "ready", messageId: "show-failed-view" });
   expect(f.provider.currentState()).toMatchObject({ connectionStatus: "failed", connectionFailure: failure });
+});
+
+it("schedules Resume from the 81-row tool tail without fetching the original input", async () => {
+  const f = fixture("resume");
+  const { tail } = longFailedToolHistory();
+  f.getMessages.mockResolvedValue(tail);
+  await f.failed();
+  const card = () => f.provider.currentState().sessionViews.s1.timeline.find(item => item.id === "long-error");
+  expect(card()).toMatchObject({ recoveryAction: "resume" });
+  expect(f.projection()).toEqual({ errorId: "long-error", dueAt: f.time.clock.now() + 300_000 });
+  expect(f.getMessages).toHaveBeenCalledTimes(1);
+  f.host.stateStore.setActiveSession("s2");
+  f.time.advance(299_999); await flush();
+  expect(f.resume).not.toHaveBeenCalled();
+  f.time.advance(1); await flush();
+  expect(f.resume).toHaveBeenCalledExactlyOnceWith("s1");
+  expect(f.retry).not.toHaveBeenCalled();
+  expect(f.provider.currentState().activeSessionId).toBe("s2");
+  expect(f.projection()).toBeUndefined();
+});
+
+it("reopening a paginated failure restores only its manual Resume", async () => {
+  const f = fixture("resume");
+  f.getMessages.mockResolvedValue(longFailedToolHistory().tail);
+  await f.host.refreshSessionHistory("s1");
+  expect(f.provider.currentState().sessionViews.s1.timeline.find(item => item.id === "long-error"))
+    .toMatchObject({ recoveryAction: "resume" });
+  expect(f.projection()).toBeUndefined();
+  f.time.advance(300_000); await flush();
+  expect(f.resume).not.toHaveBeenCalled();
 });
 
 for (const action of ["retry", "resume"] as const) describe(`${action} countdown`, () => {

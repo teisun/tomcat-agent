@@ -3,6 +3,117 @@ use fs2::FileExt;
 use super::common::*;
 use crate::core::plan_runtime::ProgressSource;
 
+#[tokio::test]
+async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner() {
+    use crate::core::tools::plan_tool::start_plan::{self, StartPlanArgs};
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let planner = PlanRuntime::new_with_session_id("shared-project", "planner");
+    let plan_id = fresh_planning_plan(&planner);
+    let path = plan_path_for_id(&plan_id).unwrap();
+    // Handoff may start from the path; identity still comes from that same file.
+    let approved = read_plan(&path).unwrap();
+    let coder = PlanRuntime::new_with_session_id("shared-project", "coder");
+    coder.set_max_code_review_rounds(0);
+    let target = start_plan::resolve_target_plan_path(
+        &coder,
+        &StartPlanArgs {
+            plan_id: Some(approved.frontmatter.plan_id.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(target, path);
+    let started = start_plan::execute_at_path(&coder, target, Default::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(started["started"], true);
+    let progress = |status| update_plan::UpdatePlanArgs {
+        plan_id: Some(plan_id.clone()),
+        path: None,
+        replace: false,
+        ops: vec![update_plan::UpdateOp::SetStatus {
+            id: "t1".into(),
+            content: None,
+            status,
+        }],
+    };
+    update_plan::execute(&coder, progress(TodoStatus::InProgress))
+        .await
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        update_plan::execute(&planner, progress(TodoStatus::Completed)).await,
+        Err(ToolError::CrossSessionDenied(_))
+    ));
+    let resumed_planner = PlanRuntime::new_with_session_id("shared-project", "planner");
+    resumed_planner
+        .attach_from_resume_state(ResumeControlState {
+            mode: Some(AgentMode::Plan),
+            plan_path: Some(path.clone()),
+            plan_id: Some(plan_id.clone()),
+        })
+        .unwrap();
+    assert_eq!(resumed_planner.mode(), AgentMode::Plan);
+    assert!(resumed_planner.active_plan().is_none());
+    assert!(resumed_planner.park_executing_plan().unwrap().is_none());
+    // /restore on the still-live planner is another cache entry point.
+    assert!(planner.sync_active_plan_from_disk().unwrap().is_none());
+    assert!(planner.park_executing_plan().unwrap().is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let mut legacy = read_plan(&path).unwrap();
+    let unidentified = PlanRuntime::new("shared-project");
+    assert!(
+        !unidentified.owns_executing_plan(&legacy),
+        "an absent current session ID cannot fall back past an explicit owner"
+    );
+    legacy.frontmatter.session_id = None;
+    assert!(unidentified.owns_executing_plan(&legacy));
+    assert!(resumed_planner.owns_executing_plan(&legacy));
+    assert!(
+        !PlanRuntime::new_with_session_id("other-project", "planner").owns_executing_plan(&legacy)
+    );
+    assert_eq!(
+        coder.park_executing_plan().unwrap().as_deref(),
+        Some(plan_id.as_str())
+    );
+    let next = PlanRuntime::new_with_session_id("shared-project", "next-coder");
+    next.set_max_code_review_rounds(0);
+    start_plan::execute_at_path(&next, path.clone(), Default::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.todos[0].status,
+        TodoStatus::InProgress
+    );
+    update_plan::execute(
+        &next,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: ["t1", "t2"]
+                .into_iter()
+                .map(|id| update_plan::UpdateOp::SetStatus {
+                    id: id.into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                })
+                .collect(),
+        },
+    )
+    .await
+    .unwrap();
+    let finished = read_plan(&path).unwrap();
+    assert_eq!(finished.frontmatter.plan_id, plan_id);
+    assert_eq!(finished.frontmatter.state, PlanFileState::Completed);
+    assert_eq!(
+        finished.frontmatter.session_id.as_deref(),
+        Some("next-coder")
+    );
+    assert_eq!(finished.frontmatter.goal, approved.frontmatter.goal);
+    cleanup_home(&home);
+}
+
 #[test]
 fn cancel_token_demotes_executing_to_pending() {
     let _g = home_lock().lock().unwrap();
@@ -374,8 +485,13 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     let plan_id = "snapshot-plan";
     write_disk_plan(plan_id, PlanFileState::Executing);
     let path = plan_path_for_id(plan_id).unwrap();
+    // Recovery now requires an executing plan actually owned by this session.
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.session_key = Some("session-a".into());
+    plan.frontmatter.session_id = Some("snapshot-session".into());
+    write_plan(&path, &plan, 2000).unwrap();
 
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "snapshot-session");
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
         plan_path: Some(path.clone()),

@@ -136,6 +136,7 @@ export function reconcileSessionSnapshot(
   const sessionFiles = reconcileValue(previous?.sessionFiles, next.sessionFiles);
   const messageQueue = reconcileValue(previous?.messageQueue, next.messageQueue);
   const errorRecovery = reconcileValue(previous?.errorRecovery, next.errorRecovery);
+  const requestRetry = reconcileValue(previous?.requestRetry, next.requestRetry);
   const origin = reconcileValue(previous?.origin, next.origin);
   if (
     previous &&
@@ -158,6 +159,7 @@ export function reconcileSessionSnapshot(
     previous.sessionFiles === sessionFiles &&
     previous.messageQueue === messageQueue &&
     previous.errorRecovery === errorRecovery &&
+    previous.requestRetry === requestRetry &&
     previous.planTodos === planTodos &&
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&
@@ -173,6 +175,7 @@ export function reconcileSessionSnapshot(
     sessionFiles,
     messageQueue,
     errorRecovery,
+    requestRetry,
     origin,
     composerDraft,
     instructionCatalog,

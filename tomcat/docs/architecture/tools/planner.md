@@ -22,6 +22,23 @@ Build 不再“进入 EXEC”。它是从 Plan 回到 Chat、并开始推进一�
 
 CLI 显示 `u[Chat]>` 或 `u[Plan]>`，Chat 绑定 executing/pending 计划时显示 `u[Chat·plan:executing]>` / `u[Chat·plan:pending]>`。
 
+## ACP 启动、策略与跨会话交接
+
+```text
+宿主自定义参数 → tomcat acp → 握手确认 → new/load 应用 → 标准 configOptions
+                                             │
+planner（Plan）→ 保存/评审 → 人工批准 → coder（Chat）start_plan(plan_id)
+                                             └─ 更新同一 PlanFile
+```
+
+ACP 使用 `agent_mode`、`plan_review`、`question_policy`、`plan_start` 四个标准 config options，分别对应 CLI `--mode`、`--plan-review`、`--question-policy`、`--plan-start`。模式值只有 chat/plan；启动未指定模式时恢复已保存模式，新会话默认 Chat。交互策略属于当前控制连接，不属于计划文件；重绑时回到新连接的启动配置或默认 ask/manual/ask。
+
+`start_plan` 是现有 `/plan build` 生命周期的工具入口，不是第三种模式：Chat 直接按已获授权的目标开工；Plan 默认再询问，显式 `--plan-start=auto` 才省略这一问。保存或自动评审不等于要求实施，仍只有收到明确实施任务时才调用它。开工后照常受工具权限控制。
+
+同机、同 HOME、标准 plans 目录内可从路径读取 `plan_id` 再交接，不增加路径参数或哈希协议。执行归属优先按 session_id 判定；旧 planner 恢复后不能绑定或停放另一 coder 的执行中计划。详情见 [update_plan](./update-plan.md)、[create_plan](./create-plan.md) 与 [共享服务接入](../shared-serve-and-acp-host-integration.md)。
+
+一体化智能体可在同一任务内写计划、评审并实施；后续任务若仍携带 `--mode=plan`，new/load 会重新进入 Plan。本轮不额外扩展跨任务续接语义。
+
 ## 2026-05 Active Binding 补充（历史）
 
 当前 `/plan` 命令族的稳定契约如下：
@@ -305,7 +322,7 @@ UI / 测试 / 集成层一律通过这三个 API 触发，slash 命令解析层�
 
 #### 6.1.1 `PLANNER_SYSTEM_REMINDER`
 
-当前模板由 `PromptKey::PlannerReminder` 注册，正式文件是 `tomcat/src/core/prompts/templates/plan/planner.txt`。提醒只保留模式身份和加载指向；工作流、设计、章节、测试与验收要求由内置 `write-plans` 的正文和两个附件承载。
+当前模板由 `PromptKey::PlannerReminder` 注册，正式文件是 `tomcat/src/core/prompts/templates/plan/planner.txt`。提醒只保留模式身份和加载指向；工作流、设计、章节、测试与最终检查由内置 `write-plans` 的正文和四个附件承载。
 
 ```text tomcat/src/core/prompts/templates/plan/planner.txt
 
@@ -320,14 +337,18 @@ Before planning or revising a plan, call `load_skill` with `name="write-plans"` 
 PLAN：         常驻清单仍不列它，由上面的短句指向 load_skill
                                      │
                                      ▼
-                          正文 → 工作流附件 → 写作标准附件
+                          正文 → 工作流 → 写作标准＋结构 → 成稿
+                                                             │
+                                                             ▼
+                                               final-check.md → 完成检查
 ```
 
 - **加载时机**：开始规划或修订前读取；对话里已有规范时可以不重复加载。这里只引导模型，不增加“已加载”状态或强制加载门禁。
+- **成稿检查与结构**：主文第4步指向 `references/final-check.md`，承接原有过度设计、执行就绪与读者检查，不在入口留副本；只将锁／版本的判定改为“缺少并发或数据完整性依据”，确认规则不变。主章节二级、问题／需求三级、说明／决策／测试四级、方案说明／UI 五级；概览保留为 Plan 内三级节，术语首次出现时解释。
 - **注入与退出**：`RuntimeTailProvider` 在每次模型请求前读取实时模式，只有 PLAN 才附加此提醒。同一轮调用 `start_plan` 后，下一请求就换成执行提醒，不必等下一条用户消息；临时提醒不写入聊天历史，不改变稳定系统前缀。
 - **清单与权限**：`render_available_skills_block` 按 `WRITE_PLANS_SKILL_NAME` 排除该名称，主代理和子代理共用。发现、同名覆盖、`load_skill` 按名解析、`/skill` 用户清单和权限闸门不变；已经加载的历史正文不会被删除。
 - **关闭后的行为**：关闭 Skill、按名禁用或设置 user-only 后，沿用现有错误反馈或工具不暴露行为；不自动改配置，不保留第二份备用写作规则。PLAN 路径限制和执行确认等运行时守卫继续生效。
-- **写作与评审分工**：write-plans 教怎么写；plan reviewer 检查没有聊天背景的读者能否理解改什么、为何这样改、如何验证，以及设计、范围和过度设计风险。两者都检查用户批准后能否不再提问就走到交付。reviewer 不再规定固定章节或排版，不为此新增 Skill 加载；UX 原则、brief、工具权限、advisory 与 `<review>` 输出契约保持不变。
+- **写作与评审分工**：write-plans 教怎么写；plan reviewer 检查无聊天背景的读者能否理解变化、理由与验证，适用时指出职责混写、流程缺分支、UI 没布局、用例缺步骤或预期。修改合回对应章节，保持图文、决策与用例一致并删除旧说法。两者沿用原有执行就绪检查；reviewer 不复制技能模板、不额外加载 skill。UX 原则、brief、工具权限、advisory 与 `<review>` 输出契约不变，`core_identity.txt` 未改。
 
 内置资产的正式来源、聊天初始化物化与覆盖边界见 [Skill 系统 §4.2.5](../skill-system.md#425-pr-sk-b内置资产与-write-plans-的-plan-入口)。
 

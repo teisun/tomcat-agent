@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, "../../..");
 const { translate } = require(path.join(root, "out/shared/i18n")) as { translate(locale: string, key: string): string };
 type Api = { __testing: {
   focusWebview(): Promise<void>;
-  getResolvedExecutable(): { source: string; executable: string };
+  getResolvedExecutable(): Promise<{ source: string; executable: string }>;
   getPromptHistory(): Array<{ message: string; severity: string }>;
   getObservedWebviewErrors(): unknown[];
   getWebviewState(): { activeSessionId: string | null; connectionStatus?: string };
@@ -36,7 +36,7 @@ suite("Installed release first launch without a workspace", () => {
     const artifacts = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
     assert.ok(artifacts);
     const api = await support.getTomcatExtensionApi();
-    assert.equal(api.__testing.getResolvedExecutable().source, "bundled");
+    assert.equal((await api.__testing.getResolvedExecutable()).source, "user-bin");
     await api.__testing.focusWebview();
     // DOM readiness, not Serve.ready: workspace_required intentionally is not ready.
     const chat = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");

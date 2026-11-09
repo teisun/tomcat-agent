@@ -83,6 +83,22 @@ function review(id: string, summary = "Looks good") {
 }
 
 describe("stateReconcile", () => {
+  it("updates and clears live attempts through full and session frames without changing the transcript", () => {
+    for (const mode of ["full", "session"]) {
+      let state = snapshot();
+      const timeline = state.sessionViews.s1.timeline;
+      for (const requestRetry of [{ attempt: 2, maxAttempts: 10 }, { attempt: 3, maxAttempts: 10 }, undefined]) {
+        const view = { ...state.sessionViews.s1, requestRetry };
+        state = mode === "full"
+          ? reconcileStateSnapshot(state, { ...state, sessionViews: { ...state.sessionViews, s1: view } })
+          : mergeSessionViewSnapshot(state, { sessionId: "s1", view });
+        expect(state.sessionViews.s1.requestRetry).toEqual(requestRetry);
+        expect(state.sessionViews.s1.timeline).toBe(timeline);
+        expect(reconcileStateSnapshot(state, structuredClone(state))).toBe(state);
+      }
+    }
+  });
+
   it("publishes and removes only the session-level countdown, preserving timeline references and patches", () => {
     const previous = snapshot();
     const next = snapshot();

@@ -1042,6 +1042,7 @@ pub(crate) async fn handle_command(
             let model = slot.ctx.effective_model(entry.as_ref());
             let thinking_level = slot.ctx.resolve_thinking_level(&model);
             let agent_mode = slot.ctx.session_runtime.plan_runtime.mode();
+            let policy = slot.ctx.session_runtime.plan_runtime.interaction_policy();
             let active_plan = slot.ctx.session_runtime.plan_runtime.active_plan();
             let active_plan_path_raw = active_plan.as_ref().map(|plan| plan.path.clone());
             let context_utilization_ratio = *slot.last_context_ratio.lock();
@@ -1076,6 +1077,9 @@ pub(crate) async fn handle_command(
                         entry.as_ref().and_then(|entry| entry.model_override.as_deref()),
                     ),
                     "agentMode": agent_mode.as_str(),
+                    "planReview": policy.review,
+                    "questionPolicy": policy.questions,
+                    "planStart": policy.start,
                     "activePlan": active_plan.map(|plan| serde_json::json!({
                         "id": plan.id,
                         "path": crate::infra::platform::format_home_path(&plan.path),
@@ -1179,6 +1183,34 @@ pub(crate) async fn handle_command(
                     send_error(&state, id, Some(slot.session_id.clone()), error)?;
                 }
             }
+        }
+        ServeCommand::SetInteractionPolicy {
+            id,
+            session_id,
+            setting,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            use crate::core::plan_runtime::interaction::InteractionPolicySetting;
+            let runtime = &slot.ctx.session_runtime.plan_runtime;
+            let mut policy = runtime.interaction_policy();
+            match setting {
+                InteractionPolicySetting::Review(value) => policy.review = value,
+                InteractionPolicySetting::Questions(value) => policy.questions = value,
+                InteractionPolicySetting::Start(value) => policy.start = value,
+            }
+            runtime.set_interaction_policy(policy);
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                None,
+            )))?;
         }
         ServeCommand::SetPlanMode {
             id,
@@ -1543,32 +1575,16 @@ pub(crate) async fn handle_command(
                 }
             };
             let catalog = resolve_model_catalog_snapshot(&state)?;
-            let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
-            let default_model_id = config.llm.default_model.trim().to_string();
-            let utility_model_id = config
-                .llm
-                .title_model
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let payload = list_models_payload(&config, &catalog, Some(&state.shared_model_prefs));
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.active_session_id(),
-                Some(
-                    serde_json::to_value(ListModelsPayload {
-                        models,
-                        default_model_id,
-                        utility_model_id,
-                        warnings: catalog.diagnostics().to_vec(),
-                    })
-                    .map_err(|error| {
-                        AppError::Config(crate::infra::i18n::tr(
-                            "serve.serializeFailed",
-                            &[("name", "list_models"), ("detail", &error.to_string())],
-                        ))
-                    })?,
-                ),
+                Some(serde_json::to_value(payload).map_err(|error| {
+                    AppError::Config(crate::infra::i18n::tr(
+                        "serve.serializeFailed",
+                        &[("name", "list_models"), ("detail", &error.to_string())],
+                    ))
+                })?),
             )))?;
         }
         ServeCommand::UpsertModel { id, model } => {
@@ -2805,6 +2821,30 @@ fn resolve_connector_registry_for_context(
         workspace_root.as_deref(),
         state.child_environment(),
     )
+}
+
+/// One catalog projection for the Native/ACP command and offline `serve models`.
+/// Offline discovery does not load the preference store (loading can create/repair files).
+pub(crate) fn list_models_payload(
+    config: &AppConfig,
+    catalog: &crate::core::llm::ModelCatalog,
+    prefs: Option<&crate::ModelPrefsStore>,
+) -> ListModelsPayload {
+    ListModelsPayload {
+        models: match prefs {
+            Some(prefs) => list_model_views_with_prefs(catalog, prefs),
+            None => crate::core::llm::list_model_views(catalog),
+        },
+        default_model_id: config.llm.default_model.trim().to_owned(),
+        utility_model_id: config
+            .llm
+            .title_model
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        warnings: catalog.diagnostics().to_vec(),
+    }
 }
 
 fn resolve_model_catalog_snapshot(

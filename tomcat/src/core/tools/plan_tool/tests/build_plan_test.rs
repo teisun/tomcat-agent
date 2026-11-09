@@ -147,7 +147,7 @@ fn plan_build_rejects_unsafe_plan_id() {
 async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_path() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-external");
     rt.set_max_code_review_rounds(0);
     let external_dir = home.join("external-plans");
     std::fs::create_dir_all(&external_dir).unwrap();

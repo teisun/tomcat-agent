@@ -8,6 +8,24 @@
 
 ---
 
+## ACP 会话交互策略（当前契约）
+
+```text
+普通 ask_question
+  ├─ manual（默认）──────> 面板等待人工答案
+  │                         ACP：同项目 VS Code 旁观窗口可回答
+  └─ recommended ──────> 校验题目 → 按 ID 选唯一推荐项 → 原结果/记录路径
+```
+
+- `tomcat acp --question-policy=recommended` 是显式的无人值守设置；不提供新的工具参数或环境变量。会话也可通过标准 ACP `question_policy` config option 设置它；策略随控制连接重绑重置，不写入计划文件。
+- 自动答案仍经过原答案校验，标记 `picked_recommended: true`，结果与 transcript 另带 `answer_source: "policy_recommended"`，不冒充用户点选。普通人工答案不要求这个新增字段，历史记录继续可读。
+- 推荐策略只在普通工具入口生效。`create_plan` 的评审询问与 `start_plan` 的开工确认直接调用面板，不被它自动回答；两者分别由 `plan_review` 与 `plan_start` 控制。
+- ACP 的 Chat、Plan 会话始终保留面板。没有旁观者时 manual 仍等待；迟到打开、重连后补发活问题。旁观者只可答当前问题，不能发任务、停止任务或取消问题；单题跳过仍是合法的 answered 答复。
+- 服务只接受第一个有效答案。其它窗口撤卡，采用结果以服务端工具结果/transcript 为准；旁观窗口只缓存自己提交的答案，不把断线或他处已答记为本地终态。
+- 提问没有自行设置的 deadline；宿主 run 的 Timeout/watchdog 仍可取消任务。ACP 冷载入只回放，下一次显式 prompt 才开跑，不自动恢复旧提问回合。
+
+实现与回归：`src/core/tools/plan_tool/{ask_question.rs,tests/ask_question_test.rs}`、`src/api/serve/{ask_question.rs,tests/connection_test.rs}`、`tests/acp_stdio_e2e.rs`；启动与旁观契约见 [共享服务接入](../shared-serve-and-acp-host-integration.md)。下文保留早期设计细节；出现旧模式名、PENDING 或与本节冲突的人工等待描述时，以本节及实现为准。
+
 ## 目录
 
 - [1. 术语统一](#1-术语统一)

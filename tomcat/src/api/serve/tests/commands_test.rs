@@ -4737,8 +4737,11 @@ async fn serve_retry_and_resume_with_queued_signal_keep_empty_reply_protection()
                 }),
             ]
         };
-        let (state, buffer, _temp, slot, requests) =
-            build_initialized_state_with_recorded_streams((0..4).map(|_| hidden()).collect()).await;
+        let attempts = crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
+        let (state, buffer, _temp, slot, requests) = build_initialized_state_with_recorded_streams(
+            (0..attempts).map(|_| hidden()).collect(),
+        )
+        .await;
         let session = &slot.ctx.session_runtime.session;
         let id = session
             .append_message(serde_json::json!({"role":"user","content":"real pending work"}))
@@ -4777,12 +4780,12 @@ async fn serve_retry_and_resume_with_queued_signal_keep_empty_reply_protection()
                     .is_some_and(|e| e.contains(&crate::infra::i18n::tr_in(
                         crate::infra::i18n::Locale::En,
                         "agentLoop.hiddenExhausted",
-                        &[("count", "3")]
+                        &[("count", &(attempts - 1).to_string())]
                     )))),
             "{frames:?}"
         );
         let captured = requests.0.lock();
-        assert_eq!(captured.len(), 4);
+        assert_eq!(captured.len(), attempts as usize);
         assert!(captured[0]
             .messages
             .iter()

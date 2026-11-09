@@ -27,6 +27,7 @@ pub(crate) struct ServeConnection {
     pub lifetime: tokio_util::sync::CancellationToken,
     environment: Arc<crate::infra::platform::EnvironmentSnapshot>,
     pub skills_dir: Option<PathBuf>,
+    pub acp_options: Option<crate::api::acp::AcpLaunchOptions>,
     source: RwLock<Option<crate::core::session::SessionOrigin>>,
     selection: RwLock<Selection>,
 }
@@ -54,7 +55,7 @@ impl ServeConnection {
     }
 
     pub fn connect(runtime: Arc<ServeRuntime>, writer: WriterHandle) -> Arc<Self> {
-        Self::connect_with_source(runtime, writer, None, Default::default(), None)
+        Self::connect_with_source(runtime, writer, None, Default::default(), None, None)
     }
 
     #[cfg(test)]
@@ -65,6 +66,7 @@ impl ServeConnection {
             Some(crate::core::session::SessionOrigin::Acp { client_name: None }),
             Default::default(),
             None,
+            None,
         )
     }
 
@@ -74,6 +76,7 @@ impl ServeConnection {
         source: Option<crate::core::session::SessionOrigin>,
         environment: crate::infra::platform::EnvironmentSnapshot,
         skills_dir: Option<PathBuf>,
+        acp_options: Option<crate::api::acp::AcpLaunchOptions>,
     ) -> Arc<Self> {
         let lifetime = runtime.shutdown.child_token();
         let connection = Arc::new(Self {
@@ -84,6 +87,7 @@ impl ServeConnection {
             lifetime,
             environment: Arc::new(environment),
             skills_dir,
+            acp_options,
             source: RwLock::new(source),
             selection: RwLock::new(Selection::default()),
         });
@@ -165,6 +169,9 @@ impl ServeConnection {
             replay.send(id, &self.writer)?;
         }
         slot.touch();
+        drop(selection);
+        drop(replay);
+        self.ask_question.replay_for(self, id)?;
         Ok(())
     }
 

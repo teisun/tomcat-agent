@@ -168,6 +168,26 @@ fn plan_todo_schemas_expose_optional_final_acceptance_kind() {
 }
 
 #[test]
+fn create_plan_schema_requests_complete_body_without_changing_argument_shape() {
+    let entry = super::builtin_tool_by_name("create_plan").unwrap();
+    let schema = (entry.parameters)();
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["goal", "draft", "todos"])
+    );
+    let properties = schema["properties"].as_object().unwrap();
+    assert_eq!(properties.len(), 3);
+    let draft = &properties["draft"];
+    assert_eq!(draft["type"], "string");
+    assert!(draft.get("maxLength").is_none());
+    let description = draft["description"].as_str().unwrap();
+    assert!(description.contains("Complete Markdown plan body, not a summary"));
+    assert!(description.contains("Heading levels are preserved"));
+    assert!(!description.contains("2000"));
+    assert!(entry.description.contains("preserves the complete `draft`"));
+}
+
+#[test]
 fn todo_set_status_schema_accepts_evidence() {
     let update_plan = BUILTIN_TOOL_CATALOG
         .iter()

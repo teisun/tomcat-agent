@@ -108,7 +108,7 @@ async fn nonexecuting_plans_reject_in_progress_updates_without_writing_the_plan(
 async fn update_plan_set_status_returns_full_items_snapshot() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     rt.set_max_code_review_rounds(0);
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
@@ -149,7 +149,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
 async fn work_todo_content_is_frozen_while_executing() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");
 
@@ -181,7 +181,7 @@ async fn work_todo_content_is_frozen_while_executing() {
 async fn set_status_completed_accepts_evidence_and_persists_to_frontmatter() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");
     let evidence = vec!["cargo test -p tomcat --lib update_plan_test passed".to_string()];
@@ -241,7 +241,7 @@ async fn planning_state_still_allows_content_rewrite() {
 async fn completed_work_todo_without_evidence_is_allowed() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");
 
@@ -403,7 +403,7 @@ async fn update_plan_plan_id_prefers_active_external_path() {
     };
     write_plan(&external_path, &plan, 2000).unwrap();
 
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     rt.build_plan(&external_path.to_string_lossy(), Some("sid-a".into()))
         .unwrap();
 
@@ -438,7 +438,7 @@ async fn update_plan_plan_id_prefers_active_external_path() {
 async fn update_plan_in_exec_promotes_completed() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();

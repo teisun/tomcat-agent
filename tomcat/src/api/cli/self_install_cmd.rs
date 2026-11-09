@@ -1,8 +1,8 @@
-//! Install only the current executable; bootstrap and service lifecycle stay untouched.
+//! Install the current executable, optionally adding user PATH; no bootstrap or service changes.
 use crate::infra::{i18n::tr, platform};
 use crate::AppError;
 
-pub(super) fn run_self_install() -> Result<(), AppError> {
+pub(super) fn run_self_install(add_to_path: bool) -> Result<(), AppError> {
     let home = platform::home_dir()
         .filter(|home| home.is_absolute())
         .ok_or_else(|| AppError::Config(tr("cli.selfInstall.invalidHome", &[])))?;
@@ -30,5 +30,17 @@ pub(super) fn run_self_install() -> Result<(), AppError> {
         "cli.selfInstall.unchanged"
     };
     println!("{}", tr(key, &[("path", &path)]));
+    if add_to_path {
+        platform::add_user_bin_dir_to_path(&home).map_err(|step| {
+            AppError::Config(super::init::manual_path_lines(&step, false).join("\n"))
+        })?;
+        println!(
+            "{}",
+            tr(
+                "cli.init.pathAdded",
+                &[("dir", &bin_dir.display().to_string())]
+            )
+        );
+    }
     Ok(())
 }

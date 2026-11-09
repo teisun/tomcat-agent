@@ -268,11 +268,14 @@ async fn materialized_write_plans_skill_is_discovered_and_fully_loadable() {
     assert!(body.contains("references/tomcat-plan-workflow.md"));
     assert!(body.contains("references/plan-structure.md"));
     assert!(body.contains("references/writing-standards.md"));
+    assert!(body.contains("references/final-check.md"));
+    assert!(!body.contains("## Avoid over-design"));
     assert!(!body.contains("name: write-plans"));
 
     for (file, expected) in [
         ("references/tomcat-plan-workflow.md", "# Tomcat Plan Workflow"),
         ("references/writing-standards.md", "# Plan Writing Standards"),
+        ("references/final-check.md", "# Final Check"),
         (
             "references/plan-structure.md",
             "`MUST`: Format each problem or requirement section heading as `Issue N: Description` or `Requirement N: Description`.",

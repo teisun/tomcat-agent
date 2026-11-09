@@ -156,6 +156,27 @@ fn cache_key_is_scoped_by_session_and_request_family() {
     );
     assert_ne!(cache_key_for(&main), cache_key_for(&verifier));
     assert_eq!(cache_key_for(&missing_session), None);
+
+    let incident_session = "1794181249645_c1d4b501cebd5921-child-plan_reviewer-5";
+    let reviewer = agent(AgentLoopConfig {
+        session_id: incident_session.to_string(),
+        subagent_type: SubagentType::PlanReviewer,
+        ..Default::default()
+    });
+    let incident_main = agent(AgentLoopConfig {
+        session_id: incident_session.to_string(),
+        subagent_type: SubagentType::User,
+        ..Default::default()
+    });
+    let reviewer_key = cache_key_for(&reviewer).expect("reviewer has a session");
+    assert_eq!(reviewer_key.len(), 64);
+    assert_eq!(
+        reviewer_key,
+        "36231c7a48f11e4f224dfde22cba07c0d50ceeebc25d6c2539a988e0f794b4bc"
+    );
+    assert_ne!(Some(reviewer_key), cache_key_for(&incident_main));
+    assert_eq!(reviewer.config.session_id, incident_session);
+    assert_eq!(incident_main.config.session_id, incident_session);
 }
 
 #[test]

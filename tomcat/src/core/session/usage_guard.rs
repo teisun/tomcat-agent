@@ -6,8 +6,16 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct SessionUsageGuard {
-    _file: File,
+    file: File,
     path: PathBuf,
+}
+
+impl Drop for SessionUsageGuard {
+    fn drop(&mut self) {
+        // A concurrent spawn's pre-exec child shares this open file description;
+        // closing our descriptor alone would keep the lock until that child execs.
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 impl SessionUsageGuard {
@@ -40,7 +48,7 @@ impl SessionUsageGuard {
                 AppError::Io(error)
             }
         })?;
-        Ok(Self { _file: file, path })
+        Ok(Self { file, path })
     }
     /// Only after metadata removal. IDs are never reused and every new holder rechecks existence.
     pub(crate) fn remove_deleted_lock(&self) -> std::io::Result<()> {
@@ -48,5 +56,21 @@ impl SessionUsageGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             result => result,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_unlocks_while_a_descriptor_copy_is_alive() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = SessionUsageGuard::shared(temp.path(), "owned-session").unwrap();
+        // Shares the open file description, like a spawning child before exec.
+        let inherited = guard.file.try_clone().unwrap();
+        drop(guard);
+        assert!(SessionUsageGuard::exclusive(temp.path(), "owned-session").is_ok());
+        drop(inherited);
     }
 }

@@ -35,7 +35,27 @@ code --install-extension /absolute/path/to/downloaded-platform-package.vsix
 
 Windows 上下载 `tomcat-vscode-ext-<版本>-win32-x64.vsix`，传入完整路径，例如在 PowerShell 中：`code --install-extension "$env:USERPROFILE\Downloads\tomcat-vscode-ext-<版本>-win32-x64.vsix"`。
 
-安装后重新加载 VS Code。VS Code 会将安装包解压到扩展目录；内置 CLI 不是从 VSIX 文件或 Downloads 目录直接运行。
+安装后重新加载 VS Code。VS Code 将安装包解压到扩展目录；包内 CLI 只是**安装素材**，不再是默认运行入口。
+
+## VS Code、Multica 与终端共用一个默认 CLI
+
+```text
+平台 VSIX ── 自动安装 / 更新 ──┐
+独立安装或开发安装 ────────────┴─> ~/.local/bin/tomcat[.exe]
+                                         ↑
+                               VS Code / Multica / 终端
+```
+
+- 平台包每次激活都会把用户级入口与包内程序对齐；允许覆盖更新的独立/开发构建，也会识别同版本不同内容。内容相同则不写。界面和配置文件里都**没有自动维护开关**。
+- 激活不等安装，界面与日志先可用；第一次运行 CLI 前等待本次安装尝试和选路。维护有 30 秒超时，不弹确认、安装通知，也不主动打开输出面板。
+- 安装只复制程序并确保用户 PATH，不配置模型、不复制凭据或会话、不重启服务。PATH 失败会按非零退出/部分完成记录；VS Code 仍可能使用用户级绝对路径，但不能据此认定外部发现已经成功。
+- PATH 修改后请重新打开终端或桌面应用；已有进程仍保留旧环境。Multica 沿用现有 PATH/登录 shell 发现，不自动注入 `MULTICA_TOMCAT_PATH`。
+- 关闭 VS Code 或卸载扩展会保留用户级 CLI。纯扩展包没有安装素材，会记录跳过维护，仍需已有 CLI。
+- 持续使用开发构建时，让程序留在构建目录，用 `tomcat.path` 指定 VS Code、用 `MULTICA_TOMCAT_PATH` 指定 Multica。它们只选择运行程序，不关闭标准入口的维护。多个 VS Code 宿主应统一扩展版本，否则激活时可能互相换回各自携带的构建。
+
+排查安装问题：打开 **Tomcat 设置 → 通用**，点击左下角版本信息下面的**查看日志**（窄屏时与版本信息并排）。它直接打开已有 **Tomcat** 输出通道，安装尚未结束、CLI 不可用或服务断线时也能查看原始输出和退出信息；不新增跨重启日志历史。
+
+**更新文件不等于更新运行中的后台。** 安装不主动断开已有连接，服务版本不兼容仍由既有检查报错。需要切换后台时由你择机执行 `/restart` 或“重启共享服务（停止所有任务）”，维护不会替你重启。
 
 ## 模型服务、费用与数据
 
@@ -146,9 +166,9 @@ Chat、Plan 等技术术语和模型 ID 可以保留英文；给模型的工具�
 
 按优先级从高到低：
 
-- 如果你显式设置了 `tomcat.path`，它优先。
-- bundled VSIX 包默认优先使用 bundled CLI。
-- 纯扩展安装会回退到 `PATH` / shell discovery。
+- 显式设置的非默认 `tomcat.path` 优先；无效指定会报错，不偷偷换源。
+- 否则使用标准用户级 CLI（来源 `user-bin`），不运行包内安装素材。
+- 标准入口不存在时，保留既有 `PATH`、登录 shell 和常见位置的外部发现兼容；不隐式回退到内置程序运行。
 
 ## 命令
 
@@ -202,9 +222,9 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 
 如果扩展找不到 Tomcat：
 
-1. 优先使用适合你平台的 bundled VSIX。
-2. 否则，在终端里运行 `tomcat --version`。
-3. 如果失败了，修复你的 `PATH` 或设置 `tomcat.path`。
+1. 从 **Tomcat 设置 → 通用** 的版本信息下方点击**查看日志**；不必先连上 CLI，查看 `[cli-install]` 的步骤和退出码。
+2. 使用平台 VSIX 自动安装，或在新终端运行 `tomcat --version` 检查独立安装。
+3. 按日志中的手动步骤修复 PATH，并检查显式 `tomcat.path`；无效指定不会自动换源。
 
 如果已经找到了 Tomcat，但仍然无法连接：
 
@@ -216,7 +236,7 @@ Terminal → 斜杠文字 → Tomcat 本地管理操作
 1. 安装 Git for Windows：`winget install --id Git.Git -e`。
 2. 重启 VS Code，让扩展拿到新的 `PATH`。不会使用 WSL 的 `bash.exe`。
 
-`tomcat.config.toml` 中不支持的键会被忽略并在启动日志中告警，不再因此阻断 Serve 连接；已知键的非法值仍报错。旧连接信息不会自动迁移，需要时按现有模型配置引导添加。内置/纯包的 CLI 选择顺序以及显式 `tomcat.path` 的优先级不变。
+`tomcat.config.toml` 中不支持的键会被忽略并在启动日志中告警，不再因此阻断 Serve 连接；已知键的非法值仍报错。旧连接信息不会自动迁移，需要时按现有模型配置引导添加。配置兼容处理不改变上面的 CLI 选路顺序。
 
 如果 Tomcat 在对话过程中退出：
 

@@ -180,6 +180,91 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
     cleanup_home(&home);
 }
 
+// Exercise the real save/read path, including host headings and generated board.
+fn assert_saved_draft(rt: &PlanRuntime, draft: &str, expected: &str) {
+    let out = create_plan::execute(
+        rt,
+        create_plan::CreatePlanArgs {
+            goal: "roundtrip".into(),
+            draft: draft.into(),
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "save the complete body".into(),
+                status: TodoStatus::Pending,
+                kind: TodoKind::Work,
+            }],
+        },
+    )
+    .unwrap();
+    let path = plan_path_for_id(out["plan_id"].as_str().unwrap()).unwrap();
+    let saved = read_plan(&path).unwrap();
+    let body = saved
+        .body
+        .strip_prefix("## Goal\n\nroundtrip\n\n## Plan\n\n")
+        .unwrap();
+    let (actual, board) = body.rsplit_once("\n\n## Todos Board\n\n").unwrap();
+    assert_eq!(actual, expected);
+    assert!(board.contains("<!-- todos-board:auto:begin -->"));
+    assert!(board.contains("<!-- todos-board:auto:end -->"));
+    assert!(board.contains(&crate::infra::i18n::tr("planTool.autoBoard", &[])));
+    assert_eq!(saved.frontmatter.todos.len(), 1);
+    assert_eq!(saved.frontmatter.todos[0].content, "save the complete body");
+}
+
+#[test]
+fn create_plan_preserves_complete_body_heading_levels_and_spacing() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("body-roundtrip");
+    rt.enter_plan().unwrap();
+    let draft = format!(
+        "Overview\n\n{}\n\n## Solution Breakdown and Implementation\n\n### Issue 1: 保留输入\n\n#### Solution\n\n##### Solution Explanation\n\n```text\n提交 -> 保存\n     +-> 失败：保留输入\n```\n\n| Decision | Reason |\n|---|---|\n| Keep input | Retry |\n\nT1 | Save fails\n- Scenario: edited form\n- Steps: fail write\n- Expected result: input stays\n- Files involved: save_test.rs (proposed)\n\n## Empty chapter\n\n\n## Notes\n\nKeep this ordinary title.\n\n### Older level-three chapter\n\n## Acceptance\n\nInput, headings, whitespace and order survive.  \nEnd.",
+        "完整方案，不应被摘要化。\n".repeat(160)
+    );
+    assert!(draft.chars().count() > 2000);
+    assert_saved_draft(&rt, &format!(" \n{draft}\n\n"), &draft);
+    assert_saved_draft(
+        &rt,
+        "## Notes\n\nStandalone notes.",
+        "## Notes\n\nStandalone notes.",
+    );
+    cleanup_home(&home);
+}
+
+#[test]
+fn create_plan_legacy_wrappers_preserve_chapters_and_fenced_examples() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("legacy-roundtrip");
+    rt.enter_plan().unwrap();
+    for (open, close) in [
+        ("```text", "```"),
+        ("~~~markdown", "~~~"),
+        ("````markdown", "````"),
+        ("~~~text", ""),
+    ] {
+        let example =
+            format!("{open}\n## Goal\n## Plan\n## Notes\n```\n## Still in example\n{close}");
+        let content = format!("Keep detail.\n\n## Empty\n\n## Feature\n\n{example}");
+        let draft = format!("## Goal\n\nroundtrip\n\n## Draft\n\n## Notes\n\n{content}");
+        // The short backtick fence closes only the first case. A different
+        // marker, shorter fence or absent closer must keep example titles literal.
+        assert_saved_draft(&rt, &draft, content.trim());
+    }
+    assert_saved_draft(&rt, "## Plan\n\n## Empty\n", "## Empty");
+    assert_saved_draft(
+        &rt,
+        "## Goal\n\nDifferent goal.\n\n## Notes\n\nKeep notes.",
+        "Different goal.\n\n\nKeep notes.",
+    );
+    let nested = "- Example:\n\n    ```markdown\n    ## Goal\n    ## Plan\n    ## Notes\n    ```\n\n    ## Indented code\n\n\t## Goal\n\n## Acceptance\n\nKeep this chapter.";
+    assert_saved_draft(&rt, &format!("## Plan\n\n{nested}"), nested);
+    let indented = "    ## Goal\n\n    Keep this literal example.\n\t## Plan";
+    assert_saved_draft(&rt, indented, indented);
+    assert_saved_draft(&rt, &format!("## Plan\n\n{indented}\n\n"), indented);
+    cleanup_home(&home);
+}
+
 #[test]
 fn create_plan_rejects_empty_goal() {
     let _g = home_lock().lock().unwrap();

@@ -74,6 +74,48 @@ it("explains an empty window's missing workspace without inventing a session", a
   }
 });
 
+describe("observer question lifecycle", () => {
+  it("reuses pending answers and drops remote termination without caching or closing a reissued question", async () => {
+    __testing.reset();
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({ capabilities: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never, sessionRouter: {} as never,
+    });
+    const host = provider as any;
+    host.stateStore.setActiveSession("observed");
+    host.stateStore.applySessionOpen({ sessionId: "observed", access: "observe" });
+    const request = { requestId: "question", responseEvent: "response-question", toolCallId: "question-tool", questions: [{
+      id: "choice", prompt: "Choose", options: [{ id: "a", label: "A", recommended: true }, { id: "b", label: "B" }],
+    }] };
+    const old = new AbortController();
+    const first = provider.askUser(request, "observed", old.signal);
+    const duplicate = provider.askUser(request, "observed", old.signal);
+    expect(host.pendingQuestions.size).toBe(1);
+    old.abort();
+    const resumed = provider.askUser(request, "observed");
+    await expect(first).resolves.toMatchObject({ result: { outcome: "host_disconnected" } });
+    await expect(duplicate).resolves.toMatchObject({ result: { outcome: "host_disconnected" } });
+    expect(host.pendingQuestions.size).toBe(1);
+    expect(host.finalizedQuestionResults.size).toBe(0);
+    expect(provider.currentState().sessionViews.observed.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "approval", resolved: false, live: true }),
+    ]));
+    const answer = { answers: [{ questionId: "choice", optionIds: ["b"], pickedRecommended: false }], outcome: "answered" as const, cancelled: false };
+    await provider.dispatchTestIntent({ type: "answerQuestion", messageId: "answer", data: { sessionId: "observed", requestId: "question", result: answer } });
+    await expect(resumed).resolves.toMatchObject({ result: answer });
+    expect(host.finalizedQuestionResults.size).toBe(1);
+    // A local submission is not an authoritative server tool result (another window may win).
+    expect(provider.currentState().sessionViews.observed.timeline.some(item => item.type === "tool")).toBe(false);
+    const skipped = provider.askUser({ ...request, requestId: "skip-question" }, "observed");
+    await provider.dispatchTestIntent({ type: "answerQuestion", messageId: "cannot-cancel", data: { sessionId: "observed", requestId: "skip-question", result: { answers: [], cancelled: true, outcome: "interrupted" } } });
+    expect(host.pendingQuestions.get("observed\0skip-question").settled).toBe(false);
+    await provider.dispatchTestIntent({ type: "answerQuestion", messageId: "skip", data: { sessionId: "observed", requestId: "skip-question", result: { answers: [], cancelled: true, outcome: "skipped" } } });
+    await expect(skipped).resolves.toMatchObject({ result: { outcome: "answered", cancelled: false, answers: [{ questionId: "choice", skipped: true, optionIds: [] }] } });
+    provider.dispose();
+  });
+});
+
 describe("Host message queue integration", () => {
   function setup() {
     __testing.reset();

@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-04 21:47 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-09 19:58 +0800 | ACTIVE | develop | - |
+
+### DONE：feature/multica 本地合并（2026-11-09）
+
+- **基线**：D=`cfd38ce2b1a071967bf78111263ac27657327dd4`（与 origin/develop 相同），S=`ecdcd55b3beefe1cfa3c76c9e003ca007aee4ee0`。`git merge --no-ff --no-commit S` 无冲突，`git diff --quiet S` 确认合并树与 S 相同；合并提交只另改本文件与根目录 develop 入口。`aggregate-status.sh` 只读取本地 `feature/*` 分支，本机仅剩两个，重新生成会删去其它 7 个分支的看板段落，故 `docs/INTEGRATION.md` 保持原样，待分支齐全时再汇总。
+- **范围**：ACP 启动策略与旁观答题、计划交接、重试/缓存键、CLI 发现、公司源码适配包，以及合并前的过度设计清理和“失败用例修复后只独立重跑”测试规范。
+- **验证**：合并树与已验收的 S 相同，按新规范合并后不重跑。S 上的验收与边界见[源分支记录](../../../docs/status/feature-multica.md#过度设计清理与本地合并2026-11-09-1958)。
+- **边界**：未推送、发布、升版、安装或重启服务；Cov% 未测量。
 
 ### DONE：隔离测试自动化整改（本地提交，未发布）
 

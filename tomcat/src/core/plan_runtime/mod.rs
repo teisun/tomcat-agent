@@ -31,6 +31,7 @@ pub mod catalog;
 pub mod code_reviewer;
 pub mod explorer;
 pub mod file_store;
+pub mod interaction;
 pub mod ops;
 pub mod panels;
 pub mod plan_reviewer;
@@ -57,6 +58,7 @@ use crate::core::session::manager::{AgentMode, ResumeControlState};
 
 pub use active_plan::ActivePlan;
 pub use code_reviewer::CodeReviewSummary;
+pub use interaction::{InteractionPolicy, PlanReviewPolicy, PlanStartPolicy, QuestionPolicy};
 pub use panels::{
     Answer, AskQuestionIdentity, AskQuestionOutcome, AskQuestionPanel, AskQuestionResult,
     AskQuestionTermination, AskQuestionTerminationReason, MockAskQuestionPanel, NoopTodosPanel,
@@ -264,6 +266,7 @@ pub struct PlanRuntime {
     /// 显式注入别的 `AskQuestionPanel`。未注入时 `ask_question` 工具返回
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
+    interaction_policy: RwLock<InteractionPolicy>,
     /// 当前 active todos scratchpad 的逻辑 id（不再参与磁盘文件命名）。
     /// `todos.new_todos=true` 时通过 [`Self::rotate_active_todos_id`] 切换，便于 tool result
     /// / panel 在内存层感知“新白板”。
@@ -417,6 +420,7 @@ impl PlanRuntime {
             bash_task_registry: Mutex::new(None),
             session_model: parking_lot::Mutex::new(None),
             ask_question_panel: Mutex::new(None),
+            interaction_policy: RwLock::new(InteractionPolicy::default()),
             active_todos_id: Mutex::new(None),
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
@@ -427,9 +431,17 @@ impl PlanRuntime {
         })
     }
 
-    fn owns_executing_plan(&self, plan: &file_store::PlanFile) -> bool {
-        if let Some(current_id) = self.current_session_id.lock().clone() {
-            return plan.frontmatter.session_id.as_deref() == Some(current_id.as_str());
+    pub fn interaction_policy(&self) -> InteractionPolicy {
+        *self.interaction_policy.read()
+    }
+
+    pub fn set_interaction_policy(&self, policy: InteractionPolicy) {
+        *self.interaction_policy.write() = policy;
+    }
+
+    pub(crate) fn owns_executing_plan(&self, plan: &file_store::PlanFile) -> bool {
+        if let Some(owner_id) = plan.frontmatter.session_id.as_deref() {
+            return self.current_session_id.lock().as_deref() == Some(owner_id);
         }
         plan.frontmatter.session_key.as_deref() == Some(self.session_key.as_str())
     }
@@ -640,15 +652,24 @@ impl PlanRuntime {
         state: ResumeControlState,
     ) -> Result<(), PlanRuntimeError> {
         *self.mode.write() = state.mode.unwrap_or(AgentMode::Chat);
+        let mut unavailable_basis = "resume_plan_file_unreadable";
         let active_plan = state.plan_path.as_ref().and_then(|path| {
-            read_plan_for_restore(path, self.lock_timeout_ms)
-                .map(|plan| ActivePlan::from_file(path.clone(), &plan))
+            read_plan_for_restore(path, self.lock_timeout_ms).and_then(|plan| {
+                if plan.frontmatter.state == file_store::PlanFileState::Executing
+                    && !self.owns_executing_plan(&plan)
+                {
+                    unavailable_basis = "resume_plan_owned_elsewhere";
+                    None
+                } else {
+                    Some(ActivePlan::from_file(path.clone(), &plan))
+                }
+            })
         });
         if state.plan_path.is_some() && active_plan.is_none() {
             self.write_transcript_custom(serde_json::json!({
                 "event": crate::infra::wire::WIRE_PLAN_RESTORE,
                 "state": "unavailable",
-                "basis": "resume_plan_file_unreadable",
+                "basis": unavailable_basis,
             }));
         }
         *self.active_plan.write() = active_plan;
@@ -713,6 +734,12 @@ impl PlanRuntime {
                 *self.active_plan.write() = None;
                 return Ok(None);
             };
+            if plan.frontmatter.state == file_store::PlanFileState::Executing
+                && !self.owns_executing_plan(&plan)
+            {
+                *self.active_plan.write() = None;
+                return Ok(None);
+            }
             let refreshed = ActivePlan::from_file(active.path, &plan);
             let plan_id = refreshed.id.clone();
             *self.active_plan.write() = Some(refreshed);

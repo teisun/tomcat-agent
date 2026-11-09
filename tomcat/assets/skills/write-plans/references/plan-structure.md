@@ -9,18 +9,15 @@ This document defines plan sections and structural examples. Read [Plan Writing 
 Goal: why do this, and what will be delivered?
   |
 Plan: overall diagram + one-sentence overview
-  -> glossary (optional) -> solution overview (not needed for small plans)
-  -> a separate section for each problem/requirement:
-     -> problem symptoms / requirement description
-     -> root cause and evidence (issues only; ASCII diagram as needed + prose)
-     -> solution
-        -> solution explanation (ASCII diagram + prose)
-        -> UI mockup (ASCII diagram, as needed)
-     -> key decisions table -> test cases
-  -> other optional chapters
-  -> acceptance
+  -> solution overview (inside Plan; omit for small plans)
   |
-Todos Board: tasks and status
+Solution Breakdown and Implementation
+  -> each problem/requirement:
+     -> symptoms / requirement; root cause and evidence (issues only)
+     -> solution explanation (ASCII + prose); UI mockup (as needed)
+     -> key decisions table -> test cases
+  |
+Other optional chapters -> Acceptance -> Todos Board
 ```
 
 - `MUST`: include every applicable required section; keep sections separate even when their content is brief.
@@ -33,19 +30,18 @@ Use the fixed chapter titles below, or their equivalents in the plan's language.
 |---|---|---|
 | `## Goal` | MUST | Objective, observable deliverables, and scope boundaries. |
 | Start of `## Plan`: overall ASCII diagram + one sentence | MUST | Show the trigger, key processing, outcome, and important branches; summarize the change and its significance in one sentence. |
-| `### Glossary` | OPTION | Collect easily confused roles, abbreviations, or states; explain a small number of terms inline instead of creating a separate chapter. |
-| `### Solution Overview` | SHOULD | Explain the overall flow and core design so readers can get a general understanding of the solution. Small plans do not need this chapter. |
-| `### Solution Breakdown and Implementation` | MUST | Give each problem or requirement its own section, with the following headings and nesting. |
-| `#### Issue N: Description` / `#### Requirement N: Description` | MUST | Label and number each issue or requirement, followed by a one-sentence description. |
-| `##### Problem Symptoms` / `##### Requirement Description` | MUST | Describe the observed problem or the requested outcome. |
-| `##### Root Cause and Evidence` | MUST (issues only) | Explain the cause with evidence; use prose and add an ASCII diagram as needed. Omit this section for requirements. |
-| `##### Solution` | MUST | Contain the solution explanation and, when needed, a UI mockup as separate subsections. |
-| `###### Solution Explanation` | MUST | Explain the solution with an ASCII diagram plus prose. |
-| `###### UI Mockup` | OPTION | Show the proposed UI with an ASCII diagram as needed; otherwise omit this subsection. |
-| `##### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.3, not just prose or a reference to the table. |
-| `##### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.4. |
-| Other optional chapters | OPTION | Add supporting content as needed, without prescribed titles or format; use `###` for standalone chapters. |
-| `### Acceptance` | MUST | For a coding plan, state observable overall completion conditions, behavior to review, regression boundaries, expected impact radius, necessary cross-feature checks, checking methods, and delivery close-out; keep specific test cases in their problem or feature chapters. |
+| `### Solution Overview` (inside Plan) | SHOULD | Explain the overall flow and core design. Small plans can omit it. |
+| `## Solution Breakdown and Implementation` | MUST | Give each problem or requirement its own section, with the following headings and nesting. |
+| `### Issue N: Description` / `### Requirement N: Description` | MUST | Label and number each issue or requirement, followed by a one-sentence description. |
+| `#### Problem Symptoms` / `#### Requirement Description` | MUST | Describe the observed problem or the requested outcome. |
+| `#### Root Cause and Evidence` | MUST (issues only) | Explain the cause with evidence; use prose and add an ASCII diagram as needed. Omit this section for requirements. |
+| `#### Solution` | MUST | Contain the solution explanation and, when needed, a UI mockup as separate subsections. |
+| `##### Solution Explanation` | MUST | Explain the solution with an ASCII diagram plus prose. |
+| `##### UI Mockup` | OPTION | Show the proposed UI with an ASCII diagram as needed; otherwise omit this subsection. |
+| `#### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.3, not just prose or a reference to the table. |
+| `#### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.4. |
+| Other optional chapters | OPTION | Add supporting content as needed; use `##` for standalone chapters. |
+| `## Acceptance` | MUST | For a coding plan, state observable overall completion conditions, behavior to review, regression boundaries, expected impact radius, necessary cross-feature checks, checking methods, and delivery close-out; keep specific test cases in their problem or feature chapters. |
 | `## Todos Board` | MUST | Use the host's task board for implementation tasks, dependencies, and status; refer to chapters for technical details and to task IDs in prose; do not create a second task list or progress record. |
 
 ### Acceptance Todo Constraints
@@ -67,7 +63,7 @@ Use the fixed chapter titles below, or their equivalents in the plan's language.
 
 ### 2.1 Solution Overview
 
-Explain the overall flow and core design so readers can get a general understanding of the solution. Small plans do not need this chapter.
+Keep `### Solution Overview` inside `## Plan`; explain the overall flow and core design. Small plans can omit it. Define terms on first use, not in a separate glossary.
 
 ### 2.2 Local Skeleton for Each Problem or Requirement
 
@@ -115,7 +111,7 @@ to the number of todos.
   distinct failure type; do not add redundant checks merely to make a plan look
   comprehensive.
 
-For the relationship between requirements and tests, see item 2 of [Avoid over-design](../SKILL.md#avoid-over-design).
+For the relationship between requirements and tests, see item 2 of [Avoid over-design](final-check.md#avoid-over-design).
 
 #### Command Evidence
 
@@ -125,11 +121,11 @@ For the relationship between requirements and tests, see item 2 of [Avoid over-d
 #### Case Format
 
 ```text
-T-ID | Case name (mark P0/P1 when there is a real risk classification)
-- Scenario: What prerequisites and risk make this case necessary?
-- Steps: How do existing test entrypoints trigger the actual behavior or failure?
-- Expected result: Which states, files, responses, or side effects are observed; what must and must not happen?
-- Files involved: Identify test files to add / modify / reuse; mark unimplemented ones as proposed additions.
+T-ID | Failed save keeps input (mark P0/P1 only when justified)
+- Scenario: Edited form; test storage fails before writing.
+- Steps: Save, inspect input and feedback; restore storage and retry.
+- Expected result: Failure keeps input and shows no success; retry shows saved.
+- Files involved: <verified save-test path>; mark new test files as proposed additions.
 ```
 
 ## 3. Simplifying Small Changes
@@ -139,14 +135,14 @@ Use this heading-only skeleton for a small issue, filling each section according
 ```markdown
 ## Goal
 ## Plan
-### Solution Breakdown and Implementation
-#### Issue N: Description
-##### Problem Symptoms
-##### Root Cause and Evidence
-##### Solution
-###### Solution Explanation
-##### Key Decisions Table
-##### Test Cases
-### Acceptance
+## Solution Breakdown and Implementation
+### Issue N: Description
+#### Problem Symptoms
+#### Root Cause and Evidence
+#### Solution
+##### Solution Explanation
+#### Key Decisions Table
+#### Test Cases
+## Acceptance
 ## Todos Board
 ```

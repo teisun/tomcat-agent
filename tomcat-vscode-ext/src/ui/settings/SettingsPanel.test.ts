@@ -50,6 +50,7 @@ describe("settings panel html asset resolution", () => {
       "gui/dist/theme.css": "body { color: blue; }",
     });
     const panel = new SettingsPanel({
+      showConnectionLogs: vi.fn(),
       ensureInitialized: async () => ({} as never),
       expectedCliVersion: "0.1.20",
       extensionUri,
@@ -79,6 +80,7 @@ describe("settings panel html asset resolution", () => {
       "gui/dist/codicon.css": "@font-face { font-family: codicon; }",
     });
     const panel = new SettingsPanel({
+      showConnectionLogs: vi.fn(),
       ensureInitialized: async () => ({} as never),
       expectedCliVersion: "0.1.20",
       extensionUri,
@@ -94,6 +96,26 @@ describe("settings panel html asset resolution", () => {
 
     expect(html).toContain("styles.css");
     expect(html).toContain("codicon.css");
+  });
+});
+
+describe("settings connection logs", () => {
+  it.each([false, true])("opens existing output without initialization (failed connection=%s)", async failed => {
+    const ensureInitialized = vi.fn(async () => { throw new Error("offline"); });
+    const showConnectionLogs = vi.fn();
+    const request = vi.fn();
+    const panel = new SettingsPanel({
+      ensureInitialized, showConnectionLogs, expectedCliVersion: null, extensionVersion: null,
+      extensionUri: vscode.Uri.file("/tmp/logs-test"), messenger: { request } as never,
+    });
+    try {
+      if (failed) await panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready" });
+      ensureInitialized.mockClear();
+      await panel.__testingDispatchIntent({ type: "viewConnectionLogs", messageId: "logs" });
+      expect(showConnectionLogs).toHaveBeenCalledOnce();
+      expect(ensureInitialized).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+    } finally { panel.dispose(); }
   });
 });
 
@@ -141,6 +163,7 @@ describe("settings panel model management flow", () => {
       ...overrides?.messenger,
     };
     const panel = new SettingsPanel({
+      showConnectionLogs: vi.fn(),
       ensureInitialized:
         overrides?.ensureInitialized
         ?? (async () => ({
@@ -1019,6 +1042,7 @@ describe("connector Reload ownership and observation", () => {
       sendListProviderKeys: vi.fn(async (): Promise<Reply> => ({ success: true, payload: { keys: [] } })),
     };
     const panel = new SettingsPanel({
+      showConnectionLogs: vi.fn(),
       ensureInitialized: async () => ({ capabilities, protocolVersion: 1, serverVersion: "test", sessionId: null, attachmentRoot: null }),
       expectedCliVersion: null, extensionVersion: null, extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
       messenger: messenger as never, selectConnectorWorkspaceRoot: selectWorkspace,

@@ -23,7 +23,281 @@ fn text(frames: &[Value], kind: &str) -> String {
 }
 
 #[test]
-fn acp_session_has_no_ask_question_tool_and_a_stray_call_does_not_leak_text() {
+fn acp_startup_config_applies_before_new_load_and_resets_per_controller() {
+    fn value<'a>(options: &'a Value, id: &str) -> &'a Value {
+        &options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["id"] == id)
+            .unwrap()["currentValue"]
+    }
+    fn contract(options: &Value) {
+        assert_eq!(options.as_array().unwrap().len(), 5);
+        for option in options.as_array().unwrap() {
+            assert_eq!(option["type"], "select");
+            assert!(option["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|choice| choice["value"] == option["currentValue"]));
+            assert!(option["name"].is_string());
+        }
+    }
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![]);
+    let fx = ServiceFixture::new(&server.base_url);
+    let mut command = fx.command();
+    command.args([
+        "acp",
+        "--mode=plan",
+        "--plan-review=auto",
+        "--question-policy=recommended",
+        "--plan-start=auto",
+    ]);
+    let mut host = spawn_serve_command(command);
+    initialize(&mut host);
+    let created = request(
+        &mut host,
+        json!("create"),
+        "session/new",
+        json!({"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    let mut observed = created.clone();
+    let options = &ok(&created)["configOptions"];
+    contract(options);
+    for (id, expected) in [
+        ("agent_mode", "plan"),
+        ("plan_review", "auto"),
+        ("question_policy", "recommended"),
+        ("plan_start", "auto"),
+    ] {
+        assert_eq!(value(options, id), expected);
+    }
+    let session = ok(&created)["sessionId"].as_str().unwrap().to_owned();
+    let loaded = request(
+        &mut host,
+        json!("same"),
+        "session/load",
+        json!({"sessionId":session,"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    assert_eq!(ok(&loaded)["configOptions"], *options);
+    observed.extend(loaded);
+    let second = request(
+        &mut host,
+        json!("second"),
+        "session/new",
+        json!({"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    let second_id = ok(&second)["sessionId"].as_str().unwrap().to_owned();
+    observed.extend(second);
+    for (id, expected) in [
+        ("agent_mode", "chat"),
+        ("plan_review", "skip"),
+        ("question_policy", "manual"),
+        ("plan_start", "ask"),
+    ] {
+        let changed = request(
+            &mut host,
+            json!(format!("second-{id}")),
+            "session/set_config_option",
+            json!({"sessionId":second_id,"configId":id,"value":expected}),
+        );
+        contract(&ok(&changed)["configOptions"]);
+        assert_eq!(value(&ok(&changed)["configOptions"], id), expected);
+        observed.extend(changed);
+    }
+    // Reading through a no-op setter must not reset the first session's policies.
+    let unchanged = request(
+        &mut host,
+        json!("first-unchanged"),
+        "session/set_config_option",
+        json!({"sessionId":session,"configId":"agent_mode","value":"plan"}),
+    );
+    assert_eq!(ok(&unchanged)["configOptions"], *options);
+    observed.extend(unchanged);
+    for (id, invalid) in [
+        ("agent_mode", "exec"),
+        ("plan_review", "false"),
+        ("question_policy", "auto"),
+        ("plan_start", "skip"),
+        ("unknown", "ask"),
+    ] {
+        let frames = request(
+            &mut host,
+            json!("invalid"),
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":id,"value":invalid}),
+        );
+        assert_eq!(frames.last().unwrap()["error"]["code"], -32602);
+        observed.extend(frames);
+    }
+    let output = host.wait_for_exit(Duration::from_secs(65));
+    assert!(output.status.success(), "{output:?}");
+    observed.extend(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+    );
+    let mut next = spawn(&fx);
+    initialize(&mut next);
+    let loaded = request(
+        &mut next,
+        json!("load"),
+        "session/load",
+        json!({"sessionId":session,"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    let options = &ok(&loaded)["configOptions"];
+    observed.extend(loaded.iter().cloned());
+    contract(options);
+    for (id, expected) in [
+        ("agent_mode", "plan"),
+        ("plan_review", "ask"),
+        ("question_policy", "manual"),
+        ("plan_start", "ask"),
+    ] {
+        assert_eq!(value(options, id), expected);
+    }
+    let changed = request(
+        &mut next,
+        json!("chat"),
+        "session/set_config_option",
+        json!({"sessionId":session,"configId":"agent_mode","value":"chat"}),
+    );
+    contract(&ok(&changed)["configOptions"]);
+    assert_eq!(value(&ok(&changed)["configOptions"], "agent_mode"), "chat");
+    observed.extend(changed);
+    let output = next.wait_for_exit(Duration::from_secs(65));
+    assert!(output.status.success(), "{output:?}");
+    observed.extend(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+    );
+    assert!(observed.iter().all(|frame| frame["jsonrpc"] == "2.0"));
+    assert!(
+        observed
+            .iter()
+            .all(|frame| { frame["params"]["update"]["sessionUpdate"] != "config_option_update" }),
+        "client configuration responses already carry the current options: {observed:?}"
+    );
+    assert!(
+        server.captured_requests().is_empty(),
+        "configuration must never call a model"
+    );
+}
+
+#[test]
+fn acp_agent_plan_execution_notifies_mode_change_once() {
+    let tool = |id: &str, name: &str, arguments: Value| {
+        response(vec![
+            sse_tool_call(id, name, &arguments.to_string()),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ])
+    };
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
+        tool(
+            "create",
+            "create_plan",
+            json!({
+                "goal":"Mode notification fixture", "draft":"Complete one disposable step.",
+                "todos":[{"id":"step", "content":"Complete fixture", "status":"pending"}]
+            }),
+        ),
+        tool("start", "start_plan", json!({})),
+        tool(
+            "finish",
+            "update_plan",
+            json!({"ops":[{
+                "kind":"set_status", "id":"step", "status":"completed", "evidence":["fixture complete"]
+            }]}),
+        ),
+        response(vec![sse_delta("finished"), sse_finish("stop"), sse_done()]),
+    ]);
+    let fx = ServiceFixture::new(&server.base_url);
+    let mut command = fx.command();
+    command.args([
+        "acp",
+        "--mode=plan",
+        "--plan-review=skip",
+        "--plan-start=auto",
+    ]);
+    let mut host = spawn_serve_command(command);
+    initialize(&mut host);
+    let mut observed = request(
+        &mut host,
+        json!("new"),
+        "session/new",
+        json!({"cwd":fx.0.workspace, "mcpServers":[]}),
+    );
+    let session = ok(&observed)["sessionId"].as_str().unwrap().to_owned();
+    prompt(
+        &mut host,
+        "execute",
+        &session,
+        "Write the plan and explicitly implement it to completion.",
+    );
+    let completed = host.recv_until(WAIT, |frame| frame["id"] == "execute");
+    assert_eq!(ok(&completed)["stopReason"], "end_turn");
+    assert_eq!(text(&completed, "agent_message_chunk"), "finished");
+    observed.extend(completed);
+    let notified =
+        |frame: &Value| frame["params"]["update"]["sessionUpdate"] == "config_option_update";
+    if !observed.iter().any(notified) {
+        observed.extend(host.recv_until(WAIT, notified));
+    }
+    let output = host.wait_for_exit(Duration::from_secs(65));
+    assert!(output.status.success(), "{output:?}");
+    observed.extend(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+    );
+    let updates = observed
+        .iter()
+        .filter(|frame| notified(frame))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        updates.len(),
+        1,
+        "exactly one Agent-initiated mode change: {observed:?}"
+    );
+    assert_eq!(updates[0]["params"]["sessionId"], session);
+    let options = updates[0]["params"]["update"]["configOptions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(options.len(), 5);
+    assert_eq!(
+        options
+            .iter()
+            .find(|option| option["id"] == "agent_mode")
+            .unwrap()["currentValue"],
+        "chat"
+    );
+    for option in options {
+        assert_eq!(option["type"], "select");
+        assert!(option["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|choice| choice["value"] == option["currentValue"]));
+    }
+    let plans = std::fs::read_dir(fx.0.home_path.join(".tomcat/plans"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".plan.md"))
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1);
+    assert!(std::fs::read_to_string(&plans[0])
+        .unwrap()
+        .contains("state: completed"));
+}
+
+#[test]
+fn acp_questions_use_explicit_recommendation_policy_and_record_source() {
     let question = json!({"questions":[{"id":"choice","prompt":"Which option?","options":[
         {"id":"a","label":"A","recommended":true}, {"id":"b","label":"B"}
     ]}]});
@@ -36,7 +310,9 @@ fn acp_session_has_no_ask_question_tool_and_a_stray_call_does_not_leak_text() {
         response(vec![sse_delta("continued"), sse_finish("stop"), sse_done()]),
     ]);
     let fx = ServiceFixture::new(&server.base_url);
-    let mut host = spawn(&fx);
+    let mut command = fx.command();
+    command.args(["acp", "--question-policy=recommended"]);
+    let mut host = spawn_serve_command(command);
     initialize(&mut host);
     let session = new_session(&mut host, &fx.0.workspace);
     prompt(
@@ -59,7 +335,7 @@ fn acp_session_has_no_ask_question_tool_and_a_stray_call_does_not_leak_text() {
         .filter(|body: &Value| body["model"] == "gpt-5.4")
         .collect();
     assert_eq!(bodies.len(), 2, "{bodies:?}");
-    assert!(!bodies[0]["tools"]
+    assert!(bodies[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
@@ -72,8 +348,9 @@ fn acp_session_has_no_ask_question_tool_and_a_stray_call_does_not_leak_text() {
             .any(|message| message["role"] == "tool"
                 && message["content"]
                     .as_str()
-                    .is_some_and(|text| text.contains("write your question in the reply"))),
-        "the model must receive the supported fallback: {}",
+                    .is_some_and(|text| text.contains("policy_recommended")
+                        && text.contains("\"option_ids\":[\"a\"]"))),
+        "the model must receive the marked policy answer: {}",
         bodies[1]
     );
 }
@@ -1026,6 +1303,7 @@ fn session_mcp_cancel_joins_running_server_and_next_prompt_restarts_it() {
         "session/new",
         json!({"cwd":fx.0.workspace,"mcpServers":[private_mcp(&fx, "cancel", &[])]}),
     );
+    let original_options = ok(&frames)["configOptions"].clone();
     let session = ok(&frames)["sessionId"].as_str().unwrap().to_owned();
     let record_path = fx.0.workspace.join("cancel.env.json");
     let pid = wait_mcp_record(&record_path)["pid"].as_i64().unwrap() as libc::pid_t;
@@ -1052,6 +1330,25 @@ fn session_mcp_cancel_joins_running_server_and_next_prompt_restarts_it() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+    for (id, value) in [
+        ("agent_mode", "plan"),
+        ("plan_review", "auto"),
+        ("question_policy", "recommended"),
+        ("plan_start", "auto"),
+    ] {
+        let rejected = request(
+            &mut client,
+            json!(format!("busy-{id}")),
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":id,"value":value}),
+        );
+        assert!(
+            rejected.last().unwrap()["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.to_ascii_lowercase().contains("busy")),
+            "{id} must reject, not queue or cancel the running MCP call: {rejected:?}"
+        );
+    }
     client.send_value(
         &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
     );
@@ -1064,6 +1361,13 @@ fn session_mcp_cancel_joins_running_server_and_next_prompt_restarts_it() {
         0,
         "cancelled is not an early acknowledgement"
     );
+    let unchanged = request(
+        &mut client,
+        json!("configuration-after-busy"),
+        "session/set_config_option",
+        json!({"sessionId":session,"configId":"model","value":original_options[0]["currentValue"]}),
+    );
+    assert_eq!(ok(&unchanged)["configOptions"], original_options);
     prompt(
         &mut client,
         "again",
@@ -1534,6 +1838,9 @@ fn model_failure_returns_an_rpc_error_not_success() {
     }]);
     let server = spawn_scripted_openai_stream_server_with_auto_title(vec![failure; 8]);
     let fx = ServiceFixture::new(&server.base_url);
+    // This checks the ACP terminal error contract, not the default retry budget.
+    // Keep the scripted server and WAIT bounded even when the default increases.
+    fx.configure(|cfg| cfg.llm.agent_max_attempts = 1);
     let mut client = spawn(&fx);
     initialize(&mut client);
     let session = new_session(&mut client, &fx.0.workspace);

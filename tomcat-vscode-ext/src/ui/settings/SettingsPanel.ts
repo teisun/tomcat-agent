@@ -232,6 +232,7 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
 }
 
 export interface SettingsPanelDeps {
+  showConnectionLogs(): void;
   ensureInitialized(): Promise<InitializeResult>;
   expectedCliVersion: string | null;
   extensionUri: vscode.Uri;
@@ -647,6 +648,9 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async handleIntent(intent: SettingsIntent): Promise<void> {
     switch (intent.type) {
+      case "viewConnectionLogs":
+        this.deps.showConnectionLogs();
+        return;
       case "setUiLanguage":
         await this.setUiLanguage(intent.data.language);
         return;

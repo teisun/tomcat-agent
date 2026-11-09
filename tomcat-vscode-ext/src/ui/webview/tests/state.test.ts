@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { setLocale, translate } from "../../../shared/i18n";
+import { longFailedToolHistory } from "./recoveryHistory";
 
 import {
   type WebviewApprovalCard,
@@ -15,6 +16,82 @@ import {
 
 const backendEditNote = "第 2 段匹配到 3 处";
 const backendEditSummary = "1 个文件已落盘，1 个失败且未写入";
+
+describe("paginated error recovery", () => {
+  const errorCard = (store: WebviewStateStore, id = "long-error") =>
+    store.snapshot().sessionViews.s1.timeline.find(item => item.id === id);
+
+  it.each([false, true])("retains Resume across failed idle, tail hydration and older pages (live=%s)", live => {
+    const { full, tail } = longFailedToolHistory();
+    expect(tail.messages).toHaveLength(81);
+    expect(tail.messages[0]).toMatchObject({ message: { role: "assistant" } });
+    expect(tail.messages.some(row => (row as { message?: { role: string } }).message?.role === "user")).toBe(false);
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    if (live) {
+      store.appendLocalUserMessage("s1", "Inspect the fixture", { messageId: "long-user", submitKind: "prompt" });
+      store.applyEvent({ type: "agent_start", sessionId: "s1" });
+      store.applyEvent({ type: "tool_execution_start", sessionId: "s1", toolCallId: "long-call-79", toolName: "read", args: {} });
+      store.applyEvent({ type: "tool_execution_end", sessionId: "s1", toolCallId: "long-call-79", toolName: "read", result: "Completed fixture result", isError: false });
+      store.applyEvent({ type: "agent_end", sessionId: "s1", messages: [], error: "Upstream overloaded" });
+      expect(store.snapshot().sessionViews.s1.timeline).toContainEqual(expect.objectContaining({ kind: "error", recoveryAction: "resume" }));
+      store.applyEvent({ type: "agent_idle", sessionId: "s1", outcome: "failed" });
+    }
+    store.hydrateHistory("s1", tail);
+    expect(errorCard(store)).toMatchObject({ recoveryAction: "resume" });
+    expect(errorCard(store)).not.toHaveProperty("recoveryTargetUserMessageId");
+    store.setActiveSession("s2"); store.setActiveSession("s1");
+    expect(errorCard(store)).toMatchObject({ recoveryAction: "resume" });
+    store.prependHistory("s1", { ...full, messages: full.messages.slice(0, -81) });
+    expect(errorCard(store)).toMatchObject({ recoveryAction: "resume" });
+    const reopened = new WebviewStateStore(); reopened.setActiveSession("s1");
+    reopened.hydrateHistory("s1", tail);
+    expect(errorCard(reopened)).toMatchObject({ recoveryAction: "resume" });
+    const complete = new WebviewStateStore(); complete.setActiveSession("s1");
+    complete.hydrateHistory("s1", full);
+    expect(errorCard(complete)).toEqual(errorCard(reopened));
+  });
+
+  const user = { type: "message", id: "user", message: { role: "user", content: "Inspect" } };
+  const calls = { type: "message", id: "assistant", message: { role: "assistant", tool_calls: [
+    { id: "a", function: { name: "read", arguments: "{}" } },
+    { id: "b", function: { name: "read", arguments: "{}" } },
+  ] } };
+  const result = (id: string, rowId = `result-${id}`) => ({ type: "message", id: rowId, message: { role: "tool", tool_call_id: id, content: "done" } });
+  const error = { type: "error", id: "error", summary: "failed", detail: "failed" };
+  it.each([
+    ["missing result", [calls, result("a")]],
+    ["wrong order", [calls, result("b"), result("a")]],
+    ["duplicate result", [calls, result("a"), result("a", "duplicate")]],
+    ["missing declaration", [result("a")]],
+    ["superseded raw tail", [calls, result("a"), { ...result("b"), message: { ...result("b").message, superseded: true } }]],
+    ["assistant tail", [calls, result("a"), result("b"), { type: "message", id: "partial", message: { role: "assistant", content: "partial" } }]],
+  ])("does not offer Resume or unsafe Retry for %s", (_name, rows) => {
+    const store = new WebviewStateStore(); store.setActiveSession("s1");
+    store.hydrateHistory("s1", { sessionId: "s1", messages: [user, ...rows as unknown[], error] });
+    expect(errorCard(store, "error")).not.toHaveProperty("recoveryAction");
+  });
+
+  it("ignores tool media appended after an error but preserves input boundaries", () => {
+    const store = new WebviewStateStore(); store.setActiveSession("s1");
+    store.hydrateHistory("s1", { sessionId: "s1", messages: [calls, result("a"), error, result("b"),
+      { type: "message", id: "media", message: { role: "user", kind: "tool_media", content: [] } },
+    ] });
+    expect(errorCard(store, "error")).toMatchObject({ recoveryAction: "resume" });
+  });
+
+  it("does not revive old tools behind a newer failed user, or an error superseded by new output", () => {
+    const store = new WebviewStateStore(); store.setActiveSession("s1");
+    const failedUser = { type: "message", id: "new-user", message: { role: "user", content: "New request", superseded: true, turn_failed: true } };
+    const messages = [user, calls, result("a"), result("b"), failedUser, error];
+    store.hydrateHistory("s1", { sessionId: "s1", messages });
+    expect(errorCard(store, "error")).toMatchObject({ recoveryAction: "retry", recoveryTargetUserMessageId: "new-user" });
+    for (const role of ["user", "assistant"]) {
+      store.hydrateHistory("s1", { sessionId: "s1", messages: [...messages, { type: "message", id: "next", message: { role, content: "Next attempt" } }] });
+      expect(errorCard(store, "error")).not.toHaveProperty("recoveryAction");
+    }
+  });
+});
 
 describe("tool-owned attachment state", () => {
   const sha = "a".repeat(64);
@@ -280,6 +357,49 @@ describe("WebviewStateStore wire routing", () => {
       type: "message",
     });
     expect(message?.label).toBeUndefined();
+  });
+
+  it("keeps live request attempts session-scoped, transient and out of transcript notices", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.setReady(true);
+    store.applyEvent({ sessionId: "s1", type: "agent_start" });
+    const retry = (sessionId: string, attempt: number, maxAttempts = 10) => store.applyEvent({
+      type: "auto_retry_start", sessionId, attempt, maxAttempts, delayMs: 1000, errorMessage: "temporary failure",
+    });
+    for (const attempt of [2, 3, 10]) {
+      expect(retry("s1", attempt)).toEqual({ kind: "session", sessionId: "s1" });
+      expect(store.snapshotSession("s1")?.requestRetry).toEqual({ attempt, maxAttempts: 10 });
+    }
+    store.applyEvent({ sessionId: "child", type: "agent_start" });
+    retry("child", 2, 4);
+    expect(store.snapshotSession("s1")?.requestRetry).toEqual({ attempt: 10, maxAttempts: 10 });
+    store.setActiveSession("other");
+    expect(store.snapshotSession("other")?.requestRetry).toBeUndefined();
+    store.setActiveSession("s1");
+    expect(store.snapshotSession("s1")?.timeline).toEqual([]);
+    for (const success of [true, false]) {
+      retry("s1", 2, 4);
+      store.applyEvent({ type: "auto_retry_end", sessionId: "s1", attempt: 2, success, finalError: success ? null : "failed" });
+      expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
+    }
+    retry("s1", 2);
+    store.setConnectionStatus("reconnecting");
+    expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
+    expect(store.snapshotSession("child")?.requestRetry).toBeUndefined();
+    store.resetForReload();
+    store.hydrateHistory("s1", longFailedToolHistory().tail);
+    expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
+    retry("s1", 3);
+    expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
+  });
+
+  it.each(["agent_end", "agent_interrupted", "agent_idle", "agent_start", "turn_end"] as const)("clears request retry feedback on %s", type => {
+    const store = new WebviewStateStore();
+    store.applyEvent({ type: "agent_start", sessionId: "s1" });
+    store.applyEvent({ type: "auto_retry_start", sessionId: "s1", attempt: 3, maxAttempts: 10, delayMs: 0, errorMessage: "overloaded" });
+    store.applyEvent({ type, sessionId: "s1", messages: [], message: {}, turnIndex: 1, toolCallIds: [], toolResults: [] } as never);
+    expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
   });
 
   it("keeps auto retry progress out of the timeline", () => {

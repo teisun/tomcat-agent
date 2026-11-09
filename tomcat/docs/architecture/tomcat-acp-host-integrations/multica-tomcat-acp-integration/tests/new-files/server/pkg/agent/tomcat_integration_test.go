@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,10 +19,31 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestTomcatSharedServeDiscoveryHelperProcess(t *testing.T) {
+	if os.Getenv("MULTICA_TOMCAT_DISCOVERY_HELPER") != "1" {
+		return
+	}
+	requireRealAgentSmoke(t)
+	binary := os.Getenv("MULTICA_TOMCAT_TEST_BIN")
+	if !filepath.IsAbs(binary) {
+		os.Exit(90)
+	}
+	catalog, err := ListModels(t.Context(), "tomcat", NewCommand(binary, nil))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(91)
+	}
+	if json.NewEncoder(os.Stdout).Encode(catalog.Models) != nil {
+		os.Exit(92)
+	}
+	os.Exit(0)
+}
 
 // This is an opt-in cross-repository protocol test, not an authenticated model
 // smoke test. The explicit binary runs against a local HTTP fixture and a fresh HOME.
@@ -35,12 +57,19 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	retainHome := false
+	t.Cleanup(func() {
+		if !retainHome {
+			if err := os.RemoveAll(home); err != nil {
+				t.Errorf("remove private HOME %s: %v", home, err)
+			}
+		}
+	})
 	workspace := filepath.Join(home, "work")
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "SHELL=/bin/sh", "NO_PROXY=127.0.0.1,localhost", "TOMCAT__UI__LANGUAGE=en"}
+	env := tomcatFixtureEnv(home)
 	command := func(ctx context.Context, args ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Env, cmd.Dir = env, workspace
@@ -62,7 +91,10 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var requestCount atomic.Int64
+	catalogRequestModels := make(chan string, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
@@ -99,6 +131,64 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 		switch {
 		case strings.Contains(text, "Generate a short chat title"):
 			send(map[string]any{"content": "Fixture title"}, "stop")
+		case strings.Contains(text, "catalog-execute-fixture"):
+			catalogRequestModels <- fmt.Sprint(body["model"])
+			send(map[string]any{"content": "catalog-fixture-done"}, "stop")
+		case strings.Contains(text, "startup-policy-fixture"):
+			toolResult := func(id string) map[string]any {
+				messages, _ := body["messages"].([]any)
+				for _, item := range messages {
+					message, _ := item.(map[string]any)
+					if message["role"] == "tool" && message["tool_call_id"] == id {
+						content, _ := message["content"].(string)
+						var result map[string]any
+						if err := json.Unmarshal([]byte(content), &result); err != nil {
+							t.Error(err)
+						}
+						return result
+					}
+				}
+				return nil
+			}
+			created := toolResult("policy-create")
+			switch {
+			case !hasResult("policy-create"):
+				tool("policy-create", "create_plan", map[string]any{
+					"goal": "Adapter launch policy fixture", "draft": "Implement one disposable fixture step.",
+					"todos": []any{map[string]any{"id": "fixture-step", "content": "Implement fixture", "status": "pending"}},
+				})
+			case !hasResult("policy-question"):
+				if !strings.Contains(fmt.Sprint(created), "policy_skipped") {
+					t.Errorf("plan-review=skip not applied: %v", created)
+				}
+				tool("policy-question", "ask_question", map[string]any{"questions": []any{map[string]any{
+					"id": "choice", "prompt": "Choose", "options": []any{
+						map[string]any{"id": "first", "label": "First"}, map[string]any{"id": "second", "label": "Second", "recommended": true},
+					},
+				}}})
+			case !hasResult("policy-start"):
+				if toolResult("policy-question")["answer_source"] != "policy_recommended" {
+					t.Error("question policy did not reach the real panel tool")
+				}
+				planID, _ := created["plan_id"].(string)
+				if planID == "" {
+					t.Errorf("Plan mode create_plan failed: %v", created)
+				}
+				tool("policy-start", "start_plan", map[string]any{"plan_id": planID})
+			case !hasResult("policy-finish"):
+				if toolResult("policy-start")["started"] != true {
+					t.Error("plan-start=auto did not apply")
+				}
+				tool("policy-finish", "update_plan", map[string]any{"plan_id": created["plan_id"], "ops": []any{map[string]any{"kind": "set_status", "id": "fixture-step", "status": "completed", "evidence": []string{"fixture complete"}}}})
+			default:
+				send(map[string]any{"content": "startup-policy-done:" + fmt.Sprint(created["plan_id"])}, "stop")
+			}
+		case strings.Contains(text, "manual-question-fixture"):
+			tool("manual-question", "ask_question", map[string]any{"questions": []any{map[string]any{
+				"id": "manual", "prompt": "Wait for the user", "options": []any{
+					map[string]any{"id": "a", "label": "A", "recommended": true}, map[string]any{"id": "b", "label": "B"},
+				},
+			}}})
 		case strings.Contains(text, "resume-fixture"):
 			send(map[string]any{"content": "resumed-fixture"}, "stop")
 		case strings.Contains(text, "start-background-fixture"):
@@ -124,10 +214,74 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 	run("init")
 	write(filepath.Join(home, ".tomcat", "mcp.json"), `{"mcpServers":{}}`)
 	write(filepath.Join(home, ".tomcat", "tomcat.config.toml"), fmt.Sprintf("[llm]\ndefault_model = \"mock\"\ntitle_model = \"mock\"\n[context]\ncompaction_model = \"mock\"\n[skills]\nenabled = false\n[workspace]\nworkspace_roots = [%s]\n", strconv.Quote(workspace)))
-	write(filepath.Join(home, ".tomcat", "models.toml"), fmt.Sprintf("[[models]]\nid = \"mock\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n", strconv.Quote(server.URL)))
+	write(filepath.Join(home, ".tomcat", "models.toml"), fmt.Sprintf("[[models]]\nid = \"mock\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n\n[[models]]\nid = \"catalog-alias\"\nmodel_name = \"alias-wire\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n", strconv.Quote(server.URL), strconv.Quote(server.URL)))
 	write(filepath.Join(workspace, "AGENTS.md"), "fixture-project-instruction\n")
 	run("model", "key", "set", "openai", "local-fixture-key")
-	t.Cleanup(func() { run("serve", "stop") })
+	t.Cleanup(func() {
+		stopCtx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		defer stop()
+		out, err := command(stopCtx, "serve", "stop").CombinedOutput()
+		if err != nil {
+			retainHome = true
+			t.Errorf("private service cleanup failed; retaining HOME %s: %v\n%s", home, err, out)
+		}
+	})
+	var discoveryState map[string]any
+	if err := json.Unmarshal(run("serve", "status"), &discoveryState); err != nil || discoveryState["running"] != false {
+		t.Fatalf("fixture already has a running service: %+v, %v", discoveryState, err)
+	}
+	sessionNames := func() string {
+		t.Helper()
+		entries, err := os.ReadDir(filepath.Join(home, ".tomcat", "agents", "main", "sessions"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		return strings.Join(names, "\n")
+	}
+	beforeSessions := sessionNames()
+	t.Logf("session entries before discovery: %q", beforeSessions)
+	// Command has no Env field. Run real discovery in a separately constructed
+	// fixture environment, never under the test runner's HOME or credentials.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeCtx, stopProbe := context.WithTimeout(t.Context(), 20*time.Second)
+	defer stopProbe()
+	probe := exec.CommandContext(probeCtx, self, "-test.run=^TestTomcatSharedServeDiscoveryHelperProcess$")
+	probe.Env = append(append([]string(nil), env...), "MULTICA_RUN_REAL_AGENT_SMOKE=1", "MULTICA_TOMCAT_DISCOVERY_HELPER=1", "MULTICA_TOMCAT_TEST_BIN="+binary)
+	probe.Dir = workspace
+	out, err := probe.Output()
+	if err != nil {
+		t.Fatalf("isolated adapter discovery: %v", err)
+	}
+	var discovered []Model
+	if err := json.Unmarshal(out, &discovered); err != nil {
+		t.Fatal(err)
+	}
+	selectedID := ""
+	for _, model := range discovered {
+		if model.ID == "catalog-alias" {
+			selectedID = model.ID
+		}
+	}
+	if selectedID == "" {
+		t.Fatalf("alias missing from real discovery: %+v", discovered)
+	}
+	if requestCount.Load() != 0 {
+		t.Fatal("discovery called a model")
+	}
+	if after := sessionNames(); after != beforeSessions {
+		t.Fatalf("discovery changed session entries: before=%q after=%q", beforeSessions, after)
+	}
+	if err := json.Unmarshal(run("serve", "status"), &discoveryState); err != nil || discoveryState["running"] != false {
+		t.Fatalf("discovery started the shared service: %+v, %v", discoveryState, err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if serviceBinary := os.Getenv("MULTICA_TOMCAT_TEST_SERVICE_BIN"); serviceBinary != "" {
@@ -150,6 +304,166 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 		}
 		t.Logf("cross-version backend: client=%s service=%v instance=%v", clientVersion, info["serverVersion"], info["instanceId"])
 	}
+
+	t.Run("custom_args_apply_all_four_policies_before_first_prompt", func(t *testing.T) {
+		backend, err := New("tomcat", Config{ExecutablePath: binary, Env: tomcatHostEnv(env), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := backend.Execute(ctx, "startup-policy-fixture: explicitly write the plan and implement it", ExecOptions{
+			Cwd: workspace, CustomArgs: []string{"--mode=plan", "--plan-review=skip", "--question-policy=recommended", "--plan-start=auto"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := tomcatResult(t, session)
+		const prefix = "startup-policy-done:"
+		if result.Status != "completed" || !strings.HasPrefix(result.Output, prefix) {
+			t.Fatalf("startup policies: %+v", result)
+		}
+		planID := strings.TrimPrefix(result.Output, prefix)
+		plan, err := os.ReadFile(filepath.Join(home, ".tomcat", "plans", planID+".plan.md"))
+		if err != nil || !bytes.Contains(plan, []byte("state: completed")) {
+			t.Fatalf("same saved plan was not executed and completed: %v", err)
+		}
+	})
+
+	t.Run("context_cancel_while_waiting_for_a_manual_answer", func(t *testing.T) {
+		backend, err := New("tomcat", Config{ExecutablePath: binary, Env: tomcatHostEnv(env), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := backend.Execute(ctx, "resume-fixture", ExecOptions{Cwd: workspace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ready := tomcatResult(t, first)
+		if ready.Status != "completed" || ready.SessionID == "" {
+			t.Fatalf("prepare observable session: %+v", ready)
+		}
+		var info struct {
+			Running       bool   `json:"running"`
+			Endpoint      string `json:"endpoint"`
+			ServerVersion string `json:"serverVersion"`
+			InstanceID    string `json:"instanceId"`
+		}
+		if err := json.Unmarshal(run("serve", "status"), &info); err != nil || !info.Running || info.InstanceID == "" {
+			t.Fatalf("private service identity: %+v, %v", info, err)
+		}
+		canonicalHome, err := filepath.EvalSymlinks(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		socketDir, err := filepath.EvalSymlinks(filepath.Dir(info.Endpoint))
+		if err != nil || !strings.HasPrefix(socketDir, filepath.Join(canonicalHome, ".tomcat")+string(os.PathSeparator)) {
+			t.Fatalf("observer refuses a socket outside the disposable HOME: %q, %v", info.Endpoint, err)
+		}
+		// Use the same shared-service socket as VS Code, not standalone serve --stdio.
+		observer, err := net.DialTimeout("unix", info.Endpoint, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer observer.Close()
+		if err := observer.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		encoder, decoder := json.NewEncoder(observer), json.NewDecoder(observer)
+		send := func(frame map[string]any) {
+			t.Helper()
+			if err := encoder.Encode(frame); err != nil {
+				t.Fatal(err)
+			}
+		}
+		receive := func(matches func(map[string]any) bool) map[string]any {
+			t.Helper()
+			for {
+				var frame map[string]any
+				if err := decoder.Decode(&frame); err != nil {
+					t.Fatalf("native observer: %v", err)
+				}
+				if frame["success"] == false {
+					t.Fatalf("native observer command rejected: %v", frame)
+				}
+				if matches(frame) {
+					return frame
+				}
+			}
+		}
+		version := strings.TrimPrefix(strings.TrimSpace(string(run("--version"))), "tomcat ")
+		send(map[string]any{"service": "tomcat", "protocolVersion": 1, "clientVersion": version, "protocol": "native"})
+		hello := receive(func(frame map[string]any) bool { return frame["service"] == "tomcat" })
+		if hello["instanceId"] != info.InstanceID || hello["serverVersion"] != info.ServerVersion || hello["endpoint"] != info.Endpoint || hello["error"] != nil {
+			t.Fatalf("observer connected to a different service: %v", hello)
+		}
+		send(map[string]any{"environment": map[string]string{}})
+		receive(func(frame map[string]any) bool { return frame["ready"] == true })
+		send(map[string]any{"type": "control_request", "requestId": "observe-init", "subtype": "initialize", "payload": map[string]any{}})
+		receive(func(frame map[string]any) bool {
+			return frame["type"] == "control_response" && frame["requestId"] == "observe-init"
+		})
+		// Match initializeServe: a shared server cannot infer a window's project.
+		send(map[string]any{"type": "new_session", "id": "observe-project", "params": map[string]any{"cwd": workspace, "resumeCurrent": true}})
+		receive(func(frame map[string]any) bool { return frame["id"] == "observe-project" })
+		questionCtx, cancelQuestion := context.WithCancel(ctx)
+		defer cancelQuestion()
+		session, err := backend.Execute(questionCtx, "manual-question-fixture: ask before continuing", ExecOptions{Cwd: workspace, ResumeSessionID: ready.SessionID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := false
+		for message := range session.Messages {
+			if message.Type == MessageToolUse && message.CallID == "manual-question" {
+				started = true
+				break
+			}
+		}
+		if !started {
+			t.Fatal("manual question never reached the adapter")
+		}
+		// A tool-start event can precede panel registration. Observe the real
+		// pending card before cancelling, and require its withdrawal afterwards.
+		send(map[string]any{"type": "switch_session", "id": "observe-question", "sessionId": ready.SessionID})
+		question := receive(func(frame map[string]any) bool {
+			return frame["type"] == "control_request" && frame["subtype"] == "ask_question" && frame["sessionId"] == ready.SessionID
+		})
+		cancelQuestion()
+		stopped := tomcatResult(t, session)
+		if stopped.Status != "aborted" || stopped.SessionID != ready.SessionID {
+			t.Fatalf("manual question cancellation: %+v", stopped)
+		}
+		receive(func(frame map[string]any) bool {
+			return frame["type"] == "control_cancel" && frame["requestId"] == question["requestId"]
+		})
+		var service map[string]any
+		if err := json.Unmarshal(run("serve", "status"), &service); err != nil || service["running"] != true {
+			t.Fatalf("cancelling one question stopped the private shared service: %v", err)
+		}
+	})
+
+	t.Run("discovered_id_and_default_reach_provider", func(t *testing.T) {
+		backend, err := New("tomcat", Config{ExecutablePath: binary, Env: tomcatHostEnv(env), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ id, wire string }{{selectedID, "alias-wire"}, {"", "mock"}} {
+			session, err := backend.Execute(ctx, "catalog-execute-fixture", ExecOptions{Cwd: workspace, Model: tc.id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := tomcatResult(t, session)
+			if result.Status != "completed" || result.Output != "catalog-fixture-done" {
+				t.Fatalf("catalog execution: %+v", result)
+			}
+			select {
+			case model := <-catalogRequestModels:
+				if model != tc.wire {
+					t.Fatalf("id %q reached provider as %q, want %q", tc.id, model, tc.wire)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("local provider did not receive the discovered selection")
+			}
+		}
+	})
 
 	type peer struct {
 		client *hermesClient
@@ -316,17 +630,7 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		write(filepath.Join(work, "AGENTS.md"), "fixture-project-instruction\n")
-		environment := map[string]string{}
-		// Simulate a separate host instead of inheriting the active Tomcat
-		// session running this test. Only the isolated fixture's env is kept.
-		for _, entry := range os.Environ() {
-			key, _, _ := strings.Cut(entry, "=")
-			environment[key] = ""
-		}
-		for _, entry := range env {
-			key, value, _ := strings.Cut(entry, "=")
-			environment[key] = value
-		}
+		environment := tomcatHostEnv(env)
 		backend, err := New("tomcat", Config{ExecutablePath: binary, Env: environment, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 		if err != nil {
 			t.Fatal(err)

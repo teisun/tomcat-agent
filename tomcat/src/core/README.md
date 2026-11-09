@@ -89,9 +89,9 @@ Layer 2  Reasoning Loop：保留已接受正文与工具轮次
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| max_attempts | u32 | 4 | 每次逻辑模型请求的尝试上限（含首次），无人值守临时故障/空答10次；详见架构文档 |
+| max_attempts | u32 | 10 | 所有入口统一使用的每次逻辑模型请求尝试上限（含首次），显式配置仍生效；详见架构文档 |
 | max_tool_rounds | usize | usize::MAX | 单次 Reasoning 的工具轮次上限；请求重试不重置、不额外占用轮次 |
-| retry_base_delay_ms | u64 | 500 | 指数退避，含 jitter；交互封顶8s、无人值守30s，Retry-After 优先 |
+| retry_base_delay_ms | u64 | 500 | 指数退避，含 jitter；普通退避统一封顶 30s，Retry-After 优先 |
 | model | String | — | LLM 模型名，由调用方从 Session/Config 填入 |
 | session_id | String | — | 会话 ID，随 AgentEvent 发布 |
 | tool_definitions | Vec<serde_json::Value> | [] | 传入 LLM 的工具 JSON Schema |
@@ -148,7 +148,7 @@ flowchart TD
 - 第二层：模型与工具交替运行；保留已接受的正文、工具结果、工具轮次，提交失败不重发模型请求。
 - 第三层：每次逻辑请求重新计数；网络、空答、压缩、附件降级共享该请求额度。完整回复通过判定后，先结束请求重试，再交回第二层提交 / 执行工具。取消、Fatal、压缩无进展与额度耗尽都结束重试事件。
 - provider 内的首个 delta 前重试不变；出字后的断流上抛至单请求重试，不执行失败流的工具预览。
-- Git `eb2cd0a9` → `9f25ac4e` 的旧设计把 Attempt 包住整个 Reasoning；`09333a6d` 只增加无人值守次数。本次调整归属，不提高数值。完整规则及扩展五分钟冷却见 [Agent Loop 设计](../../docs/architecture/agent-loop.md)。
+- Git `eb2cd0a9` → `9f25ac4e` 的旧设计把 Attempt 包住整个 Reasoning；`09333a6d` 只增加无人值守次数。上述提交是旧策略的历史记录；当前所有入口统一默认10次尝试，显式配置仍生效。完整规则及扩展五分钟冷却见 [Agent Loop 设计](../../docs/architecture/agent-loop.md)。
 
 ### 6.1 上下文管理集成流程（TASK-17）
 

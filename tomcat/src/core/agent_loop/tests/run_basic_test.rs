@@ -406,7 +406,7 @@ async fn run_retries_on_429_then_succeeds() {
 }
 
 #[tokio::test]
-async fn run_observed_gateway_codes_get_the_full_unattended_budget() {
+async fn run_observed_gateway_codes_use_the_unified_budget() {
     for code in [
         "server_error",
         "upstream_http2_stream_error",
@@ -433,7 +433,6 @@ async fn run_observed_gateway_codes_get_the_full_unattended_budget() {
             Arc::new(MockPrimitiveExecutor),
             Arc::new(DefaultEventBus::new()),
             AgentLoopConfig {
-                unattended_retry: true,
                 retry_base_delay_ms: 0,
                 ..Default::default()
             },
@@ -453,7 +452,7 @@ async fn run_observed_gateway_codes_get_the_full_unattended_budget() {
 }
 
 #[tokio::test]
-async fn run_unattended_transport_retries_past_interactive_budget_without_manual_resume() {
+async fn run_default_transport_retries_past_four_attempts_without_manual_resume() {
     let mut streams = (0..4)
         .map(|_| {
             vec![Err(llm_error(
@@ -483,12 +482,10 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            // The fifth request is past the interactive budget of four.
-            max_attempts: 4,
+            // The fifth request must fit the unified default budget.
             system_prompt: None,
             retry_base_delay_ms: 0,
-            session_id: "unattended-transport-retry".to_string(),
-            unattended_retry: true,
+            session_id: "default-transport-retry".to_string(),
             plan_runtime: None,
             ..Default::default()
         },
@@ -500,7 +497,7 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
         .await;
 
     let AgentRunOutcome::Completed(result) = outcome else {
-        panic!("transient transport failure should recover in the same unattended run");
+        panic!("transient transport failure should recover in the same run");
     };
     assert_eq!(result.final_text, "RECOVERED_AUTONOMOUSLY");
     assert_eq!(
@@ -520,23 +517,18 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
         retry_events
             .iter()
             .all(|event| event["maxAttempts"].as_u64() == Some(10)),
-        "unattended transport retries must advertise their elevated budget: {retry_events:?}"
+        "transport retries must advertise the unified default budget: {retry_events:?}"
     );
 }
 
 #[tokio::test]
-async fn run_unattended_billing_429_stops_without_elevated_retries() {
+async fn run_billing_429_stops_without_retrying() {
     let (provider, requests) =
         RecordingStreamLlmProvider::new(vec![vec![Err(llm_http_status_error(
             "mock",
             429,
             r#"{"error":{"code":"insufficient_quota","message":"insufficient credits"}}"#,
         ))]]);
-    let plan_runtime = PlanRuntime::new("unattended-billing-retry");
-    plan_runtime.seed_active_plan_for_test(
-        "unattended-billing-retry-plan".to_string(),
-        PlanFileState::Executing,
-    );
     let event_bus = Arc::new(DefaultEventBus::new());
     let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     {
@@ -554,11 +546,9 @@ async fn run_unattended_billing_429_stops_without_elevated_retries() {
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            max_attempts: 4,
             system_prompt: None,
             retry_base_delay_ms: 0,
-            session_id: "unattended-billing-retry".to_string(),
-            plan_runtime: Some(plan_runtime),
+            session_id: "billing-no-retry".to_string(),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -575,7 +565,7 @@ async fn run_unattended_billing_429_stops_without_elevated_retries() {
     assert_eq!(
         requests.0.lock().unwrap().len(),
         1,
-        "billing must not consume the elevated unattended transport budget"
+        "billing must stop after one request even with the default ten-attempt budget"
     );
     assert!(
         retry_events.lock().unwrap().is_empty(),
@@ -672,7 +662,7 @@ async fn failed_run_does_not_double_report_a_stalled_plan() {
 }
 
 #[tokio::test]
-async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
+async fn run_default_transport_exhaustion_stops_at_ten_attempts() {
     let streams = (0..10)
         .map(|_| {
             vec![Err(llm_error(
@@ -683,11 +673,6 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
         })
         .collect::<Vec<_>>();
     let (provider, requests) = RecordingStreamLlmProvider::new(streams);
-    let plan_runtime = PlanRuntime::new("unattended-transport-exhaustion");
-    plan_runtime.seed_active_plan_for_test(
-        "unattended-transport-exhaustion-plan".to_string(),
-        PlanFileState::Executing,
-    );
     let event_bus = Arc::new(DefaultEventBus::new());
     let retry_starts = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let retry_ends = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
@@ -716,11 +701,9 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            max_attempts: 4,
             system_prompt: None,
             retry_base_delay_ms: 0,
-            session_id: "unattended-transport-exhaustion".to_string(),
-            plan_runtime: Some(plan_runtime),
+            session_id: "default-transport-exhaustion".to_string(),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -731,7 +714,7 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
         loop_.run(vec![ChatMessage::user("continue execution")]),
     )
     .await
-    .expect("elevated retries must terminate instead of hanging");
+    .expect("default retries must terminate instead of hanging");
 
     assert!(
         matches!(
@@ -739,12 +722,12 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
             AgentRunOutcome::Failed(error)
                 if crate::infra::error::llm_stage(error) == Some(LlmErrorStage::Connect)
         ),
-        "exhausting the elevated transport budget must surface the terminal LoopError::Fatal: {outcome:?}"
+        "exhausting the default transport budget must surface the terminal LoopError::Fatal: {outcome:?}"
     );
     assert_eq!(
         requests.0.lock().unwrap().len(),
         10,
-        "the unattended budget includes the initial request and must not issue an eleventh request"
+        "the default budget includes the initial request and must not issue an eleventh request"
     );
     let retry_starts = retry_starts.lock().unwrap().clone();
     assert_eq!(
@@ -758,7 +741,7 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
         retry_starts
             .iter()
             .all(|event| event["maxAttempts"].as_u64() == Some(10)),
-        "every retry notification must retain the elevated ceiling: {retry_starts:?}"
+        "every retry notification must retain the default ten-attempt ceiling: {retry_starts:?}"
     );
     let retry_ends = retry_ends.lock().unwrap().clone();
     assert_eq!(
@@ -771,7 +754,7 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
 }
 
 #[tokio::test]
-async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
+async fn run_default_non_billing_429_retries_past_four_attempts() {
     let mut streams = (0..4)
         .map(|_| {
             vec![Err(llm_http_status_error(
@@ -783,11 +766,6 @@ async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
         .collect::<Vec<_>>();
     streams.push(ok_text_stream("RECOVERED_AFTER_RATE_LIMIT"));
     let (provider, requests) = RecordingStreamLlmProvider::new(streams);
-    let plan_runtime = PlanRuntime::new("unattended-rate-limit-retry");
-    plan_runtime.seed_active_plan_for_test(
-        "unattended-rate-limit-retry-plan".to_string(),
-        PlanFileState::Executing,
-    );
     let event_bus = Arc::new(DefaultEventBus::new());
     let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     {
@@ -805,11 +783,9 @@ async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            max_attempts: 4,
             system_prompt: None,
             retry_base_delay_ms: 0,
-            session_id: "unattended-rate-limit-retry".to_string(),
-            plan_runtime: Some(plan_runtime),
+            session_id: "default-rate-limit-retry".to_string(),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -824,12 +800,12 @@ async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
             outcome,
             AgentRunOutcome::Completed(result) if result.final_text == "RECOVERED_AFTER_RATE_LIMIT"
         ),
-        "a non-billing 429 must receive the elevated unattended retry budget"
+        "a non-billing 429 must receive the unified default retry budget"
     );
     assert_eq!(
         requests.0.lock().unwrap().len(),
         5,
-        "the fifth request proves rate limiting retries beyond the interactive budget of four"
+        "the fifth request proves rate limiting uses the default budget beyond four attempts"
     );
     let retry_events = retry_events.lock().unwrap().clone();
     assert_eq!(
@@ -843,7 +819,7 @@ async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
         retry_events
             .iter()
             .all(|event| event["maxAttempts"].as_u64() == Some(10)),
-        "unlike insufficient_quota, a rate-limit 429 must advertise the elevated ceiling: {retry_events:?}"
+        "unlike insufficient_quota, a rate-limit 429 must advertise the default ten-attempt ceiling: {retry_events:?}"
     );
 }
 
@@ -1203,7 +1179,39 @@ fn retry_delay_uses_jitter_window_and_cap() {
     let capped = super::super::request_retry::compute_retry_delay_ms(500, 20, 40);
     assert_eq!(min_delay, 400, "attempt=2 最小 jitter 应为 base 的 80%");
     assert_eq!(max_delay, 600, "attempt=2 最大 jitter 应为 base 的 120%");
-    assert_eq!(capped, 8_000, "指数退避应被上限 cap 到 8s");
+    assert_eq!(capped, 30_000, "指数退避统一使用 30s 上限");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_can_exceed_the_ordinary_backoff_cap() {
+    let error = AppError::LlmDetailed(Box::new(
+        LlmError::http_status("mock", 429, "rate limit").with_retry_after_ms(90_000),
+    ));
+    let llm = Arc::new(MockLlmProvider::new(vec![
+        vec![Err(error)],
+        ok_text_stream("done"),
+    ]));
+    let mut agent = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        agent
+            .run(vec![ChatMessage::user("answer")])
+            .await
+            .unwrap()
+            .final_text,
+        "done"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(90));
 }
 
 #[tokio::test]
@@ -2364,7 +2372,7 @@ async fn truncated_encrypted_thinking_without_visible_text_is_fatal() {
 }
 
 #[tokio::test]
-async fn hidden_reasoning_exhausts_interactive_budget_with_retry_count() {
+async fn hidden_reasoning_exhausts_explicit_budget_with_retry_count() {
     let (provider, requests) = RecordingStreamLlmProvider::new(vec![
         hidden_empty_stream("resp_empty_1"),
         hidden_empty_stream("resp_empty_2"),
@@ -2394,16 +2402,16 @@ async fn hidden_reasoning_exhausts_interactive_budget_with_retry_count() {
     assert_eq!(
         requests.0.lock().unwrap().len(),
         4,
-        "interactive empty responses use the four-request budget"
+        "empty responses respect the explicitly configured four-request budget"
     );
 }
 
 #[tokio::test]
-async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
+async fn hidden_empty_turn_uses_default_ten_request_budget() {
     let mut streams = (0..5)
         .map(|index| hidden_empty_stream(&format!("resp_empty_{index}")))
         .collect::<Vec<_>>();
-    streams.push(ok_text_stream("recovered unattended"));
+    streams.push(ok_text_stream("recovered within default budget"));
     let (provider, requests) = RecordingStreamLlmProvider::new(streams);
     let event_bus = Arc::new(DefaultEventBus::new());
     let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
@@ -2422,11 +2430,9 @@ async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
         Arc::new(MockPrimitiveExecutor),
         event_bus,
         AgentLoopConfig {
-            max_attempts: 4,
             system_prompt: None,
             retry_base_delay_ms: 0,
-            session_id: "hidden-empty-unattended".to_string(),
-            unattended_retry: true,
+            session_id: "hidden-empty-default-budget".to_string(),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -2435,8 +2441,8 @@ async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
     let outcome = loop_.run(vec![ChatMessage::user("continue")]).await;
 
     assert!(
-        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered unattended"),
-        "unattended empty responses should recover within the elevated budget: {outcome:?}"
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered within default budget"),
+        "empty responses should recover within the default budget: {outcome:?}"
     );
     assert_eq!(requests.0.lock().unwrap().len(), 6);
     assert!(
@@ -2445,7 +2451,7 @@ async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
             .unwrap()
             .iter()
             .all(|event| event["maxAttempts"].as_u64() == Some(10)),
-        "unattended retries must advertise the ten-request budget"
+        "retries must advertise the default ten-request budget"
     );
 }
 
