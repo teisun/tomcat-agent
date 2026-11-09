@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-09 15:07 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-09 15:09 +0800 | ACTIVE | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -20,6 +20,8 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - 版本同步至 CLI / bundled CLI `0.1.89`、扩展 `0.2.7`，对应此前各一次 patch 升级，本轮不再次递增。darwin-x64 完整 VSIX 已构建并核验包内 CLI 与 release 产物一致；产物保持忽略，不入库。用户已安装插件并重启共享服务，本机会话中已核验 CLI / serve 均为 `0.1.89`，桌面 daemon 加载 Multica 修复提交 `5e36721c1`。
 - TOMC-4 通用缓存键修复：在 `PromptCacheKeyFamily::key_for` 保留不超过 64 个 UTF-8 字节的逻辑键，超长时对完整会话与请求家族取 SHA-256 小写 hex。现场 75 字节评审键、64/65 边界、Unicode、长会话后缀与家族隔离均有回归；只改派生缓存键，不改会话身份、历史、权限或 provider wire。源码已提交并随上述构建部署；用户现已报告本机验收通过，不将用户验收等同于所有自动门禁或跨平台验证通过。
 
+- TOMC-5 help 增强完成并经用户验收：根帮助以中英各四行介绍产品能力、共享服务及 ACP 入口，ACP 长帮助解释 stdio 与五项参数的用途和交互策略边界。沿用中文 clap 元数据与英文目录，仅增加 `tomcat.acp.long`；扩展原有本地化和隔离 CLI 测试，并在现有架构章节补帮助入口说明，不改参数、默认值、运行逻辑、权限或依赖。
+
 ### 🔌 INTERFACE (接口变更)
 
 - `tomcat acp` 新增 `--mode=chat/plan`、`--plan-review=ask/auto/skip`、`--question-policy=manual/recommended`、`--plan-start=ask/auto`。不指定 mode 时，新会话为 Chat，恢复会话保留原模式；`--plan-start=auto` 不等于保存即开工。
@@ -28,10 +30,15 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - Multica 产品 adapter 继续原样传入自定义参数，不新增产品参数解析器、数据库字段、审批协议或轮询器。
 - `key_for` 返回值新增 64 字节上界；短键兼容，超长键与诊断日志显示稳定摘要。无新配置、依赖或协议字段，不承诺上游缓存命中率。
 
+- 本次 help 增强仅更新展示元数据及英文帮助键，`--mode`、`--plan-review`、`--question-policy`、`--plan-start` 与 `--skills-dir` 的解析、可选性、合法值和行为保持不变；帮助继续在运行时初始化前退出。
+
 ### 验证与提交范围
 
 | 范围 | 结果 | 证据与边界 |
 | :--- | :--- | :--- |
+| TOMC-5 本地化、ACP 解析与语言偏好 | 3 + 2 + 1 + 1，共 7 项通过 | `1794206279950-68yej5` exit 0；已读原日志，并复核相关源码、测试和 Cargo 文件未在该批次后修改，复用有效结果 |
+| TOMC-5 隔离 CLI 黑盒 | 4 项通过；含四份双语根/ACP 帮助、空 HOME、坏配置与错误退出检查 | `1794206563841-qosh4e` exit 0；实际输出 `.agents/acceptance/tomc-5-help-output.log`，四个全新 HOME 前后均空，八个坏配置场景清单/字节不变；输入未在批次后修改 |
+| TOMC-5 格式与范围 | 四个 Rust 文件的定向 rustfmt 和空白检查通过 | `1794206592999-mtbc2u` exit 0；对照 `plan_tomc_5_tomcat_help_tomcat_acp_help_acp_h_d3da124f` 审阅六文件 diff；本轮仅补 status 并提交，不重复运行有效测试 |
 | 缓存键红绿 | 修复前 6 passed / 4 failed；修复后 10 passed / 0 failed | `cargo test --offline --locked --lib cache_key`；`1794185535184-ijrk2l` / `1794185709612-28zcen`，含现场摘要参考值与 AgentLoop 真实构造入口 |
 | Rust Clippy / doctest / 构建 | `--all-targets -- -D warnings` 通过；doc 检查退出 0（当前 0 个 doctest）；integration 前置本地 debug 构建通过 | `1794185854805-urpf98` 各阶段独立记录；构建不是部署或真实评审验收 |
 | Rust 库测试 | 3500 passed / 1 failed / 7 ignored，阶段退出 101 | 同一批次；唯一失败为 `search_files_content_mode_defaults_to_three_context_lines`，缺 rg 时走不提供上下文的既有 fallback；搜索实现和该测试未改，所有缓存键测试通过 |
@@ -49,7 +56,7 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 | 默认答题升级行为 | 未配置普通问题策略的 ACP 智能体会等待同项目 VS Code 人工回答 | 无人值守须显式 recommended；不将自动答题当作开发或工具授权 |
 | 搜索环境与既有 fallback 缺口 | PATH 中缺少 rg，库测试的上下文行断言失败；`search.rs:573-577` 已明确不支持 fallback 上下文 | 未纳入本次两文件修复，不弱化断言或静默跳过；另行补齐环境/修复搜索边界后复验 |
 | 集成测试工具 | 缺 cargo-nextest，本次 integration 未执行 | 由用户决定是否安装，再跑原 runner 的 integration 阶段；不声称全门禁通过 |
-| help 交付状态 | TOMC-5 帮助增强与定向验证已完成，待本轮独立提交；此前 `0.2.7` VSIX 构建早于该增强 | 不将源码提交当作新帮助已安装；如需交付该文案，再另行升版、构建与安装，不覆盖已交付的同版本包 |
+| help 部署边界 | TOMC-5 帮助增强、测试与架构说明纳入本轮独立提交；此前 `0.2.7` VSIX 构建早于该增强 | 不将源码提交当作新帮助已安装；如需交付该文案，再另行升版、构建与安装，不覆盖已交付的同版本包 |
 | 接入资料包快照 | 包内 `tomcat.go` 与测试仍为旧版本，缺少后续终态/清理边界及参数解析早退修复；模型发现文件与当前源码相同 | 以已提交源码做最小语义同步，连同必要接线、测试、说明及 manifest 哈希一起更新；不把整个新版宿主倒入公司基线 |
 | 发布与服务边界 | 本机已核验的部署状态不代表公司二开环境或其它平台完成部署 | 本轮仅本地提交，不改真实配置/PATH、不操作运行服务、不推送或公开发布 |
 | 验证边界 | 覆盖率未测量；Windows/Linux/arm64 原生旅程及远端 CI 未由本轮验证 | Cov% 留空值 `-`，提交信息省略覆盖率，不宣称跨平台或所有可能测试全绿；历史失败与环境限制保留在既有证据中 |

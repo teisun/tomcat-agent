@@ -64,8 +64,8 @@ pub(crate) use plugin_cmd::{
 #[derive(Parser, Debug)]
 #[command(
     name = CLI_NAME,
-    about = "Tomcat Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "tomcat 是基于 rquickjs 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
+    about = "Tomcat Agent CLI — 轻量级 AI Agent 运行时",
+    long_about = "Tomcat 是基于 Rust 的轻量级 AI Agent 运行时。\n支持对话与计划、会话管理和多模型切换。\n提供工具扩展、权限控制与审计，支持浏览器辅助的前端验收。\ntomcat serve 提供多客户端共享服务，ACP 客户端可接入；详见 tomcat acp --help。",
     version
 )]
 pub struct Cli {
@@ -171,9 +171,12 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
-    /// 以标准 ACP/stdio 接入共享服务
+    /// 通过 Agent Client Protocol（ACP）及标准输入/输出接入本机共享服务
+    #[command(
+        long_about = "通过 Agent Client Protocol（ACP）及标准输入/输出接入本机共享服务。通常由 ACP 客户端启动；标准输入/输出用于协议通信，而非交互式终端对话。实际连接会复用或按需启动共享服务；查看帮助不会建立连接。\n以下设置用于本连接控制的会话。--mode 设置初始会话模式；--plan-review、--question-policy、--plan-start 分别控制保存后的评审、普通问题回答和明确开工时的额外询问。\n自动交互策略不会绕过工具权限。保存或评审计划不等于批准实施；--plan-start=auto 也不会让保存或评审自动触发开发。"
+    )]
     Acp {
-        /// 本连接控制会话的私有技能目录（绝对路径）
+        /// 本连接控制会话使用的私有技能目录；须为绝对、可读取目录。省略时不追加连接私有目录，不因此授予工具访问权限
         #[arg(long)]
         skills_dir: Option<std::path::PathBuf>,
         #[command(flatten)]

@@ -1028,6 +1028,8 @@ Multica 自定义参数（原样透传）
   → 标准 configOptions / session/set_config_option / config_option_update
 ```
 
+帮助入口：`tomcat --help` 概述主要能力和 `serve` 共享服务，`tomcat acp --help` 展开 stdio 接入、五项参数及交互策略边界。中文来自 `src/api/cli/mod.rs` 与 `src/api/acp/launch.rs` 的 clap 展示元数据，英文沿用 `assets/i18n/cli_help.en.json`（长说明键 `tomcat.acp.long`），由现有 `src/api/cli/localization.rs` 选择。查看帮助在运行时初始化前退出；回归入口为 `src/api/cli/tests/localization_test.rs` 和 `tests/i18n_cli_tests.rs`，后者用隔离 HOME/cwd 检查双语根/ACP 帮助的前后文件清单，并核对坏配置字节不变。
+
 | CLI 参数 | ACP config ID | 值与默认语义 |
 | --- | --- | --- |
 | `--mode` | `agent_mode` | chat/plan；省略时新建为 Chat，载入保留保存的模式 |
