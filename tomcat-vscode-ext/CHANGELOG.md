@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.8
+
+Includes the changes prepared for the unpublished 0.2.4–0.2.7 extension versions.
+
+- Use one standard CLI for VS Code, Multica and terminals: every activation of a platform package installs or aligns `~/.local/bin/tomcat` (`tomcat.exe` on Windows) with its bundled program and ensures the user PATH. This can replace a newer or same-version standalone or development build, and there is no switch to turn it off; to keep using a development build, leave it in its build directory and set `tomcat.path` (VS Code) or `MULTICA_TOMCAT_PATH` (Multica). Installation does not configure models, copy credentials or restart running services. Open a new terminal or application after PATH changes; `tomcat self-install --add-to-path` performs the same step manually.
+- Change executable selection: an explicitly configured, non-default `tomcat.path` still wins, and an invalid override now reports an error instead of switching sources. Otherwise the user-level entry is used; if it is absent, existing PATH, login-shell and common-location discovery remain. The bundled file is no longer a runtime fallback, and pure-extension installs skip automatic installation and still need an installed CLI.
+- Automatic PATH maintenance now removes only lines that Tomcat marked as its own, preserving unmarked PATH entries that point to Tomcat build directories.
+- Add **View Logs** below the version information in Tomcat Settings → General. It opens the Tomcat Output channel, including `[cli-install]` steps and exit codes, even while installation is pending or the CLI or service is unavailable.
+- Retry transient model request failures up to 10 attempts by default in every session mode and for sub-agents, with backoff capped at 30 seconds and honoring `Retry-After`. Explicitly saved retry budgets stay in effect; non-transient failures keep the previous four-attempt limit. While retrying, the progress row shows the current request attempt.
+- Fix Retry and Resume disappearing from error cards in long sessions whose history is loaded in pages.
+- Add `tomcat acp` options `--mode`, `--plan-review`, `--question-policy` and `--plan-start`, so Paperclip/Multica hosts can set the starting mode, plan review, ordinary question answers and plan-start confirmation through their existing custom arguments, and hand a plan from planning to development by its original plan ID instead of copying it. Automatic answers never grant development or tool permissions, and a review skipped by policy is labeled as not independently reviewed. Planning sessions may run host-assigned delivery commands, such as uploading the saved plan, under normal permissions without gaining permission to implement, install, commit or publish.
+- Let VS Code observers of a Paperclip/Multica session in the same project answer its pending question. Observers still cannot send tasks, stop execution or approve tools; the shared service accepts only one answer, and Skip in an observer view skips the questions without cancelling the host's task.
+- Add `tomcat serve models`, which lists the shared service's saved model catalog as JSON without starting or connecting to the service. Models without saved credentials are hidden, catalog errors are reported explicitly, and unrelated model settings in the caller's environment no longer block discovery.
+- Root command help now points to ACP, and `tomcat acp --help` explains its stdio usage, options and the permission limits of automatic policies in English and Chinese.
+- Fix plan review failing before it starts with providers that limit prompt cache keys to 64 characters. Overlong keys are replaced with a stable hash; session identity is unchanged.
+- Save plans as written: the plan saver no longer reorders sections or trims code fences, whitespace, valid headings or first-line Markdown indentation. Plan previews style all six heading levels distinctly, and built-in plan-writing and review guidance is clarified.
+- Fix an intermittent "session in use" error right after a session was released while another command or MCP process was being started.
+- Bundle CLI 0.1.90 in platform-specific packages. Pure-extension users must update their external CLI to receive these changes. Updating the CLI file does not update a running shared service; check its active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.3
 
 - Fix a shared-service startup race after concurrent launches: wait for losing startup children to exit before reporting success, so a late child from a completed start request cannot bring the service back after an explicit stop. Keep startup time limits, instance checks, locking and confirmed task cleanup unchanged.
