@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat | 2026-11-09 18:37 +0800 | ACTIVE | feature/multica | - |
+| Tomcat | 2026-11-09 19:58 +0800 | DONE（已本地合入 develop，未推送） | feature/multica | - |
 
 ### ✅ DONE (已完成/进行中)
 
@@ -88,6 +88,12 @@ Mika 汇报 ← coder 验证并交付 ← 执行、更新同一 PlanFile
 - 锁补漏前的旁观安装态和 native 专项 `1794218193350-6zag5r` exit 0：安装态旁观恢复 1 项、真实 CLI 自动安装与安装失败各 1 项通过，VS Code 1.106.0。相关桌面/窄屏 PNG、ARIA、console 已读取；native capture-time console 各有一条测试 harness 的 marketplace 404，未归为产品 renderer 回归，也不报告全窗口零错误。
 - 正文修复后、锁补漏前 CLI 的旧宿主受控 ACP `1794219120749-mgstd6` exit 0：四策略、人工等待取消、目录 ID/default、registered backend 执行/取消/恢复四子场景通过；自有 HOME、loopback HTTP、假 Key，无外部模型请求。不是公司分支部署或付费模型验收。
 - 同一个 DeepSeek 全流程在正文最终修复后由 `1794218390965-qpkvmd` 再次通过（1 passed / 0 skipped，107.516 秒）；本次锁修复后的同场景 `1794220654107-ap7icv` 尚进行中。只增加同一场景的回归执行次数，不新增联真场景，不宣称完整 real-llm。当前仍未合并 develop。
+
+### 过度设计清理与本地合并（2026-11-09 19:58）
+
+- `0ee32b5f` 清理上两次补漏：会话锁删去 owner PID 与 unsafe fork 测试，改用共享打开描述的 `try_clone` 小测试（去掉解锁后确认先红）；`serve models` 身份改为两次直接读取环境变量；正文裁剪改为三行，仅保留首行缩进语义；真实计划用例恢复 IDATATLAS，DeepSeek 仅为本轮本地验证。`d05c6ec8` 提交旁观重载探测容忍旧页面断连；`fecc3aac` 将“失败用例修复后只独立重跑”写入测试规范。
+- 只复验改动与失败用例：fmt、范围 Clippy（lib、`cli_tests`、`plan_real_llm_inprocess_tests`）通过；`usage_guard` 10 项、`create_plan` 1 项、`serve_models_*` CLI 4 项、旁观 VS Code 场景 1 passing。未重跑整套门禁或联真用例：`qbjeu9` 的唯一失败已修复并单独复验；`iivdyy`、`ap7icv` 结果未读取，不作证据。
+- 已本地 no-ff 合入 develop，合并树与本分支相同；未推送、发布、安装或重启服务。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 
