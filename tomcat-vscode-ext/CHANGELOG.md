@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9
+
+- Simplify built-in plan-writing guidance: give each issue or requirement its own top-level section, remove redundant wrapper sections, and keep chapter titles and table headers in the plan's language. The runtime-managed `Goal`, `Plan` and `Todos Board` headings remain in English. Plans may use ASCII or Mermaid diagrams, with shorter, more direct explanations.
+- Bundle CLI 0.1.91 in platform-specific packages. Pure-extension users must update their external CLI to receive the planning-guidance changes. Updating the CLI file does not update a running shared service; check its active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.8
 
 Includes the changes prepared for the unpublished 0.2.4–0.2.7 extension versions.

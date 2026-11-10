@@ -1,7 +1,7 @@
 {
-  "cli": "0.1.90",
+  "cli": "0.1.91",
   "extension": {
-    "version": "0.2.8",
-    "bundledCli": "0.1.90"
+    "version": "0.2.9",
+    "bundledCli": "0.1.91"
   }
 }
