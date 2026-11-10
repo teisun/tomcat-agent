@@ -220,7 +220,7 @@ host 只把两类目录授权给 transcript 这条支线：
 对应证据：
 
 - `tomcat/src/core/prompts/templates/system/output_conventions.txt:1`
-- `tomcat/docs/status/feature-transcript-rich-render.md:32`（当时为了 clickable path，专门新增了 `SystemOutputConventions`）
+- `docs/status/feature-transcript-rich-render.md:32`（当时为了 clickable path，专门新增了 `SystemOutputConventions`）
 
 但它**没有**教模型另一件同样重要的事：
 

@@ -11,7 +11,7 @@ alwaysApply: true
 
 ## 一、提交前覆盖率来源（可选，不强制）
 
-- **含代码变更的提交**：从当前分支对应的 `docs/status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或为空，**直接跳过**，不写 `[cov]`，不提示，不阻塞提交。
+- **含代码变更的提交**：从当前分支对应的 `仓库根/docs/status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或为空，**直接跳过**，不写 `[cov]`，不提示，不阻塞提交。注意 status 碎片统一放在仓库根的 `docs/status/`，不是 `tomcat/docs/status/`（该目录已不存在）。
 - **仅修改 docs/status/*.md 或仅 docs/INTEGRATION.md**：按豁免规则，不要求覆盖率。
 
 ---

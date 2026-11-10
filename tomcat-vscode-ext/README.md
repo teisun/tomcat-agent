@@ -282,7 +282,7 @@ npm run gate:full
 
 `package:vsix` and standalone package smoke tests build by default. The smoke setup runs its build asynchronously with bounded process-group cleanup; `gate:full` owns one build and reuses it for sequential packaging. `--skip-build` validates a content-hash record and rejects missing, stale, or corrupt artifacts. Do not run builds/packages that share `out`/`gui/dist` concurrently.
 
-GUI entry points clean known Electron window-mode variables only for the launch and restore them afterward. They retain unique launch logs under the printed artifact directory. Screenshots must show the **test window**, not the user's desktop; keep the matching accessibility and console records. A successful install is not visual acceptance. See [the remediation evidence ledger](https://github.com/teisun/tomcat-agent/blob/main/tomcat/docs/reports/acceptance-remediation.md) for this run's successes, failures, and unfinished checks.
+GUI entry points clean known Electron window-mode variables only for the launch and restore them afterward. They retain unique launch logs under the printed artifact directory. Screenshots must show the **test window**, not the user's desktop; keep the matching accessibility and console records. A successful install is not visual acceptance. See [the remediation evidence ledger](https://github.com/teisun/tomcat-agent/blob/main/docs/reports/acceptance-remediation.md) for this run's successes, failures, and unfinished checks.
 
 ## Changelog
 

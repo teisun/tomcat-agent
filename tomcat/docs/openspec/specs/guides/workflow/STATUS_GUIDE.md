@@ -8,7 +8,7 @@
 
 ## 1. 核心规则
 - **命名规范**：文件名必须与当前 Git 分支一一对应。
-  - 转换规则：`分支名 / 替换为 -`，并存放于 `docs/status/` 目录。
+  - 转换规则：`分支名 / 替换为 -`，并存放于仓库根的 `docs/status/` 目录（即 `tomcat-agent/docs/status/`，不是 `tomcat/docs/status/`）。
   - 若非 `feature/*` 分支, 则直接用分支名
   - 示例：`feature/infra-bus` -> `docs/status/feature-infra-bus.md`, `develop` -> `develop.md`。
 - **始终按「当前 Git 分支」确定文件名**：先取 `git branch --show-current` 得到当前检出分支，再将分支名中的 `/` 替换为 `-`，得到 `docs/status/<该名>.md`。例如当前分支为 `develop` 则只写 `docs/status/develop.md`；为 `feature/plugin-lifecycle` 则写 `docs/status/feature-plugin-lifecycle.md`。**禁止按任务看板中的「分支」字段写**，必须与当前检出分支一致。

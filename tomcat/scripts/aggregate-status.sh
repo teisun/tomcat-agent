@@ -11,12 +11,8 @@ if [ -z "$GIT_ROOT" ]; then
   exit 1
 fi
 
-# status 路径前缀：若仓库根与脚本所在项目根不同（如 monorepo），则带相对前缀
-if [ "$GIT_ROOT" != "$REPO_ROOT" ]; then
-  STATUS_PREFIX="${REPO_ROOT#$GIT_ROOT/}/docs/status"
-else
-  STATUS_PREFIX="docs/status"
-fi
+# status 碎片统一存放在仓库根的 docs/status（相对 Git 根）
+STATUS_PREFIX="docs/status"
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 if [ "$CURRENT_BRANCH" != "develop" ]; then
@@ -35,8 +31,8 @@ OUTPUT="# 项目集成与进度看板
 # 先汇总 develop 的 docs/status/develop.md（从当前分支读取，建议在 develop 上执行）
 DEVELOP_PATH="$STATUS_PREFIX/develop.md"
 develop_content=""
-if [ -f "$REPO_ROOT/docs/status/develop.md" ]; then
-  develop_content=$(cat "$REPO_ROOT/docs/status/develop.md" 2>/dev/null || true)
+if [ -f "$GIT_ROOT/docs/status/develop.md" ]; then
+  develop_content=$(cat "$GIT_ROOT/docs/status/develop.md" 2>/dev/null || true)
 fi
 OUTPUT+="
 ## develop
@@ -62,9 +58,17 @@ for branch in "${BRANCHES[@]}"; do
   # 分支名中 / 转为 -，得到 status 文件名，如 feature/infra -> feature-infra.md
   section_name="${branch//\//-}"
   path="$STATUS_PREFIX/$section_name.md"
+  # 未合并分支可能仍用迁移前的位置 tomcat/docs/status；仅当新位置缺失时回退
+  legacy_path="tomcat/$STATUS_PREFIX/$section_name.md"
   content=""
   if git rev-parse --verify "$branch" &>/dev/null; then
     content=$(git show "$branch:$path" 2>/dev/null || true)
+    if [ -z "$content" ]; then
+      content=$(git show "$branch:$legacy_path" 2>/dev/null || true)
+      if [ -n "$content" ]; then
+        path="$legacy_path"
+      fi
+    fi
   fi
   # 每个分支始终带 H2 标题，再拼内容或占位；块间用 --- 分隔
   OUTPUT+="
