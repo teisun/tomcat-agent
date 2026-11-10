@@ -12,13 +12,11 @@ Technical design, prose, and visual guidelines for development plans.
 
 ### Prose Rules
 
-- Explain problems and technical solutions in a way that is easy to read and understand. The following requirements apply to the plan document, not to chat replies or review reports.
+- 总纲：简明扼要、言简意赅、说人话，不要写又臭又长的计划。
 
-- Assume the reader has no project background. Explain the context needed for each chapter, define unfamiliar terms on first use, and use one consistent name for each concept.
+- Lead with the main point, then the evidence. One idea per paragraph; use lists for steps and distinct items.
 
-- Give each paragraph one idea and put its main point first. Describe concrete behavior and outcomes. Use lists for steps and distinct items, and short paragraphs for reasoning.
-
-- Remove empty assurances, promotional adjectives, and repetition. Keep necessary context, evidence, risks, and trade-offs in the plan itself, not only in chat.
+- State concrete behavior and outcomes; cut empty assurances, promotional adjectives, and repetition.
 
 ### Wording Examples
 
@@ -42,11 +40,12 @@ Technical design, prose, and visual guidelines for development plans.
 
 ### Visual and Verbal Principles
 
-- Combine visuals and text, leading with the visual (ASCII diagram) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
+- Combine visuals and text, leading with the visual (ASCII or Mermaid diagram) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
 
 ### Diagram Rules
 
-- Add local diagrams for complex logic: trace relevant success/failure branches. For UI, show layout, controls, and feedback, not a list of text labels.
+- Typically, use ASCII for architecture, and Mermaid for flows and sequence diagrams.
+- Add a diagram inside each complex section: trace relevant success/failure branches. For UI, show layout, controls, and feedback, not a list of text labels.
 - Give each diagram one main takeaway and state it in the caption. Draw the relevant actions and paths, not just boxes of component names: label arrows with verbs such as "read draft", "save settings", and "notify UI". Make added, removed, or changed paths visible; keep names and directions consistent in comparisons. An overall takeaway may connect several components or changes.
 
 ### Diagram Example (Example 1)

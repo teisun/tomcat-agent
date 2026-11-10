@@ -9,13 +9,11 @@ This document defines plan sections and structural examples. Read [Plan Writing 
 Goal: why do this, and what will be delivered?
   |
 Plan: overall diagram + one-sentence overview
-  -> solution overview (inside Plan; omit for small plans)
   |
-Solution Breakdown and Implementation
-  -> each problem/requirement:
-     -> symptoms / requirement; root cause and evidence (issues only)
-     -> solution explanation (ASCII + prose); UI mockup (as needed)
-     -> key decisions table -> test cases
+Each problem/requirement: one top-level section
+  -> symptoms / requirement description; root cause and evidence (issues only)
+  -> solution explanation (diagram + prose); UI mockup (as needed)
+  -> key decisions table -> test cases
   |
 Other optional chapters -> Acceptance -> Todos Board
 ```
@@ -24,22 +22,20 @@ Other optional chapters -> Acceptance -> Todos Board
 - `SHOULD`: recommended; do not repeat what another chapter already explains.
 - `OPTION`: add a separate chapter as needed.
 
-Use the fixed chapter titles below, or their equivalents in the plan's language.
+Use the canonical names below for English plans; [§3](#3-plan-language-titles) covers other plan languages.
 
-| Chapter Title (Follow These Names Exactly) | Requirement Level | When to Write It and What It Answers |
+| Chapter Title (English Canonical Name) | Requirement Level | When to Write It and What It Answers |
 |---|---|---|
 | `## Goal` | MUST | Objective, observable deliverables, and scope boundaries. |
-| Start of `## Plan`: overall ASCII diagram + one sentence | MUST | Show the trigger, key processing, outcome, and important branches; summarize the change and its significance in one sentence. |
-| `### Solution Overview` (inside Plan) | SHOULD | Explain the overall flow and core design. Small plans can omit it. |
-| `## Solution Breakdown and Implementation` | MUST | Give each problem or requirement its own section, with the following headings and nesting. |
-| `### Issue N: Description` / `### Requirement N: Description` | MUST | Label and number each issue or requirement, followed by a one-sentence description. |
-| `#### Problem Symptoms` / `#### Requirement Description` | MUST | Describe the observed problem or the requested outcome. |
-| `#### Root Cause and Evidence` | MUST (issues only) | Explain the cause with evidence; use prose and add an ASCII diagram as needed. Omit this section for requirements. |
-| `#### Solution` | MUST | Contain the solution explanation and, when needed, a UI mockup as separate subsections. |
-| `##### Solution Explanation` | MUST | Explain the solution with an ASCII diagram plus prose. |
-| `##### UI Mockup` | OPTION | Show the proposed UI with an ASCII diagram as needed; otherwise omit this subsection. |
-| `#### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.3, not just prose or a reference to the table. |
-| `#### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.4. |
+| Start of `## Plan`: overall diagram + one sentence | MUST | Show the trigger, key processing, outcome, and important branches; summarize the change and its significance in one sentence. |
+| `## Issue N: Description` / `## Requirement N: Description` | MUST | Give each problem or requirement its own top-level section and label and number it, followed by a one-sentence description and the headings below. |
+| `### Problem Symptoms` / `### Requirement Description` | MUST | Describe the observed problem or the requested outcome. |
+| `### Root Cause and Evidence` | MUST (issues only) | Explain the cause with evidence; use prose and add a diagram as needed. Omit this section for requirements. |
+| `### Solution` | MUST | Contain the solution explanation and, when needed, a UI mockup as separate subsections. |
+| `#### Solution Explanation` | MUST | Explain the solution with a diagram and prose. |
+| `#### UI Mockup` | OPTION | Show the proposed UI with a diagram as needed; otherwise omit this subsection. |
+| `### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.2, not just prose or a reference to the table. |
+| `### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.3. |
 | Other optional chapters | OPTION | Add supporting content as needed; use `##` for standalone chapters. |
 | `## Acceptance` | MUST | For a coding plan, state observable overall completion conditions, behavior to review, regression boundaries, expected impact radius, necessary cross-feature checks, checking methods, and delivery close-out; keep specific test cases in their problem or feature chapters. |
 | `## Todos Board` | MUST | Use the host's task board for implementation tasks, dependencies, and status; refer to chapters for technical details and to task IDs in prose; do not create a second task list or progress record. |
@@ -61,11 +57,7 @@ Use the fixed chapter titles below, or their equivalents in the plan's language.
 
 ## 2. Explain the Whole First, Then Each Part
 
-### 2.1 Solution Overview
-
-Keep `### Solution Overview` inside `## Plan`; explain the overall flow and core design. Small plans can omit it. Define terms on first use, not in a separate glossary.
-
-### 2.2 Local Skeleton for Each Problem or Requirement
+### 2.1 Local Skeleton for Each Problem or Requirement
 
 Name chapters after user outcomes, not technical layers or file lists. For internal refactoring, name the behavior or guarantee being preserved.
 
@@ -85,14 +77,14 @@ Issue N: Description                  Requirement N: Description
 ```
 
 - Do not invent a root cause for a new requirement.
-- Omit Root Cause and Evidence for requirements. For issues, include prose and add an ASCII diagram as needed.
-- Solution Explanation includes an ASCII diagram plus prose. UI Mockup is a separate subsection under Solution, included only as needed.
+- Omit Root Cause and Evidence for requirements. For issues, include prose and add a diagram as needed.
+- Solution Explanation includes a diagram and prose. UI Mockup is a separate subsection under Solution, included only as needed.
 - Within the solution explanation, move from the expected experience to the mechanism and then the implementation locations. This is an explanation sequence, not an additional set of subsection headings.
 - Explain the reasons and trade-offs behind the choices in the key decisions table.
 
-### 2.3 Key Decisions: Read the Question, Choice, and Cost Together
+### 2.2 Key Decisions: Read the Question, Choice, and Cost Together
 
-The following six-column table is the only format for key decisions:
+The following six-column table is the only format for key decisions. Chinese plans use `维度 | 关注点 | 决策 | 理由与取舍 | 说人话解释 | 备注` for these columns.
 
 | Dimension | Concern | Decision | Rationale and Trade-offs | Plain-language Explanation | Notes |
 |---|---|---|---|---|---|
@@ -100,7 +92,7 @@ The following six-column table is the only format for key decisions:
 
 Gray-text markup example: `<small style="color:gray">…</small>`.
 
-### 2.4 Test Cases: Prove Behavior, Not That Names Exist
+### 2.3 Test Cases: Prove Behavior, Not That Names Exist
 
 #### Design Principles
 
@@ -128,21 +120,8 @@ T-ID | Failed save keeps input (mark P0/P1 only when justified)
 - Files involved: <verified save-test path>; mark new test files as proposed additions.
 ```
 
-## 3. Simplifying Small Changes
+## 3. Plan-language Titles
 
-Use this heading-only skeleton for a small issue, filling each section according to the chapter table. Keep required headings separate even when the content is brief. This example omits an unnecessary UI Mockup; for a requirement, use Requirement N: Description and Requirement Description, and omit Root Cause and Evidence.
+Write every chapter title and table column header in the plan's language: a Chinese plan uses Chinese throughout, and an English plan keeps the canonical names from the chapter table.
 
-```markdown
-## Goal
-## Plan
-## Solution Breakdown and Implementation
-### Issue N: Description
-#### Problem Symptoms
-#### Root Cause and Evidence
-#### Solution
-##### Solution Explanation
-#### Key Decisions Table
-#### Test Cases
-## Acceptance
-## Todos Board
-```
+The only exception is `## Goal`, `## Plan`, and `## Todos Board`. The runtime writes those three in English, so keep them as they are: never translate, rename, or duplicate them.

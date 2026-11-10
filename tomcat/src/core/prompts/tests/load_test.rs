@@ -52,17 +52,52 @@ fn planner_prompt_is_a_short_write_plans_entrypoint() {
 }
 
 #[test]
-fn write_plans_workflow_mentions_create_plan_and_ask_question() {
+fn write_plans_workflow_routes_tools_and_keeps_only_cross_tool_rules() {
     let s = PLAN_WORKFLOW;
-    assert!(s.contains("create_plan"));
-    assert!(s.contains("Call `start_plan` only when the user's latest message explicitly asks"));
-    assert!(s.contains("never start merely because they asked to create or revise a plan"));
-    assert!(s.contains("ask_question"));
-    assert!(s.contains("PLAN mode"));
-    assert!(s.contains("Creating/editing a PlanFile: choose the tool by the part being changed:"));
-    assert!(s.contains("New plan: use `create_plan`"));
-    assert!(s.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
-    assert!(s.contains("Existing `frontmatter.todos`: use `update_plan`"));
+
+    // 正向：路由表与跨工具时序仍交代清楚。
+    for tool in [
+        "create_plan",
+        "edit",
+        "hashline_edit",
+        "update_plan",
+        "ask_question",
+        "dispatch_agent",
+        "start_plan",
+    ] {
+        assert!(s.contains(tool), "write-plans 应仍指向 {tool}");
+    }
+    assert!(s.contains("only when the target text is not unique"));
+    assert!(s.contains("edit the body first, then call `update_plan`"));
+    assert!(s.contains("never create a second plan to express a revision"));
+    assert!(s.contains("todos-board:auto"));
+    assert!(s.contains("safety::enforce_write_path_policy"));
+    assert!(s.contains("## Gates") && s.contains("## Decomposition"));
+
+    // 反向：常驻层（planner 提醒 / 工具 schema / plan-structure）已被复述的内容一律不在本文件。
+    for restated in [
+        "You are in PLAN mode",
+        "Behavior contract",
+        "recommended: true",
+        "EXACTLY ONE option",
+        "set_status: in_progress",
+        "Default body sections",
+        "old_content",
+        "Existing plan body",
+        "spawns read-only explorer subagents",
+        "1–4 questions per call",
+    ] {
+        assert!(
+            !s.contains(restated),
+            "write-plans 不应复述常驻层已声明的内容: {restated:?}"
+        );
+    }
+
+    // 两条压缩指针行：只说“何时用”，参数细节指向 schema。
+    assert!(s.contains("exactly one recommended option"));
+    assert!(s.contains("only under the conditions its description lists"));
+
+    // 历史文案不得回归。
     assert!(!s.contains("requested plan/proposal creation or revision"));
     assert!(!s.contains("Do NOT emit a plan/proposal as prose"));
     assert!(!s.contains("Read this before starting planning in Tomcat."));
@@ -311,10 +346,34 @@ fn write_plans_preserves_heading_and_reader_contracts() {
         "Use the equivalent labels in the plan's language; always include both the label and the number."
     ));
     assert!(PLAN_STRUCTURE.contains("Do not invent a root cause for a new requirement."));
-    assert!(WRITING_STANDARDS.contains("The following requirements apply to the plan document, not to chat replies or review reports."));
+    assert!(WRITING_STANDARDS.contains("Lead with the main point, then the evidence."));
+    assert!(
+        WRITING_STANDARDS.contains("cut empty assurances, promotional adjectives, and repetition")
+    );
+    assert!(
+        WRITING_STANDARDS.contains("Typically, use ASCII for architecture, and Mermaid for flows")
+    );
     assert!(PLAN_STRUCTURE
-        .contains("The following six-column table is the only format for key decisions:"));
-    assert!(WRITING_STANDARDS.contains("in the plan itself, not only in chat"));
+        .contains("The following six-column table is the only format for key decisions."));
+    let prose_rules = WRITING_STANDARDS
+        .split_once("### Prose Rules\n")
+        .expect("prose rules exist")
+        .1
+        .trim_start();
+    assert!(prose_rules.starts_with("- 总纲：简明扼要、言简意赅、说人话，不要写又臭又长的计划。"));
+    for removed in [
+        "define unfamiliar terms on first use",
+        "use one consistent name for each concept",
+        "not only in chat",
+        "The following requirements apply to the plan document",
+        "Assume the reader has no project background",
+        "put its main point first",
+    ] {
+        assert!(
+            !WRITING_STANDARDS.contains(removed),
+            "writing standards must not restore the removed instruction: {removed}"
+        );
+    }
     for removed in [
         "Do not generate empty tables for inapplicable content",
         "Omitting an OPTION chapter does not mean omitting necessary information",
@@ -349,21 +408,20 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         })
         .collect();
     let expected = [
-        ("`## Solution Breakdown and Implementation`", "MUST"),
         (
-            "`### Issue N: Description` / `### Requirement N: Description`",
+            "`## Issue N: Description` / `## Requirement N: Description`",
             "MUST",
         ),
         (
-            "`#### Problem Symptoms` / `#### Requirement Description`",
+            "`### Problem Symptoms` / `### Requirement Description`",
             "MUST",
         ),
-        ("`#### Root Cause and Evidence`", "MUST (issues only)"),
-        ("`#### Solution`", "MUST"),
-        ("`##### Solution Explanation`", "MUST"),
-        ("`##### UI Mockup`", "OPTION"),
-        ("`#### Key Decisions Table`", "MUST"),
-        ("`#### Test Cases`", "MUST"),
+        ("`### Root Cause and Evidence`", "MUST (issues only)"),
+        ("`### Solution`", "MUST"),
+        ("`#### Solution Explanation`", "MUST"),
+        ("`#### UI Mockup`", "OPTION"),
+        ("`### Key Decisions Table`", "MUST"),
+        ("`### Test Cases`", "MUST"),
         ("Other optional chapters", "OPTION"),
         ("`## Acceptance`", "MUST"),
     ];
@@ -372,17 +430,36 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         "chapter rows must preserve heading levels, order, and conditional requirements"
     );
     for rule in [
-        "Chapter Title (Follow These Names Exactly)",
+        "Chapter Title (English Canonical Name)",
         "Bold text and list items are not substitutes for headings.",
         "Keep every required subsection, even in a small plan.",
         "Omit Root Cause and Evidence for requirements.",
-        "For issues, include prose and add an ASCII diagram as needed.",
-        "Solution Explanation includes an ASCII diagram plus prose.",
+        "For issues, include prose and add a diagram as needed.",
+        "Solution Explanation includes a diagram and prose.",
         "UI Mockup is a separate subsection under Solution, included only as needed.",
-        "Include the six-column table from §2.3, not just prose or a reference to the table.",
+        "Include the six-column table from §2.2, not just prose or a reference to the table.",
     ] {
         assert!(PLAN_STRUCTURE.contains(rule), "missing rule: {rule}");
     }
+    // The wrapper chapters were flattened away; each problem is now top level.
+    for removed in [
+        "## Solution Breakdown and Implementation",
+        "### Solution Overview",
+        "For issues, include prose and add an ASCII diagram as needed.",
+        "Solution Explanation includes an ASCII diagram and prose.",
+        "From §2.3",
+        "from §2.3",
+        "using §2.4",
+    ] {
+        assert!(
+            !PLAN_STRUCTURE.contains(removed),
+            "flattened heading must not return: {removed}"
+        );
+    }
+    assert!(
+        !PLAN_STRUCTURE.contains("ASCII"),
+        "the diagram medium belongs to writing-standards, not the chapter table"
+    );
     // This is the structural diagram, not a snapshot of the explanatory prose.
     assert!(PLAN_STRUCTURE.contains(concat!(
         "Issue N: Description                  Requirement N: Description\n",
@@ -394,32 +471,46 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         "├─ Key Decisions Table                └─ Test Cases\n",
         "└─ Test Cases\n",
     )));
-    let small_change = PLAN_STRUCTURE
-        .split_once("## 3. Simplifying Small Changes\n")
-        .expect("small-change guidance exists")
-        .1;
-    let headings: Vec<_> = small_change
-        .lines()
-        .filter(|line| line.starts_with('#'))
-        .collect();
-    assert_eq!(
-        headings,
-        [
-            "## Goal",
-            "## Plan",
-            "## Solution Breakdown and Implementation",
-            "### Issue N: Description",
-            "#### Problem Symptoms",
-            "#### Root Cause and Evidence",
-            "#### Solution",
-            "##### Solution Explanation",
-            "#### Key Decisions Table",
-            "#### Test Cases",
-            "## Acceptance",
-            "## Todos Board",
-        ],
-        "the small-issue skeleton must not collapse required headings"
+    // Language rules are one statement at the end, not an enumerated heading list.
+    let titles_at = PLAN_STRUCTURE
+        .find("## 3. Plan-language Titles\n")
+        .expect("plan-language section exists");
+    let test_cases_at = PLAN_STRUCTURE
+        .find("### 2.3 Test Cases")
+        .expect("test cases section exists");
+    assert!(
+        titles_at > test_cases_at,
+        "plan-language rules must come after every writing section"
     );
+    let titles = &PLAN_STRUCTURE[titles_at..];
+    assert!(
+        titles.contains("Write every chapter title and table column header in the plan's language")
+    );
+    assert!(titles.contains("a Chinese plan uses Chinese throughout"));
+    assert!(titles.contains("never translate, rename, or duplicate them"));
+    assert!(PLAN_STRUCTURE.contains("维度 | 关注点 | 决策 | 理由与取舍 | 说人话解释 | 备注"));
+    for removed in [
+        "### 问题现象",
+        "### 需求背景",
+        "### 方案讲解",
+        "关键决策清单",
+    ] {
+        assert!(
+            !PLAN_STRUCTURE.contains(removed),
+            "headings must not be enumerated again: {removed}"
+        );
+    }
+    for removed in [
+        "## 3. Simplifying Small Changes",
+        "this heading-only skeleton for a small issue",
+        "This example omits an unnecessary UI Mockup",
+        "Follow These Names Exactly",
+    ] {
+        assert!(
+            !PLAN_STRUCTURE.contains(removed),
+            "redundant restatement must not return: {removed}"
+        );
+    }
 }
 
 #[test]
@@ -472,13 +563,15 @@ fn write_plans_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
     let planner = PLAN_WORKFLOW;
     let executor = load(PromptKey::ExecutorReminderFmt);
 
-    assert!(planner
-        .contains("use it to survey several modules in parallel without filling your own context"));
-    assert!(
-        planner.contains("but use it only when the criteria in its tool description are satisfied")
-    );
-    assert!(planner.contains("NEVER mutate the codebase in PLAN"));
-    assert!(planner.contains("File editing tools are restricted to"));
+    // write-plans 只留一行指针，不再复述 dispatch_agent 的三条适用条件。
+    assert!(planner.contains("only under the conditions its description lists"));
+    assert!(!planner.contains("use it to survey several modules in parallel"));
+
+    // PLAN 期只读调查规则仍在，且点明 bash 不在写路径守卫内。
+    assert!(planner.contains("Investigation in PLAN mode is read-only"));
+    assert!(planner.contains("`bash` is **not** path-guarded"));
+    assert!(planner.contains("must not modify"));
+    assert!(planner.contains("restricted to `~/.tomcat/plans/*.plan.md`"));
 
     assert!(executor.contains(
         "survey several modules in parallel and return findings instead of raw file contents"
@@ -493,11 +586,17 @@ fn write_plans_and_executor_gate_dispatch_agent_on_its_catalog_criteria() {
 fn dispatch_agent_is_described_rather_than_listed_bare() {
     let planner = PLAN_WORKFLOW;
     let executor = load(PromptKey::ExecutorReminderFmt);
+
+    // write-plans 用一行指针交代“何时值得派”，而不是把工具名塞进一串名字里。
+    assert!(
+        planner.contains("A wide read-only survey"),
+        "plan workflow 应说明 dispatch_agent 适用于什么场景"
+    );
+    assert!(
+        executor.contains("read-only explorer subagents"),
+        "executor 应说明 dispatch_agent 是什么，而不是把它塞进一串工具名里"
+    );
     for (label, text) in [("plan workflow", planner), ("executor", executor)] {
-        assert!(
-            text.contains("read-only explorer subagents"),
-            "{label} 应说明 dispatch_agent 是什么，而不是把它塞进一串工具名里"
-        );
         assert!(
             !text.contains("`dispatch_agent`and"),
             "{label} 里的缺空格笔误应已修掉"
@@ -728,7 +827,7 @@ fn negative_assertion_prompt_present() {
 #[test]
 fn write_plans_preserves_decomposition_and_test_design() {
     const TODO_POLICY: &str = concat!(
-        "6. Decompose thoroughly. For non-trivial work, break the work into one or more milestones,\n",
+        "Decompose thoroughly. For non-trivial work, break the work into one or more milestones,\n",
         "then precisely break each milestone down into detailed todos so nothing is missed and over-decomposition is avoided.\n",
         "However, for a simple, single-surface change, a flat linear todo list is sufficient."
     );
@@ -739,7 +838,8 @@ fn write_plans_preserves_decomposition_and_test_design() {
     assert!(PLAN_STRUCTURE.contains("where each layer catches a\n  distinct failure type"));
     assert!(PLAN_STRUCTURE.contains("Source commands from the user, project rules, manifests"));
     assert!(WRITING_STANDARDS.contains("first principles"));
-    assert!(WRITING_STANDARDS.contains("ASCII diagram"));
+    assert!(WRITING_STANDARDS.contains("(ASCII or Mermaid diagram)"));
+    assert!(!WRITING_STANDARDS.contains("(ASCII diagram)"));
     assert!(WRITING_STANDARDS.contains("Put user experience first"));
 }
 
@@ -914,20 +1014,19 @@ fn long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract() {
 }
 
 #[test]
-fn write_plans_keeps_overview_brief_and_omits_optional_chapter_templates() {
-    let overview = PLAN_STRUCTURE
-        .split_once("### 2.1 Solution Overview\n")
-        .expect("overview guidance exists")
-        .1
-        .split_once("### 2.2 Local Skeleton for Each Problem or Requirement\n")
-        .expect("local skeleton follows overview")
-        .0
-        .trim();
-    assert!(overview.contains("`### Solution Overview` inside `## Plan`"));
-    assert!(overview.contains("Small plans can omit it"));
-    assert!(overview.contains("Define terms on first use"));
+fn write_plans_flattens_chapter_tree_and_omits_optional_templates() {
+    assert!(!PLAN_STRUCTURE.contains("### 2.1 Solution Overview"));
+    assert!(!PLAN_STRUCTURE.contains("Solution Overview"));
+    assert!(!PLAN_STRUCTURE.contains("## Solution Breakdown and Implementation"));
     assert!(!PLAN_STRUCTURE.contains("### Glossary"));
+    assert!(!PLAN_STRUCTURE.contains("##### "));
     assert!(!PLAN_STRUCTURE.contains("###### "));
+    assert!(!PLAN_STRUCTURE.contains("Define terms on first use"));
+    // Section numbers shift up once Solution Overview is gone.
+    assert!(PLAN_STRUCTURE.contains("### 2.1 Local Skeleton"));
+    assert!(PLAN_STRUCTURE.contains("### 2.2 Key Decisions"));
+    assert!(PLAN_STRUCTURE.contains("### 2.3 Test Cases"));
+    assert!(!PLAN_STRUCTURE.contains("§2.4"));
     for removed in [
         "### 3.3 Implementation and Verification Arrangements",
         "Milestones are delivery boundaries",

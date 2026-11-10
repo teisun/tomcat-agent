@@ -1,6 +1,22 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-09 19:58 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-10 10:18 +0800 | ACTIVE | develop | - |
+
+### DONE：write-plans 章节树扁平化与语言规则收敛（2026-11-10）
+
+```text
+同一套章节原本说了三遍
+  骨架块 · 章节表 · 小改动骨架  →  改一次结构要手工同步三处
+        │
+        ▼
+  骨架块 · 章节表（唯一权威）· 末尾一句话语言规则
+```
+
+- **范围**：只改 write-plans 技能文档与配套 `load_test.rs`。删除 `### Solution Overview` 与 `## Solution Breakdown and Implementation` 两层包装，把问题/需求提为顶级 `##`、最深层收敛到 `####`，§2 编号顺移；删掉第三份副本“Simplifying Small Changes”（其骨架只比完整结构少一个本就可选的 UI Mockup，标题声称的简化并不存在）；`plan-structure.md` 内 7 处 `ASCII` 改为 `diagram`，图介质统一交给 `writing-standards.md` 决定；`plus` 改为 `and`。
+- **语言规则**：原先 `Follow These Names Exactly` 与 `or their equivalents in the plan's language` 自相矛盾，且正文逐条列举中文译名。改为文档末尾一句话：章节标题与表格列名跟随计划语言，中文计划全程中文；唯一例外是 `## Goal`、`## Plan`、`## Todos Board`。
+- **例外依据**：这三个标题由 `create_plan.rs` 的 `default_body` 硬编码写入，`planDocument.ts` 用 `/^#{1,6}[ \t]+Todos Board[ \t]*$/` 匹配后摘除自动待办区；翻译或重命名会让计划预览失去定位。中文计划的六列决策表头映射为 `维度 | 关注点 | 决策 | 理由与取舍 | 说人话解释 | 备注`。
+- **验证**：实现阶段已跑 `core::prompts::tests::load_test` 33、`create_plan` 13、`skill::builtin` 9，全绿；`rustfmt --check` 与 `git diff --check` 通过。按用户要求，提交阶段不重跑测试、构建或视觉验收，上列数字不冒充本次重跑结果。
+- **边界**：未推送、发布、升版、安装或重启服务；Cov% 未测量，保持 `-`。
 
 ### DONE：feature/multica 本地合并（2026-11-09）
 
