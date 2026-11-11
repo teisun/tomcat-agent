@@ -94,6 +94,62 @@ fn tool_media_openai_wire_equals_user_media() {
     );
 }
 
+#[test]
+fn gemini_wire_closes_tool_turn_before_following_user_message() {
+    let call = |id: &str| {
+        ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![
+                serde_json::json!({"id":id,"type":"function","function":{"name":"read","arguments":"{}"}}),
+            ],
+        )
+    };
+    let mut screenshot = ChatMessage::tool("two", "");
+    screenshot.content = Some(ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::image_base64_data("image/png", "aGVsbG8=").unwrap(),
+    ]));
+    let mut runtime_tail = ChatMessage::user("runtime");
+    runtime_tail.kind = MessageKind::EphemeralTail;
+    let messages = vec![
+        ChatMessage::user("request"),
+        call("one"),
+        ChatMessage::tool("one", "result"),
+        ChatMessage::user("prompt after interrupt"),
+        call("two"),
+        screenshot,
+        ChatMessage::assistant("done"),
+    ];
+    let roles = |wire: &[serde_json::Value]| {
+        wire.iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let gemini = transport_messages(&messages, "Gemini-4-Carbon", false, None);
+    assert_eq!(
+        roles(&gemini),
+        "user assistant tool assistant user assistant tool assistant user assistant"
+    );
+    assert_eq!(gemini[3]["content"], TOOL_TURN_BRIDGE);
+    assert_eq!(gemini[7]["content"], TOOL_TURN_BRIDGE);
+    assert_eq!(
+        gemini[8]["content"][0]["text"],
+        crate::core::llm::tool_result_media::TOOL_MEDIA_INTRO
+    );
+
+    let mut pending_tool_turn = messages[..3].to_vec();
+    pending_tool_turn.push(runtime_tail);
+    let gemini = transport_messages(&pending_tool_turn, "gemini-4-carbon", false, None);
+    assert_eq!(roles(&gemini), "system user assistant tool");
+
+    let other = transport_messages(&messages, "deepseek-v4-pro", false, None);
+    assert_eq!(
+        roles(&other),
+        "user assistant tool user assistant tool user assistant"
+    );
+}
+
 fn deepseek_entry(api_key_env: &str) -> ModelEntry {
     ModelEntry {
         id: "deepseek-v4-pro".to_string(),

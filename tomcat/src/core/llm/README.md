@@ -224,6 +224,10 @@ let resp = provider.chat(req).await?;
 
 User 媒体沿用原路径。Tool 媒体经 `tool_result_media.rs::tool_result_media_mode` 选择：Anthropic 原生 `tool_result.content[]`，Responses 原生 `function_call_output.output[]`；Chat Completions 先闭合整批 tool 结果，再追加仅用于该请求的一条 user 媒体消息。历史账本不写入该临时 user；System/Assistant 的非文本 part 仍按原规则处理。纯文本工具保持原字符串形状。
 
+Chat Completions 发往 Gemini 系型号（wire `model` 含 `gemini`，不分大小写）时，出站在「tool 结果后紧跟 user」处补一条 `[Tool results received.]` assistant 消息。Gemini 只有 user/model 两种轮次，工具结果算 user；不补的话两者落进同一轮，Gemini 3.6+ 会以 `Requests ending with a model turn are not supported` 拒绝。这条消息只出现在出站克隆里，不写账本；其他型号的 wire 不变。
+
+流式 `tool_calls` 按 `index` 累积，但 Gemini 中转会把同名的并行调用放在同一个 `index` 上：只有第一个带 `id` 和 `name`，后续每个调用只追加一段完整的 JSON 参数（样本见 `tests/fixtures/llm_stream/gemini_gateway_parallel_tool_calls.sse`）。provider 以「参数的顶层 JSON 对象闭合」作为一个调用的结束。同一 `index` 上之后再来的参数文本或不同的 `id` 都算新调用：沿用原 `name`，没有自己的 `id` 时编为 `{id}_{n}`，并重映射为连续的逻辑 index。下游累积逻辑不变。
+
 正常工具附件（read图片/PDF、MCP图片）不自动上传为file_id；内联仍遵守原大小限制，超限明确提示。file_id构造器、客户端与wire转换为兼容/显式调用保留。图片由dispatcher写入既有blob仓库，档案用input_image_ref，provider内存版内联；live事件media与历史引用均不带图片字节。L0/L1压缩只替换工具文字，不丢附件引用；GC同时标记主会话与子agent会话，缓存键分命名空间。
 
 

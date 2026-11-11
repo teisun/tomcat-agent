@@ -219,7 +219,21 @@ pub(super) async fn run_chat_stream(
                         source_chain = %source_chain,
                         snippet = %snippet
                     );
-                    return Err(classify_error(e));
+                    let loop_err = classify_error(e);
+                    if matches!(loop_err, LoopError::Fatal(_)) {
+                        warn!(
+                            target: "tomcat_chat_diag",
+                            phase = "reasoning_chat_stream_connect_fatal",
+                            model = %request_model,
+                            provider = agent.llm.provider_name(),
+                            summary = %summary,
+                            input_items = request_input_items,
+                            shape = %request_shape,
+                            attempt,
+                            "request rejected before streaming"
+                        );
+                    }
+                    return Err(loop_err);
                 }
             }
         }

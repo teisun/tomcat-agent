@@ -1,22 +1,27 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-10 10:48 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-11 16:15 +0800 | ACTIVE | develop | - |
 
-### DONE：status / reports 归并到仓库根 docs/（2026-11-10）
+### DONE：Gemini 工具轮次与并行调用修复、CLI / EXT 升版（2026-11-11）
 
 ```text
-迁移前（两份并存）              迁移后（只有一份）
-tomcat/docs/status   ─┐
-tomcat/docs/reports  ─┤  迁入   docs/status  · docs/reports
-根 docs/status       ─┘  去重   原 tomcat/docs/ 两个目录删除
+Opus 修复 + SSE 回归夹具
+  → Gemini 出站工具轮次补齐 / 同 index 并行调用拆分
+  → CLI 0.1.92 + EXT 0.2.10（内置 CLI 0.1.92）
+  → 本地提交；插件整包另行构建，不触发发布或安装
 ```
 
-- **范围**：把 `tomcat/docs/status/` 与 `tomcat/docs/reports/` 全部迁到仓库根 `docs/` 下，并删除两个原目录。使用 `git mv` 保留文件历史，13 个文件被识别为重命名而非删除重建。
-- **同名冲突**：4 个同名文件按“留正文、丢存根”处理——`develop.md`（132KB）、`feature-shared-serve-acp.md`（54KB）、`feature-transcript-rich-render.md`（147KB）保留 tomcat 侧正文、丢弃根侧存根（存根本身写着“此处不维护副本”）；`feature-multica.md` 相反，根侧 20KB 才是正文，丢弃 tomcat 侧 868B 存根。现 `docs/status/` 下已无任何存根。
-- **相对链接**：迁移改变文件深度（`tomcat/docs/status` → `docs/status`），42 条站内相对链接中 34 条失效。按旧基准解析、映射新位置并重算相对路径后全部收敛：能解析 34 / 失效 8，剩余 8 条均为迁移前就已失效（6 条为正则误捕的正文 `](path)` 示例，2 条指向仓外不存在的 `tomcat-wiki/`）。
-- **功能依赖**：`aggregate-status.sh` 新增仅在新路径缺失时生效的旧路径回退——本地 8 个 feature 分支中 5 个仍持旧路径，不回退会让它们的看板全变成“暂无进度”。另同步 `commit-guard.mdc`（Cov% 读取位置）、`aggregate-status.md`、`STATUS_GUIDE.md` 及三处历史文档引用。
-- **验证**：`bash -n aggregate-status.sh` 语法通过；实跑输出全部 8 个分支且路径正确。实跑会重写 `tomcat/docs/INTEGRATION.md`，从 335KB 降到 186KB（既有已知问题：本机只有 8 个分支，重生成会丢掉其它分支段落），已 `git checkout` 还原，仅保留其中一行路径修正。旧路径残留检查：除 STATUS_GUIDE 的警告说明与脚本回退注释两处故意保留外零命中。
-- **边界**：按用户要求本次未跑产品测试、构建或视觉验收（纯文档与脚本路径迁移）；未推送、发布、升版、安装或重启服务；Cov% 未测量，保持 `-`。
+- **范围**：纳入 Cursor / Opus 已有的 Gemini Chat Completions 修复、建流前 fatal 诊断、provider / stream 回归测试及 SSE 夹具、LLM README。提交前仅删除夹具末尾多余空行，未另改产品实现。
+- **版本**：仅运行一次 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.91 → 0.1.92`、EXT `0.2.9 → 0.2.10`、内置 CLI `0.1.91 → 0.1.92`；脚本只改五个版本文件的必要字段，未改变依赖或私有 GUI 版本。
+- **检查**：升级前后版本一致性检查通过；Rust 四个受影响文件的 `rustfmt --edition 2021 --check` 通过（task `1794384442118-ay973h`）；修正夹具后 staged / unstaged 空白检查通过。相关源码、文档、版本与未跟踪夹具全部纳入提交。
+
+### INTERFACE：Gemini 兼容修复
+
+无公开配置或事件类型变更。Gemini 出站克隆在 tool 后紧跟 user 时补 assistant 桥接，不写历史账本；同 wire index 的完整 JSON 参数按调用边界拆为连续逻辑 index，缺失 id 时沿用基准 id 加序号。其他型号不加工具轮次桥接，下游工具累积接口保持不变。
+
+### BLOCKED：本次验证与交付边界
+
+按用户追加要求，**提交阶段不跑测试**。此前启动的定向单测 task `1794384442045-21zlj3` 在 Rust 编译阶段被停止（exit `-1`），未取得测试结果，不计通过；未运行完整门禁、覆盖率或真实付费 Gemini 验收，Cov% 保持 `-`。插件整包使用本次源码另行本地构建；本提交不代表整包构建或发布成功。未推送、打 tag、创建 release、安装到在用环境或重启共享服务。
 
 ### DONE：write-plans 章节树扁平化与语言规则收敛（2026-11-10）
 

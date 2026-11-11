@@ -575,6 +575,100 @@ fn test_openai_chunk_deepseek_tool_turn_without_reasoning_does_not_emit_snapshot
     )));
 }
 
+/// Accumulates `ToolCallDelta`s by index exactly like the agent stream handler.
+fn accumulate_stream_tool_calls(sse: &str) -> Vec<(String, String, String)> {
+    let mut state = OpenAiReasoningState::default();
+    let mut calls: Vec<(String, String, String)> = Vec::new();
+    for data in sse.lines().filter_map(|line| line.strip_prefix("data: {")) {
+        let chunk: OpenAiStreamChunk =
+            serde_json::from_str(&format!("{{{data}")).expect("parse chunk");
+        for event in openai_chunk_to_stream_events_with_state(chunk, &mut state) {
+            let StreamEvent::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments_delta,
+            } = event
+            else {
+                continue;
+            };
+            let index = index as usize;
+            if calls.len() <= index {
+                calls.resize_with(index + 1, Default::default);
+            }
+            let call = &mut calls[index];
+            if let Some(id) = id {
+                call.0 = id;
+            }
+            if let Some(name) = name {
+                call.1 = name;
+            }
+            if let Some(arguments) = arguments_delta {
+                call.2.push_str(&arguments);
+            }
+        }
+    }
+    calls
+}
+
+fn streamed_call(id: &str, name: &str, arguments: &str) -> (String, String, String) {
+    (id.to_string(), name.to_string(), arguments.to_string())
+}
+
+#[test]
+fn gemini_gateway_same_name_parallel_calls_on_one_index_are_split() {
+    let calls = accumulate_stream_tool_calls(include_str!(
+        "../../../../tests/fixtures/llm_stream/gemini_gateway_parallel_tool_calls.sse"
+    ));
+    assert_eq!(
+        calls,
+        [
+            streamed_call(
+                "toolu_9d3b810ea89f1cb2",
+                "get_weather",
+                r#"{"city":"Paris"}"#
+            ),
+            streamed_call(
+                "toolu_9d3b810ea89f1cb2_2",
+                "get_weather",
+                r#"{"city":"Tokyo"}"#
+            ),
+            streamed_call(
+                "toolu_9d3b810ea89f1cb2_3",
+                "get_weather",
+                r#"{"city":"New York"}"#
+            ),
+            streamed_call("toolu_2c644afde5d0d309", "get_time", r#"{"city":"London"}"#),
+            streamed_call(
+                "toolu_2c644afde5d0d309_2",
+                "get_time",
+                r#"{"city":"Sydney"}"#
+            ),
+        ]
+    );
+}
+
+#[test]
+fn chunked_tool_arguments_split_only_after_their_object_closes() {
+    let command = r#"{"command":"echo \"}{\" && printf '{x}'"}"#;
+    let (head, tail) = command.split_at(18);
+    let sse = sse_body(&[
+        &serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]}}]}).to_string(),
+        &serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":head}}]}}]}).to_string(),
+        &serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":tail}}]}}]}).to_string(),
+        &serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"read","arguments":"{\"path\":\"a\"}"}}]}}]}).to_string(),
+        &serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_3","function":{"arguments":"{\"path\":\"b\"}"}}]},"finish_reason":"tool_calls"}]}).to_string(),
+    ]);
+    assert_eq!(
+        accumulate_stream_tool_calls(&sse),
+        [
+            streamed_call("call_1", "bash", command),
+            streamed_call("call_2", "read", r#"{"path":"a"}"#),
+            streamed_call("call_3", "read", r#"{"path":"b"}"#),
+        ]
+    );
+}
+
 #[test]
 fn tool_owned_media_split_keeps_deepseek_reasoning_before_wire_user() {
     use crate::core::llm::{ChatMessageContent, ChatMessageContentPart};
