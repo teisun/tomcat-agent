@@ -34,6 +34,7 @@
 | `openai-responses` | `OpenAiResponsesProvider` | `POST {base}/v1/responses` |
 | `openai` | `OpenAiProvider` | `POST {base}/v1/chat/completions` |
 | `anthropic-messages` | `AnthropicProvider` | `POST {base}/v1/messages` |
+| `google-gemini` | `GeminiProvider` | `POST {gemini_root}/models/{model}:streamGenerateContent?alt=sse` / `:generateContent` |
 
 `provider` 现在只表示**逻辑厂商**，用于凭证推断、展示和审计；例如 `provider = "deepseek"` 仍然可以配 `api = "openai"`。
 
@@ -42,8 +43,9 @@
 - **bare host**：`https://api.openai.com` + `responses` → `https://api.openai.com/v1/responses`
 - **显式 provider 路径**：`https://open.bigmodel.cn/api/paas/v4` + `chat/completions` → `https://open.bigmodel.cn/api/paas/v4/chat/completions`
 - **Anthropic**：`https://api.anthropic.com/v1` + `messages` → `https://api.anthropic.com/v1/messages`
+- **Google Gemini（`gemini_api_root`）**：最后一段是 `v1beta` / `v1alpha` 则保留；是 `v1` 正式版号（常见于共用中转卡片）则替换为 `v1beta`；裸域名或网关前缀则补 `/v1beta`
 
-说人话：如果 `base_url` 只是主机，就按历史兼容自动补 `/v1`；如果用户已经明确写了路径，就别再帮倒忙多拼一层。
+说人话：如果 `base_url` 只是主机，就按历史兼容自动补 `/v1`；如果用户已经明确写了路径，就别再帮倒忙多拼一层；Gemini 的版本段则由 `gemini_api_root` 收敛到 `/v1beta`。
 
 ### 1.3 `models.toml` 与内置模型
 
@@ -128,7 +130,7 @@ supported_reasoning_levels                    └─ 按 catalog model id 存储
 - **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
 - **chat-completions `reasoning_content` continuity 语义（一条通用规则）**：`reasoning_content` 的 **capture** 与 **replay** 明确解耦，且**不按厂商或型号名单**。`ProviderCompatProfile::chat_completions(model)` 对所有 Chat Completions 型号一视同仁：响应里带了 `reasoning_content` 就写进 transcript；只在**当前回合内、同一型号**（provider + model_family 一致）的后续请求里回放，更早的回合一律不带。中转、自建或新型号无需登记即可续传；`same_profile` 比对保证换型号不串档。`had_tool_call` / `replay_requirement` 仍保留在 transcript metadata 里，用于审计和表达 tool turn 的 replay 强约束。
 - **账本全量 vs 出站精简**：transcript 是 continuity 的**全量账本**——hydrate（`chat_message_from_entry` 整条反序列化）与 `/model` 切换（`switch_current_model` 只改 `model_override` + 落 `model_change` 事件）都**不会**清洗历史里的 `reasoning_continuation` / `continuity`。真正的“精简”只发生在**出站 wire 克隆**上，绝不回写主账本。
-- **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque replay；包括上一轮最后一条 assistant 在内的更早历史一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**绝不转成正文**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
+- **可 replay 窗口（出站收敛）**：只有 Chat Completions 的 wire builder 按 `ReplayWindow` 收敛——只有**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque replay；包括上一轮最后一条 assistant 在内的更早历史一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**绝不转成正文**、**不告警**）。Anthropic、Responses 和 Gemini 则全量回放同路由的未压缩历史。
   - 不再有保留历史回合的例外型号（原 Kimi K3 的 `preserve_history` 已删）：老回合的思考对续答价值低、却按输入计费。临时拆分图片 user 不参与内部窗口和逻辑轮计算。
 - **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现同 profile 却没能 `KeepOpaque` 时触发（`SameProfileIncompatible`）。跨 profile 的 opaque reasoning 无法安全重放，一律静默 `StripOpaque`；窗口外老历史的静默 strip 仅计数、从不告警。不再使用进程内“问题指纹”缓存压重复 warning。
 - **结构化错误模型**：provider 不再把 `503/429/400` 等语义只塞进一段字符串；统一构造 `LlmError { provider, stage, http_status, summary, source }`，并由 `infra/error/llm.rs` 作为 `is_retryable_llm_error` / `llm_connect_or_network` / `is_context_overflow` 的单一事实来源。
@@ -222,11 +224,9 @@ let resp = provider.chat(req).await?;
 - `InputImage` → `{type: "input_image", image_url: "data:..."}`（A 通道）或 `{type: "input_image", file_id}`（B 通道）；`file_id` 优先
 - `InputFile` → `{type: "input_file", file_data: "data:..."}`（A 通道）或 `{type: "input_file", file_id}`（B 通道）
 
-User 媒体沿用原路径。Tool 媒体经 `tool_result_media.rs::tool_result_media_mode` 选择：Anthropic 原生 `tool_result.content[]`，Responses 原生 `function_call_output.output[]`；Chat Completions 先闭合整批 tool 结果，再追加仅用于该请求的一条 user 媒体消息。历史账本不写入该临时 user；System/Assistant 的非文本 part 仍按原规则处理。纯文本工具保持原字符串形状。
+User 媒体沿用原路径。Tool 媒体经 `tool_result_media.rs::tool_result_media_mode` 选择：Anthropic 原生 `tool_result.content[]`，Responses 原生 `function_call_output.output[]`，Google Gemini 原生 `functionResponse.parts[].inlineData`；Chat Completions 先闭合整批 tool 结果，再追加仅用于该请求的一条 user 媒体消息。历史账本不写入该临时 user；System/Assistant 的非文本 part 仍按原规则处理。纯文本工具保持原字符串形状。
 
-Chat Completions 发往 Gemini 系型号（wire `model` 含 `gemini`，不分大小写）时，出站在「tool 结果后紧跟 user」处补一条 `[Tool results received.]` assistant 消息。Gemini 只有 user/model 两种轮次，工具结果算 user；不补的话两者落进同一轮，Gemini 3.6+ 会以 `Requests ending with a model turn are not supported` 拒绝。这条消息只出现在出站克隆里，不写账本；其他型号的 wire 不变。
-
-流式 `tool_calls` 按 `index` 累积，但 Gemini 中转会把同名的并行调用放在同一个 `index` 上：只有第一个带 `id` 和 `name`，后续每个调用只追加一段完整的 JSON 参数（样本见 `tests/fixtures/llm_stream/gemini_gateway_parallel_tool_calls.sse`）。provider 以「参数的顶层 JSON 对象闭合」作为一个调用的结束。同一 `index` 上之后再来的参数文本或不同的 `id` 都算新调用：沿用原 `name`，没有自己的 `id` 时编为 `{id}_{n}`，并重映射为连续的逻辑 index。下游累积逻辑不变。
+`google-gemini`（`/v1beta/models`）只发送 `x-goog-api-key` 请求头，工具定义走 `parametersJsonSchema`（展开同文档 `$ref`、移除 `$schema`、保证对象根带 `properties`），工具结果文本统一包进 `{"output": ...}`，在「tool 结果后紧跟普通 user 消息」处自动补一条 `[Tool results received.]` model 桥接，避免两类 user 内容合并导致模型续写或 400。思考续传以 `ReasoningFormat::GeminiThoughtSignatures` 保存有序原始 `parts` 数组（包含正文、思维摘要、调用及签名），仅合并相邻且无签名或其他字段的同类文本增量。签名留在收到它的片段上；同模型、服务端与凭据的未压缩历史在新用户轮次后仍原样回传，不再使用 `ReplayWindow`。每步首个 `functionCall` 缺签名时补 `"skip_thought_signature_validator"`；若 HTTP 400 的错误摘要含 `thought signature` 或 `thought_signature`（不区分大小写），仅对本次请求剥离原始片段、按可见内容重建并重发一次（`retry_count = 0` 也生效），降级时记一次 warn，重发失败原样报错；不改 transcript，响应侧仍按既有续传设置保存新签名。其他路由、关闭续传及未发布开发版的旧字典载荷按可见内容重建，不读取旧签名。上游未给调用 ID 时仅内部生成 ID；回放的调用和 `functionResponse` 两边都不带 ID，按调用顺序配对；有上游 ID 时原样保留。一个原生调用片段即完整调用，重复上游 ID 报错且不发布工具调用，不再按 ID 合并参数。
 
 正常工具附件（read图片/PDF、MCP图片）不自动上传为file_id；内联仍遵守原大小限制，超限明确提示。file_id构造器、客户端与wire转换为兼容/显式调用保留。图片由dispatcher写入既有blob仓库，档案用input_image_ref，provider内存版内联；live事件media与历史引用均不带图片字节。L0/L1压缩只替换工具文字，不丢附件引用；GC同时标记主会话与子agent会话，缓存键分命名空间。
 

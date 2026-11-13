@@ -6,7 +6,15 @@
 use super::types::{
     ChatMessage, ChatMessageRole, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
 };
+use sha2::{Digest, Sha256};
 use tracing::warn;
+
+/// Short non-reversible digest of an API key used to scope replay route identities
+/// without persisting or logging secret material.
+pub(crate) fn credential_fingerprint(api_key: &str) -> String {
+    let digest = Sha256::digest(api_key.as_bytes());
+    format!("{digest:x}")[..16].to_string()
+}
 
 /// provider 对 continuity 的抓取形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,15 +99,16 @@ impl ProviderCompatProfile {
         base_url: &str,
         credential_fingerprint: &str,
     ) -> Self {
-        let provider = normalized_route_component(provider, "openai");
-        let base_url = normalized_route_component(base_url, "default-base");
-        let credential_fingerprint =
-            normalized_route_component(credential_fingerprint, "anonymous-credential");
-        let model_family = model_family(model);
+        let (profile_id, provider, model_family) = routed_profile_parts(
+            "openai.responses.route",
+            "openai",
+            model,
+            provider,
+            base_url,
+            credential_fingerprint,
+        );
         Self {
-            profile_id: format!(
-                "openai.responses.route/{provider}/{model_family}/{base_url}/{credential_fingerprint}"
-            ),
+            profile_id,
             provider,
             api_family: "responses".to_string(),
             model_family,
@@ -107,6 +116,32 @@ impl ProviderCompatProfile {
             replay_acceptance: ReplayAcceptance::SameProfileOnly,
             requires_tool_turn_replay: false,
             supports_response_id_hint: true,
+        }
+    }
+
+    pub fn google_gemini_routed(
+        model: &str,
+        provider: &str,
+        base_url: &str,
+        credential_fingerprint: &str,
+    ) -> Self {
+        let (profile_id, provider, model_family) = routed_profile_parts(
+            "google.gemini.route",
+            "google",
+            model,
+            provider,
+            base_url,
+            credential_fingerprint,
+        );
+        Self {
+            profile_id,
+            provider,
+            api_family: "google-gemini".to_string(),
+            model_family,
+            capture_mode: CaptureMode::OpaqueItems,
+            replay_acceptance: ReplayAcceptance::SameProfileOnly,
+            requires_tool_turn_replay: true,
+            supports_response_id_hint: false,
         }
     }
 
@@ -371,6 +406,12 @@ fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinu
                 && matches!(target.capture_mode, CaptureMode::OpaqueItems)
                 && same_profile(target, continuation)
         }
+        ReasoningFormat::GeminiThoughtSignatures => {
+            continuation.source_api == "google-gemini"
+                && target.api_family == "google-gemini"
+                && matches!(target.capture_mode, CaptureMode::OpaqueItems)
+                && same_profile(target, continuation)
+        }
     }
 }
 
@@ -384,9 +425,10 @@ fn same_profile(target: &ProviderCompatProfile, continuation: &ReasoningContinua
             && model_family(&continuation.source_model) == target.model_family
             && replay_profile_id == target.profile_id;
     }
-    if continuation.source_api == "responses"
+    if (continuation.source_api == "responses"
         && target.api_family == "responses"
-        && target.profile_id != "openai.responses.default"
+        && target.profile_id != "openai.responses.default")
+        || (continuation.source_api == "google-gemini" && target.api_family == "google-gemini")
     {
         // New routed profiles must carry an explicit replay profile id; otherwise fail closed
         // and strip opaque reasoning rather than risk cross-relay replay.
@@ -395,6 +437,24 @@ fn same_profile(target: &ProviderCompatProfile, continuation: &ReasoningContinua
     continuation.source_provider == target.provider
         && continuation.source_api == target.api_family
         && model_family(&continuation.source_model) == target.model_family
+}
+
+fn routed_profile_parts(
+    route_prefix: &str,
+    default_provider: &str,
+    model: &str,
+    provider: &str,
+    base_url: &str,
+    credential_fingerprint: &str,
+) -> (String, String, String) {
+    let provider = normalized_route_component(provider, default_provider);
+    let base_url = normalized_route_component(base_url, "default-base");
+    let credential_fingerprint =
+        normalized_route_component(credential_fingerprint, "anonymous-credential");
+    let model_family = model_family(model);
+    let profile_id =
+        format!("{route_prefix}/{provider}/{model_family}/{base_url}/{credential_fingerprint}");
+    (profile_id, provider, model_family)
 }
 
 fn normalized_route_component(raw: &str, fallback: &str) -> String {

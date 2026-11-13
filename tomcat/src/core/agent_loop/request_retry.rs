@@ -210,6 +210,10 @@ pub(super) async fn run_request_once(
         });
     }
 
+    agent
+        .config
+        .read_file_state
+        .retain_present_tool_results(messages);
     let request_messages = assemble_request_messages(messages, agent);
     let ephemeral_tail = request_messages
         .iter()

@@ -461,6 +461,7 @@ pub fn is_context_overflow_text(text: &str) -> bool {
         || lower.contains("context length exceeded")
         || lower.contains("context limit exceeded")
         || lower.contains("exceeds the context window")
+        || lower.contains("exceeds the maximum number of tokens")
         || lower.contains("maximum context length")
         || lower.contains("maximum context token limit")
         || lower.contains("prompt is too long")

@@ -924,7 +924,7 @@ fn responses_chunk_incomplete_max_output_tokens_emits_notice_finish_and_usage() 
         StreamEvent::LlmNotice {
             finish_reason,
             message
-        } if finish_reason == "max_output_tokens" && message.contains("max_output_tokens")
+        } if finish_reason == "max_output_tokens" && message.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.maxOutputNotice", &[]))
     ));
     assert!(matches!(
         &events[1],

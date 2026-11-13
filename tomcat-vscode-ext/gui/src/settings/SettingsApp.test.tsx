@@ -217,6 +217,7 @@ describe("SettingsApp", () => {
       expect(within(connectable).queryAllByRole("button").map((button) => button.dataset.testid)).toEqual([
         "settings-connectable-openai",
         "settings-connectable-anthropic",
+        "settings-connectable-google",
         "settings-connectable-kimi",
         "settings-connectable-zhipu",
         "settings-connectable-moonshot",
@@ -453,17 +454,18 @@ describe("SettingsApp", () => {
       const [fetch] = sent(postMessage, "listRemoteModels");
       expect(fetch.data).toEqual({ api: "openai", apiKey: "relay-secret", baseUrl: "https://api.fcodex.com" });
       expect(screen.getByTestId("settings-connect-fetch").textContent).toBe(en("models.connect.fetching"));
-      await emitState({ ...state, remoteModelsReceipt: { models: ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model", "deepseek-chat"], requestId: fetch.messageId } });
+      await emitState({ ...state, remoteModelsReceipt: { models: ["gpt-6.1-sol", "claude-opus-5-5", "gemini-4-carbon", "my-relay-model", "deepseek-chat"], requestId: fetch.messageId } });
 
-      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model", "deepseek-chat"]) {
+      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "gemini-4-carbon", "my-relay-model", "deepseek-chat"]) {
         expect(input(`settings-connect-model-${name}`).checked).toBe(false);
       }
       expect(screen.queryAllByTestId(/^settings-connect-protocol-/u)).toHaveLength(0);
-      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "my-relay-model"]) {
+      for (const name of ["gpt-6.1-sol", "claude-opus-5-5", "gemini-4-carbon", "my-relay-model"]) {
         fireEvent.click(input(`settings-connect-model-${name}`));
       }
       expect((screen.getByTestId("settings-connect-protocol-gpt-6.1-sol") as HTMLSelectElement).value).toBe("openai-responses");
       expect((screen.getByTestId("settings-connect-protocol-claude-opus-5-5") as HTMLSelectElement).value).toBe("anthropic-messages");
+      expect((screen.getByTestId("settings-connect-protocol-gemini-4-carbon") as HTMLSelectElement).value).toBe("google-gemini");
       expect((screen.getByTestId("settings-connect-protocol-my-relay-model") as HTMLSelectElement).value).toBe("openai");
       expect(screen.getByTestId("settings-connect-default-hint").textContent)
         .toBe(en("models.connect.defaultAfterSave", { name: "fcodex/gpt-6.1-sol" }));
@@ -478,10 +480,12 @@ describe("SettingsApp", () => {
       expect(request.data.models.map(({ api, apiKeyEnv, id, supportedSpeeds }) => ({ api, apiKeyEnv, id, supportedSpeeds }))).toEqual([
         { api: "openai-responses", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/gpt-6.1-sol", supportedSpeeds: ["fast"] },
         { api: "anthropic-messages", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/claude-opus-5-5", supportedSpeeds: ["fast"] },
+        { api: "google-gemini", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/gemini-4-carbon", supportedSpeeds: null },
         { api: "openai", apiKeyEnv: "FCODEX_API_KEY", id: "fcodex/my-relay-model", supportedSpeeds: null },
       ]);
       expect(request.data.models[1]).toMatchObject({ capabilities: { files: true }, thinkingFormat: "anthropic-adaptive" });
-      expect(request.data.models[2]).toMatchObject({
+      expect(request.data.models[2]).toMatchObject({ thinkingFormat: "gemini" });
+      expect(request.data.models[3]).toMatchObject({
         capabilities: { files: true, reasoning: true, tools: true, vision: true, webSearch: false },
         contextWindow: null,
         maxOutputTokens: null,
@@ -690,8 +694,14 @@ describe("SettingsApp", () => {
       fireEvent.click(screen.getByTestId("settings-edit-fcodex/gpt-5.5"));
       fireEvent.click(screen.getByTestId("settings-model-advanced"));
       expect(screen.queryByTestId("settings-capability-unprobed")).toBeNull();
+      fireEvent.change(screen.getByTestId("settings-model-api"), { target: { value: "google-gemini" } });
+      expect((screen.getByLabelText(en("models.thinkingFormat")) as HTMLSelectElement).value).toBe("gemini");
       fireEvent.click(screen.getByTestId("settings-save-model"));
-      expect(sent(postMessage, "upsertModel")[1].data.model.supportedSpeeds).toBeNull();
+      expect(sent(postMessage, "upsertModel")[1].data.model).toMatchObject({
+        api: "google-gemini",
+        supportedSpeeds: null,
+        thinkingFormat: "gemini",
+      });
     });
 
     it("deletes a user model from its edit form after confirmation", async () => {

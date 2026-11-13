@@ -435,28 +435,6 @@ fn flush_tool_media(out: &mut Vec<Value>, media: &mut Vec<Value>) {
     out.push(json!({"role":"user","content":content}));
 }
 
-const TOOL_TURN_BRIDGE: &str = "[Tool results received.]";
-
-/// Gemini has only `user`/`model` turns and counts tool results as `user`, so
-/// `tool` followed by `user` collapses into one turn whose last part is not a
-/// function response; Gemini 3.6+ rejects that ("Requests ending with a model
-/// turn are not supported"). A non-empty assistant message closes the turn.
-fn requires_model_turn_after_tool_results(model: &str) -> bool {
-    model.to_ascii_lowercase().contains("gemini")
-}
-
-fn close_tool_turns_before_user(messages: Vec<Value>) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::with_capacity(messages.len() + 1);
-    for message in messages {
-        let after_tool = out.last().is_some_and(|prev| prev["role"] == "tool");
-        if after_tool && message["role"] == "user" {
-            out.push(json!({"role": "assistant", "content": TOOL_TURN_BRIDGE}));
-        }
-        out.push(message);
-    }
-    out
-}
-
 fn transport_messages(
     messages: &[ChatMessage],
     model: &str,
@@ -535,9 +513,6 @@ fn transport_messages(
         out.push(value);
     }
     flush_tool_media(&mut out, &mut deferred_media);
-    if requires_model_turn_after_tool_results(model) {
-        out = close_tool_turns_before_user(out);
-    }
     promote_runtime_tail_to_system(&mut out, &runtime_tail);
     if continuity_enabled {
         report.emit(&target);
@@ -1252,161 +1227,10 @@ struct SseEventStream<S> {
     eof_error: Option<AppError>,
 }
 
-/// Splits streamed tool calls that share a wire `index` into dense logical
-/// calls. Gemini gateways stream same-name parallel calls on one index, giving
-/// only the first an id and name and appending each further call's complete
-/// JSON arguments. A call therefore ends when its top-level JSON object
-/// closes; later argument text or a different id at that index starts the next
-/// call, which inherits the name and, without its own id, gets `{id}_{n}`.
-#[derive(Debug, Default)]
-struct ToolCallSlots {
-    slots: Vec<ToolCallSlot>,
-    next_logical: u32,
-}
-
-#[derive(Debug)]
-struct ToolCallSlot {
-    wire_index: u32,
-    logical: u32,
-    /// Last id the gateway sent on this wire index.
-    id: Option<String>,
-    name: Option<String>,
-    /// Calls on this index since `id` arrived, including its own.
-    calls_from_id: u32,
-    arguments: JsonObjectEnd,
-}
-
-/// Incrementally finds where a JSON object ends. Structural bytes are ASCII,
-/// so byte offsets always fall on UTF-8 boundaries.
-#[derive(Debug, Default)]
-struct JsonObjectEnd {
-    depth: u32,
-    in_string: bool,
-    escaped: bool,
-    closed: bool,
-}
-
-impl JsonObjectEnd {
-    /// Returns the offset of the first non-whitespace byte after the object closed.
-    fn feed(&mut self, text: &str) -> Option<usize> {
-        for (offset, byte) in text.bytes().enumerate() {
-            if self.closed {
-                if byte.is_ascii_whitespace() {
-                    continue;
-                }
-                return Some(offset);
-            }
-            if self.in_string {
-                match byte {
-                    _ if self.escaped => self.escaped = false,
-                    b'\\' => self.escaped = true,
-                    b'"' => self.in_string = false,
-                    _ => {}
-                }
-                continue;
-            }
-            match byte {
-                b'"' => self.in_string = true,
-                b'{' | b'[' => self.depth += 1,
-                b'}' | b']' if self.depth > 0 => {
-                    self.depth -= 1;
-                    self.closed = self.depth == 0;
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-}
-
-fn take_logical(next: &mut u32) -> u32 {
-    let logical = *next;
-    *next += 1;
-    logical
-}
-
-impl ToolCallSlots {
-    fn push(&mut self, delta: OpenAiStreamToolCallDelta, events: &mut Vec<StreamEvent>) {
-        let wire_index = delta.index.unwrap_or(0);
-        let (mut name, mut arguments) = delta
-            .function
-            .map_or((None, None), |function| (function.name, function.arguments));
-        let mut id = delta.id;
-        let Self {
-            slots,
-            next_logical,
-        } = self;
-        let slot = match slots.iter().position(|slot| slot.wire_index == wire_index) {
-            Some(position) => &mut slots[position],
-            None => {
-                slots.push(ToolCallSlot {
-                    wire_index,
-                    logical: take_logical(next_logical),
-                    id: None,
-                    name: None,
-                    calls_from_id: 0,
-                    arguments: JsonObjectEnd::default(),
-                });
-                slots.last_mut().expect("slot was just pushed")
-            }
-        };
-        if id.is_some() && id != slot.id {
-            if slot.arguments.closed {
-                slot.start_call(take_logical(next_logical));
-                name = name.or_else(|| slot.name.clone());
-            }
-            slot.id.clone_from(&id);
-            slot.calls_from_id = 1;
-        }
-        if name.is_some() {
-            slot.name.clone_from(&name);
-        }
-        let mut index = slot.logical;
-        while let Some(offset) = arguments
-            .as_deref()
-            .and_then(|text| slot.arguments.feed(text))
-        {
-            let rest = arguments.as_mut().map(|text| text.split_off(offset));
-            events.push(StreamEvent::ToolCallDelta {
-                index,
-                id,
-                name,
-                arguments_delta: arguments,
-            });
-            slot.start_call(take_logical(next_logical));
-            slot.calls_from_id += 1;
-            index = slot.logical;
-            id = slot
-                .id
-                .as_ref()
-                .map(|base| format!("{base}_{}", slot.calls_from_id));
-            name = slot.name.clone();
-            arguments = rest;
-        }
-        events.push(StreamEvent::ToolCallDelta {
-            index,
-            id,
-            name,
-            arguments_delta: arguments,
-        });
-    }
-
-    fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-}
-
-impl ToolCallSlot {
-    fn start_call(&mut self, logical: u32) {
-        self.logical = logical;
-        self.arguments = JsonObjectEnd::default();
-    }
-}
-
 #[derive(Debug)]
 struct OpenAiReasoningState {
     text: String,
-    tool_calls: ToolCallSlots,
+    had_tool_call: bool,
     source_profile: ProviderCompatProfile,
     continuity_enabled: bool,
     snapshot_emitted: bool,
@@ -1417,7 +1241,7 @@ impl Default for OpenAiReasoningState {
     fn default() -> Self {
         Self {
             text: String::new(),
-            tool_calls: ToolCallSlots::default(),
+            had_tool_call: false,
             source_profile: ProviderCompatProfile::chat_completions("gpt-5"),
             continuity_enabled: false,
             snapshot_emitted: false,
@@ -1496,7 +1320,6 @@ impl OpenAiReasoningState {
             return None;
         }
         self.snapshot_emitted = true;
-        let had_tool_call = !self.tool_calls.is_empty();
         Some(StreamEvent::ReasoningSnapshot {
             thinking_text: Some(trimmed.to_string()),
             reasoning_continuation: Some(ReasoningContinuation {
@@ -1511,10 +1334,10 @@ impl OpenAiReasoningState {
                 provider_refs: None,
             }),
             continuity: Some(ContinuityMetadata {
-                had_tool_call,
+                had_tool_call: self.had_tool_call,
                 replay_requirement: replay_requirement_for_profile(
                     &self.source_profile,
-                    had_tool_call,
+                    self.had_tool_call,
                 ),
             }),
         })
@@ -1811,8 +1634,18 @@ fn openai_chunk_to_stream_events_with_state(
                 if let Some(content) = delta.content {
                     events.extend(reasoning_state.scrub_content_delta(&content));
                 }
-                for tool_call in delta.tool_calls.into_iter().flatten() {
-                    reasoning_state.tool_calls.push(tool_call, &mut events);
+                if let Some(tool_calls) = delta.tool_calls {
+                    if !tool_calls.is_empty() {
+                        reasoning_state.had_tool_call = true;
+                    }
+                    for tc in tool_calls {
+                        events.push(StreamEvent::ToolCallDelta {
+                            index: tc.index.unwrap_or(0),
+                            id: tc.id,
+                            name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                            arguments_delta: tc.function.and_then(|f| f.arguments),
+                        });
+                    }
                 }
             }
             if let Some(reason) = choice.finish_reason {

@@ -30,6 +30,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   plan_delivery_flow_e2e
   robustness_tests
   read_tool_tests
+  read_guidance_replay_real_llm_e2e # Offline fixture/metrics only; paid replay is #[ignore].
   resume_hydration_tests
   skill_tool_tests
   transcript_summary_integration_tests

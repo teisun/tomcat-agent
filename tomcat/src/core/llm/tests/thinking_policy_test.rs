@@ -71,10 +71,18 @@ fn format_resolve_auto_by_wire_api() {
         ThinkingFormat::Auto.resolve_for_api("anthropic-messages"),
         ThinkingFormat::AnthropicAdaptive
     );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve_for_api("google-gemini"),
+        ThinkingFormat::Gemini
+    );
     assert_eq!(thinking_format_for_api("openai"), ThinkingFormat::Openai);
     assert_eq!(
         thinking_format_for_api("openai-responses"),
         ThinkingFormat::Openai
+    );
+    assert_eq!(
+        thinking_format_for_api("google-gemini"),
+        ThinkingFormat::Gemini
     );
     assert_eq!(
         thinking_format_for_api("deepseek"),
@@ -88,6 +96,26 @@ fn format_resolve_auto_by_wire_api() {
     assert_eq!(
         default_thinking_format_for_api("anthropic-messages"),
         "anthropic-adaptive"
+    );
+    assert_eq!(default_thinking_format_for_api("google-gemini"), "gemini");
+    assert_eq!(
+        crate::core::llm::thinking_policy::safe_supported_reasoning_levels_for(
+            "google-gemini",
+            None
+        ),
+        vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+    );
+    assert_eq!(
+        crate::core::llm::thinking_policy::gemini_thinking_level(ThinkingLevel::Xhigh),
+        Some("high")
+    );
+    assert_eq!(
+        crate::core::llm::thinking_policy::gemini_thinking_level(ThinkingLevel::Minimal),
+        Some("minimal")
+    );
+    assert_eq!(
+        crate::core::llm::thinking_policy::gemini_thinking_level(ThinkingLevel::Off),
+        None
     );
     // 已显式指定的 format 不会被改写
     assert_eq!(

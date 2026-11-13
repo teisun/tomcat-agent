@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "support/gemini_native_live.rs"]
+mod gemini_native;
+
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -30,6 +33,7 @@ struct CapturedTurn {
     continuity: Option<ContinuityMetadata>,
     tool_calls: Vec<Value>,
     finish_reason: Option<String>,
+    cache_read_tokens: Option<u32>,
 }
 
 fn require_api_key(env_key: &str) {
@@ -234,6 +238,10 @@ async fn capture_stream_turn(
                         captured.continuity = continuity;
                     }
                 }
+                StreamEvent::Usage {
+                    cache_read_tokens, ..
+                } => captured.cache_read_tokens = cache_read_tokens,
+                StreamEvent::LlmError { message, .. } => return Err(AppError::Llm(message)),
                 StreamEvent::FinishReason { reason } => captured.finish_reason = Some(reason),
                 _ => {}
             }

@@ -459,7 +459,7 @@ pub(super) fn final_stream_events(
         if stop_reason == "max_tokens" {
             events.push(StreamEvent::LlmNotice {
                 finish_reason: finish_reason.clone(),
-                message: crate::infra::i18n::tr("llm.anthropicMaxOutputNotice", &[]),
+                message: crate::infra::i18n::tr("llm.maxOutputNotice", &[]),
             });
         }
         events.push(StreamEvent::FinishReason {

@@ -38,7 +38,7 @@ describe("buildProviderCards", () => {
     expect(result.cards[0].rows.map((row) => row.model.id)).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
     expect(result.cards[0].hosts).toEqual(["api.deepseek.com"]);
     expect(result.connectable.map((preset) => translate("en", preset.labelKey))).toEqual([
-      "OpenAI", "Anthropic", "Kimi Code", "Zhipu AI", "Moonshot", "MiMo",
+      "OpenAI", "Anthropic", "Google", "Kimi Code", "Zhipu AI", "Moonshot", "MiMo",
     ]);
     expect(JSON.stringify(result.cards)).not.toContain("claude");
   });
@@ -94,8 +94,8 @@ describe("buildProviderCards", () => {
     expect(result.connectable.map((preset) => preset.provider)).toContain("anthropic");
   });
 
-  it("keeps all seven presets connectable when the catalog shrinks or is empty", () => {
-    expect(cards([]).connectable).toHaveLength(7);
+  it("keeps all eight presets connectable when the catalog shrinks or is empty", () => {
+    expect(cards([]).connectable).toHaveLength(8);
     expect(cards([]).cards).toEqual([]);
   });
 

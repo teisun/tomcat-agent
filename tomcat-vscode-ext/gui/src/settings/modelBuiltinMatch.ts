@@ -39,8 +39,12 @@ export function defaultProtocolFor(
   candidates: readonly string[],
 ): string {
   if (reference && candidates.includes(reference.api)) return reference.api;
-  if (upstreamFamilyName(modelName).startsWith("claude-") && candidates.includes("anthropic-messages")) {
+  const family = upstreamFamilyName(modelName);
+  if (family.startsWith("claude-") && candidates.includes("anthropic-messages")) {
     return "anthropic-messages";
+  }
+  if (family.startsWith("gemini-") && candidates.includes("google-gemini")) {
+    return "google-gemini";
   }
   return candidates[0] ?? "openai";
 }

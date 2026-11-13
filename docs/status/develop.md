@@ -1,27 +1,64 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-11 16:15 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-13 17:39 +0800 | ACTIVE | develop | - |
 
-### DONE：Gemini 工具轮次与并行调用修复、CLI / EXT 升版（2026-11-11）
+### DONE：Gemini 原生适配、签名自愈与版本升级（2026-11-13）
 
 ```text
-Opus 修复 + SSE 回归夹具
-  → Gemini 出站工具轮次补齐 / 同 index 并行调用拆分
-  → CLI 0.1.92 + EXT 0.2.10（内置 CLI 0.1.92）
-  → 本地提交；插件整包另行构建，不触发发布或安装
+签名类HTTP400 → 仅本次出站按可见历史重建、补首调用哨兵 → 重发一次
+                  不改会话历史                    成功 / 原样报错
+其他400 → 不触发签名降级
 ```
 
-- **范围**：纳入 Cursor / Opus 已有的 Gemini Chat Completions 修复、建流前 fatal 诊断、provider / stream 回归测试及 SSE 夹具、LLM README。提交前仅删除夹具末尾多余空行，未另改产品实现。
-- **版本**：仅运行一次 `node scripts/release-version.mjs bump --all patch`，CLI `0.1.91 → 0.1.92`、EXT `0.2.9 → 0.2.10`、内置 CLI `0.1.91 → 0.1.92`；脚本只改五个版本文件的必要字段，未改变依赖或私有 GUI 版本。
-- **检查**：升级前后版本一致性检查通过；Rust 四个受影响文件的 `rustfmt --edition 2021 --check` 通过（task `1794384442118-ay973h`）；修正夹具后 staged / unstaged 空白检查通过。相关源码、文档、版本与未跟踪夹具全部纳入提交。
+- **提交范围**：纳入此前未提交的Gemini原生接入、旧Chat Completions补丁回滚、原始parts全历史回放、签名400自愈、设置页/CLI帮助/测试/文档；同时纳入已确认的通用读取去重修复，避免工具结果移出历史后残留“已读”标记。已检查staged/unstaged/untracked，原生模块与新夹具、回放测试不得漏提；忽略目录内的诊断产物不纳入。
+- **实现**：在Gemini适配层复用结构化HTTP状态和错误摘要，只匹配400中的`thought signature`/`thought_signature`（忽略大小写）；正常请求保留原回放，签名被拒后仅本次出站关闭opaque replay并warn一次。`retry_count=0`也生效；降级失败直接返回，不进入普通重试循环。响应仍按原续传设置保存新parts/签名，不增加持久化状态、配置或公共错误类型，不改通用重试、账本或其它供应商。
+- **实施阶段验证（非本次重跑）**：复用MockHttpServer新增2项测试，正确filter下先RED 2/2，修复后Gemini定向22/22通过；覆盖流式/非流式、两种关键字、零常规重试、出站哨兵、工具结果不变、新签名保留、普通400不重发、降级400/503不循环。`cargo clippy --all-targets -- -D warnings`与`cargo fmt --check`通过。首次filter漏`registry`导致0测试，记录但不计通过；无其它本轮残留失败。
+- **版本与提交检查**：按用户本次独立请求，使用`node scripts/release-version.mjs bump --all patch`且只运行一次：CLI `0.1.93 → 0.1.94`、EXT `0.2.11 → 0.2.12`、内置CLI `0.1.93 → 0.1.94`。前后版本一致性检查通过；相对执行前，五个版本文件只有允许的版本字段变化，依赖与私有GUI版本未变。覆盖率未测量，Cov%保持`-`，提交信息不编造覆盖率。
+- **提交卫生**：发现昨日遗留的零字节`index.lock`，核实没有Git进程或文件持有者后移至忽略的验收目录备份；初次staged空白检查发现一份SSE夹具末尾多余空行，仅移除该空行，JSON帧不改。源码已有EOF尾帧处理；按用户要求不重跑测试。
+- **文档/边界**：README将ReplayWindow范围收窄到Chat Completions，补签名400降级说明。同一会话后续仍可能先400再降级，不宣称永久消除坏签名或解决限流/窄读。按用户要求本次提交不跑测试；只检查提交范围、版本一致性和空白，实施阶段结果不冒充重跑。本地提交后再按现有流程构建含CLI的`darwin-x64`插件整包；构建/打包结果以实际产物为准，不等于安装或发布。未安装/重启/推送/打tag/创建release。签名验收见`.agents/acceptance/gemini-signature-recovery/acceptance.md`；本次版本和打包记录位于`.agents/acceptance/gemini-release-20261113/`。
 
-### INTERFACE：Gemini 兼容修复
+### INTERFACE：Gemini 原生协议与读取状态
 
-无公开配置或事件类型变更。Gemini 出站克隆在 tool 后紧跟 user 时补 assistant 桥接，不写历史账本；同 wire index 的完整 JSON 参数按调用边界拆为连续逻辑 index，缺失 id 时沿用基准 id 加序号。其他型号不加工具轮次桥接，下游工具累积接口保持不变。
+- 新增`api = "google-gemini"`、`thinking_format = "gemini"`与`ReasoningFormat::GeminiThoughtSignatures`，通过既有模型配置和continuation保存/回放；`ReadFileState::retain_present_tool_results`用于请求前清理已离开历史的读取标记。签名400自愈只改本次出站，不增加配置或持久化格式。
 
-### BLOCKED：本次验证与交付边界
+### BLOCKED：本次提交与打包边界
 
-按用户追加要求，**提交阶段不跑测试**。此前启动的定向单测 task `1794384442045-21zlj3` 在 Rust 编译阶段被停止（exit `-1`），未取得测试结果，不计通过；未运行完整门禁、覆盖率或真实付费 Gemini 验收，Cov% 保持 `-`。插件整包使用本次源码另行本地构建；本提交不代表整包构建或发布成功。未推送、打 tag、创建 release、安装到在用环境或重启共享服务。
+- 无提交阻塞；按用户要求不重跑测试、覆盖率或真实收费模型请求。窄读调查继续暂缓，历史0/3、签名400与限流部分结果保留；本次整包仅面向当前Intel macOS主机，不能据此宣称其它平台包已构建或运行验收完成。
+
+### DONE：Gemini 原始 parts 回放与读取文案纠错（2026-11-13；窄读改善按用户决定暂缓）
+
+```text
+原始 parts → 原位保存签名 → 既有会话存储 → 同路由未压缩历史回放
+                 本地回归通过                 │
+                                             ▼
+协议/文案/回归验收完成 → 交付；窄读改善暂缓，历史失败与限流证据保留
+```
+
+- **实现**：复用 continuation 保存原始有序数组，只合并相邻且无签名/额外字段的同类文本；取消 Gemini 当前轮窗口，首调用缺签名补哨兵，不读取旧开发字典；上游无 ID 时调用与结果均省略 ID、内部按顺序配对；重复上游 ID 报错不发布调用。未改其它模型窗口或新增持久化版本/配置/重试机制。
+- **读取文案**：删去宽读必落盘/仅预览的错误描述。按用户追加要求同时删除“禁止整读落盘结果”的禁令和内部机制解释；保留 300–1200 行建议及反复 20–60 行读取失败模式，不修改读取行为、权限、预算或去重。
+- **本地验证**：Gemini 20、hydrate 40、compaction 19、prompts 33、system_prompt 36 定向通过。完整 lib 原3529通过/1失败/7忽略，唯一失败在复用仓库私有 rg 后同源码独立通过；all-targets clippy、fmt、doctest通过（doctest 0项）。integration 并行原395通过/1分组登记失败，修正回放 binary 归类后补验门禁6项与离线回放2项全过；serial 92通过/3跳过。保留首次门禁失败记录，不冒称一次整条全绿，也未全套重复运行。
+- **首次真实结果（11月12日）**：原路由合成思考开/省略及强制工具探针均 HTTP 200，但无思维片段和签名，思维 tokens=0；用量自述 `billing_usage.source=claude_messages`，不能据此独立断言实际后端。真实签名往返因此失败，签名计费未测得，不以无签名对照冒充。现场前416行恢复后3次各12步，首读中位数90/115/90行、连续单段窄读最长11/4/5步，均无推进，**0/3达标**；输入偏差0.853%/0.853%/0.860%，满足±15%重现场景门槛。
+- **2026-11-13 用户追加缓存核对**：复用现有 `models_toml_model_growing_prefix_cache_marathon`，原Gemini路由6轮/间隔8秒，首请求120秒超时，未完成测量轮；原始REST完全相同请求对照首发约181秒超时，后续未发；极小“回复OK”请求直接返回502 `Upstream request failed`，模型目录则200且含目标模型。本轮缓存命中率**未测得**，不写成0%；昨日3×12条落盘cache字段均显式0已核查。Google当前文档确认Gemini4采用默认隐式缓存，不支持显式缓存，不添加OpenAI/Anthropic私有缓存字段。无产品代码变更；请求/任务/本地产物见 `.agents/acceptance/gemini-parts/acceptance.md` §7，等待中转后台核实生成链路后复测。
+- **2026-11-13 成功会话与本地新旧对照**：用户会话10:53正常回复并记录25个思考tokens，不能把此前10:17–10:25超时/502泛化成整个中转站不可用。共享服务仍是11月12日09:48启动的已安装版本，本轮测试构建未安装/重启。两版在相同临时配置、loopback模拟Gemini下首请求对照，URL、high思考配置、用户内容及参数结构相同，仅两处已批准读取文案不同；没有证据直接归因于本轮parts修复，也不能据此排除所有多轮回归。当时仅完成离线对照；用户随后授权恢复真实测试，结果见后两项及验收记录§9。
+- **2026-11-13 恢复实测后的定位**：用户授权不限次数，已完成新旧二进制真实首请求，均200正常结束；相同请求体重复访问同一原生流式URL，出现有签名和无签名两种原始响应形态（输入12953/12509 tokens，后者带`gemini_chat`计费包装）。产品工具测试第0步返回2调用但原始HTTP完全缺签名，直接REST工具请求亦复现，已定位这项缺口在Tomcat解析之前，不是本次parts保存丢字段。high思考请求拿到429思考tokens、思考片段与签名；真签名工具原样续传的REST对照200并正确回答。产品完整重启/跨轮签名验收仍失败，不能拿REST成功替代。
+- **缓存与计费续查**：同体REST三次缓存字段显式0；既有增长前缀测试完成前2轮（5911/7056输入、cache记录0/0），第3轮120秒超时，整项exit101。countTokens带签名文本历史返回53，去签名对照428；另一份思考历史也428，未获有效差额，遵守“不重复提交”停止。不是整体中转不可用；需按验收§9给出的request ID核实签名透传、转换路径、缓存统计与428终态。无新增产品补丁、无完整回放重跑；test-only录制增强fmt/目标clippy通过，真实失败原样保留。
+- **2026-11-13 Vertex分组复测**：用户自行切换key分组后，不改产品代码/超时，真实完整协议往返通过（并行2→顺序1→文本→SessionManager保存恢复→新用户历史parts原样回传，19.95s）。high返回820思考tokens、3思考片段、1签名；countTokens完整378、只去签名378、再去思考摘要228，本样本签名计数差0、摘要差150，不等于实际账单保证。原始同体3次均200，后2次缓存命中3786/5840（64.83%），不再是始终0。首次往返第3步和增长前缀第2轮仍分别120s超时，不能宣称服务稳定性全通过。原始证据与task见验收记录§10，旧失败不覆盖。
+- **2026-11-13 现场迁移回放**：用户授权新组重跑后，旧签名原样回放两次均HTTP400 `Invalid thought signature`（第1次1步、第2次0步，第3次未发）。随后用户明确批准仅在测试副本去掉旧签名：新增测试专用opt-in，保留全部其它字段和工具结果、后续新签名照常保存，沿用现有首调用哨兵。3项离线用例、目标clippy、fmt通过。迁移回放完成7步后持续429；运行时记录1次流错误、5次429自动重试后，已停止自有测试任务（exit-1），后2次未启动。部分首读中位数110行、单段窄读最长5步、无推进；4步缓存命中266105/273344/276782/278878。这是限流中断的部分结果，不是完成3次验收。详见验收记录§11。
+- **最终验收范围**：用户要求“反复窄读的问题估计是模型的问题，你先别管了，直接走验收吧”。据此不再追查窄读、不补跑新组3次；本次协议修复、文案、测试与真实协议核对验收完成。旧组0/3、跨组400、迁移后7步遭429中止仍保留，不写成全部行为通过或模型归因已证实。
+- **复核与边界**：相对执行前基线，tracked增量仍只有计划内9路径；生产源码与manifest在广范围门禁后未变，复用有效结果，新增测试改动已定向验证。未恢复被删整改项，未发现本轮待修P0/P1；没有本轮UI增量。原始745行 transcript hash不变；原会话不改，自有测试已停止，未安装/重启/提交/升版。详细结果、失败分流和最终验收见 `.agents/acceptance/gemini-parts/acceptance.md` §12；安装仍由用户在独立终端运行 `./scripts/dev-install.sh` 后显式 `/restart`。
+
+### DONE：Gemini 原生协议复核整改（2026-11-11）
+
+- **整改**：三协议截断提示统一为中性文案；读去重删除按文字识别和压缩层重复检查，回归测试移到真实请求路径；Gemini 忽略 `[DONE]` 并仅在 EOF 检查终态，非流式缺 `finishReason` 按可重试上游错误处理。
+- **简化与边界**：wire 只对工具结果后接用户内容插桥接，有真实 id 才下发 id；保留结果排序和签名路由/窗口语义，去掉历史克隆、重复媒体转换、冗余 role 与档位分支。流正常结束和截断共用事件路径，合成 id 仅用 UUID v4；Responses 直接复用公共凭证指纹函数。中英文用户指南同步四协议、8 预置与 Gemini 默认协议。
+- **验证**：按计划定向覆盖 Gemini wire/stream/provider、replay、endpoint、remote models、媒体模式、Responses、Anthropic、pipeline、compaction、completion guard 与错误分类，去重计 375 项 Rust 测试通过；通知透传集成 1 项通过；`cargo fmt --check`、`cargo clippy --tests -- -D warnings` 与资源/空白检查通过。新增请求体字节断言首轮预期误把窗口外调用当成窗口内，修正该测试预期后只补跑失败项；保留原批次 exit 1，不冒称整条门禁一次全绿。
+- **文案显示与边界**：真实 App/CSS + 模拟宿主状态的 1440×900 / 390×844 截图、ARIA、console 已逐一读回，提示完整可读、窄屏换行、捕获范围错误为空；不是实际 VS Code 服务窗口或付费模型验收。命令、task 与失败记录见 `.agents/acceptance/gemini-rectification/acceptance.md`，两组产物在 `.agents/shots/gemini-rectification/`。未跑全仓或跨平台套件，未升版、提交、发布、安装或重启在用服务；由用户独立终端运行 `./scripts/dev-install.sh` 后显式 `/restart`（会停止全部任务）。
+
+### DONE：Google Gemini 原生 `/v1beta/models` 协议接入与第一期 Completions 补丁回滚（2026-11-11）
+
+- **替代关系**：`073e602c` 中针对中转 Chat Completions 翻译损耗引入的 `openai.rs` 模型名桥接与同 index 并行调用拆分补丁已由原生 `google-gemini` 协议正式取代并撤回；保留通用的 `stream_handler.rs` 建流前被拒诊断日志与 `0.1.92` / `0.2.10` 版本号。
+- **实现**：新增 `core/llm/gemini/{mod,wire,stream}.rs` 并在 `registry.rs`、`remote_models.rs` 注册 `google-gemini`；通过 `gemini_api_root` 收敛 `/v1beta` 版本段，`x-goog-api-key` 鉴权，`parametersJsonSchema` 轻清洗，工具结果包成 `{"output": ...}` 并补 `[Tool results received.]` 桥接，思考签名经 `ReasoningFormat::GeminiThoughtSignatures` 与 `google_gemini_routed` 按路由隔离续传、窗口内无真签名时对首调用填 `skip_thought_signature_validator`；同步接入 VS Code 设置页 Google 预设、`google-gemini` 协议与 `gemini-*` 默认协议推导；读去重以按 id 失效加发请求前的存在性检查为准：L0/L1 替换正文时按调用 id 失效，`ReadFileState::retain_present_tool_results` 在发请求前清理对应工具消息已移除的戳。
+- **验证**：Rust 286 项定向单测与 `i18n_cli_tests` 4 项集成测试全绿；VS Code `gate:fast` 与设置页单测全绿；使用 `hk.fcodex.top + gemini-4-carbon` 完成多轮并行工具调用、中途插话、第一期无签名会话切换、中断恢复与开放式多文件调研真机验收，全程 0 个 HTTP 400，推理链每步连续且正常收尾。未安装或重启在用共享服务。
 
 ### DONE：write-plans 章节树扁平化与语言规则收敛（2026-11-10）
 

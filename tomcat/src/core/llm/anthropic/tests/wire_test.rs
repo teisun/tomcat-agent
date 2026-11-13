@@ -1154,7 +1154,7 @@ fn final_stream_events_notices_anthropic_max_tokens() {
             StreamEvent::LlmNotice {
                 finish_reason,
                 message,
-            } if finish_reason == "max_tokens" && message.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.anthropicMaxOutputNotice", &[]))
+            } if finish_reason == "max_tokens" && message.contains(&crate::infra::i18n::tr_in(crate::infra::i18n::Locale::En, "llm.maxOutputNotice", &[]))
         )
     }));
     assert!(events.iter().any(|event| {

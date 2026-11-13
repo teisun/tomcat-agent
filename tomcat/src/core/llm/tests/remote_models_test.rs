@@ -109,6 +109,40 @@ async fn anthropic_listing_uses_x_api_key_version_and_page_limit() {
 }
 
 #[tokio::test]
+async fn google_gemini_listing_uses_v1beta_x_goog_api_key_and_filters_generative_models() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        200,
+        r#"{
+            "models": [
+                {"name": "models/gemini-4-carbon", "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]},
+                {"name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"]},
+                {"name": "models/gemini-4-argon", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-4-carbon", "supportedGenerationMethods": ["generateContent"]}
+            ]
+        }"#,
+    )])
+    .await;
+
+    let models = list_remote_models(
+        &LlmRuntimeConfig::default(),
+        request(&format!("{}/v1", server.base_url), "google-gemini"),
+    )
+    .await
+    .expect("gemini listing succeeds");
+
+    let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gemini-4-carbon", "gemini-4-argon"]);
+    let texts = server.request_texts();
+    assert_eq!(
+        request_line(&texts[0]),
+        "GET /v1beta/models?pageSize=1000 HTTP/1.1"
+    );
+    assert_eq!(header_value(&texts[0], "x-goog-api-key"), Some(TEMP_KEY));
+    assert_eq!(header_value(&texts[0], "authorization"), None);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn remote_model_listing_uses_the_configured_proxy() {
     let proxy = MockHttpServer::start(vec![ScriptedHttpResponse::json(
         200,

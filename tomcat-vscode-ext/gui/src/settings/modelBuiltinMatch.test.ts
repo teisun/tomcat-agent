@@ -63,20 +63,24 @@ describe("findReusableModelByName", () => {
   });
 });
 
-const ALL_PROTOCOLS = ["openai", "openai-responses", "anthropic-messages"];
+const ALL_PROTOCOLS = ["openai", "openai-responses", "anthropic-messages", "google-gemini"];
 
 describe("defaultProtocolFor", () => {
-  it("follows the reference model, then claude- names, then the connection's primary protocol", () => {
+  it("follows the reference model, then claude-/gemini- names, then the connection's primary protocol", () => {
     expect(defaultProtocolFor("gpt-6.1-sol", { api: "openai-responses" }, ALL_PROTOCOLS)).toBe("openai-responses");
     expect(defaultProtocolFor("claude-opus-5-5", { api: "anthropic-messages" }, ALL_PROTOCOLS)).toBe("anthropic-messages");
     expect(defaultProtocolFor("anthropic/claude-sonnet-5", null, ALL_PROTOCOLS)).toBe("anthropic-messages");
     expect(defaultProtocolFor("Claude-X", null, ALL_PROTOCOLS)).toBe("anthropic-messages");
+    expect(defaultProtocolFor("gemini-4-carbon", null, ALL_PROTOCOLS)).toBe("google-gemini");
+    expect(defaultProtocolFor("google/gemini-3.8-flash", null, ALL_PROTOCOLS)).toBe("google-gemini");
+    expect(defaultProtocolFor("Gemini-Pro", null, ALL_PROTOCOLS)).toBe("google-gemini");
     expect(defaultProtocolFor("my-relay-model", null, ALL_PROTOCOLS)).toBe("openai");
     expect(defaultProtocolFor("gpt-7-preview", null, ALL_PROTOCOLS)).toBe("openai");
   });
 
   it("never leaves the candidates of a single-protocol preset", () => {
     expect(defaultProtocolFor("claude-x", null, ["openai"])).toBe("openai");
+    expect(defaultProtocolFor("gemini-4-carbon", null, ["openai"])).toBe("openai");
     expect(defaultProtocolFor("gpt-6.1-sol", { api: "openai-responses" }, ["openai"])).toBe("openai");
   });
 });

@@ -5,6 +5,7 @@ export const API_OPTIONS = [
   { labelKey: "term.api.openai", value: "openai" },
   { labelKey: "term.api.responses", value: "openai-responses" },
   { labelKey: "term.api.anthropic", value: "anthropic-messages" },
+  { labelKey: "term.api.gemini", value: "google-gemini" },
 ] as const;
 
 /** Candidates for an address without a fixed protocol; the first is its primary protocol. */
@@ -17,6 +18,7 @@ export const THINKING_FORMAT_OPTIONS = [
   { labelKey: "term.thinking.doubao", value: "doubao" },
   { labelKey: "term.thinking.anthropic", value: "anthropic" },
   { labelKey: "term.thinking.adaptive", value: "anthropic-adaptive" },
+  { labelKey: "term.thinking.gemini", value: "gemini" },
 ] as const;
 
 export function formatApiLabel(api: string, t: Translator): string {
@@ -38,6 +40,9 @@ export function defaultThinkingFormatForApi(api: string): string {
     case "anthropic":
     case "anthropic-messages":
       return "anthropic-adaptive";
+    case "google":
+    case "google-gemini":
+      return "gemini";
     case "deepseek":
       return "deepseek";
     case "zai":

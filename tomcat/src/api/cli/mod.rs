@@ -427,7 +427,7 @@ pub enum ModelSub {
     Add {
         /// 模型 id（如 my-gateway）
         id: String,
-        /// 上游协议族：openai / openai-responses / anthropic-messages
+        /// 上游协议族：openai / openai-responses / anthropic-messages / google-gemini
         #[arg(long)]
         api: String,
         /// provider 名（决定默认 API Key 环境变量名）

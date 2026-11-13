@@ -217,3 +217,38 @@ fn hash_content_is_deterministic_and_distinct() {
     assert_eq!(hash_content(b"hello"), hash_content(b"hello"));
     assert_ne!(hash_content(b"hello"), hash_content(b"world"));
 }
+
+#[test]
+fn retain_present_tool_results_drops_removed_stamps_only() {
+    use crate::core::llm::ChatMessage;
+    use std::path::PathBuf;
+
+    let state = ReadFileState::new();
+    let p_removed = PathBuf::from("/removed.rs");
+    let p_visible = PathBuf::from("/visible.rs");
+    let p_edited = PathBuf::from("/edited.rs");
+    let p_unowned = PathBuf::from("/unowned.rs");
+
+    for (path, call_id) in [
+        (&p_removed, Some("call-removed")),
+        (&p_visible, Some("call-visible")),
+        (&p_edited, Some("call-edit")),
+        (&p_unowned, None),
+    ] {
+        let mut s = stamp(1, 10, None, None);
+        s.tool_call_id = call_id.map(str::to_string);
+        state.put(path.clone(), s);
+    }
+
+    let messages = vec![
+        ChatMessage::compaction_summary("summary replaced call-removed", "sum_1"),
+        ChatMessage::tool("call-visible", "fn main() {}\n"),
+        ChatMessage::tool("call-edit", "Edited: /edited.rs"),
+    ];
+
+    assert_eq!(state.retain_present_tool_results(&messages), 1);
+    assert!(state.get(&p_removed).is_none());
+    assert!(state.get(&p_visible).is_some());
+    assert!(state.get(&p_edited).is_some());
+    assert!(state.get(&p_unowned).is_some());
+}

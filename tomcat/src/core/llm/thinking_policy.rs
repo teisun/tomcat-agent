@@ -101,6 +101,8 @@ pub enum ThinkingFormat {
     Anthropic,
     /// 新版 Anthropic：`thinking: {"type":"adaptive"}` + `output_config.effort`。
     AnthropicAdaptive,
+    /// Google Gemini 3+ 原生 `/v1beta`：`generationConfig.thinkingConfig.thinkingLevel`。
+    Gemini,
 }
 
 impl ThinkingFormat {
@@ -115,6 +117,7 @@ impl ThinkingFormat {
             Self::Doubao => "doubao",
             Self::Anthropic => "anthropic",
             Self::AnthropicAdaptive => "anthropic-adaptive",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -130,6 +133,7 @@ impl ThinkingFormat {
                 "doubao" | "moonshot" => Self::Doubao,
                 "anthropic" => Self::Anthropic,
                 "anthropic-adaptive" => Self::AnthropicAdaptive,
+                "gemini" => Self::Gemini,
                 _ => Self::Auto,
             },
         }
@@ -176,6 +180,7 @@ pub fn default_thinking_format_for_api(api: &str) -> &'static str {
         // Modern Claude models use adaptive thinking. Older models are covered
         // by the provider's one-shot compatibility fallback after a 400.
         "anthropic" | "anthropic-messages" => "anthropic-adaptive",
+        "google" | "google-gemini" => "gemini",
         _ => "openai",
     }
 }
@@ -276,6 +281,11 @@ pub fn safe_supported_reasoning_levels_for(
             ThinkingLevel::High,
             ThinkingLevel::Xhigh,
             ThinkingLevel::Max,
+        ],
+        ThinkingFormat::Gemini => &[
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
         ],
         ThinkingFormat::Qwen | ThinkingFormat::Auto => &[
             ThinkingLevel::Low,
@@ -402,10 +412,11 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
                 thinking: Some(serde_json::Value::Object(obj)),
             }
         }
-        // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`。
-        ThinkingFormat::Qwen | ThinkingFormat::Anthropic | ThinkingFormat::AnthropicAdaptive => {
-            ThinkingRequestFields::default()
-        }
+        // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`；Gemini 走 `gemini_thinking_level`。
+        ThinkingFormat::Qwen
+        | ThinkingFormat::Anthropic
+        | ThinkingFormat::AnthropicAdaptive
+        | ThinkingFormat::Gemini => ThinkingRequestFields::default(),
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
     }
@@ -478,6 +489,18 @@ fn openai_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
         ThinkingLevel::High => Some("high"),
         ThinkingLevel::Xhigh => Some("xhigh"),
         ThinkingLevel::Max => Some("max"),
+    }
+}
+
+/// Maps `ThinkingLevel` to Gemini 3+ `thinkingConfig.thinkingLevel` (`minimal`..`high`).
+/// Tiers above `high` (`xhigh`, `max`) fold into `"high"`.
+pub fn gemini_thinking_level(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal => Some("minimal"),
+        ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high"),
     }
 }
 

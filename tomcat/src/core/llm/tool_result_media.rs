@@ -12,7 +12,7 @@ pub(crate) enum ToolResultMediaMode {
 /// Keep the decision here, rather than learning modes by retrying paid requests.
 pub(crate) fn tool_result_media_mode(api: &str) -> ToolResultMediaMode {
     match api {
-        "anthropic-messages" | "openai-responses" => ToolResultMediaMode::Native,
+        "anthropic-messages" | "openai-responses" | "google-gemini" => ToolResultMediaMode::Native,
         _ => ToolResultMediaMode::Split,
     }
 }

@@ -622,3 +622,79 @@ fn cross_provider_downgrade_keeps_semantic_history() {
     assert_eq!(stripped.text_content(), Some("visible answer"));
     assert!(stripped.reasoning_continuation.is_none());
 }
+
+#[test]
+fn google_gemini_routed_profile_isolates_signatures_by_route_and_fails_closed_without_profile_id() {
+    use crate::core::llm::ProviderRefs;
+
+    let route_a = ProviderCompatProfile::google_gemini_routed(
+        "gemini-4-carbon",
+        "fcodex",
+        "https://hk.fcodex.top/v1beta",
+        "cred_aaaa",
+    );
+    let route_b = ProviderCompatProfile::google_gemini_routed(
+        "gemini-4-carbon",
+        "fcodex",
+        "https://jp.fcodex.top/v1beta",
+        "cred_aaaa",
+    );
+    let diff_model = ProviderCompatProfile::google_gemini_routed(
+        "gemini-4-argon",
+        "fcodex",
+        "https://hk.fcodex.top/v1beta",
+        "cred_aaaa",
+    );
+
+    let signed = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}})],
+    )
+    .with_reasoning_state(
+        None,
+        Some(ReasoningContinuation {
+            source_provider: route_a.provider.clone(),
+            source_api: route_a.api_family.clone(),
+            source_model: route_a.model_family.clone(),
+            format: ReasoningFormat::GeminiThoughtSignatures,
+            opaque_payload: serde_json::json!({ "c1": "sig_1" }),
+            fallback_text: None,
+            provider_refs: Some(ProviderRefs {
+                openai_response_id: None,
+                replay_profile_id: Some(route_a.profile_id.clone()),
+            }),
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+
+    assert_eq!(
+        plan_scoped(&route_a, &signed, true),
+        ReplayAction::KeepOpaque
+    );
+    assert_eq!(
+        plan_scoped(&route_a, &signed, false),
+        ReplayAction::StripOpaque
+    );
+    assert_eq!(
+        plan_scoped(&route_b, &signed, true),
+        ReplayAction::StripOpaque
+    );
+    assert_eq!(
+        plan_scoped(&diff_model, &signed, true),
+        ReplayAction::StripOpaque
+    );
+
+    let mut unrouted = signed.clone();
+    unrouted
+        .reasoning_continuation
+        .as_mut()
+        .unwrap()
+        .provider_refs = None;
+    assert_eq!(
+        plan_scoped(&route_a, &unrouted, true),
+        ReplayAction::StripOpaque
+    );
+}

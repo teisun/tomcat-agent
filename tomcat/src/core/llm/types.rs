@@ -774,6 +774,7 @@ pub enum ReasoningFormat {
     OpenaiResponsesReasoningItems,
     DeepseekReasoningContent,
     AnthropicThinkingBlocks,
+    GeminiThoughtSignatures,
 }
 
 /// 同一条 continuity 材料在下一轮 replay 时的强弱要求。

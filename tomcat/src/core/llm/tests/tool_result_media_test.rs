@@ -10,6 +10,10 @@ fn tool_result_media_defaults_follow_verified_api_contracts() {
         tool_result_media_mode("openai-responses"),
         ToolResultMediaMode::Native
     );
+    assert_eq!(
+        tool_result_media_mode("google-gemini"),
+        ToolResultMediaMode::Native
+    );
     assert_eq!(tool_result_media_mode("openai"), ToolResultMediaMode::Split);
     assert_eq!(
         tool_result_media_mode("unknown"),

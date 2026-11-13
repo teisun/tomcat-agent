@@ -20,6 +20,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   { api: "openai", apiKeyEnv: "DEEPSEEK_API_KEY", baseUrl: "https://api.deepseek.com", labelKey: "models.preset.deepseek", provider: "deepseek", thinkingFormat: "deepseek" },
   { api: "openai-responses", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", labelKey: "models.preset.openai", provider: "openai", thinkingFormat: "openai" },
   { api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", labelKey: "models.preset.anthropic", provider: "anthropic", thinkingFormat: "anthropic-adaptive" },
+  { api: "google-gemini", apiKeyEnv: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com", labelKey: "models.preset.google", provider: "google", thinkingFormat: "gemini" },
   { api: "openai", apiKeyEnv: "KIMI_API_KEY", baseUrl: "https://api.kimi.com/coding/v1", labelKey: "models.preset.kimi", provider: "kimi" },
   { api: "openai", apiKeyEnv: "ZHIPU_API_KEY", baseUrl: "https://open.bigmodel.cn/api/paas/v4", labelKey: "models.preset.zhipu", provider: "zhipu", thinkingFormat: "zai" },
   { api: "openai", apiKeyEnv: "MOONSHOT_API_KEY", baseUrl: "https://api.moonshot.cn/v1", labelKey: "models.preset.moonshot", provider: "moonshot", thinkingFormat: "doubao" },
@@ -29,6 +30,7 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 const LABEL_OVERRIDES: Record<string, string> = {
   anthropic: "Anthropic",
   deepseek: "DeepSeek",
+  google: "Google",
   mimo: "MiMo",
   moonshot: "Moonshot",
   openai: "OpenAI",

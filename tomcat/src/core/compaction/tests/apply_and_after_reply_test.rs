@@ -172,6 +172,46 @@ fn apply_boundary_replaces_covered_range() {
 }
 
 #[test]
+fn apply_boundary_removes_covered_gemini_parts_and_keeps_tail_parts() {
+    use crate::core::llm::{ChatMessage, ReasoningContinuation, ReasoningFormat};
+    let signed = |id: &str| {
+        let mut msg = ChatMessage::assistant(id).with_reasoning_state(None, Some(ReasoningContinuation {
+            source_provider: "fcodex".into(), source_api: "google-gemini".into(),
+            source_model: "gemini-4-carbon".into(), format: ReasoningFormat::GeminiThoughtSignatures,
+            opaque_payload: serde_json::json!([{"text": id}, {"text":"", "thoughtSignature":id}]),
+            fallback_text: None, provider_refs: None,
+        }), None);
+        msg.msg_id = Some(id.into());
+        msg
+    };
+    let mut state = make_state(100, 100_000, 25_000);
+    let tail = signed("tail");
+    let mut messages = vec![
+        user_msg_with_id("start", "q"),
+        signed("covered"),
+        tail.clone(),
+    ];
+    let mut turn_start = messages.len();
+    let result = crate::core::session::manager::CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "start".into(),
+        covered_end_id: "covered".into(),
+        covered_count: 2,
+        ..dummy_compaction_result()
+    };
+    state
+        .apply_boundary(&mut messages, result, &mut turn_start)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert!(messages[0].reasoning_continuation.is_none());
+    assert_eq!(
+        messages[1].reasoning_continuation,
+        tail.reasoning_continuation
+    );
+}
+
+#[test]
 fn apply_boundary_not_found_returns_err() {
     let mut state = make_state(1000, 10_000, 2_500);
     let mut messages = vec![user_msg("x")]; // no msg_id set → won't match

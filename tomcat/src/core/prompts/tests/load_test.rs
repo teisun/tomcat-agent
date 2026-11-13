@@ -538,11 +538,11 @@ fn plan_review_prompt_challenges_the_design_without_becoming_a_gate() {
 }
 
 #[test]
-fn paged_reading_separates_persisted_results_from_fresh_files() {
+fn paged_reading_encourages_sufficient_context_without_forbidding_full_reads() {
     let s = load(PromptKey::SystemPagedReading);
-    assert!(s.contains("Do NOT re-read the whole persisted result"));
-    // 原文那句「不要整读」本意只针对已落盘结果，被当成通用读文件准则后
-    // 直接催生了几百次 20-60 行的窄读。
+    assert!(s.contains("[Tool result persisted: <path>]"));
+    // Storage location does not determine the scope needed to understand a file.
+    assert!(!s.contains("Do NOT re-read the whole persisted result"));
     assert!(!s.contains("Do NOT re-read the entire file"));
     assert!(s.contains("one read costs one round-trip no matter how"));
     assert!(s.contains("300-1200"));

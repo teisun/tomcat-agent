@@ -680,6 +680,7 @@ pub(crate) fn infer_default_base_url(provider: Option<&str>) -> Option<String> {
         "zhipu" => Some("https://open.bigmodel.cn/api/paas/v4".to_string()),
         "moonshot" => Some("https://api.moonshot.cn".to_string()),
         "anthropic" | "anthropic-messages" => Some("https://api.anthropic.com".to_string()),
+        "google" | "google-gemini" => Some("https://generativelanguage.googleapis.com".to_string()),
         _ => None,
     }
 }

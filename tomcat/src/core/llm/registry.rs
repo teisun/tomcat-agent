@@ -70,10 +70,13 @@ mod openai;
 // 风格对齐；新增 single-file Provider 仍可走 `#[path = "<new>.rs"]`。
 #[path = "anthropic/mod.rs"]
 mod anthropic;
+#[path = "gemini/mod.rs"]
+mod gemini;
 #[path = "openai_responses/mod.rs"]
 mod openai_responses;
 
 use anthropic::AnthropicProvider;
+use gemini::GeminiProvider;
 use openai::OpenAiProvider;
 use openai_responses::OpenAiResponsesProvider;
 
@@ -89,6 +92,7 @@ const PROVIDERS: &[(&str, ProviderCtor)] = &[
     ("openai", build_openai_completions),
     ("openai-responses", build_openai_responses),
     ("anthropic-messages", build_anthropic_messages),
+    ("google-gemini", build_google_gemini),
 ];
 
 fn build_openai_completions(
@@ -120,6 +124,17 @@ fn build_anthropic_messages(
     route: &ProviderRoute,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
     Ok(Arc::new(AnthropicProvider::with_route(
+        entry, runtime, credential, route,
+    )?))
+}
+
+fn build_google_gemini(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+    route: &ProviderRoute,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    Ok(Arc::new(GeminiProvider::with_route(
         entry, runtime, credential, route,
     )?))
 }

@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::infra::config::LlmRuntimeConfig;
 
 use super::auth::read_env_value;
-use super::endpoint::build_path_aware_endpoint;
+use super::endpoint::{build_path_aware_endpoint, gemini_api_root};
 use super::http_client::build_http_client;
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 const ANTHROPIC_PAGE_LIMIT: &str = "1000";
+const GEMINI_PAGE_SIZE: &str = "1000";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +102,12 @@ pub(crate) async fn list_remote_models_within(
                 .filter(|name| !name.is_empty())
                 .and_then(read_env_value)
         });
-    let url = build_path_aware_endpoint(&request.base_url, "models");
+    let is_gemini = request.api == "google-gemini";
+    let url = if is_gemini {
+        format!("{}/models", gemini_api_root(&request.base_url))
+    } else {
+        build_path_aware_endpoint(&request.base_url, "models")
+    };
     let mut builder = client.get(url).timeout(timeout);
     if request.api == "anthropic-messages" {
         builder = builder
@@ -109,6 +115,11 @@ pub(crate) async fn list_remote_models_within(
             .header("anthropic-version", "2023-06-01");
         if let Some(key) = key.as_deref() {
             builder = builder.header("x-api-key", key);
+        }
+    } else if is_gemini {
+        builder = builder.query(&[("pageSize", GEMINI_PAGE_SIZE)]);
+        if let Some(key) = key.as_deref() {
+            builder = builder.header("x-goog-api-key", key);
         }
     } else if let Some(key) = key.as_deref() {
         builder = builder.bearer_auth(key);
@@ -136,8 +147,12 @@ pub(crate) async fn list_remote_models_within(
             network()
         }
     })?;
-    parse_model_list(&body)
-        .ok_or_else(|| RemoteModelsFailure::new(RemoteModelsFailureReason::Format, None))
+    let parsed = if is_gemini {
+        parse_gemini_model_list(&body)
+    } else {
+        parse_model_list(&body)
+    };
+    parsed.ok_or_else(|| RemoteModelsFailure::new(RemoteModelsFailureReason::Format, None))
 }
 
 fn parse_model_list(body: &[u8]) -> Option<Vec<RemoteModelView>> {
@@ -145,6 +160,30 @@ fn parse_model_list(body: &[u8]) -> Option<Vec<RemoteModelView>> {
     let mut ids = Vec::new();
     for item in value.get("data")?.as_array()? {
         let id = item.get("id")?.as_str()?.trim();
+        if !id.is_empty() && !ids.iter().any(|known: &RemoteModelView| known.id == id) {
+            ids.push(RemoteModelView { id: id.to_string() });
+        }
+    }
+    Some(ids)
+}
+
+fn parse_gemini_model_list(body: &[u8]) -> Option<Vec<RemoteModelView>> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let mut ids = Vec::new();
+    for item in value.get("models")?.as_array()? {
+        let supports_generate = item
+            .get("supportedGenerationMethods")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|methods| {
+                methods
+                    .iter()
+                    .any(|m| m.as_str() == Some("generateContent"))
+            });
+        if !supports_generate {
+            continue;
+        }
+        let raw_name = item.get("name")?.as_str()?.trim();
+        let id = raw_name.strip_prefix("models/").unwrap_or(raw_name).trim();
         if !id.is_empty() && !ids.iter().any(|known: &RemoteModelView| known.id == id) {
             ids.push(RemoteModelView { id: id.to_string() });
         }

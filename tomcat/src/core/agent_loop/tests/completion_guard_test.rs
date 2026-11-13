@@ -1218,6 +1218,56 @@ fn tool_stream(id: &str) -> Vec<Result<StreamEvent, AppError>> {
 }
 
 #[tokio::test]
+async fn request_clears_removed_read_stamps_and_preserves_present_results() {
+    let read_file_state = Arc::new(ReadFileState::new());
+    let removed_path = PathBuf::from("/removed.rs");
+    let present_path = PathBuf::from("/present.rs");
+    read_file_state.put(removed_path.clone(), read_stamp("removed-read"));
+    read_file_state.put(present_path.clone(), read_stamp("present-read"));
+
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(MockLlmProvider::new(vec![text_stream("done")])),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "sess-read-presence".to_string(),
+            read_file_state: Arc::clone(&read_file_state),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.set_context_state(Some(empty_context_state()));
+
+    let outcome = agent
+        .run(vec![
+            ChatMessage::user("inspect files"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![serde_json::json!({
+                    "id": "present-read",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"/present.rs\"}"}
+                })],
+            ),
+            ChatMessage::tool("present-read", "fn main() {}"),
+            ChatMessage::user("continue"),
+        ])
+        .await;
+    assert!(matches!(outcome, AgentRunOutcome::Completed(_)));
+    assert!(
+        read_file_state.get(&removed_path).is_none(),
+        "the real request path must clear a stamp whose tool result left history"
+    );
+    assert!(
+        read_file_state.get(&present_path).is_some(),
+        "the request must preserve a stamp whose tool result remains in history"
+    );
+}
+
+#[tokio::test]
 async fn guard_cap_survives_tool_rounds_between_text_turns() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_cap_tool_rounds");

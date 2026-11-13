@@ -382,6 +382,9 @@ function normalizeThinkingFormat(api, thinkingFormat) {
       return "anthropic";
     case "anthropic-messages":
       return "anthropic";
+    case "google":
+    case "google-gemini":
+      return "gemini";
     case "openai":
     case "openai-responses":
     default:
@@ -410,6 +413,8 @@ function inferSupportedReasoningLevels(api, thinkingFormat) {
     case "anthropic":
     case "anthropic-adaptive":
       return ["low", "medium", "high", "xhigh", "max"];
+    case "gemini":
+      return ["low", "medium", "high"];
     case "qwen":
     case "openrouter":
     case "openai":

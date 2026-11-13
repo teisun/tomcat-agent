@@ -782,6 +782,7 @@ export const zhCN = {
   "models.preset.deepseek": "DeepSeek",
   "models.preset.openai": "OpenAI",
   "models.preset.anthropic": "Anthropic",
+  "models.preset.google": "Google",
   "models.preset.kimi": "Kimi Code",
   "models.preset.zhipu": "智谱",
   "models.preset.moonshot": "Moonshot",

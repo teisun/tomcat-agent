@@ -821,7 +821,7 @@ fn read_parameters() -> Value {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 10,
-                "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Keep a batch to 3-5 files so the combined result stays small enough to remain inline.",
+                "description": "Read several files in one call. Mutually exclusive with `path`. Entries are read in order and share one output budget; anything that does not fit is reported as SKIPPED with a resume call rather than dropped silently. Returned windows enter model context in full; compaction may later persist older large results.",
                 "items": object_schema(
                     serde_json::json!({
                         "path": { "type": "string", "description": "File to read." },

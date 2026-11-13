@@ -76,6 +76,20 @@ fn llm_stream_terminal_error_preserves_code_without_status_or_stage() {
 }
 
 #[test]
+fn gemini_input_token_exceeded_400_classifies_as_context_overflow() {
+    let err = llm_http_status_error(
+        "google-gemini",
+        400,
+        r#"{"error":{"code":400,"message":"The input token count (1050000) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}"#,
+    );
+    assert!(is_context_overflow(&err));
+    assert_eq!(
+        classify_llm_failure(&err).kind,
+        LlmFailureKind::ContextOverflow
+    );
+}
+
+#[test]
 fn is_retryable_llm_error_matches_truth_table() {
     for status in [429, 500, 502, 503, 504] {
         assert!(

@@ -442,11 +442,6 @@ fn rolling_array_fingerprints(values: &[Value]) -> Vec<String> {
 }
 
 impl OpenAiResponsesProvider {
-    fn credential_fingerprint(api_key: &str) -> String {
-        let digest = Sha256::digest(api_key.as_bytes());
-        format!("{digest:x}")[..16].to_string()
-    }
-
     /// 从模型条目 + 全局运行时配置构建。
     #[cfg(test)]
     pub fn new(
@@ -496,7 +491,9 @@ impl OpenAiResponsesProvider {
             client,
             base_url,
             route_provider: entry.provider.trim().to_string(),
-            credential_fingerprint: Self::credential_fingerprint(&credential.value),
+            credential_fingerprint: crate::core::llm::replay_policy::credential_fingerprint(
+                &credential.value,
+            ),
             api_base_fallback,
             api_key: credential.value.clone(),
             catalog_model_id: entry.id.clone(),

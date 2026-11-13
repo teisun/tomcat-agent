@@ -220,6 +220,29 @@ impl ReadFileState {
         before - guard.len()
     }
 
+    /// 只保留对应 `Tool` 消息仍在 `messages` 中的 stamp；无 tool_call_id 的记录原样保留。
+    ///
+    /// 历史改写后，必须在任何工具执行前调用一次；目前由 request_retry 发请求前负责。
+    pub fn retain_present_tool_results(&self, messages: &[crate::core::llm::ChatMessage]) -> usize {
+        if self.inner.read().is_empty() {
+            return 0;
+        }
+        let present_ids: std::collections::HashSet<&str> = messages
+            .iter()
+            .filter(|msg| msg.role == crate::core::llm::ChatMessageRole::Tool)
+            .filter_map(|msg| msg.tool_call_id.as_deref())
+            .collect();
+        let mut guard = self.inner.write();
+        let before = guard.len();
+        guard.retain(|_, stamp| {
+            stamp
+                .tool_call_id
+                .as_deref()
+                .is_none_or(|id| present_ids.contains(id))
+        });
+        before - guard.len()
+    }
+
     /// 清空整张表；语义上对应「会话结束」的一次性回收。
     ///
     /// 注意：**正常路径不需要显式调用** —— `AgentLoop` 析构时 `Arc<ReadFileState>`

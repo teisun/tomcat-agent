@@ -310,7 +310,7 @@ tomcat init
 
 - `id`：本地模型 id，给 `/model list`、默认模型选择、会话持久化使用
 - `model_name`：真正发给上游的模型名；省略时默认等于 `id`
-- `api`：走哪条 wire，目前支持 `openai`、`openai-responses` 与 `anthropic-messages`
+- `api`：走哪条 wire，目前支持 `openai`、`openai-responses`、`anthropic-messages` 与 `google-gemini`。Gemini 适配器会把 API 版本段统一换成 `/v1beta`。
 - `provider`：逻辑厂商名，只用于凭证推断、展示、审计
 - `api_key_env`：显式指定环境变量名；省略时自动推断为 `<PROVIDER>_API_KEY`
 - `base_url`：既可以只填 host，也可以带显式厂商路径。tomcat 会自动补 leaf，所以 `https://api.openai.com` 会拼成 `/v1/...`，而 GLM 这类 `https://open.bigmodel.cn/api/paas/v4` 会保留 `/api/paas/v4/...`
@@ -388,8 +388,8 @@ Tomcat 设置 → 模型
 ```
 
 - **一个 Key 槽（`api_key_env`）一张卡片。** 某家有了 Key 或你加过型号才出现卡片，每行各自显示协议。**更换 Key** 往同一个槽写新值。**删除** 会删掉你在该槽下加的型号，清掉指向它们的默认模型、辅助模型和会话选择，再删除 Tomcat 保存的 Key；系统环境变量提供的 Key 删不掉，界面会如实说明。内置预置仍留在“还可以连接”里。
-- **+ 连接供应商** 可选 7 个预置（DeepSeek、OpenAI、Anthropic、Kimi、智谱、Moonshot、MiMo，地址与协议固定）或 **其它地址...**，再填 API Key。型号清单合并三处来源：该家的内置推荐、用你刚填的 Key 向它的 `/models` 拉回的名字（这把 Key 只用于这次请求），以及你手填的名字；同名型号只留一个。卡片里的 **+ 添加模型** 复用同一个对话框并沿用该卡的 Key。点取消不写任何数据。
-- **一把 Key 通用多协议**（中转的同一把 Key 在它的 OpenAI 兼容端点和 Anthropic 端点都能用）：用 **其它地址...** 连接一次，给每个勾选的型号各选协议。默认协议依次取同名内置型号的协议、`claude-*` 用 Anthropic、其余用 OpenAI Completions。这些型号共用一张卡片、一个 Key 槽，槽名为 `{SLUG}_API_KEY`，例如 `FCODEX_API_KEY`。
+- **+ 连接供应商** 可选 8 个预置（DeepSeek、OpenAI、Anthropic、Google、Kimi、智谱、Moonshot、MiMo，地址与协议固定）或 **其它地址...**，再填 API Key。型号清单合并三处来源：该家的内置推荐、用你刚填的 Key 向它的 `/models` 拉回的名字（这把 Key 只用于这次请求），以及你手填的名字；同名型号只留一个。卡片里的 **+ 添加模型** 复用同一个对话框并沿用该卡的 Key。点取消不写任何数据。
+- **一把 Key 通用多协议**（中转的同一把 Key 在它的 OpenAI 兼容端点和 Anthropic 端点都能用）：用 **其它地址...** 连接一次，给每个勾选的型号各选协议。默认协议依次取同名内置型号的协议、`claude-*` 用 Anthropic、`gemini-*` 用 Google Gemini、其余用 OpenAI Completions。这些型号共用一张卡片、一个 Key 槽，槽名为 `{SLUG}_API_KEY`，例如 `FCODEX_API_KEY`。
 - **同一地址两把 Key**（例如中转把 OpenAI 和 Anthropic 分成两个分组）：再连接一次这个地址，界面会问你是加到已有卡片（沿用已保存的 Key），还是用另一把 Key 新建卡片；新卡片的槽名加序号，例如 `FCODEX_2_API_KEY`。已有槽不改名、不迁移。
 - **第一个配置成功的型号就是默认模型。** 还没有默认模型时，连接成功保存的第一个型号、或刚补上 Key 的卡片的第一行，会写入 `llm.default_model`；已有默认一律不覆盖，两个窗口同时保存也一样。当前默认不可用时，对话框会预勾 **设为默认**。你在某个会话里明确选过的型号保持不变。
 - **辅助模型** 就是 `llm.title_model`：负责会话标题、回合标题和命令说明，默认 `deepseek-v4-flash`，可改指任意已配置型号。辅助模型缺 Key、不存在或未设置时，会话标题暂用对话模型生成，回合标题和命令说明暂不生成；设置页会如实提示，不会自动改选。上下文压缩默认跟随对话模型，除非你设置了 `context.compaction_model`。
