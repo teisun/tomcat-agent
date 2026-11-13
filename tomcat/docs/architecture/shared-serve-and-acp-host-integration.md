@@ -2,7 +2,7 @@
 
 > **状态：实现已落地，macOS 按约定范围验收完成；Windows 实机待验。** 完成项与验证证据以运行时计划 `plan_tomcat_paperclip_multica_agent_3e12d03d` 为准；不是旧版“断线后后台续跑”方案。
 > **本期结论：**一个长期运行的 serve；两个宿主只新增标准 Agent 适配器；控制连接断开即取消其任务，旁观连接断开不影响任务。
-> **本轮补充：**§3.2.3 增补会话 MCP 与连接技能目录的单张 ASCII 总图，说明它们如何复用原机制及各自的生命周期；§3.3 保留 cwd 从客户端到模型提示词、再到工具执行的链路；§3.4 用 Paperclip 的真实用法和 ASCII 图解释环境变量从宿主到 acp、serve、LLM 与工具的全过程。§4.1 按当前工作树校正本机握手字段和退出通知；其余实施进度仍以运行时计划为准。
+> **当前共享输入修订：**Native 同项目窗口可插话、停止和准备附件；空闲写入安全接手，ACP 仅在 load 接手，订阅不断流。旧版只读契约已在下文替换；§8.2 仍仅记录历史验收，本轮证据以计划 `plan_acp_vs_code_multica_acp_host_composer_d91ea310` 为准，不代表真实 Multica 或 Windows 已重新验收。
 > **范围：**同机、同用户、同 Tomcat 数据目录和 agent。服务可执行不同项目/worktree，但每个 VS Code 窗口仍只列出当前项目的会话；只有打开宿主所在项目才能旁观。WebSocket、断线续跑并接回原轮均为后续规划。
 > **规范：**遵循 [ARCHITECTURE_SPEC](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)，正文 §1–§10 与其对应。返回[架构文档地图](README.md)。
 >
@@ -23,7 +23,7 @@
 控制者发任务                         旁观者打开会话
      |                                     |
      v                                     v
-连接准入 + 唯一控制者                 原有打开流程 + 只读
+连接准入 + 唯一执行宿主               原有打开流程 + 共享输入
      |                                     ^
      v                                     |
 共享服务中的会话运行时 ------> 实时消息 / 工具状态
@@ -96,7 +96,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 就绪连接 | new/load 成功 | 控制该会话 | 原子登记唯一控制者 | 先领到会话，才能发任务。 |
 | 就绪连接 | 读得慢、输出积压 | 仍就绪 | 本连接 writer 合并增量；原生满时丢消息增量并提示，ACP 保留完整增量；均不触发取消 | 界面卡一下，不等于人走了。 |
 | 运行/等批准 | 控制连接断开 | 停止中 | 封住新准入、清空断线控制绑定，取消确认和排队项、停止工具与子 agent | 控制者已离开，不代表工具已停手。 |
-| 停止中 | 所有相关工作退出且必要落盘完成 | 空闲、可接手 | 解除停止中占用，通知旁观者；不自动把旁观者升级为控制者 | 确认停手后，重新打开才能接手。 |
+| 停止中 | 所有相关工作退出且必要落盘完成 | 空闲、可接手 | 解除停止中占用，通知旁观者；不自动把旁观者升级为控制者 | 确认停手后，打开或下一次写入可接手。 |
 | 停止中 | 到达宽限期 | 停止失败、不可接手 | 报 `stop_timeout`，保留运行句柄/占用事实 | 超时不是“已经停了”。 |
 | 旁观中 | 切走/关闭视图/断开 | 结束旁观 | 停止接收该会话事件，不修改任务或控制者 | 关直播不等于关机器。 |
 | 服务就绪 | stop/restart | 关闭所有会话 | 执行现有清理，不设客户端否决 | 明确停服会影响大家。 |
@@ -110,8 +110,8 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 服务实例 | 同一数据目录与 agent 的共享执行进程 | 【新增】`ServeRuntime`、本机监听、实例 ID | 身份不含 cwd、客户端或程序版本；版本不同不能另起第二份 | 一家共用的厨房。 |
 | 连接 | 一个客户端与服务的一条通信链路 | 【新增】`ServeConnection`、连接 ID、输出队列 | ID 只在当前服务实例有效；握手环境只存内存 | 一根连接线。 |
 | 背压 | 客户端读取速度赶不上服务输出 | 每连接独立 writer；内部仍按 sessionId 分缓冲 | 原生沿现有合并/丢增量/提示策略；ACP 只合并、不丢正文；不因慢读断开，区别于真实 EOF 或写失败 | 原生直播可降级，宿主结果不能缺字。 |
-| 控制者 | 有权给某会话派活的连接 | slot 的控制绑定，注册表统一维护，只在服务内存中 | 每会话最多一个；断线清空绑定并取消，原任务停完才能交接 | 当前点菜的人。 |
-| 旁观者 | 只读执行状态、可回答当前问题的连接 | 连接的当前显示 sessionId + slot 控制绑定 | 打开已加载会话不重建执行上下文、不接手控制；只改本连接显示，不参与写命令 | 只看不动。 |
+| 控制者（执行宿主） | 提供执行环境、私有 MCP、交互策略与权限回复目的地的连接 | slot 控制绑定，注册表统一维护 | 每会话最多一个；旧活宿主没有活工作才可安全转移，断开仍取消其任务 | 当前握方向盘的人，不是唯一能说话的人。 |
+| 订阅者（observe） | 正在显示并接收会话流的连接 | 连接的当前显示 sessionId + slot 控制绑定 | Native 同项目可共享输入；打开有活宿主的会话不接手，写入按静止条件接手；ACP 客户端没有新增旁观承诺 | 能看、能插话或喊停，接着开车须先等车停稳。 |
 | 会话 | 可跨多次 prompt 保留的对话 | `SessionManager`、`SessionSlot`、原 transcript | load 是读历史继续，不是接回旧 RPC | 一份对话记录。 |
 | 进程 cwd | 操作系统记录的进程当前工作目录 | `std::env::current_dir()`；由启动者设置 | 共享 serve 固定在自己的数据目录，不随请求全局切换 | 服务自己落脚的地方。 |
 | 会话 cwd | 本次对话的项目工作目录 | 既有 `SessionEntry.cwd`、JSONL 头 `cwd`；运行时 `SessionSlot.cwd` 与 `ChatContext.scope_services.agent_workspace_dir` | 共享模式由客户端明确提供、校验并绑定；据此生成模型上下文，不自动授权 | 这份任务在哪干活。 |
@@ -119,7 +119,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 整轮任务 | 一个 prompt 驱动的最外层执行 | `run_task`、cancel token、完成结果 | 可包含多条 assistant 消息和多次工具调用；不能以首个 agent_end 猜成功 | 一次完整交办。 |
 | 当前消息补发记录 | 当前一条助手消息的累计正文、思考及是否结束 | `event_pump.rs` 转发处的会话内记录【新增】 | 下一条 message_start 才替换，slot 卸载时释放；不以 message_end 当落盘确认 | 只补正在说的这句话，不重做整场会议纪要。 |
 | 会话来源 `origin` | 这个会话是否经 ACP 创建及创建方名称 | 【新增】transcript 第一行的可选对象 `{kind:"acp", clientName:…}` | 只在 ACP new 时写一次；原生/老会话缺省；名称不参与权限判断 | “谁开的会话”，不是“谁现在在线”。 |
-| 本窗口访问方式 `access` | 本窗口此刻是 control 还是 observe | 【新增】switch_session 回复及扩展会话视图内存 | 服务按来源和控制者判断；不落盘，与消息 role 无关；重新打开才重新判定 | 这扇窗口现在能不能下指令。 |
+| 本窗口宿主身份 `access` | 本窗口此刻是 control 还是 observe | switch_session 回复、session_access 推送及扩展会话视图内存 | 只按当前控制者判断；不落盘；输入能力由 shared_session_input 单独声明 | 名牌表示谁在开车，不限制谁能说话。 |
 | 连接环境快照 | 客户端交给会话子进程的环境；另只读 `TOMCAT_HOST_LOCALE` 和 `TOMCAT__UI__LANGUAGE` 解析本连接的界面语言 | 内存 `map<string,string>` | 不全局 `set_var`，不写聊天、日志或会话文件；缺省键不借服务进程的同名变量 | 每个任务带自己的工具箱，窗口带自己的语言。 |
 
 “唯一执行者”只保证**这个共享 serve 内**同一会话不被重复创建或控制。本期保留现有 usage 共享锁，不声称它能排斥另一个独立 `chat`/旧 stdio 进程执行同一历史；该兼容边界见 §9。
@@ -167,7 +167,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 协议 | 标准 Agent 与私有 UI 共存 | ACP v1 与原生 NDJSON 在 serve 内汇入同一运行时。 | Tomcat `tomcat/src/api/serve/types.rs`；Paperclip `paperclip/packages/adapters/gemini-local/src/server/acp.ts` | 设计：SDK 映射、relay 转发；理由：宿主不认识 Tomcat 内部协议 | 旧计划私有 ACP attach/requestId 扩展：本期不续跑，无消费者 | 平台说 ACP，界面说原生话，都交给同一个执行器。 |
 | 环境 | 首个启动者污染其它会话 | 会话子进程用连接快照；模型 key 用保存凭据，出网代理按控制方环境及保存配置。 | Tomcat `tomcat/src/core/tools/primitive/bash_task.rs`、`tomcat/src/core/llm/auth.rs`；Paperclip `paperclip/packages/adapter-utils/src/acpx-engine/execute.ts` | 设计：逐会话注入；理由：保住宿主原有任务环境；项目 MCP 共享例外见 §6 | VS Code 私有 serve 继承整份父环境的旧路径（`tomcat-vscode-ext/src/serveClient/TomcatMessenger.ts`）：不能直接扩成共享默认 | 谁先开服务，不应决定别人的模型 key。 |
 | 实时旁观 | 中途加入不能漏前缀 | 复用普通打开流程，在开始转发时只补发当前消息。 | Tomcat `tomcat/src/api/serve/{commands,event_pump}.rs`、`tomcat-vscode-ext/src/ui/webview/{provider,state}.ts`；Codex `codex/codex-rs/app-server/src/request_processors/thread_lifecycle.rs` | 设计：同一转发边界补正文/思考，历史按稳定 ID 合并；理由：已完成消息已有持久历史 | Codex 的整轮快照：本期不照搬；Continue `continue/extensions/cli/src/commands/serve.helpers.ts` 的历史轮询：拿不到半截正文 | 打开还是老流程，只补没听到的半句话。 |
-| 控制/旁观 | 谁决定窗口能否写会话 | 服务在打开时返回 access；界面置灰、服务按白名单准入。 | Tomcat `tomcat/src/api/serve/{commands,types}.rs`、`tomcat-vscode-ext/src/serveClient/sessionRouter.ts`；计划第 5 节 | 设计：来源入会话头，控制者在服务内存，access 只作窗口显示结果；理由：三者寿命不同 | 扩展自己猜身份或另加 Host 意图拦截：重复授权逻辑，且可能阻断打开动作 | 界面负责提示，服务负责守门。 |
+| 控制/旁观 | 谁决定窗口能否写会话 | 服务返回 access 表示宿主；shared_session_input 表示共享输入，服务按操作分类守门。 | Tomcat `tomcat/src/api/serve/{commands,types}.rs`、`tomcat-vscode-ext/src/serveClient/sessionRouter.ts`；计划第 5 节 | 设计：来源入会话头，控制者在服务内存，access 只作窗口显示结果；理由：三者寿命不同 | 扩展自己猜身份或另加 Host 意图拦截：重复授权逻辑，且可能阻断打开动作 | 界面负责提示，服务负责守门。 |
 | 慢连接 | 界面卡顿不能取消任务或拖慢别人 | 每连接复用 writer；原生满时丢消息增量并提示，ACP 只合并、不丢正文；均不按慢读断开。 | Tomcat `tomcat/src/api/serve/writer.rs::spawn_writer`、`enqueue_frame`；`tomcat/src/api/serve/tests/writer_test.rs` | 设计：stdout 出口改为各连接 socket，背压策略复用；理由：慢读不是控制者离开 | 队列溢出即断开：会连带取消该连接控制的任务；另造重放/重连协议：本期不需要 | 卡的是画面，不该把活停了。 |
 | 项目说明 | 宿主说明不应反复进入用户消息 | AGENTS.md 并入现有规则管线，每轮重读。 | Tomcat `tomcat/src/core/project_instructions.rs`；Codex `codex/codex-rs/core/src/agents_md.rs` | 设计：根→cwd，单文件上限、不占原规则预算；理由：不重复污染对话 | Codex 同文件的回退文件名/总量截断：本期不需要；Multica inline prompt 路线：重复写历史 | 项目手册放在环境里，不每轮冒充用户再说一遍。 |
 | 宿主接入 | 是否修改团队系统核心 | 只新增各自标准适配器和登记项。 | Paperclip `paperclip/packages/adapters/gemini-local/src/server/acp.ts`；Multica `multica/server/pkg/agent/agent.go` | 设计：复用执行/停止/恢复流程；理由：控制断线取消已满足当前边界 | Paperclip `paperclip/packages/paperclip-runner/src/drivers/acpx/codex-acpx-driver.ts` 的 native 路线：为接回活动轮承担额外资格与恢复改造 | 不为了加一个 Agent 重写平台。 |
@@ -181,7 +181,7 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | M0 项目说明与基线 | 本地分支；AGENTS.md 层级、预算、刷新 | `project_instructions.rs`、`chat/context.rs`、`chat/run_loop/mod.rs` | T01–T03；图 §3.2.1 | 先让 Tomcat 读懂宿主放在仓库里的说明。 |
 | M1 共享服务与 ACP | 服务启停、连接状态拆分、relay、标准 ACP、真实停止与慢读隔离 | `serve/{runtime,connection,service}.rs`【新增】、`registry.rs`、`writer.rs`、`api/acp/`【新增】、`platform/process.rs` | T04–T10、T28；图 A.2、§3.2.2 | 先证明接得上、跑得动、停得干净；慢读不停任务。 |
 | M2 上下文与旁观 | 环境/MCP/技能、唯一控制权、槽位回收、按连接筛事件与当前消息补发 | `chat/context.rs`、MCP 工厂链、Bash 工厂、`serve/{connection,commands,event_pump}.rs` | T11–T17；§3.2.3–4 | 不串环境，也不漏正在生成的消息前半段。 |
-| M2 VS Code | 共享 Messenger、switch 回复传 access/origin、两层只读、停服管理 | `TomcatMessenger.ts`、`ServeConnectionSupervisor.ts`、`sessionRouter.ts`、`ui/webview/`、GUI | T17–T20；图 §3.2.5 | 还是原来的会话列表和聊天界面。 |
+| M2 VS Code | 共享 Messenger、access/origin 与 session_access、能力兼容及停服管理 | `TomcatMessenger.ts`、`ServeConnectionSupervisor.ts`、`sessionRouter.ts`、`ui/webview/`、GUI | T17–T20；图 §3.2.5 | 还是原来的会话列表和聊天界面。 |
 | M3 宿主适配器 | tomcat-local / tomcat backend、模型和技能登记、配置 UI | Paperclip adapters/server/CLI/UI；Multica agent/execenv/迁移 | T21–T24；§3.2.6 | 加菜单选项，不改平台调度。 |
 | 最终验收 | 两宿主真实旅程、兼容回归、三处界面证据 | §8 的既有 runner、隔离夹具和文档 | T25–T27 | 一条完整用户路径跑完，再交付。 |
 
@@ -229,14 +229,14 @@ relay stdin EOF -> 请求本连接 drain -> 拒绝新任务/清空待发
 - Unix 目录 0700/socket 0600；Windows 管道 DACL 限当前用户、拒绝远端。路径过长报错，不静默更换服务身份。
 - `cancel_and_wait` 是复用起点，须组合 Bash registry stop/wait、级联子 agent、排队项和后台回调收口。已取消的连接不得被后台任务完成事件再唤起新轮。
 - checkpoint 落盘复用 CLI 原有的 30 秒预算，不与前台取消的 3 秒混用；relay 总等待上限 60 秒，Multica backend 为 65 秒、WaitDelay 为 66 秒。超时仍失败并保留未完成句柄，不把等待延长当作停止成功。
-- 连接断开即清空它的控制绑定并取消任务；**无控制者不等于已经停下**。新控制者仍须等原任务清理完成，停止失败返回 busy/stop_timeout，不 abort 掉句柄后假装空闲。原生旁观窗口不会自动接手，只能重新打开后由服务重新判断；ACP 来源在 VS Code 始终只读。
+- 连接断开即清空它的控制绑定并取消任务；**无控制者不等于已经停下**。新控制者仍须等原任务清理完成，停止失败返回 busy/stop_timeout，不 abort 掉句柄后假装空闲。原生窗口不因断开通知自动接手，但下一次普通写入或打开可以接手；来源不参与权限判断。
 - 同一个连接可控制多个会话，另外当前显示一个会话（可为旁观）；关闭连接取消其全部控制会话，不按“目前显示哪一个”缩小取消范围。
 
 **强杀例外：**宿主强杀 relay 或服务通信故障时，relay 无法在退出前取得确认；服务发现断开后再取消。宿主清理 worktree 与取消之间仍可能有窗口。本期不改宿主收尾状态机，不能承诺强杀/超时后目录绝对零写入；M1 必须测量并暴露失败，见 §9。
 
 满槽位时，注册表串行决定淘汰最久未用的合格 slot：无运行任务、command job、排队输入、待确认、后台工作；不由 ACP 连接持有，也不是任何 VS Code 连接当前显示的会话，**当前显示为旁观也受保护**。扫描各连接的当前显示 sessionId 即可，不加旁观引用计数。选择与卸载期间禁止并发新准入，锁内不执行耗时 I/O；卸载复用现有清理并释放控制绑定，不加空闲定时器。
 
-被卸载的会话从服务 Live 清单消失，但仍留在自己项目的磁盘列表中；宿主会话也可在同项目窗口通过原有打开路径重新载入，只读身份不变。不扫描或打开其它项目的历史。两个槽位都被运行中或当前显示会话占住时返回 `too_many_sessions`，不能把正在看的旁观页踢回历史来腾位。
+被卸载的会话从服务 Live 清单消失，但仍留在自己项目的磁盘列表中；宿主会话也可在同项目窗口通过原有打开路径重新载入，来源仅作展示。不扫描或打开其它项目的历史。两个槽位都被运行中或当前显示会话占住时返回 `too_many_sessions`，不能把正在看的旁观页踢回历史来腾位。
 
 **连接输出与慢读（背压）。** 一个服务有多条连接后，不能共用同一个输出队列；也不能因某个窗口暂时读不动就把它断开，否则会误取消它控制的任务。
 
@@ -433,7 +433,7 @@ VS Code 点开会话
 
 **慢读与补发的边界：**本节“不重不漏”针对正常接收时的中途加入、历史合并与重连，不是背压下的无损承诺。触发 §3.2.2 的丢增量后，该连接的实时正文/思考（包括以 message_update 补发的前缀）可能不完整；恢复读取会收到提示和后续事件，不因慢读重连或取消任务。已完成并落盘的内容仍可通过原 `get_messages` 读取；不新增逐帧补传，也不承诺提示一到就自动补齐尚未落盘的消息。
 
-#### 3.2.5 VS Code：原界面加只读来源
+#### 3.2.5 VS Code：同一会话的共享输入与安全接手
 
 扩展用同一个 Messenger 连接共享服务；supervisor 负责连接重试，不把 dispose 等同于 kill/shutdown。明确 stop 的客户端停用自动重启；其它连接看到停服不应无条件把服务拉起，用户主动连接才进入启动流程。
 
@@ -450,20 +450,20 @@ VS Code 点开会话
   -> get_state / get_messages + 实时消息
 ```
 
-`initialize.ts` 显式提供窗口目录；`commands.rs::resume_current_command` 复用原项目 key、`SessionManager::current_session_entry`、`SessionScope` 与打开流程。`resumeCurrent` 默认 false，普通“新建会话”及 ACP 的新建行为不变；它仅保留旧私有 serve 的“恢复当前／没有才新建”，不每次重连制造空会话，不新增连接项目字段、握手字段或第二套项目标识。若已有 current 来自 ACP，也不抢控制权。
+`initialize.ts` 显式提供窗口目录；`commands.rs::resume_current_command` 复用原项目 key、`SessionManager::current_session_entry`、`SessionScope` 与打开流程。`resumeCurrent` 默认 false，普通“新建会话”及 ACP 的新建行为不变；它仅保留旧私有 serve 的“恢复当前／没有才新建”，不每次重连制造空会话，不新增连接项目字段、握手字段或第二套项目标识。若已有 current 来自 ACP 且宿主仍在线，也不因打开抢控制权；无活宿主则沿原流程清理后接手。
 
 `TomcatMessenger` 只持有 socket，dispose 半关闭并等连接收尾，不给共享 PID 发信号；超时如实说明服务收尾未确认。`ServeConnectionSupervisor` 的自动重试不启动服务，用户点重新连接才允许启动；原重启命令明确命名为“重启共享服务（停止所有任务）”，调用 CLI restart，不加二次确认。重连前清理临时画面，不能在初始化之后清理，否则会删掉初始化期间刚补发的消息。读取使用 UTF-8 流解码；本机握手结束时 readline 会暂停 socket，移交给原 NDJSON reader 后必须 resume。版本不兼容直接报错，不回落私有 stdio。
 
 主输入框的 `/restart` 复用 `restartSharedService → tomcat.restartServe → tomcat serve restart`，只对无参数、无附件/引用的精确纯文本命令生效；先同步空草稿再断开，命令不进入模型或队列。它不放开输入禁用规则，无法发送时仍用命令面板。扩展管理命令的外层期限为 stop 80 秒、restart 150 秒，覆盖 CLI 的连接/握手、60 秒停止以及启动探测/锁/就绪阶段并留出余量；version/status/start 仍为 35 秒，Rust 清理期限与 supervisor 初始化计时不变。
 
-定向证据入口：`tomcat/src/api/serve/tests/connection_test.rs` 的 `session_bootstrap_*`；扩展 `src/serveClient/tests/{sharedConnection,messenger_disposal,ServeConnectionSupervisor}.test.ts`；真实多窗口、重载、停服与工具取消放在 `tomcat-vscode-ext/tests/serve_disposal_integration.test.ts`。真实 GUI 与只读开关另归 T20/T27，不能用这些连接测试替代。
+定向证据入口：`tomcat/src/api/serve/tests/connection_test.rs` 的 `session_bootstrap_*`；扩展 `src/serveClient/tests/{sharedConnection,messenger_disposal,ServeConnectionSupervisor}.test.ts`；真实多窗口、重载、停服与工具取消放在 `tomcat-vscode-ext/tests/serve_disposal_integration.test.ts`。真实 GUI 与共享输入的能力兼容另归 T20/T27，不能用这些连接测试替代。
 
 **项目边界沿用原设计。** `session_key_for_agent` / `project_root`（`tomcat/src/core/session/scope.rs`）仍按 git 根聚合：仓库根与子目录同项目，worktree 自成项目，无 git 时按目录。侧边栏继续 `sessionPool.ts::refresh` 的 `listSessions("disk")`，不合并 Live、不新增外部会话区。复用连接已有的 `SessionScope` 和 cwd 初始化流程；磁盘列表取本连接的 scope，旁观不改它。已加载会话的入口也核对原来的 key，跨项目回 `unknown_session`；直接按 ID 读取历史/状态同样不能绕过。既有聚合和存储不重写，不另造项目绑定协议。
 
 ```text
 窗口目录 -> 原 session key -> 原项目磁盘列表
                                   |
-                                  +-- 同项目宿主会话 -> 原打开流程 + 只读
+                                  +-- 同项目宿主会话 -> 原打开流程 + 共享输入
                                   +-- 其它仓库/worktree -> 不列出、不打开、不收流
 ```
 
@@ -474,24 +474,22 @@ switch_session(X)
   |
   +-- 不属于本窗口项目？ ------------ 是 --> unknown_session
   |           否
-  +-- 会话头 origin.kind == "acp"？ -- 是 --> observe
-  |           否
-  +-- 被其它连接控制着？ ------------ 是 --> observe
+  +-- 被其它活连接控制着？ ---------- 是 --> observe
   |           否
   +-- 本连接已有控制权，或无主且清理已完成 --> control
 
-回复 { activeSessionId, access, origin }
+回复 { activeSessionId, access, origin, controllerName }
   -> sessionRouter -> sessionPool -> provider -> 会话视图 -> GUI
      保留服务结果，不按 busy、客户端名称或消息 role 自己推断
 ```
 
-停止中的任务尚未清理完成时，仍受 §3.2.2 的接手门限制，不能因控制绑定已清空就提前执行新任务。原生旁观窗口在原控制者离开后仍是 observe，**重新打开**才可能得到 control；ACP 会话即使宿主离线、服务重启后仍有来源记录，VS Code 再打开也只能 observe。
+停止中的任务尚未清理完成时仍受接手门限制。Native 普通写入在 admission 锁内检查旧活宿主已静止后接手，无活宿主则先清理遗留工作；ACP 只在 `session/load` 带上其 MCP 配置接手。`acquire` 是唯一交接点：更新宿主后，向旧/新 Native 宿主及当前 Native 观察者推送带 `controllerName` 的 `session_access`，再发送新轮事件，不改变任何连接的显示选择。历史、计划、模型与模式保留；环境、私有 MCP、交互策略、确认路由切到新宿主。
 
-**只读界面已接线。** `sessionRouter.ts::switchSession` 返回 `SessionOpenResult`，`sessionPool` / `provider` 把 access/origin 传入会话视图；`state.ts::applySessionState` 刷新时保留服务端 access，已有 owned 标记由它派生，不是第二份控制权。`get_state` / `get_messages` 的失败明确抛出，不把跨项目拒绝伪装成空状态。
+**共享输入与兼容。** 新能力 `shared_session_input` 使 observe 下输入可用；旧服务仍显示原只读提示。`applySessionOpen` 与 `session_access` 共用身份更新入口，`ownedByThisFrontend` 由 access 派生；`get_state` 不覆盖它。历史编辑、删除按钮、附件租约与失败恢复按输入能力判断，提问卡片的“跳过是否取消本轮”仍按宿主身份。
 
 现有 `switch_session` 的已加载分支仍会持久化 current 选择（`tomcat/src/api/serve/commands.rs:572-578`），共享模式必须区分本连接的显示与会话控制状态；“复用旧接口”不表示将这个单窗口副作用原样照搬给旁观者。
 
-原项目磁盘列表中的宿主会话可标来源；它卸载后仍可在同项目窗口只读打开。要旁观任务 worktree，就打开该 worktree，而非主仓库。Live 仍只回答“服务加载了哪些会话”，不拿来填侧边栏，也不为本次旁观重定义这个接口。切走、关闭旁观视图只结束该连接对它的接收，不触发全局 slot 清理；关闭当前控制会话仍走原有停止/清理路径。
+原项目磁盘列表中的宿主会话可标来源；它卸载后仍可在同项目窗口打开并安全接手。要旁观任务 worktree，就打开该 worktree，而非主仓库。Live 仍只回答“服务加载了哪些会话”，不拿来填侧边栏，也不为本次旁观重定义这个接口。切走、关闭旁观视图只结束该连接对它的接收，不触发全局 slot 清理；关闭当前控制会话仍走原有停止/清理路径。
 
 ```text
 本窗口打开：.../task-worktree
@@ -501,22 +499,22 @@ switch_session(X)
 Tomcat：正在检查……（持续增长）
 工具：读取文件 ✓  运行测试 …
 --------------------------------------------------
-只读观察 · 来自 multica-agent-sdk
-输入/发送/停止置灰；可回答当前问题，工具权限批准仍只发控制者
+正在 multica-agent-sdk 中运行
+输入/附件可用；运行中设置不可切换；工具权限批准仍只发宿主
 
 控制方断开：正在停止 -> 已取消 / 停止失败
 服务断开：状态待确认 [重新连接 / 重启服务]
 ```
 
-只读只加两层：**GUI 按 access 置灰，服务在命令分发入口按 §4.3 白名单拒绝旁观写命令。** 唯一例外是同项目、此刻正在旁观会话的 Native 连接，可通过原提问卡片回答当前 ACP 问题；不能取消问题、发任务或停止执行。权限批准仍只路由控制连接，不给旁观者控制权，也不另造卡片或批准通道。
+同项目 Native 的 `Steer(onlyIfRunning=true)`、Interrupt、附件上传/租约/缩略图缓存直接放行，不换宿主。其它写命令须静止后接手，忙时返回 busy；普通发送仍走客户端待发队列，“立即发送”才插话。停止会使原 ACP prompt 以 cancelled 收尾；若收尾时已换宿主，旧连接直接成功返回，不能停掉新宿主工作。权限回复仍校验原控制连接，提问回答继续复用现有卡片与单次应答路由。
 
-**不新增 Host 意图入口拦截。** 现有 `sessionBlocked` 处理删除/草稿退役，还会挡住打开会话（`tomcat-vscode-ext/src/ui/webview/provider.ts:1672-1674`、`tomcat-vscode-ext/src/ui/webview/provider.ts:4303`），不能把 observe 塞进这个条件；其原有保护保持不变。绕过置灰的写请求由服务拒绝，扩展沿原失败提示显示错误。
+**不新增 Host 意图入口拦截。** 现有 `sessionBlocked` 处理删除/草稿退役，还会挡住打开会话（`tomcat-vscode-ext/src/ui/webview/provider.ts:1672-1674`、`tomcat-vscode-ext/src/ui/webview/provider.ts:4303`），不能把 observe 塞进这个条件；其原有保护保持不变。服务负责准入与拒绝，扩展沿原失败提示显示错误。
 
 来源名只取创建时 ACP `initialize.clientInfo.name`，原样用于展示；缺省显示本地化的“ACP 客户端”，不凭 acpx 进程名猜平台。Multica 的实际值是 `multica-agent-sdk`（`../multica/server/pkg/agent/hermes.go:681-688`）。来源名、消息 role 和 busy 都不是权限依据；外部 cwd 也不自动授予执行权限。
 
-**界面与旅程证据：**打开原会话下拉框时按需刷新同项目 disk 列表，不加轮询或 Live 合并。旁观时输入、发送/停止、模型/推理配置、回滚、文件恢复和删除不可用；切回自己的会话恢复可写。`gui/src/components/ModelPicker.tsx` 的旧测试兼容入口也遵循 disabled，已打开的配置菜单在只读时关闭。来源标注与只读提示沿原组件和 i18n。
+**界面与旅程：**原会话列表按需刷新，不加轮询或 Live 合并。新服务下仅“他端宿主运行中”显示 `session.runningIn`（“正在 {host} 中运行”），名称未知时显示简短 `session.runningElsewhere`，空闲隐藏；不附待发/插话/停止说明；旧版 observe 保持只读。`controllerName` 从当前活控制连接的 ACP `clientInfo.name` 派生，不取创建来源；Native 未上报名时不猜成 VS Code。宿主切换时即使观察者仍是 observe 也更新名称，断开时清空；不落盘、不新增查询或订阅。删除不接手：他端活宿主（含空闲）返回 session_in_use；否则仍须无活工作。实时看到的可恢复失败可触发既有 5 分钟倒计时，任何新轮开始取消，不按来源或发起方区分。
 
-真实旅程位于 `tomcat-vscode-ext/src/test/suite/support/sharedObservationScenario.ts`，由 `host.e2e.test.ts` 调用；使用真实 CLI、共享服务、ACP 子进程与 VS Code，只有外部模型使用本地脚本 HTTP 响应。在扩展目录执行 `TOMCAT_E2E_REAL_OBSERVATION=1 TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=<项目制品目录>/shots/shared-observation npm run test:e2e:vscode-devhost`。覆盖生成中加入、真实 webview 重载、真实 shell 运行/完成、忙闲只读、其它项目不可见/不可读、回到自己的会话；同时保留 PNG、ARIA、console 与旅程断言 JSON。重载测试等新页面出现后重新连接 CDP，只重试读取探针，不重发点击或业务命令。此旅程不是两个完整宿主的验收，后者仍归 M3。
+真实旅程在 `sharedObservationScenario.ts`，沿用 `TOMCAT_E2E_REAL_OBSERVATION=1 ... npm run test:e2e:vscode-devhost`：真实 CLI/ACP/共享服务/webview、脚本模型；覆盖生成中加入与重载、发送待发/立即插话、真实工具停止、同一计划引用及原地修订，以及宽窄屏 PNG/ARIA/console。实际通过与否见本轮计划，不把模拟 ACP peer 当作完整 Multica 验收。
 
 #### 3.2.6 两个宿主只加标准适配器
 
@@ -1045,9 +1043,9 @@ Multica 自定义参数（原样透传）
 
 同机、同 HOME 内，从标准 `~/.tomcat/plans/` 文件路径读取 plan_id 后交给 coder，start_plan 与 update_plan 继续处理同一文件。执行归属以 session_id 优先，旧 planner 恢复不会接管 coder 的计划。具体工具契约见 [create_plan](tools/create-plan.md)、[update_plan](tools/update-plan.md)、[ask_question](tools/ask-question.md)。
 
-### 4.3 原生旁观：复用打开命令与消息事件
+### 4.3 原生共享输入：复用打开命令与消息事件
 
-使用现有 `switch_session → get_state → get_messages`，不增加旁观专用请求或历史读取路径。**access 与 origin 由 switch_session 回复带回**；get_state 保持既有运行状态职责，当前消息通过原有事件补发。以下是共享模式拟定字段，原 stdio 行为不变。
+使用现有 `switch_session → get_state → get_messages`，不增加旁观专用请求或历史读取路径。**access、origin 与 controllerName 由 switch_session 回复带回，后续宿主变化和断开由 session_access 推送**；get_state 保持既有运行状态职责，当前消息通过原有事件补发。以下是共享模式拟定字段，原 stdio 行为不变。
 
 | 字段 | JSON 类型 | 必填 | 默认值 | 适用场景 | 说明 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1058,8 +1056,9 @@ Multica 自定义参数（原样透传）
 | `params` | object | 否 | `{}` | get_messages | 沿既有 GetMessagesParams；null 不等于省略 | 分页参数照旧。 |
 | `params.attachmentMode` | string | 否 | inline | get_messages | `inline` / `reference`；扩展沿用 reference | 图片不因旁观另复制一份。 |
 | `activeSessionId` | string | switch 成功回复必填 | 无 | switch_session payload，已有 | 本连接这次打开的目标 | 确认打开的是哪一页。 |
-| `access` | string | 共享 switch 成功回复必填 | 无 | switch_session payload【新增】 | `control` / `observe`；服务按 §3.2.5 判定，仅存扩展视图内存 | 这扇窗口能操作还是只能看。 |
+| `access` | string | 共享 switch 成功回复必填 | 无 | switch_session payload【新增】 | `control` / `observe`；服务按 §3.2.5 判定，仅存扩展视图内存 | 本窗口是不是当前执行宿主，输入另看能力。 |
 | `origin` | object/null | 共享 switch 回复必填；项目列表可投影 | 原生/老会话为 null | switch_session payload、项目磁盘摘要【新增】 | 来自会话头；对象为下列 kind/clientName，不是权限结果 | 来源重启后还在。 |
+| `controllerName` | string/null | 否 | 缺省/null 均为未知 | switch_session payload、session_access | 当前活控制连接上报的名称；空名归 null，切换/断开时刷新，不取 origin，不落盘 | 现在谁负责，不是最初谁创建。 |
 | `origin.kind` | string | origin 非 null 时必填 | 无 | origin 子结构 | 本期仅 `acp`；是服务判断来源的稳定代码 | 不看平台名字猜来源。 |
 | `origin.clientName` | string/null | 否 | 缺省/null 均无名称 | origin 子结构 | ACP initialize 的 clientInfo.name；未提供/空名显示“ACP 客户端” | 名称只是给人看的。 |
 | `cwd` | string/null | 共享响应必填 | 无 | get_state 已有 | 共享会话返回已校验的绝对路径；旧 stdio 可空；不为旁观扩展 Live 摘要 | 标出任务在哪个目录。 |
@@ -1067,7 +1066,7 @@ Multica 自定义参数（原样透传）
 
 字段落点证据：`tomcat/src/api/serve/types.rs:758-794`（命令）、`tomcat/src/api/serve/types.rs:204-213`（历史参数）、`tomcat/src/api/serve/commands.rs:604-608`（switch 回复）、`tomcat/src/api/serve/commands.rs:845-862`（Live 列表）。回复外壳继续使用 `ResponseFrame`（`tomcat/src/api/serve/types.rs:1522-1558`）；共享 switch 回复缺失或未知 access 不得默认成可写。`get_messages` 的 cursor/limit、附件处理和 `upToSeq` 占位保持原契约。
 
-**旁观命令准入白名单：**
+**无需接手的观察命令：**
 
 ```text
 get_state               get_messages              list_checkpoints
@@ -1075,11 +1074,11 @@ get_session_files       get_session_file_baseline preview_rewind
 get_instruction_catalog switch_session            close_session
 ```
 
-统一分发入口先按 `ServeCommand::session_id()` 与连接身份解析实际目标会话，再校验；支持省略 sessionId 的会话命令须解析到本连接当前会话，不能把省略当成绕过校验。旁观连接对该会话的其它命令一律回 `read_only_session`，包括 prompt、steer、interrupt、set_model、compact、delete_session；以后新增的会话命令默认拒绝，不维护写操作黑名单。全局列表/服务管理仍走原入口，不因当前旁观一页就禁用整条连接。
+统一入口先解析显式 sessionId 或本连接当前会话，核对项目范围。Native 同项目的共享输入白名单为：`steer(params.onlyIfRunning=true)`、`interrupt`、`ingest_attachment`、`retain_attachment_leases`、`cache_attachment_thumbnail`；删除单独检查“无他端活宿主且无活工作”，不接手。其余写命令默认先尝试安全接手：旧活宿主忙则 busy，无活宿主先停止遗留工作。ACP 非宿主的写命令仍回 read_only_session，必须先 load。全局列表与管理保持原入口；权限回复不因共享输入放开。
 
 校验必须在任何会话副作用之前，并覆盖优先处理的 interrupt 和确认回复路径：现有 `tomcat/src/api/serve/stdin.rs:57-87` 分流 interrupt，而 `tomcat/src/api/serve/commands.rs:260-269` 先处理控制命令，不能只在后面的普通 match 中加守门。确认仍按待批准请求绑定的控制连接检查，不因为命令被允许读取就授予批准权。
 
-白名单里的两个视图命令有明确边界：`switch_session` 可按 §3.2.5 重新判定原生会话的 access，但不会把 ACP 会话交给 VS Code；旁观 `close_session` 只表示“我不看了”，清掉本连接对它的显示/接收状态，回复沿用 `closed: true`，**不卸载、不取消、不改控制者**。控制者关闭自己的会话保留原清理路径。已有关闭调用见 `tomcat/src/api/serve/commands.rs:2533-2546`、`tomcat-vscode-ext/src/ui/webview/provider.ts:1974-1986`。
+白名单里的两个视图命令有明确边界：`switch_session` 按 §3.2.5 判定宿主身份，与 ACP 来源无关；旁观 `close_session` 只表示“我不看了”，清掉本连接对它的显示/接收状态，回复沿用 `closed: true`，**不卸载、不取消、不改控制者**。控制者关闭自己的会话保留原清理路径。已有关闭调用见 `tomcat/src/api/serve/commands.rs:2533-2546`、`tomcat-vscode-ext/src/ui/webview/provider.ts:1974-1986`。
 
 打开请求与回复示例（每个代码块是一条消息，不是批处理）：
 
@@ -1087,10 +1086,10 @@ get_instruction_catalog switch_session            close_session
 {"type":"switch_session","id":"open-1","sessionId":"s1"}
 ```
 
-共享服务对 ACP 会话的回复；下两条查询不会重新判定 access：
+共享服务对仍由活宿主持有的 ACP 会话的回复；下两条查询不会重新判定 access：
 
 ```json
-{"type":"response","id":"open-1","success":true,"sessionId":"s1","payload":{"activeSessionId":"s1","access":"observe","origin":{"kind":"acp","clientName":"multica-agent-sdk"}}}
+{"type":"response","id":"open-1","success":true,"sessionId":"s1","payload":{"activeSessionId":"s1","access":"observe","controllerName":"multica-agent-sdk","origin":{"kind":"acp","clientName":"multica-agent-sdk"}}}
 ```
 
 ```json
@@ -1104,13 +1103,19 @@ get_instruction_catalog switch_session            close_session
 对照：另一次打开无主且已可接手的原生会话，回复为 control、来源为 null：
 
 ```json
-{"type":"response","id":"open-native-1","success":true,"sessionId":"native-1","payload":{"activeSessionId":"native-1","access":"control","origin":null}}
+{"type":"response","id":"open-native-1","success":true,"sessionId":"native-1","payload":{"activeSessionId":"native-1","access":"control","controllerName":null,"origin":null}}
 ```
 
-绕过界面向 s1 发写命令时，仍用原生错误外壳拒绝：
+旧活宿主仍忙时，普通 Native 写入被拒绝（插话、停止不在此列）：
 
 ```json
-{"type":"response","id":"write-1","success":false,"sessionId":"s1","error":"read_only_session"}
+{"type":"response","id":"write-1","success":false,"sessionId":"s1","error":"busy"}
+```
+
+接手时的 Native 身份事件由同一 writer 有序写出，先于新轮事件；未打开的视图忽略它，打开回复仍给出当前身份：
+
+```json
+{"type":"session_access","sessionId":"s1","access":"observe","controllerName":"multica-agent-sdk"}
 ```
 
 补发仍用原有事件外壳；当前实现见 `tomcat/src/api/serve/event_pump.rs::MessageReplay`。`message.content` 与 `message.thinking_text` 是截至开始接收时的完整前缀，`assistantMessageEvent` 为 null，表示按稳定 ID 替换而非追加。后续实时事件才使用 `content_delta` / `thinking_delta`；message_end 不带该子结构：
@@ -1135,7 +1140,7 @@ get_instruction_catalog switch_session            close_session
 
 ### 4.4 持久来源与兼容性
 
-在 `SessionHeader` 新增可选对象 `origin`：ACP `session/new` 将 `{"kind":"acp","clientName":…}` 与会话头**一次写入**，原生新建不写，老文件省略（或 null）按原生读取。未提供 clientInfo.name 时省略 clientName，不把翻译后的兜底名称写进文件；未知 kind 或非法结构不能默认为原生可写。写入点复用 `create_session_with_activation`（`tomcat/src/core/session/manager/session_impl.rs:843-863`），头结构见 `tomcat/src/core/session/transcript.rs:132-148`。
+在 `SessionHeader` 新增可选对象 `origin`：ACP `session/new` 将 `{"kind":"acp","clientName":…}` 与会话头**一次写入**，原生新建不写，老文件省略（或 null）按原生读取。未提供 clientInfo.name 时省略 clientName，不把翻译后的兜底名称写进文件；未知 kind 或非法结构继续按已有解码校验处理，来源不授予权限。写入点复用 `create_session_with_activation`（`tomcat/src/core/session/manager/session_impl.rs:843-863`），头结构见 `tomcat/src/core/session/transcript.rs:132-148`。
 
 下面只示意现有会话文件的第一行；没有新增来源数据库或第二份聊天文件：
 
@@ -1147,12 +1152,12 @@ get_instruction_catalog switch_session            close_session
 | --- | --- | --- |
 | origin | 会话文件第一行 | 只在 ACP 创建时写；宿主断开、服务重启、后续 load 均不改来源 |
 | 控制连接 | 服务内存里的会话绑定 | 接手时登记，断线清空；任务停止完成之前仍禁止新执行 |
-| access | switch 回复、扩展会话视图内存 | 每次打开由服务计算，不落盘；旁观不会因对方离开而自动变 control |
+| access | switch 回复、session_access 推送、扩展视图内存 | 不落盘；断开本身不自动转为 control，后续打开或写入在安全接手后更新 |
 | 消息 role | transcript 的每条消息 | user/assistant/tool 表示谁说了这句话，与控制/旁观权限无关 |
 
-**两个身份例子：**ACP 会话即使宿主已断开，VS Code 再打开仍是 observe；原生会话由窗口 A 控制时，B 打开为 observe，A 关闭且清理完成后 B 也不会自动接手，B 重新打开才变 control。没有 origin 的旧会话同样走原生规则。
+**两个身份例子：**ACP 宿主断开后，VS Code 无需重新打开即可在下一次写入时清理并接手；Native A 空闲持有时 B 打开为 observe，B 写入接手后 A 收到 observe 通知，A 若仍显示会话则继续收流。无 origin 的旧会话遵循同一规则。
 
-ACP 连接自己的 `session/load` 按唯一控制者与作用域规则处理，不套用 VS Code 的“ACP 来源只能旁观”规则，也不在 load 时重写来源。header/列表投影及既有 copy/restore 路径须保留来源，不把改路径当作来源转换。此约束是当前共享服务/UI 合同，不是对同用户任意旧 CLI 的新安全沙箱；前版字符串 origin 仅是未实施草案，不为它增加磁盘迁移或兼容分支。
+ACP 连接自己的 `session/load` 按唯一宿主、静止与作用域规则处理，不在 prompt 隐式接手，也不在 load 时重写来源。header/列表投影及既有 copy/restore 路径须保留来源，不把改路径当作来源转换。此约束是当前共享服务/UI 合同，不是对同用户任意旧 CLI 的新安全沙箱；前版字符串 origin 仅是未实施草案，不为它增加磁盘迁移或兼容分支。
 
 ## 5. 文件职责总览（One-Glance Map）
 
@@ -1178,7 +1183,7 @@ ACP 连接自己的 `session/load` 按唯一控制者与作用域规则处理，
            src/api/serve/mod.rs                 保留 stdio 兼容入口【修改】
                   |
                   +-> registry.rs               唯一 slot/控制者、满槽淘汰【修改】
-                  +-> stdin.rs / control.rs     统一只读准入含优先中断、确认回复路由【修改】
+                  +-> stdin.rs / control.rs     统一准入含共享输入、优先中断、确认回复路由【修改】
                   +-> commands.rs               switch 回复 access/origin；旁观 close 只退订【修改】
                   +-> confirmation.rs / ask_question.rs  按控制连接路由、取消【修改】
                   +-> types.rs / schema.rs      switch 访问结果、来源对象及命令白名单【修改】
@@ -1204,7 +1209,7 @@ ACP 连接自己的 `session/load` 按唯一控制者与作用域规则处理，
        +-> src/core/session/manager/session_impl.rs  创建头时一次写来源；复制保持【修改】
        |   src/core/session/manager/context.rs       hydrate【已加载分支不重复调用；复用】
        |   src/core/session/usage_guard.rs           原共享锁【只复用，不升级】
-       +-> src/infra/events/mod.rs             原有 message_update/end 与工具事件【只复用】
+       +-> src/infra/events/mod.rs             事件复用；AgentIdle 增加可选失败分类【修改】
        [src/api/chat/tests/、src/core/tests/、src/core/skill/tests/]
        [src/core/session/tests/、src/api/serve/tests/instruction_prompt_test.rs]
                   |
@@ -1239,7 +1244,7 @@ ACP 连接自己的 `session/load` 按唯一控制者与作用域规则处理，
   -> src/serveClient/sessionRouter.ts                      switch 返回 ID + access + origin
   -> src/ui/webview/sessionPool.ts                         透传打开结果，不丢身份字段
   -> src/ui/webview/{provider,state,protocol}.ts             把 access/origin 记入视图；不加意图拦截
-  -> gui/src/App.tsx 及现有会话栏/输入组件                   按 access 置灰并显示来源
+  -> gui/src/App.tsx 及现有会话栏/输入组件                   按共享输入能力兼容旧只读，按宿主身份显示运行提示
   -> 各邻近 tests/ + tests/external_session_observation.test.ts【新增】
   -> src/test/suite/host.e2e.test.ts                         真服务 devhost 场景
 
@@ -1311,7 +1316,7 @@ tomcat serve start
 | --- | --- | --- |
 | Paperclip | 选择 **Tomcat** 本地适配器；沿原项目工作区设置目录；需要时配置可执行路径与模型 | 执行端必须能访问该目录；云端执行端不会因此获得用户电脑的目录。 |
 | Multica | 在执行机器安装 CLI；必要时给 daemon 设置 `MULTICA_TOMCAT_PATH`；沿原 runtime / Agent / 项目资源流程派任务 | 本地目录、临时 worktree、持久工作区的寿命由宿主决定；Windows 上派任务前须先启动共享服务（见下文）。 |
-| VS Code | 使用本次扩展及其所选 CLI、同一数据目录；打开宿主实际工作的项目，再从原会话列表打开 | 别的项目不可见；临时 worktree 要开它自己的窗口；旁观不能发送、停止、改模型或回滚。 |
+| VS Code | 使用本次扩展及其所选 CLI、同一数据目录；打开宿主实际工作的项目，再从原会话列表打开 | 别的项目不可见；临时 worktree 要开它自己的窗口；新服务支持共享输入与静止接手，旧服务仍只读。 |
 
 **升级或回退。** 停服是明确的全局动作，会取消这个服务上的全部任务；先安排好宿主任务，再操作，不以“关闭某个旁观窗口”代替停服。
 
@@ -1375,7 +1380,7 @@ Windows Multica 的受管 Job
                          ├─ 模型 API key：Tomcat 保存的凭据
                          ├─ Tomcat HTTP 代理：保存配置或系统设置
                          ├─ bash / MCP stdio 任务环境：仍沿原控制方规则
-                         └─ 项目列表：仍按窗口原有项目范围，只叠加只读旁观
+                         └─ 项目列表：仍按窗口原有项目范围，支持共享输入
 ```
 
 | 变化 | 用户怎么迁移 / 边界 | 代码证据 |
@@ -1384,7 +1389,7 @@ Windows Multica 的受管 Job
 | 模型 API key 不再从环境兜底 | 仅在 shell 导出 key、或仅在 Paperclip/Multica 智能体环境配置 key 的用户，须在 **Tomcat 设置里保存一次**；原来已保存的不受影响。缺 key 会明确提示，旧 chat/stdio 不变；任务工具仍可使用宿主传入的环境 | `tomcat/src/core/llm/auth.rs::process_env_value`、`tomcat/src/api/cli/mod.rs::preload_runtime_env` |
 | “允许此文件夹”跨会话保留 | 原来 VS Code 只在当前会话生效；现在将所批准目录写入 `workspace.workspace_roots`，与 CLI 一致。仅持有控制权且目录与所提供选项一致的回复能保存 | `tomcat/src/api/serve/confirmation.rs::ServeConfirmationProvider::confirm_decision` |
 | 版本不一致时不再无效重试 | VS Code 给出重启共享服务按钮，文字写明会停止所有任务；点击沿已有命令直接执行。ACP 中转不要求 CLI 数字版本相同，但本机协议不兼容仍拒绝 | `tomcat/src/api/serve/service.rs::handle_connection`；`tomcat-vscode-ext/src/serveClient/ServeConnectionSupervisor.ts`、`tomcat-vscode-ext/gui/src/App.tsx` |
-| 同项目宿主会话可只读旁观 | 仍走原会话列表；其它项目不可见。独立 worktree 需打开它自己的窗口，旁观关闭不取消宿主任务 | `tomcat/src/api/serve/ownership.rs`；`tomcat-vscode-ext/src/ui/webview/state.ts` |
+| 同项目宿主会话支持共享输入 | 仍走原会话列表；其它项目不可见。独立 worktree 需打开它自己的窗口，旁观关闭不取消宿主任务 | `tomcat/src/api/serve/ownership.rs`；`tomcat-vscode-ext/src/ui/webview/state.ts` |
 
 **代理需要迁移的用户。** 如果此前只在窗口终端或宿主智能体环境里设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，正式共享服务不再使用它们。请改用系统代理，或在 Tomcat 配置中保存 `llm.proxy`；模型、网页工具和插件 HTTP 复用普通客户端，不再维护会话代理句柄、代理路由键或接管刷新。服务启动时删除 8 个大小写代理变量，防止第一个启动者影响全部连接。
 
@@ -1423,12 +1428,16 @@ AGENTS.md 读取失败    -> 跳过该文件 + instruction summary 诊断
 | --- | --- | --- |
 | protocol/version mismatch | 所有连接拒绝本机协议不兼容；仅原生拒绝 CLI 版本不同，VS Code 立即给重启入口；不另起第二实例 | 区分协议不兼容和界面版本不匹配。 |
 | invalid cwd / scope / origin | new/load 或控制操作失败；不回落服务目录 | 目录和会话身份不能猜。 |
-| session_in_use | 原控制者仍活着则拒绝；停止中也不接手 | 不能两个人同时下指令。 |
-| read_only_session | GUI 按 access 置灰；服务在分发入口拒绝白名单外会话命令，扩展沿原失败提示显示 | 绕过按钮也不能改，不重复加 Host 拦截。 |
+| session_in_use / busy | ACP load 仅在他端活宿主有活工作时拒绝；Native 普通写入忙时返回 busy；删除在他端活宿主仍在线时拒绝（含空闲） | 插话不抢方向盘，接手必须先停稳，删除不接手。 |
+| read_only_session | ACP 非宿主写入或旧服务拒绝；新扩展无共享输入能力时保留旧只读界面 | 兼容旧服务，不把来源当成锁。 |
 | backpressure（原生提示，不是错误） | 原生沿原 writer 合并、满时丢消息增量并提示；ACP 只合并、不丢正文、不插提示；两者均不断开、不取消 | 原生直播可能缺片，宿主结果不能缺字。 |
 | stop_timeout | 不报 stopped、不释放未停止状态；记录残留任务 ID | 退出码和“已停手”要对得上。 |
 | connection_lost / service_unavailable | 按连接角色取消或退订；不直接显示成功/已取消 | 看不到结果不等于结果已完成。 |
 | instructions_skipped | 沿摘要给出路径和理由，不把正文写日志 | 不能静默丢掉手册。 |
+
+**ACP 网络失败诊断。** `agent_idle(failed)` 的可选 `failure {kind, phase}` 复用 transcript 的分类函数，仅 `stream_interrupted` 在 `session/prompt` 的错误 data 附固定英文网络诊断，message 保持原摘要；HTTP 429/5xx、额度与鉴权不伪装。Multica 当前将 data 拼入错误并以关键词识别 provider_network，再由其既有策略决定重派；Tomcat 不新增重试定时器或跨轮挂起请求。完整措辞、七条限制及未运行真实 Multica 的边界见[接入说明 §6.1](tomcat-acp-host-integrations/multica-tomcat-acp-integration/README.md#61-sharing-a-session-with-vs-code)。
+
+OpenAI Chat Completions 的流内 `error` 必须先转换成现有 `LlmError` 与终止事件，保留 provider 的 message/code/type；不能忽略它，再把随后的 EOF 当成断网。该缺口由真实 ACP 的鉴权回归暴露，解析单测同时覆盖首帧与部分输出后的错误，避免 ACP 诊断放大原有误分类。
 
 panic/JoinError 作为该连接或会话失败收口，触发相同清理；不可让一个连接解码/handler 的失败直接结束整个服务。进程级崩溃仍会中断全部任务，不承诺热恢复。
 
@@ -1454,9 +1463,9 @@ panic/JoinError 作为该连接或会话失败收口，触发相同清理；不�
 | P0 插件 T14 | 【新增】`tomcat/src/ext/dispatcher/tests/session_bash_env_test.rs::plugin_bash_uses_calling_session_env` | 见 §8.2 | 同目录不同连接的插件 Bash 不用第一个会话的 registry。 |
 | P1 技能 T15 | 扩展 `tomcat/src/api/chat/tests/resource_inventory_test.rs`；【新增】`serve_shared_e2e.rs::new_load_refreshes_skills_without_overlay_leak` | 见 §8.2 | 新技能被看见，目录卡片和 load_skill 同源，私有技能不进别人目录。 |
 | P0 流一致 T16 | 【新增】`tomcat/tests/acp_observer_e2e.rs::join_mid_message_then_merge_history`；扩展 `tomcat/src/api/serve/tests/event_pump_test.rs` | 见 §8.2 | 正常接收、未触发背压丢弃时，按 switch→state→history 加入；正文/思考前缀不重不漏；刚结束及未落盘时补全文+结束，下一条开始才替换。工具及 prompt 从历史正确重建；慢读降级另见 T28。 |
-| P0 旁观 T17 | 【新增】`tomcat/tests/acp_observer_e2e.rs::switch_session_observes_without_taking_control`；扩展 `tomcat/src/api/serve/tests/commands_test.rs` | 见 §8.2 | ACP 在宿主在线/离线及服务重启后均 observe，来源不被 load 改写；原生 A 控制时 B 为 observe，A 离开后 B 须重开才 control；旧会话头缺 origin 为原生。9 条白名单可用，其余写命令回 read_only_session，含省略目标与优先中断；旁观 close 后停收但任务继续，宿主 load 不被阻挡。开关旁观不多调模型，未加载和已加载的跨项目会话均不得打开；`tomcat/src/api/serve/tests/connection_test.rs::project_observation_*` 覆盖同仓子目录、独立仓库、worktree、无 Git、无项目上下文及显式 ID 读取，旁观前后项目 key、历史和控制者不变。 |
+| P0 旁观 T17 | 【新增】`tomcat/tests/acp_observer_e2e.rs::switch_session_observes_without_taking_control`；扩展 `tomcat/src/api/serve/tests/commands_test.rs` | 见 §8.2 | ACP 来源仅展示；打开活宿主持有的会话为 observe，共享输入不接手，静止写入可接手并推送 session_access。旁观 close 后停收但任务继续，宿主 load 不被阻挡。开关旁观不多调模型，未加载和已加载的跨项目会话均不得打开；`tomcat/src/api/serve/tests/connection_test.rs::project_observation_*` 覆盖同仓子目录、独立仓库、worktree、无 Git、无项目上下文及显式 ID 读取，旁观前后项目 key、历史和控制者不变。 |
 | P1 连接 T18 | 扩展 `tomcat-vscode-ext/src/serveClient/tests/{ServeConnectionSupervisor,messenger_disposal}.test.ts` | 见 §8.2 | dispose 不 kill 服务，关窗取消本窗控制任务，显式停服不被重连拉起。 |
-| P0 合流/只读 T19 | 扩展 `tomcat-vscode-ext/src/ui/webview/tests/dual_channel.test.ts`、`tomcat-vscode-ext/gui/src/App.test.tsx` | 见 §8.2 | switch 的 access/origin 经 router/pool 进入视图；get_state 不覆盖身份。observe 时输入/发送/停止置灰、来源及无名兜底正确，control 照旧；关旁观标签不停任务，服务拒绝写命令时显示原失败提示。补发与历史重叠、切回、带缓存重连无重漏，未显示且非本窗控制的会话不串流。 |
+| P0 合流/只读 T19 | 扩展 `tomcat-vscode-ext/src/ui/webview/tests/dual_channel.test.ts`、`tomcat-vscode-ext/gui/src/App.test.tsx` | 见 §8.2 | switch 的 access/origin 经 router/pool 进入视图；get_state 不覆盖身份。新服务下 observe 可输入和停止，旧服务保持只读；宿主变更先通知再发新轮事件；关旁观标签不停任务，服务拒绝写命令时显示原失败提示。补发与历史重叠、切回、带缓存重连无重漏，未显示且非本窗控制的会话不串流。 |
 | P1 扩展集成 T20 | 【新增】`tomcat-vscode-ext/tests/external_session_observation.test.ts`；扩展 `src/test/suite/host.e2e.test.ts` 的 `shared service observation` | 见 §8.2 | 实际 CLI + 受控模型 + VS Code；同项目中途打开、重载；其它项目窗口不列出也打不开；worktree 必须用它自己的窗口。 |
 | P1 Paperclip T21 | 【新增】`paperclip/packages/adapters/tomcat-local/src/server/{execute,test,skills}.test.ts` | 见 §8.2 | 标准 ACP、环境探测、临时技能真正可用、取消及失败；任务工作区 cwd 经共享引擎进入 ACP new/load，不误用服务/转发器启动目录。 |
 | P0 Paperclip 恢复 T22 | 【新增】同包 `execute.test.ts` 的 `skills_command_identity_and_resume`；回归共享引擎 `operator-stop.test.ts` | 见 §8.2 | 临时目录是否改变指纹必须实测；区分保存后的续聊与未保存后的新会话。 |
@@ -1499,6 +1508,10 @@ Windows：必做项迁到 GitHub Windows CI；个人 PC 可选，本机不代签
 | 权限与界面 | 默认 true、保存 false、批准/拒绝/取消/断开与迟到回复由真实 ACP 权限门覆盖。宿主 false 实测为 Paperclip deny-all 拒写、Multica allow_once 自动批准，不宣称人工弹窗。三端 PNG/ARIA/console 已捕获并读取；宿主可选文档/日志 404 和更新检查网络错误保留，不宣称控制台全程零错误。 |
 | 平台与发布 | 当前证据为 macOS；Windows 系统代理/管道/Job/真实后端与窗口生命周期待云端实际验证，Paperclip POSIX shell 限制见 §6.1。条件提交/推送授权见 §6.3；此历史批次未提交、推送或发布。 |
 
+### 8.3 共享输入修订的验收范围
+
+本次仅修改 Tomcat 服务、ACP 适配层与 VS Code 扩展，按 `plan_acp_vs_code_multica_acp_host_composer_d91ea310` 实施；不改 Multica。当前结果、失败修复与本地视觉证据见 [Multica 集成验收记录 C.2](tomcat-acp-host-integrations/multica-tomcat-acp-integration/ACCEPTANCE.md#c2-tomcat-侧共享输入实现验证)。真实 ACP 进程和隔离 VS Code DevHost 不等于真实 Multica 任务编排验收，也不覆盖 Windows 部署。
+
 ## 9. 风险与应对
 
 风险不是额外需求；这里记录当前边界下仍需验证或不能保证的部分。**说人话：**把可能失手的地方和处理动作提前写清，不靠“应该没事”收尾。
@@ -1506,7 +1519,7 @@ Windows：必做项迁到 GitHub Windows CI；个人 PC 可选，本机不代签
 | 风险 | 影响 | 应对（具体动作） | 说人话 |
 | --- | --- | --- | --- |
 | 模型看到项目 A，工具却使用服务目录 | 读错文件或在错误位置执行命令；只检查会话 cwd 无法发现 | 按 §3.3 将已绑定的会话目录贯穿提示词与工具执行，补齐现有相对路径/Bash 默认目录接缝；T12 同时检查模型请求与实际结果，禁止全局 chdir，保留权限门 | 告诉模型地址，不等于工具已走到那里。 |
-| 来源与访问方式混淆 | 宿主离线后误变可写，或原生窗口抢走控制权 | origin 只在头里保存，access 由 switch 回复给窗口；clientName/role/busy 均不参与授权。T06/T17/T19 覆盖断线、重开、老文件及 get_state 刷新；控制绑定清空不绕过停止等待 | 来源是历史事实，控制者是当前状态，窗口拿到的是判断结果。 |
+| 来源与宿主身份混淆 | 来源永久锁死输入，或忙时抢走控制权 | origin 仅展示；access 经 switch/session_access 更新；共享输入能力与执行宿主分离，静止检查复用删除边界并在 admission 锁内完成 | 能说话不等于能在行驶中抢方向盘。 |
 | 共享内存绕过原项目边界 | 另一个项目的会话被打开、读历史或收到流 | 列表保留 disk；共享会话入口复用现有 session key 核对，旁观不改本连接 scope。T17/T20 覆盖热/冷载入及同仓子目录/worktree/无 Git；不加第二套项目注册表 | 服务共用，窗口的项目边界不变。 |
 | 强杀 relay / drain 超时后宿主立即清理目录 | 工具取消与 worktree 收尾竞态 | 60s 总宽限内真实 stop/wait；超时非零、保留停止中、日志带任务 ID；T08 注入延迟和持续写文件。若宿主把失败仍当安全收尾，M1 上报边界，不宣称绝对零写入 | 正常退出能等停手，强杀不能保证这个顺序。 |
 | 共享 usage 锁不能跨独立进程排斥执行 | 旧 chat/stdio 可并行打开同一历史 | 不升级锁；文档说明不要同时用旧入口执行共享服务正控制的 session。旁观已加载 slot 不重复 hydrate；T26 保留原并发/删除保护 | 本期解决一个服务内的控制权，不改整台机器的执行锁。 |
@@ -1531,10 +1544,10 @@ Windows：必做项迁到 GitHub Windows CI；个人 PC 可选，本机不代签
 - ~~TCP 端口、发现文件、令牌、全局事件序号~~ → 否：本机 IPC + OS 权限、在开始转发处补当前消息足够当前需求。
 - ~~独立 ObserverClient、逐进程旁观端口、跨进程独占锁升级~~ → 否：共享 Messenger 和原锁足够本期约定范围；不把遗留边界说成新安全保证。
 - ~~整轮快照、`observe_session` / `unobserve_session`、`currentTurn` 响应与 `serve/observation/`~~ → 本轮删除：复用 `switch_session → get_state → get_messages`，只在 `event_pump.rs` 补发当前消息。
-- ~~旁观专用只读历史查询、跨项目合并 Live 列表或打开历史~~ → 删除：保留原项目磁盘列表和打开流程，宿主会话卸载后仍可在同项目窗口只读打开；不另做跨项目发现或隔离系统。
+- ~~旁观专用只读历史查询、跨项目合并 Live 列表或打开历史~~ → 删除：保留原项目磁盘列表和打开流程，宿主会话卸载后仍可在同项目窗口打开并安全接手；不另做跨项目发现或隔离系统。
 - ~~新建 live 基线合流协议、用户消息广播、整轮工具/等待投影~~ → 本轮删除：沿现有历史与事件合并，补发的时序保证由转发处负责，缺口通过原路径的回归测试定位。
-- ~~get_state 返回 readOnly、字符串 origin、GUI/Host/服务三层重复只读判断~~ → 本轮替换：switch_session 返回 access 与来源对象；界面置灰、服务统一白名单，Host 只传结果和展示错误。
-- ~~无控制者就自动把旁观窗口变成控制者~~ → 否：原生会话重新打开才重算，ACP 来源在 VS Code 始终只读；停止完成之前不得接手。
+- ~~get_state 返回 readOnly、字符串 origin、GUI/Host/服务三层重复只读判断~~ → 本轮替换：switch 返回 access/origin，session_access 更新宿主身份；共享输入按能力放开，服务统一准入，Host 复用原流程。
+- ~~ACP 来源永久只读、必须重新打开才能接手~~ → 已替换：来源只展示，Native 可共享输入，普通写入静止接手，ACP 在 load 接手；订阅不变。断开本身不自动授权新轮，停止完成之前不得接手。
 - ~~慢队列溢出就断连，再重连补发~~ → 本轮删除：沿用每连接 writer；原生合并/丢增量/提示，ACP 合并但不丢正文；慢读不断开，避免把画面卡顿变成控制任务取消。真实 EOF/写失败的断连语义不变。
 - ~~为传项目说明而反复拼接 Multica AGENTS.md 到 prompt~~ → 否：AGENTS.md 进入现有环境规则管线，每轮刷新但不写对话；这不删除 Paperclip 既有的任务 prompt 和变量使用说明，后者见 §3.4。
 - ~~本机 `mode` / `env` 握手和短管理连接 `drain_connection`~~ → §4.1 按当前代码替换为 `ConnectionHello.protocol` / `environment`，以及原本机连接内的私有 close/确认记录；不改变宿主侧标准 ACP。

@@ -44,6 +44,7 @@ export function SessionBar({
   onSetPinned,
   onDeleteSession,
   deleteSupported = false,
+  sharedInputSupported = false,
   actionFeedback,
   onNewSession,
   ready,
@@ -60,6 +61,7 @@ export function SessionBar({
   onSetPinned?(sessionId: string, pinned: boolean): void;
   onDeleteSession?(sessionId: string): void;
   deleteSupported?: boolean;
+  sharedInputSupported?: boolean;
   actionFeedback?: SessionActionFeedback | null;
   onNewSession(): void;
   ready: boolean;
@@ -222,8 +224,9 @@ export function SessionBar({
                       : (pendingQuestionCounts[session.sessionId] ?? 0);
                     const pinLabel = t(session.isPinned ? "session.unpin" : "session.pin");
                     const busy = session.busy || (pendingQuestionCounts[session.sessionId] ?? 0) > 0;
+                    const readOnly = !session.ownedByThisFrontend && !sharedInputSupported;
                     const deleteReason = session.deleting ? t("session.delete.pending")
-                      : !session.ownedByThisFrontend ? t("session.readOnly")
+                      : readOnly ? t("session.readOnly")
                       : busy ? t("session.delete.busy")
                       : !deleteSupported ? t("session.delete.unavailable") : t("session.delete");
                     return (
@@ -261,7 +264,7 @@ export function SessionBar({
                         <span aria-hidden="true" className={`codicon ${session.isPinned ? "codicon-pinned" : "codicon-pin"}`} />
                       </button> : null}
                       {onDeleteSession ? <span title={deleteReason}><button className="tc-icon-button tc-session-row__action" type="button"
-                        aria-label={t("session.delete")} title={deleteReason} disabled={!deleteSupported || !session.ownedByThisFrontend || busy || session.deleting}
+                        aria-label={t("session.delete")} title={deleteReason} disabled={!deleteSupported || readOnly || busy || session.deleting}
                         onClick={() => { deleteConfirmed.current = false; setDeleteTarget(session); }}>
                         <span aria-hidden="true" className="codicon codicon-trash" />
                       </button></span> : null}

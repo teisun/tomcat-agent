@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.13
+
+- Allow shared input on same-project ACP sessions: queue, steer, stop and prepare attachments while another host runs; idle writes take control. Show the current host name when busy; old servers stay read-only.
+- Reuse the existing recoverable-error actions and five-minute countdown for eligible failures from other clients; a new turn cancels recovery. Deletion never takes control.
+- Attach English network diagnostics only to ACP transport interruptions, and classify in-stream OpenAI-compatible provider errors (auth, quota, …) as themselves instead of network disconnects.
+- Bundle CLI 0.1.95 in platform-specific packages. Pure-extension users need a matching external CLI for shared session input. Updating the executable does not update a running shared service; check active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.9
 
 - Simplify built-in plan-writing guidance: give each issue or requirement its own top-level section, remove redundant wrapper sections, and keep chapter titles and table headers in the plan's language. The runtime-managed `Goal`, `Plan` and `Todos Board` headings remain in English. Plans may use ASCII or Mermaid diagrams, with shorter, more direct explanations.

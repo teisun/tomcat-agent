@@ -76,6 +76,7 @@ describe("request retry feedback", () => {
 describe("manual recovery App to Provider", () => {
   const cases: Array<{ name: string; overrides: Partial<WebviewSessionSnapshot> }> = [
     { name: "ordinary idle", overrides: {} },
+    { name: "shared observed session", overrides: { access: "observe", ownedByThisFrontend: false } },
     { name: "pending command", overrides: { commandPending: true } },
     { name: "unready model", overrides: { modelReady: false } },
   ];
@@ -86,6 +87,7 @@ describe("manual recovery App to Provider", () => {
       await f.failed();
       f.host.stateStore.setReady(true);
       Object.assign(f.host.stateStore.view().sessionViews.s1, { access: "control", ...overrides });
+      if (overrides.access === "observe") f.host.initialized = { capabilities: ["shared_session_input"] };
       const rpc = action === "retry" ? f.retry : f.resume;
       rpc.mockRejectedValueOnce(new Error("busy"));
       if (overrides.commandPending) {
@@ -157,6 +159,26 @@ describe("error recovery countdown projection", () => {
 });
 
 describe("read-only session observation", () => {
+  it("names the current host rather than the session origin and hides the notice when idle", async () => {
+    const { unmount } = mount(undefined, "en");
+    const snapshot = approvalDraftSnapshot("s1");
+    snapshot.sharedInputSupported = true;
+    Object.assign(snapshot.sessionViews.s1, {
+      access: "observe", ownedByThisFrontend: false, busy: true,
+      origin: { kind: "acp", clientName: "original host" },
+    });
+    for (const controllerName of ["multica-agent-sdk", "another host", null]) {
+      snapshot.sessionViews.s1.controllerName = controllerName;
+      await emitState({ channel: "state", content: snapshot, messageId: `host-${controllerName}` });
+      expect(screen.getByTestId("observer-notice").textContent).toBe(controllerName
+        ? translate("en", "session.runningIn", { host: controllerName })
+        : translate("en", "session.runningElsewhere"));
+    }
+    snapshot.sessionViews.s1.busy = false;
+    await emitState({ channel: "state", content: snapshot, messageId: "host-idle" });
+    expect(screen.queryByTestId("observer-notice")).toBeNull();
+    unmount();
+  });
   it("keeps the existing question card answerable without enabling task controls", async () => {
     const { postMessage } = mount(undefined, "en");
     const snapshot = approvalDraftSnapshot("s1");
@@ -168,12 +190,13 @@ describe("read-only session observation", () => {
     expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
     expect(postMessage.mock.calls.some(([message]) => ["prompt", "interrupt", "buildPlan"].includes(message.type))).toBe(false);
   });
-  it("locks write actions while busy and idle, keeps reading available, and restores a writable session", async () => {
+  it.each([false, true])("applies read/write gates by shared-input capability (%s) without blocking reading", async (sharedInputSupported) => {
     const { postMessage } = mount(undefined, "en");
     const snapshot = approvalDraftSnapshot("s1");
     snapshot.messageQueueSupported = true;
     snapshot.rewindSupported = true;
     snapshot.sessionFilesSupported = true;
+    snapshot.sharedInputSupported = sharedInputSupported;
     const host = snapshot.sessionViews.s1;
     Object.assign(host, {
       access: "observe", ownedByThisFrontend: false, busy: true,
@@ -189,26 +212,34 @@ describe("read-only session observation", () => {
       sessionFiles: { sourceTurnId: "host-prompt", files: [{ path: "/workspace/a.ts", status: "modified", added: 1, removed: 1, restorable: true }] },
     });
     await emitState({ channel: "state", content: snapshot, messageId: "observing-busy" });
-    expect(screen.getByTestId("observer-notice").textContent).toBe(translate("en", "session.readOnlyFrom", { source: "paperclip" }));
-    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe("false");
-    expect(screen.getByTestId("composer-input").getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", true);
-    fireEvent.click(screen.getByTestId("stop-button"));
+    expect(screen.getByTestId("observer-notice").textContent).toBe(sharedInputSupported ? translate("en", "session.runningElsewhere") : translate("en", "session.readOnlyFrom", { source: "paperclip" }));
+    expect(screen.getByTestId("composer-input").getAttribute("contenteditable")).toBe(String(sharedInputSupported));
+    expect(screen.getByTestId("stop-button")).toHaveProperty("disabled", !sharedInputSupported);
+    expect(screen.getByTestId("mode-select")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("model-select")).toHaveProperty("disabled", true);
+    if (sharedInputSupported) {
+      fireEvent.click(screen.getByTestId("stop-button"));
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "interrupt", data: { sessionId: "s1" } }));
+      postMessage.mockClear();
+    }
     host.busy = false;
     host.composerDraft = { text: "saved draft", segments: [{ type: "text", text: "saved draft" }] };
     await emitState({ channel: "state", content: snapshot, messageId: "observing-idle" });
     expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
     for (const id of ["send-button", "attachment-add", "mode-select", "model-select", "checkpoint-marker-button", "build-plan", "keep-all-files", "undo-all-files"]) {
-      expect(screen.getByTestId(id)).toHaveProperty("disabled", true);
-      fireEvent.click(screen.getByTestId(id));
+      expect(screen.getByTestId(id)).toHaveProperty("disabled", !sharedInputSupported);
+      if (!sharedInputSupported) fireEvent.click(screen.getByTestId(id));
     }
+    if (sharedInputSupported) expect(screen.queryByTestId("observer-notice")).toBeNull();
     fireEvent.click(screen.getByText("host prompt"));
-    expect(screen.queryByTestId("edit-user-message")).toBeNull();
-    await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "must not edit" } }); });
-    expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    expect(!!screen.queryByTestId("edit-user-message")).toBe(sharedInputSupported);
+    if (!sharedInputSupported) {
+      await act(async () => { fireEvent.paste(screen.getByTestId("composer-input"), { clipboardData: { getData: () => "must not edit" } }); });
+      expect(screen.getByTestId("composer-input").textContent).toBe("saved draft");
+    }
     expect(postMessage.mock.calls.some(([m]) => ["prompt", "interrupt", "setModel", "setPlanMode", "restoreCheckpoint", "buildPlan", "keepSessionFiles", "restoreSessionFiles"].includes(m.type))).toBe(false);
     fireEvent.click(screen.getByTestId("files-toggle"));
-    expect(screen.getByTestId("undo-file")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("undo-file")).toHaveProperty("disabled", !sharedInputSupported);
     fireEvent.click(screen.getByTestId("session-file-diff"));
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "openSessionFileDiff" }));
     expect(screen.getByTestId("new-session-button")).toHaveProperty("disabled", false);
@@ -389,6 +420,7 @@ describe("inline user-message editing in App", () => {
     const snapshot = approvalDraftSnapshot("s1");
     snapshot.rewindSupported = true;
     snapshot.sessionViews.s1.ownedByThisFrontend = false;
+    snapshot.sessionViews.s1.access = "observe";
     snapshot.sessionViews.s1.timeline = [{type:"message",id:"foreign",kind:"user",text:"read-only prompt",rewindEligible:true}];
     await emitState({channel:"state",content:snapshot,messageId:"foreign-state"});
     fireEvent.click(screen.getByText("read-only prompt"));
@@ -725,6 +757,7 @@ type StateTestSession = Partial<WebviewSessionSnapshot> &
 function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
   return {
     access: fixture.access,
+    controllerName: fixture.controllerName,
     origin: fixture.origin,
     activePlan: fixture.activePlan ?? null,
     agentMode: fixture.agentMode ?? "chat",

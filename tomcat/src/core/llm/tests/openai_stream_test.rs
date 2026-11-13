@@ -225,6 +225,71 @@ async fn sse_stream_eof_without_terminal_is_interrupted() {
 }
 
 #[tokio::test]
+async fn sse_provider_errors_preserve_classification_instead_of_becoming_network_eof() {
+    use tokio_stream::StreamExt;
+
+    for (fields, expected) in [
+        (
+            json!({"code":"invalid_api_key", "type":"invalid_request_error"}),
+            LlmFailureKind::Authentication,
+        ),
+        (
+            json!({"code":null, "type":"authentication_error"}),
+            LlmFailureKind::Authentication,
+        ),
+        (
+            json!({"code":"insufficient_quota"}),
+            LlmFailureKind::Billing,
+        ),
+        (
+            json!({"type":"rate_limit_error"}),
+            LlmFailureKind::RateLimit,
+        ),
+        (
+            json!({"type":"server_error"}),
+            LlmFailureKind::UpstreamTransient,
+        ),
+        (json!({}), LlmFailureKind::Unknown),
+    ] {
+        for prefix in [
+            "",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ] {
+            let mut error = fields.clone();
+            error["message"] = json!("original provider summary");
+            // No [DONE]: the explicit error itself must terminate the response.
+            let body = format!("{prefix}data: {}\n\n", json!({"error":error}));
+            let source = tokio_stream::iter(vec![Ok(Bytes::from(body))]);
+            let mut stream = SseEventStream::new(
+                source,
+                ProviderCompatProfile::chat_completions("gpt-4"),
+                true,
+            );
+            if !prefix.is_empty() {
+                assert!(
+                    matches!(stream.next().await.unwrap().unwrap(), StreamEvent::ContentDelta { delta } if delta == "partial")
+                );
+            }
+            let event = stream.next().await.unwrap().unwrap();
+            let StreamEvent::LlmError { message, code, .. } = event else {
+                panic!("expected provider error, got {event:?}");
+            };
+            assert_eq!(message, "original provider summary");
+            let failure = crate::infra::error::llm_stream_terminal_error("openai", message, code);
+            assert_eq!(classify_llm_failure(&failure).kind, expected, "{error}");
+            assert!(matches!(
+                stream.next().await.unwrap().unwrap(),
+                StreamEvent::FinishReason { .. }
+            ));
+            assert!(
+                stream.next().await.is_none(),
+                "provider error must not be followed by a synthetic network error"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn sse_stream_eof_after_terminal_ends_cleanly() {
     use tokio_stream::StreamExt;
 

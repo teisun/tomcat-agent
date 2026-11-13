@@ -1181,10 +1181,18 @@ impl ServeCommand {
     }
 }
 
-/// `plan.*` 自定义事件的 schema 入口。
+/// Serve-owned session and plan events, separate from agent execution events.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServePlanEvent {
+    #[serde(rename = "session_access")]
+    SessionAccess {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        access: String,
+        #[serde(rename = "controllerName")]
+        controller_name: Option<String>,
+    },
     #[serde(rename = "session.agent_mode.changed")]
     SessionAgentModeChanged {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]

@@ -133,6 +133,24 @@ describe("stateReconcile", () => {
     expect(reconcileStateSnapshot(next, changedOrigin).sessionViews.s1.origin?.clientName).toBeNull();
   });
 
+  it("updates and clears the current host without changing access or the timeline", () => {
+    for (const mode of ["full", "session"]) {
+      let state = snapshot();
+      state.sessionViews.s1.access = "observe";
+      state.sessionViews.s1.origin = { kind: "acp", clientName: "original host" };
+      const timeline = state.sessionViews.s1.timeline;
+      for (const controllerName of ["first host", "second host", null]) {
+        const view = { ...state.sessionViews.s1, controllerName };
+        state = mode === "full"
+          ? reconcileStateSnapshot(state, { ...state, sessionViews: { ...state.sessionViews, s1: view } })
+          : mergeSessionViewSnapshot(state, { sessionId: "s1", view });
+        expect(state.sessionViews.s1.controllerName).toBe(controllerName);
+        expect(state.sessionViews.s1.timeline).toBe(timeline);
+        expect(reconcileStateSnapshot(state, structuredClone(state))).toBe(state);
+      }
+    }
+  });
+
   it("returns the previous state when the full snapshot is structurally unchanged", () => {
     const previous = snapshot();
     const reconciled = reconcileStateSnapshot(previous, snapshot());

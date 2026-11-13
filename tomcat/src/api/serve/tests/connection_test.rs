@@ -515,9 +515,28 @@ async fn external_load_checks_cwd_before_acquisition_and_needs_no_placeholder_se
     assert!(error.to_string().contains("session_cwd_mismatch"));
     assert_eq!(next.active_session_id(), Some(id.clone()));
     let rival = connect_acp(&runtime);
-    let error = handle_command(rival, load(&cwd)).await.unwrap_err();
+    loaded.mark_busy();
+    let error = handle_command(rival.clone(), load(&cwd)).await.unwrap_err();
     assert!(error.to_string().contains("session_in_use"));
     assert_eq!(*loaded.controller.lock(), Some(next.connection_id));
+    loaded.mark_idle();
+    handle_command(rival.clone(), load(&cwd)).await.unwrap();
+    assert_eq!(*loaded.controller.lock(), Some(rival.connection_id));
+    handle_command(
+        next.clone(),
+        ServeCommand::Prompt {
+            id: Some("lost-control".into()),
+            session_id: Some(id.clone()),
+            text: "must reload before prompting".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "lost-control").await["error"],
+        "read_only_session"
+    );
 
     // Even Rust-side construction cannot grant a native connection the private ACP load path.
     let (native, output) = connect(&runtime);
@@ -656,7 +675,14 @@ async fn disk_list_reports_origin_and_write_access_without_acquiring_control() {
             row(&host_id)["origin"],
             serde_json::json!({"kind":"acp","clientName":"paperclip"})
         );
-        assert_eq!(row(&host_id)["access"], "observe");
+        assert_eq!(
+            row(&host_id)["access"],
+            if stage == "cold" {
+                "control"
+            } else {
+                "observe"
+            }
+        );
         assert_eq!(row(&other_id)["access"], "observe");
         assert_eq!(row(&own_id)["access"], "control");
         assert_eq!(viewer.active_session_id().as_deref(), Some(own_id.as_str()));
@@ -674,7 +700,7 @@ async fn disk_list_reports_origin_and_write_access_without_acquiring_control() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn acp_origin_survives_disconnect_and_reload_without_observer_mutations() {
+async fn acp_origin_is_display_metadata_across_disconnect_reload_and_delete() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(4);
     let host = connect_acp(&runtime);
@@ -712,33 +738,27 @@ async fn acp_origin_survives_disconnect_and_reload_without_observer_mutations() 
         .await
         .unwrap();
         let response = frame(&output, |f| f["id"] == request).await;
-        assert_eq!(response["payload"]["access"], "observe");
+        assert_eq!(
+            response["payload"]["access"],
+            if disconnect { "control" } else { "observe" }
+        );
         assert_eq!(
             response["payload"]["origin"],
             serde_json::json!({"kind":"acp","clientName":"paperclip"})
         );
         assert_eq!(
             manager.current_session_entry().unwrap().unwrap().session_id,
-            native
+            if disconnect {
+                id.clone()
+            } else {
+                native.clone()
+            }
         );
         assert_eq!(std::fs::read(&history).unwrap(), original_bytes);
     }
     cleanup_session_slot(&host, &external, SlotCleanup::Close)
         .await
         .unwrap();
-    handle_command(
-        viewer.clone(),
-        ServeCommand::DeleteSession {
-            id: Some("deny-delete".into()),
-            session_id: id.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        frame(&output, |f| f["id"] == "deny-delete").await["error"],
-        "read_only_session"
-    );
     handle_command(
         viewer.clone(),
         ServeCommand::SwitchSession {
@@ -750,14 +770,14 @@ async fn acp_origin_survives_disconnect_and_reload_without_observer_mutations() 
     .unwrap();
     assert_eq!(
         frame(&output, |f| f["id"] == "cold").await["payload"]["access"],
-        "observe"
+        "control"
     );
     let reloaded = runtime.registry.get(&id).unwrap();
     assert_eq!(reloaded.origin, origin);
-    assert_eq!(*reloaded.controller.lock(), None);
+    assert_eq!(*reloaded.controller.lock(), Some(viewer.connection_id));
     assert_eq!(
         manager.current_session_entry().unwrap().unwrap().session_id,
-        native
+        id
     );
     assert_eq!(std::fs::read(&history).unwrap(), original_bytes);
     let next = connect_acp(&runtime);
@@ -772,20 +792,48 @@ async fn acp_origin_survives_disconnect_and_reload_without_observer_mutations() 
     .unwrap();
     assert_eq!(*reloaded.controller.lock(), Some(next.connection_id));
     let rival = connect_acp(&runtime);
-    let error = handle_command(
-        rival,
+    handle_command(
+        rival.clone(),
         ServeCommand::SwitchSession {
             id: None,
             session_id: id.clone(),
         },
     )
     .await
-    .unwrap_err();
-    assert!(error.to_string().contains("session_in_use"));
+    .unwrap();
+    assert_eq!(*reloaded.controller.lock(), Some(rival.connection_id));
     assert_eq!(
         crate::core::session::read_header(&history).unwrap().origin,
         origin
     );
+    handle_command(
+        viewer.clone(),
+        ServeCommand::DeleteSession {
+            id: Some("occupied-delete".into()),
+            session_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "occupied-delete").await["error"],
+        "session_in_use"
+    );
+    rival.disconnect().await.unwrap();
+    handle_command(
+        viewer.clone(),
+        ServeCommand::DeleteSession {
+            id: Some("unowned-delete".into()),
+            session_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "unowned-delete").await["success"],
+        true
+    );
+    assert!(!history.exists());
     for slot in runtime.registry.slots() {
         cleanup_session_slot(&viewer, &slot, SlotCleanup::Close)
             .await
@@ -1528,7 +1576,7 @@ async fn queued_new_session_does_not_block_a_pending_approval_reply() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_controller() {
+async fn busy_observer_writes_and_forged_approvals_preserve_controller() {
     use crate::core::tools::contract::confirmation::ConfirmDecision;
     use crate::core::tools::primitive::PrimitiveOperation;
     let _key = install_test_api_key();
@@ -1551,6 +1599,7 @@ async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_con
         frame(&b_buffer, |f| f["id"] == "observe").await["payload"]["access"],
         "observe"
     );
+    assert!(slot.mark_busy());
     let before = std::fs::read(slot.ctx.session_runtime.session.transcript_path(&id)).unwrap();
     for (index, requested) in [Some(id.clone()), None].into_iter().enumerate() {
         let request = format!("prompt-{index}");
@@ -1567,21 +1616,7 @@ async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_con
         .unwrap();
         assert_eq!(
             frame(&b_buffer, |f| f["id"] == request).await["error"],
-            "read_only_session"
-        );
-        let request = format!("stop-{index}");
-        handle_command(
-            b.clone(),
-            ServeCommand::Interrupt {
-                id: Some(request.clone()),
-                session_id: requested,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            frame(&b_buffer, |f| f["id"] == request).await["error"],
-            "read_only_session"
+            "busy"
         );
     }
     assert_eq!(
@@ -1589,6 +1624,7 @@ async fn observer_writes_and_forged_approvals_are_rejected_without_affecting_con
         before
     );
     assert!(!slot.is_interrupted());
+    slot.mark_idle();
     let provider = runtime.confirmation.provider_for_session(id.clone());
     let wait = tokio::spawn(async move {
         provider
@@ -2081,7 +2117,15 @@ async fn assert_project_observation(
         .unwrap();
         let opened = frame(&output, |f| f["id"] == open_id).await;
         if visible {
-            assert_eq!(opened["payload"]["access"], "observe", "{phase}: {opened}");
+            assert_eq!(
+                opened["payload"]["access"],
+                if phase == "cold" {
+                    "control"
+                } else {
+                    "observe"
+                },
+                "{phase}: {opened}"
+            );
             assert_eq!(viewer.active_session_id().as_deref(), Some(id.as_str()));
         } else {
             assert_eq!(opened["error"], "unknown_session", "{phase}: {opened}");
@@ -2089,7 +2133,14 @@ async fn assert_project_observation(
             assert_eq!(runtime.registry.get(&id).is_some(), phase == "live");
         }
         assert_eq!(viewer.current_scope().unwrap().key, key);
-        assert_eq!(manager.current_session_id().unwrap(), durable_current);
+        assert_eq!(
+            manager.current_session_id().unwrap(),
+            if visible && phase == "cold" {
+                Some(id.clone())
+            } else {
+                durable_current.clone()
+            }
+        );
         assert_eq!(std::fs::read(&history).unwrap(), original);
         if phase == "live" {
             assert_eq!(*host_slot.controller.lock(), Some(host.connection_id));
@@ -2240,6 +2291,603 @@ fn shared_sessions_require_existing_absolute_cwd_but_stdio_keeps_its_default() {
         resolve_session_paths(&params, true).unwrap().0,
         crate::infra::platform::canonicalize(dir.path()).unwrap()
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn native_writes_transfer_control_without_interrupting_either_subscription() {
+    use crate::core::llm::StreamEvent;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let (a, a_output) = connect(&runtime);
+    let (b, b_output) = connect_in_project(&runtime, work.path()).await;
+    let (provider, requests) = RecordingMockLlm::new(
+        (0..2)
+            .map(|_| {
+                vec![
+                    Ok(StreamEvent::ContentDelta {
+                        delta: "shared response".into(),
+                    }),
+                    Ok(StreamEvent::FinishReason {
+                        reason: "stop".into(),
+                    }),
+                ]
+            })
+            .collect(),
+    );
+    let slot = shared_slot_with_provider(&a, work.path(), Arc::new(provider)).await;
+    handle_command(
+        b.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("watch".into()),
+            session_id: slot.session_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&b_output, |f| f["id"] == "watch").await["payload"]["access"],
+        "observe"
+    );
+    for (new, old, new_output, old_output) in [
+        (&b, &a, &b_output, &a_output),
+        (&a, &b, &a_output, &b_output),
+    ] {
+        flush(&a, &a_output).await;
+        flush(&b, &b_output).await;
+        a_output.0.lock().clear();
+        b_output.0.lock().clear();
+        handle_command(
+            new.clone(),
+            ServeCommand::Prompt {
+                id: Some("continue".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "continue here".into(),
+                params: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            frame(new_output, |f| f["id"] == "continue").await["success"],
+            true
+        );
+        for (output, access) in [(new_output, "control"), (old_output, "observe")] {
+            frame(output, |f| f["type"] == "agent_idle").await;
+            let frames = read_ndjson_lines(output);
+            let access_index = frames
+                .iter()
+                .position(|f| f["type"] == "session_access" && f["access"] == access)
+                .unwrap();
+            let start_index = frames
+                .iter()
+                .position(|f| f["type"] == "agent_start")
+                .unwrap();
+            assert!(access_index < start_index, "{frames:?}");
+            assert!(frames.iter().any(|f| f["type"] == "message_update"));
+        }
+        assert_eq!(*slot.controller.lock(), Some(new.connection_id));
+        assert_eq!(old.active_session_id(), Some(slot.session_id.clone()));
+    }
+    assert_eq!(requests.0.lock().len(), 2);
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn current_controller_name_follows_handoffs_for_all_observers_not_origin() {
+    use crate::core::llm::StreamEvent;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(5);
+    let original = connect_acp(&runtime);
+    original.set_acp_client_name(Some("original host".into()));
+    let (provider, _) = RecordingMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".into(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }),
+    ]]);
+    let slot = shared_slot_with_provider(&original, work.path(), Arc::new(provider)).await;
+    let id = slot.session_id.clone();
+    let (view, output) = connect_in_project(&runtime, work.path()).await;
+    let (watcher, watch_output) = connect_in_project(&runtime, work.path()).await;
+    let foreign_work = tempfile::tempdir().unwrap();
+    let (foreign, foreign_output) = connect_in_project(&runtime, foreign_work.path()).await;
+    for (connection, buffer) in [(&view, &output), (&watcher, &watch_output)] {
+        handle_command(
+            connection.clone(),
+            ServeCommand::SwitchSession {
+                id: Some("watch".into()),
+                session_id: id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let opened = frame(buffer, |f| f["id"] == "watch").await;
+        assert_eq!(opened["payload"]["controllerName"], "original host");
+        assert_eq!(opened["payload"]["origin"]["clientName"], "original host");
+        flush(connection, buffer).await;
+        buffer.0.lock().clear();
+    }
+    let replacement = connect_acp(&runtime);
+    replacement.set_acp_client_name(Some(" current host ".into()));
+    let load = || ServeCommand::LoadExternalSession {
+        id: Some("load".into()),
+        session_id: id.clone(),
+        cwd: work.path().to_string_lossy().into_owned(),
+    };
+    handle_command(replacement.clone(), load()).await.unwrap();
+    for (connection, buffer) in [(&view, &output), (&watcher, &watch_output)] {
+        let event = frame(buffer, |f| f["type"] == "session_access").await;
+        assert_eq!(event["access"], "observe");
+        assert_eq!(event["controllerName"], "current host");
+        flush(connection, buffer).await;
+        buffer.0.lock().clear();
+    }
+    // A native write clears the old ACP name for both the new owner and a third observer.
+    handle_command(
+        view.clone(),
+        ServeCommand::Prompt {
+            id: Some("native".into()),
+            session_id: Some(id.clone()),
+            text: "continue".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    for (buffer, access) in [(&output, "control"), (&watch_output, "observe")] {
+        frame(buffer, |f| f["type"] == "agent_idle").await;
+        let frames = read_ndjson_lines(buffer);
+        let changed = frames
+            .iter()
+            .position(|f| f["type"] == "session_access")
+            .unwrap();
+        let started = frames
+            .iter()
+            .position(|f| f["type"] == "agent_start")
+            .unwrap();
+        assert!(changed < started);
+        assert_eq!(frames[changed]["access"], access);
+        assert!(frames[changed]["controllerName"].is_null());
+    }
+    handle_command(replacement.clone(), load()).await.unwrap();
+    // Opening a warm session also distinguishes the current controller from its origin.
+    handle_command(
+        watcher.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("reopen".into()),
+            session_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let reopened = frame(&watch_output, |f| f["id"] == "reopen").await;
+    assert_eq!(reopened["payload"]["controllerName"], "current host");
+    assert_eq!(reopened["payload"]["origin"]["clientName"], "original host");
+    for (connection, buffer) in [(&view, &output), (&watcher, &watch_output)] {
+        flush(connection, buffer).await;
+        buffer.0.lock().clear();
+    }
+    replacement.disconnect().await.unwrap();
+    for buffer in [&output, &watch_output] {
+        let event = frame(buffer, |f| f["type"] == "session_access").await;
+        assert_eq!(event["access"], "observe");
+        assert!(event["controllerName"].is_null());
+    }
+    flush(&foreign, &foreign_output).await;
+    // flush() itself inserts response fences for every live session.
+    let foreign_frames = read_ndjson_lines(&foreign_output);
+    assert!(
+        !foreign_frames
+            .iter()
+            .any(|f| f["sessionId"] == id && f["type"] != "response"),
+        "{foreign_frames:?}"
+    );
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn shared_input_prepares_attachments_steers_and_stops_without_acquiring() {
+    use serde_json::json;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let (writer, host_output) = spawn_buffered_writer(&runtime.cfg.serve);
+    let host = ServeState::connect_acp(runtime.clone(), writer);
+    host.initialized.store(true, Ordering::SeqCst);
+    let (model, requests) = PausedModel::new();
+    let slot = shared_slot_with_provider(&host, work.path(), model.clone()).await;
+    let id = slot.session_id.clone();
+    let (view, output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(
+        view.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("watch".into()),
+            session_id: id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let prompt = || ServeCommand::Prompt {
+        id: Some("host-prompt".into()),
+        session_id: Some(id.clone()),
+        text: "work on this".into(),
+        params: Default::default(),
+    };
+    handle_command(host.clone(), prompt()).await.unwrap();
+    model.wait_until_paused().await;
+    let steer = |label: &str| {
+        serde_json::from_value::<ServeCommand>(json!({
+            "type":"steer", "id":label, "sessionId":id, "text":"test first", "params":{"onlyIfRunning":true}
+        }))
+        .unwrap()
+    };
+    handle_command(view.clone(), steer("steer")).await.unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "steer").await["payload"]["queued"],
+        true
+    );
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12NgYAAAAAIAAeUn3vwAAAAASUVORK5CYII=";
+    handle_command(
+        view.clone(),
+        serde_json::from_value::<ServeCommand>(json!({
+            "type":"ingest_attachment", "id":"image", "sessionId":id,
+            "attachment":{"kind":"image", "mimeType":"image/png", "dataBase64":png}
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let image = frame(&output, |f| f["id"] == "image").await;
+    assert_eq!(image["success"], true, "{image}");
+    let sha = &image["payload"]["blobSha"];
+    for wire in [
+        json!({"type":"retain_attachment_leases", "id":"lease", "sessionId":id, "params":{"attachments":[{"blobSha":sha}]}}),
+        json!({"type":"cache_attachment_thumbnail", "id":"thumbnail", "sessionId":id, "thumbnail":{"sourceSha":sha,"thumbBase64":png}}),
+    ] {
+        let request = wire["id"].as_str().unwrap().to_owned();
+        handle_command(
+            view.clone(),
+            serde_json::from_value::<ServeCommand>(wire).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            frame(&output, |f| f["id"] == request).await["success"],
+            true
+        );
+    }
+    assert!(!slot.is_interrupted());
+    assert_eq!(*slot.controller.lock(), Some(host.connection_id));
+    for (connection, output) in [(&view, &output), (&host, &host_output)] {
+        flush(connection, output).await;
+        assert!(!read_ndjson_lines(output)
+            .iter()
+            .any(|f| f["type"] == "session_access" && f["sessionId"] == id));
+    }
+    model.release.notify_one();
+    assert_eq!(
+        frame(&output, |f| f["type"] == "agent_idle").await["outcome"],
+        "completed"
+    );
+    assert!(requests
+        .0
+        .lock()
+        .get(1)
+        .unwrap()
+        .messages
+        .iter()
+        .any(|message| message.text_content() == Some("test first")));
+    handle_command(view.clone(), steer("late-steer"))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "late-steer").await["error"],
+        "not_running"
+    );
+    model.pause_next.store(true, Ordering::SeqCst);
+    handle_command(host.clone(), prompt()).await.unwrap();
+    model.wait_until_paused().await;
+    handle_command(
+        view.clone(),
+        ServeCommand::Interrupt {
+            id: Some("stop".into()),
+            session_id: Some(id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    frame(&output, |f| {
+        f["type"] == "agent_idle" && f["outcome"] == "interrupted"
+    })
+    .await;
+    assert_eq!(*slot.controller.lock(), Some(host.connection_id));
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn background_work_blocks_native_writes_and_acp_load_without_cancelling_it() {
+    use serde_json::json;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let (owner, _) = connect(&runtime);
+    new_shared(&owner, work.path(), "owner").await;
+    let id = owner.active_session_id().unwrap();
+    let slot = runtime.registry.get(&id).unwrap();
+    let (view, output) = connect_in_project(&runtime, work.path()).await;
+    let host = connect_acp(&runtime);
+    let ticket = slot
+        .ctx
+        .session_runtime
+        .bash_task_registry
+        .spawn("sleep 30".into(), Some(work.path().to_owned()))
+        .await
+        .unwrap();
+    for wire in [
+        json!({"type":"prompt", "id":"prompt", "sessionId":id, "text":"do not take over"}),
+        json!({"type":"set_model", "id":"model", "sessionId":id, "model":"gpt-5.4"}),
+        json!({"type":"steer", "id":"plain-steer", "sessionId":id, "text":"may start a turn"}),
+    ] {
+        let request = wire["id"].as_str().unwrap().to_owned();
+        handle_command(
+            view.clone(),
+            serde_json::from_value::<ServeCommand>(wire).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            frame(&output, |f| f["id"] == request).await["error"],
+            "busy"
+        );
+    }
+    let error = handle_command(
+        host,
+        ServeCommand::LoadExternalSession {
+            id: None,
+            session_id: id.clone(),
+            cwd: work.path().to_string_lossy().into_owned(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("session_in_use"));
+    assert_eq!(*slot.controller.lock(), Some(owner.connection_id));
+    assert!(slot
+        .ctx
+        .session_runtime
+        .bash_task_registry
+        .list()
+        .iter()
+        .any(|task| task.task_id == ticket.task_id
+            && matches!(
+                task.status,
+                crate::core::tools::primitive::BashTaskStatus::Running
+            )));
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn late_acp_cancel_cleanup_does_not_touch_the_new_controller() {
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let host = connect_acp(&runtime);
+    let (model, _) = PausedModel::new();
+    let slot = shared_slot_with_provider(&host, work.path(), model.clone()).await;
+    let id = slot.session_id.clone();
+    let (native, output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(
+        native.clone(),
+        ServeCommand::Prompt {
+            id: Some("takeover".into()),
+            session_id: Some(id.clone()),
+            text: "continue".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["id"] == "takeover").await["success"],
+        true
+    );
+    model.wait_until_paused().await;
+    host.finish_cancelled_turn(&id).await.unwrap();
+    assert!(!slot.is_interrupted());
+    assert!(slot.is_busy());
+    assert_eq!(*slot.controller.lock(), Some(native.connection_id));
+    model.release.notify_one();
+    assert_eq!(
+        frame(&output, |f| f["type"] == "agent_idle").await["outcome"],
+        "completed"
+    );
+    runtime.stop_all().await.unwrap();
+}
+
+async fn shared_slot_with_provider(
+    state: &Arc<ServeState>,
+    cwd: &std::path::Path,
+    provider: Arc<dyn crate::core::llm::LlmProvider>,
+) -> Arc<registry::SessionSlot> {
+    let mut slot = create_session_slot(
+        state.clone(),
+        NewSessionParams {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let ctx = Arc::get_mut(&mut Arc::get_mut(&mut slot).unwrap().ctx).unwrap();
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        provider,
+        "gpt-5.4",
+        ctx.global_services.model_catalog.snapshot(),
+    ));
+    *slot.controller.lock() = Some(state.connection_id);
+    state.registry.insert(slot.clone()).unwrap();
+    register_slot_hooks(state, &slot);
+    state.set_active_session(&slot.session_id).unwrap();
+    slot
+}
+
+/// Pause the provider at a tool-call response without sleep-based races.
+struct PausedModel {
+    inner: RecordingMockLlm,
+    pause_next: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+impl PausedModel {
+    fn new() -> (Arc<Self>, SharedRequests) {
+        use crate::core::llm::StreamEvent;
+        let done = || {
+            vec![
+                Ok(StreamEvent::ContentDelta {
+                    delta: "done".into(),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "stop".into(),
+                }),
+            ]
+        };
+        let (inner, requests) = RecordingMockLlm::new(vec![
+            vec![
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("todo".into()),
+                    name: Some("todos".into()),
+                    arguments_delta: Some(
+                        r#"{"ops":[{"kind":"upsert","id":"check","content":"Check input"}]}"#
+                            .into(),
+                    ),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "tool_calls".into(),
+                }),
+            ],
+            done(),
+            done(),
+        ]);
+        (
+            Arc::new(Self {
+                inner,
+                pause_next: true.into(),
+                entered: Default::default(),
+                release: Default::default(),
+            }),
+            requests,
+        )
+    }
+    async fn wait_until_paused(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), self.entered.notified())
+            .await
+            .unwrap();
+    }
+}
+#[async_trait::async_trait]
+impl crate::core::llm::LlmProvider for PausedModel {
+    fn provider_name(&self) -> &str {
+        "paused-mock"
+    }
+    async fn chat(
+        &self,
+        _: crate::core::llm::ChatRequest,
+    ) -> Result<crate::core::llm::ChatResponse, crate::AppError> {
+        unreachable!()
+    }
+    async fn chat_stream(
+        &self,
+        request: crate::core::llm::ChatRequest,
+    ) -> Result<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<crate::core::llm::StreamEvent, crate::AppError>>
+                + Send
+                + Unpin,
+        >,
+        crate::AppError,
+    > {
+        let stream = crate::core::llm::LlmProvider::chat_stream(&self.inner, request).await?;
+        if self.pause_next.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(stream)
+    }
+    fn count_tokens(&self, _: &[crate::core::llm::ChatMessage]) -> Result<u32, crate::AppError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn native_plan_revision_keeps_plan_identity_and_restores_human_policy() {
+    use crate::core::llm::StreamEvent;
+    use crate::core::plan_runtime::{file_store, InteractionPolicy, PlanStartPolicy};
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(3);
+    let host = connect_acp(&runtime);
+    let (provider, requests) = RecordingMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "Revise tests before implementation".into(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        }),
+    ]]);
+    let slot = shared_slot_with_provider(&host, work.path(), Arc::new(provider)).await;
+    let plan_path = work.path().join("same-plan.plan.md");
+    let plan = file_store::PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id":"shared-plan", "goal":"revise this plan", "state":"pending",
+            "created_at":chrono::Utc::now().to_rfc3339(), "schema_version":1,
+            "todos":[{"id":"implement","content":"Implement after tests","status":"pending"}]
+        }))
+        .unwrap(),
+        body: "## Plan\nImplement before testing\n".into(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2_000).unwrap();
+    let plans = &slot.ctx.session_runtime.plan_runtime;
+    plans.enter_plan().unwrap();
+    plans.bind_plan_file_for_test(plan_path.clone());
+    plans.set_interaction_policy(InteractionPolicy {
+        start: PlanStartPolicy::Auto,
+        ..Default::default()
+    });
+    host.disconnect().await.unwrap();
+    let (native, output) = connect_in_project(&runtime, work.path()).await;
+    handle_command(
+        native.clone(),
+        ServeCommand::Prompt {
+            id: Some("revise".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "Quote: Implement before testing. Change it to testing first.".into(),
+            params: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&output, |f| f["type"] == "agent_idle").await["outcome"],
+        "completed"
+    );
+    assert_eq!(plans.active_plan().unwrap().id, "shared-plan");
+    assert_eq!(plans.active_plan_path(), Some(plan_path.clone()));
+    assert_eq!(plans.mode(), crate::core::session::AgentMode::Plan);
+    assert_eq!(plans.interaction_policy(), InteractionPolicy::default());
+    assert_eq!(
+        file_store::read_plan(&plan_path).unwrap().frontmatter.state,
+        file_store::PlanFileState::Pending
+    );
+    assert!(requests.0.lock()[0].messages.iter().any(|m| m
+        .text_content()
+        .is_some_and(|text| text.contains("Change it to testing first"))));
+    runtime.stop_all().await.unwrap();
 }
 
 #[tokio::test]

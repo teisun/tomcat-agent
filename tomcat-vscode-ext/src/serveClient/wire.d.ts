@@ -60,6 +60,10 @@ export type KeySource = "saved" | "environment";
 
 export type ListSessionsScope = "live" | "disk";
 
+export type LlmErrorStage = "Connect" | "Send" | "BodyRead" | "IdleTimeout" | "ReadTimeout" | "NonStreamStale" | "Parse";
+
+export type LlmFailureKind = "context_overflow" | "billing" | "authentication" | "rate_limit" | "upstream_transient" | "stream_interrupted" | "empty_response" | "content_filtered" | "unsupported_multimodal" | "invalid_request" | "unknown";
+
 export type Locale = "en" | "zh-CN";
 
 export type Message = any;
@@ -213,6 +217,11 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.verify";
   verdict?: null | string;
+} | {
+  access: string;
+  controllerName?: null | string;
+  sessionId: string;
+  type: "session_access";
 } | {
   agentMode?: null | string;
   sessionId?: null | string;
@@ -416,6 +425,10 @@ export type ToolMediaRef = {
 
 export type ToolOutput = any;
 
+export interface TurnFailure {
+  kind: LlmFailureKind;
+  phase?: LlmErrorStage | null;
+}
 export type UiLanguage = "auto" | "en" | "zh-CN";
 
 export interface ConnectorRecoveryProgress {
@@ -1025,6 +1038,10 @@ export type WireEvent = ({
   type: "context_overflow_trim_end";
   willRetry: boolean;
 } | {
+  failure?: TurnFailure | null;
+  outcome: AgentIdleOutcome;
+  type: "agent_idle";
+} | {
   finishReason: string;
   message: string;
   type: "llm_notice";
@@ -1038,9 +1055,6 @@ export type WireEvent = ({
   toolName: string;
   truncatedChars: number;
   type: "tool_result_truncated";
-} | {
-  outcome: AgentIdleOutcome;
-  type: "agent_idle";
 } | {
   partialTextLen: number;
   toolResultsCount: number;

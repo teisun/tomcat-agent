@@ -2639,6 +2639,16 @@
           "type"
         ],
         "properties": {
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/TurnFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "outcome": {
             "$ref": "#/definitions/AgentIdleOutcome"
           },
@@ -3670,6 +3680,35 @@
           }
         }
       },
+      "LlmErrorStage": {
+        "type": "string",
+        "enum": [
+          "Connect",
+          "Send",
+          "BodyRead",
+          "IdleTimeout",
+          "ReadTimeout",
+          "NonStreamStale",
+          "Parse"
+        ]
+      },
+      "LlmFailureKind": {
+        "description": "LLM 失败的语义类别。它刻意不等同于 HTTP 状态码：同一个 403 既可能是鉴权， 也可能是余额不足；流内错误则根本没有 HTTP 状态码。",
+        "type": "string",
+        "enum": [
+          "context_overflow",
+          "billing",
+          "authentication",
+          "rate_limit",
+          "upstream_transient",
+          "stream_interrupted",
+          "empty_response",
+          "content_filtered",
+          "unsupported_multimodal",
+          "invalid_request",
+          "unknown"
+        ]
+      },
       "Message": {
         "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
       },
@@ -3926,6 +3965,28 @@
       },
       "ToolOutput": {
         "description": "占位：工具输出。"
+      },
+      "TurnFailure": {
+        "description": "The same typed classification recorded in the failed turn's transcript.",
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/definitions/LlmFailureKind"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/LlmErrorStage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
       }
     }
   },
@@ -4099,6 +4160,35 @@
           }
         }
       },
+      "LlmErrorStage": {
+        "type": "string",
+        "enum": [
+          "Connect",
+          "Send",
+          "BodyRead",
+          "IdleTimeout",
+          "ReadTimeout",
+          "NonStreamStale",
+          "Parse"
+        ]
+      },
+      "LlmFailureKind": {
+        "description": "LLM 失败的语义类别。它刻意不等同于 HTTP 状态码：同一个 403 既可能是鉴权， 也可能是余额不足；流内错误则根本没有 HTTP 状态码。",
+        "type": "string",
+        "enum": [
+          "context_overflow",
+          "billing",
+          "authentication",
+          "rate_limit",
+          "upstream_transient",
+          "stream_interrupted",
+          "empty_response",
+          "content_filtered",
+          "unsupported_multimodal",
+          "invalid_request",
+          "unknown"
+        ]
+      },
       "Message": {
         "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
       },
@@ -4233,8 +4323,36 @@
         }
       },
       "ServePlanEvent": {
-        "description": "`plan.*` 自定义事件的 schema 入口。",
+        "description": "Serve-owned session and plan events, separate from agent execution events.",
         "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "access",
+              "sessionId",
+              "type"
+            ],
+            "properties": {
+              "access": {
+                "type": "string"
+              },
+              "controllerName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session_access"
+                ]
+              }
+            }
+          },
           {
             "type": "object",
             "required": [
@@ -5547,6 +5665,28 @@
       "ToolOutput": {
         "description": "占位：工具输出。"
       },
+      "TurnFailure": {
+        "description": "The same typed classification recorded in the failed turn's transcript.",
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/definitions/LlmFailureKind"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/LlmErrorStage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "WireEvent": {
         "description": "serve `--print-schema` 使用的事件 wire 入口：与 [`WireEnvelope`] 同形，但用拥有所有权的字段 参与 `JsonSchema` / fixture 导出，不影响运行时 event bus 发射路径。",
         "type": "object",
@@ -5602,6 +5742,16 @@
               "type"
             ],
             "properties": {
+              "failure": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/TurnFailure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "outcome": {
                 "$ref": "#/definitions/AgentIdleOutcome"
               },

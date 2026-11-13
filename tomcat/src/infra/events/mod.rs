@@ -404,6 +404,14 @@ pub enum AgentIdleOutcome {
     Failed,
 }
 
+/// The same typed classification recorded in the failed turn's transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TurnFailure {
+    pub kind: crate::infra::error::LlmFailureKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<crate::infra::error::LlmErrorStage>,
+}
+
 /// Reference-only tool media, shared by live events and history attachment views.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -437,6 +445,8 @@ pub enum AgentEvent {
     /// 该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。
     AgentIdle {
         outcome: AgentIdleOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<TurnFailure>,
     },
     /// Input was archived and appended at a safe point, not necessarily answered yet.
     SteeringConsumed {

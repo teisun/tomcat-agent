@@ -1507,11 +1507,24 @@ fn protocol_errors_load_ownership_and_saved_history() {
     let mut next = spawn(&fx);
     initialize(&mut next);
     let load = json!({"sessionId":session, "cwd":fx.0.workspace, "mcpServers":[]});
-    let occupied = request(&mut next, json!("occupied"), "session/load", load.clone());
-    assert!(occupied.last().unwrap()["error"]["message"]
+    let acquired = request(
+        &mut next,
+        json!("acquire-idle"),
+        "session/load",
+        load.clone(),
+    );
+    ok(&acquired);
+    prompt(
+        &mut first,
+        "lost-control",
+        &session,
+        "must load before writing again",
+    );
+    let rejected = first.recv_until(WAIT, |v| v["id"] == "lost-control");
+    assert!(rejected.last().unwrap()["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("session_in_use"));
+        .contains("read_only_session"));
     close(first);
     let loaded = request(&mut next, json!("loaded"), "session/load", load);
     ok(&loaded);
@@ -1831,6 +1844,69 @@ fn permission_wait_ends_on_disconnect_and_service_stop_without_writing() {
 }
 
 #[test]
+fn network_failure_can_be_resumed_by_a_new_acp_process_in_the_same_session() {
+    // EOF before the first valid SSE event is a transport interruption, not a
+    // provider HTTP failure or an intentionally empty model answer.
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
+        response(vec![]),
+        response(vec![]),
+        response(vec![sse_delta("recovered"), sse_finish("stop"), sse_done()]),
+    ]);
+    let fx = ServiceFixture::new(&server.base_url);
+    fx.configure(|cfg| {
+        cfg.llm.agent_max_attempts = 2;
+        cfg.llm.agent_retry_base_delay_ms = 1;
+    });
+    let mut first = spawn(&fx);
+    initialize(&mut first);
+    let session = new_session(&mut first, &fx.0.workspace);
+    prompt(&mut first, "failed", &session, "first interrupted task");
+    let frames = first.recv_until(WAIT, |v| v["id"] == "failed");
+    let error = &frames.last().unwrap()["error"];
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{frames:?}"
+    );
+    assert_eq!(
+        error["data"],
+        "network error: model provider stream disconnected"
+    );
+    assert_eq!(common::serve::captured_non_title_requests(&server).len(), 2);
+    close(first);
+
+    // A new process models Multica's existing re-dispatch, not a Multica test.
+    let mut second = spawn(&fx);
+    initialize(&mut second);
+    let loaded = request(
+        &mut second,
+        json!("load"),
+        "session/load",
+        json!({"sessionId":session,"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    ok(&loaded);
+    assert!(text(&loaded, "user_message_chunk").contains("first interrupted task"));
+    prompt(&mut second, "resume", &session, "retry the same task");
+    let frames = second.recv_until(WAIT, |v| v["id"] == "resume");
+    assert_eq!(ok(&frames)["stopReason"], "end_turn");
+    assert_eq!(text(&frames, "agent_message_chunk"), "recovered");
+    let history = request(
+        &mut second,
+        json!("history"),
+        "session/load",
+        json!({"sessionId":session,"cwd":fx.0.workspace,"mcpServers":[]}),
+    );
+    ok(&history);
+    let users = text(&history, "user_message_chunk");
+    assert!(
+        users.contains("first interrupted task") && users.contains("retry the same task"),
+        "{history:?}"
+    );
+    close(second);
+}
+
+#[test]
 fn model_failure_returns_an_rpc_error_not_success() {
     let failure = response(vec![common::serve::ScriptedPart {
         delay_ms: 0,
@@ -1856,6 +1932,14 @@ fn model_failure_returns_an_rpc_error_not_success() {
     assert!(
         reply.get("result").is_none(),
         "failure must not be end_turn: {reply}"
+    );
+    assert_eq!(
+        reply["error"]["message"],
+        "LLM request error: injected provider failure"
+    );
+    assert!(
+        reply["error"].get("data").is_none(),
+        "authentication is not a network failure: {reply}"
     );
     close(client);
 }

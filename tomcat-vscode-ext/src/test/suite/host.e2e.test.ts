@@ -72,7 +72,7 @@ suite("Tomcat host E2E", () => {
     await assertExternalHostObservation(getTomcatExtensionApi);
   });
 
-  (process.env.TOMCAT_E2E_REAL_OBSERVATION === "1" ? test : test.skip)("shared service observation: project-scoped, live and read-only", async function () {
+  (process.env.TOMCAT_E2E_REAL_OBSERVATION === "1" ? test : test.skip)("shared service observation: project-scoped, live and shared-input", async function () {
     this.timeout(180_000);
     await assertSharedObservationFlow(getTomcatExtensionApi);
   });

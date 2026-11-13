@@ -144,7 +144,9 @@ impl ServeConnection {
             .get(session_id)
             .ok_or_else(|| AppError::Config("unknown_session".into()))?;
         if !self.controls(&slot) {
-            return Err(AppError::Config("read_only_session".into()));
+            // Acquisition already stopped the previous controller's work. Never
+            // fail the cancelled prompt or stop the replacement controller's turn.
+            return Ok(());
         }
         self.stop_slot_work(&slot).await
     }
@@ -176,7 +178,9 @@ impl ServeConnection {
             .filter(|slot| *slot.controller.lock() == Some(self.connection_id))
             .collect();
         for slot in &slots {
+            let _replay = slot.message_replay.lock();
             *slot.controller.lock() = None;
+            let _ = super::ownership::notify_session_access(self, slot, Some(self.connection_id));
         }
         let results =
             futures_util::future::join_all(slots.iter().map(|slot| self.stop_slot_work(slot)))

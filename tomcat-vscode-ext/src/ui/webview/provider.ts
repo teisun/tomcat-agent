@@ -1244,7 +1244,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.projectCurrentDraft(sessionId, session),
       ]),
     );
-    return { ...snapshot, sessionViews, messageQueueSupported: this.messageQueueEnabled, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
+    return { ...snapshot, sessionViews, sharedInputSupported: this.sharedInputEnabled, messageQueueSupported: this.messageQueueEnabled, rewindSupported: !!this.initialized && hasServeCapability(this.initialized, "rewind_and_resend"), sessionFilesSupported: !!this.initialized && hasServeCapability(this.initialized, "session_files") };
   }
 
   private findToolCard(
@@ -1500,6 +1500,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private get messageQueueEnabled(): boolean { return !!this.initialized && hasServeCapability(this.initialized, "message_queue"); }
+  private get sharedInputEnabled(): boolean { return !!this.initialized && hasServeCapability(this.initialized, "shared_session_input"); }
+
 
   /** Shared wire construction, with no active-session or draft side effects. */
   private sendQueueInput(sessionId: string, kind: UserSubmitKind, content: QueueContent) {
@@ -1807,7 +1809,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private canRecoverError(sessionId: string): boolean {
     const view = this.peekState().sessionViews[sessionId];
-    return !this.disposed && !!view && view.access !== "observe" && !this.closedFileSessions.has(sessionId)
+    return !this.disposed && !!view && (view.access !== "observe" || this.sharedInputEnabled) && !this.closedFileSessions.has(sessionId)
       && !["failed", "reconnecting"].includes(this.serveConnectionStatus)
       && !this.sessionBlocked(sessionId) && this.sessionQuiescent(sessionId);
   }
@@ -3808,7 +3810,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const draft = await this.draftStore.hydrate(sessionId, (candidate) =>
         this.sessionExists(candidate),
       );
-      if (this.peekState().sessionViews[sessionId]?.access !== "observe") {
+      if (this.peekState().sessionViews[sessionId]?.access !== "observe" || this.sharedInputEnabled) {
         await this.retainDraftAttachmentLeases(sessionId, draft);
       }
       await this.applyDraftToState(sessionId, draft);

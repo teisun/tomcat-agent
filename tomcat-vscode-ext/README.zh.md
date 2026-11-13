@@ -96,6 +96,22 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 - 切会话或仅重载 Webview 不会丢失未提交选择；
 - 回答、整单跳过、中断、宿主断开会生成不同的历史卡片。VS Code Window / Extension Host reload 属于不可恢复断开，而仅重载 Webview 仍会继续等待。
 
+## 与 ACP 宿主共用会话
+
+```text
+ACP 宿主 + VS Code -> tomcat serve 中的同一会话 -> 两端连接期间持续刷新
+  运行中：发送进入待发；“立即发送”插话；停止结束当前任务
+  空闲时：发送或改设置 -> 安全接手 -> 继续同一会话
+```
+
+打开宿主实际工作的项目（独立 worktree 要打开它自己），从原会话列表选择目标会话。CLI 声明 `shared_session_input` 后，输入框可写，也能提前添加附件；运行中仍不能切换模型或模式。空闲后可从计划预览引用片段，要求修改**同一 planId、同一份计划文件**，不会因此自动开工。接手切换的是本窗口的执行环境、私有 MCP 和人工确认策略，不复制历史、不沿用已结束宿主任务的令牌。旧服务保持原只读行为。
+
+实时看到的、具备恢复动作的失败，任何可写窗口都可手动重试，或由原有可取消的 **5 分钟倒计时**恢复；新轮开始就取消倒计时。网络中断还会通过 ACP 返回英文诊断，供 Multica 原有重派策略识别，不代表所有错误都会重试。
+
+**Multica 不是常驻订阅者：**它不显示插话原文，自己的轮次结束便断开；VS Code 停止会使其任务记为 aborted。此后 VS Code 的新轮或成功重试不会实时回到 Multica，也不会把它原失败任务改成成功；下个任务可以加载原会话，但会话忙时会被拒绝。VS Code 接手后执行 `multica` 命令使用本机 CLI 的登录身份，而不是已结束任务的 Agent 身份。完整边界见[接入说明](../tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/README.md#61-sharing-a-session-with-vs-code)。
+
+删除不会先接手：其它活宿主即使空闲也会阻止删除；ACP 来源本身不阻止。删除对话保留计划文件，但 Multica 下次新建会话不会自动恢复与该计划的关联。
+
 ## 会话、Settings 与计划审查
 
 ```text

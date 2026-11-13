@@ -49,6 +49,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "prompt",
                             "steer",
                             "message_queue",
+                            "shared_session_input",
                             "follow_up",
                             "resume",
                             "retry",

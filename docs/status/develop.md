@@ -1,29 +1,28 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-13 17:39 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-14 07:48 +0800 | ACTIVE | develop | - |
 
-### DONE：Gemini 原生适配、签名自愈与版本升级（2026-11-13）
+### DONE：ACP / VS Code 共享输入、宿主提示与版本升级（2026-11-14）
 
 ```text
-签名类HTTP400 → 仅本次出站按可见历史重建、补首调用哨兵 → 重发一次
-                  不改会话历史                    成功 / 原样报错
-其他400 → 不触发签名降级
+同项目 ACP 与 VS Code → serve 中的同一会话 → 连接期间持续刷新
+  运行中：待发 / 插话 / 停止 / 附件准备，不换执行宿主
+  静止后：写入安全接手，继续原会话和计划；提示显示当前宿主名
 ```
 
-- **提交范围**：纳入此前未提交的Gemini原生接入、旧Chat Completions补丁回滚、原始parts全历史回放、签名400自愈、设置页/CLI帮助/测试/文档；同时纳入已确认的通用读取去重修复，避免工具结果移出历史后残留“已读”标记。已检查staged/unstaged/untracked，原生模块与新夹具、回放测试不得漏提；忽略目录内的诊断产物不纳入。
-- **实现**：在Gemini适配层复用结构化HTTP状态和错误摘要，只匹配400中的`thought signature`/`thought_signature`（忽略大小写）；正常请求保留原回放，签名被拒后仅本次出站关闭opaque replay并warn一次。`retry_count=0`也生效；降级失败直接返回，不进入普通重试循环。响应仍按原续传设置保存新parts/签名，不增加持久化状态、配置或公共错误类型，不改通用重试、账本或其它供应商。
-- **实施阶段验证（非本次重跑）**：复用MockHttpServer新增2项测试，正确filter下先RED 2/2，修复后Gemini定向22/22通过；覆盖流式/非流式、两种关键字、零常规重试、出站哨兵、工具结果不变、新签名保留、普通400不重发、降级400/503不循环。`cargo clippy --all-targets -- -D warnings`与`cargo fmt --check`通过。首次filter漏`registry`导致0测试，记录但不计通过；无其它本轮残留失败。
-- **版本与提交检查**：按用户本次独立请求，使用`node scripts/release-version.mjs bump --all patch`且只运行一次：CLI `0.1.93 → 0.1.94`、EXT `0.2.11 → 0.2.12`、内置CLI `0.1.93 → 0.1.94`。前后版本一致性检查通过；相对执行前，五个版本文件只有允许的版本字段变化，依赖与私有GUI版本未变。覆盖率未测量，Cov%保持`-`，提交信息不编造覆盖率。
-- **提交卫生**：发现昨日遗留的零字节`index.lock`，核实没有Git进程或文件持有者后移至忽略的验收目录备份；初次staged空白检查发现一份SSE夹具末尾多余空行，仅移除该空行，JSON帧不改。源码已有EOF尾帧处理；按用户要求不重跑测试。
-- **文档/边界**：README将ReplayWindow范围收窄到Chat Completions，补签名400降级说明。同一会话后续仍可能先400再降级，不宣称永久消除坏签名或解决限流/窄读。按用户要求本次提交不跑测试；只检查提交范围、版本一致性和空白，实施阶段结果不冒充重跑。本地提交后再按现有流程构建含CLI的`darwin-x64`插件整包；构建/打包结果以实际产物为准，不等于安装或发布。未安装/重启/推送/打tag/创建release。签名验收见`.agents/acceptance/gemini-signature-recovery/acceptance.md`；本次版本和打包记录位于`.agents/acceptance/gemini-release-20261113/`。
+- **提交范围**：本仓库 Rust serve/ACP、OpenAI 流内错误分类、VS Code 扩展、协议 fixtures、回归用例及相关文档；检查 staged / unstaged / untracked，将新增 `prompt_failure_test.rs` 一并纳入。Multica 仓库未修改，忽略目录内验收产物不提交。
+- **实现与边界**：输入权限与执行宿主身份分离，去掉 ACP 来源永久只读限制；复用现有事件多播、接手流程及删除静止检查，不加服务端队列或独立订阅层。插话/停止/附件准备不换宿主；删除独立准入，仍受其它活宿主与未完成工作保护。接手保留 sessionId / planId / 计划文件，不自动开工；旧服务按能力保留只读兼容。
+- **宿主与恢复**：运行提示仅显示当前连接名，未知回退短句、空闲隐藏，接手/断开同步刷新旁观者；不从 origin 猜宿主。可写窗口复用现有错误动作与五分钟恢复，ACP 仅给传输中断附英文网络诊断；OpenAI 明确的流内鉴权/额度等错误保留自身分类，避免误触发网络重派。
+- **实施阶段验证（非本次重跑）**：最终扩展 core 951、GUI 910、受影响扩展集成 6、真实 DevHost 1 通过；Rust serve 261 通过/1 ignored、受影响集成 17 通过/2 skipped，严格 Clippy、类型检查与 wire 一致性通过。8 组宽窄屏 PNG/ARIA/console 已读取。此前 Rust 全库缺 rg、并行集成漏更新 schema fixture 的非零整批及单项复验如实保留，不冒称整批重跑全绿。完整任务、失败分流与边界见 `tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/ACCEPTANCE.md` C.2/C.3。
+- **本次版本与提交检查**：按用户请求，仅执行一次 `node scripts/release-version.mjs bump --all patch`：CLI `0.1.94 → 0.1.95`、EXT `0.2.12 → 0.2.13`、内置 CLI `0.1.94 → 0.1.95`；前后版本一致性及五文件空白检查通过，只改允许的版本字段，依赖及私有 GUI 版本未变。本次不重跑测试或覆盖率，Cov% 保持 `-`，提交信息不编造数值；本地提交后再编译并打 `darwin-x64` 内置 CLI 整包，产物结果以实际命令为准。
 
-### INTERFACE：Gemini 原生协议与读取状态
+### INTERFACE：共享输入与当前宿主
 
-- 新增`api = "google-gemini"`、`thinking_format = "gemini"`与`ReasoningFormat::GeminiThoughtSignatures`，通过既有模型配置和continuation保存/回放；`ReadFileState::retain_present_tool_results`用于请求前清理已离开历史的读取标记。签名400自愈只改本次出站，不增加配置或持久化格式。
+- 新能力 `shared_session_input`；新增 `session_access` 推送及可选显示字段 `controllerName`，打开回复也带回当前宿主名；`access` 仍表示宿主身份，`origin` 仍为创建来源。失败 `agent_idle` 可附现有失败分类 `failure`，ACP 保留原错误摘要并仅对传输中断补充诊断。不新增持久化格式、配置、Reviewer 入口或跨端消息伪装。
 
-### BLOCKED：本次提交与打包边界
+### BLOCKED：部署与交付边界
 
-- 无提交阻塞；按用户要求不重跑测试、覆盖率或真实收费模型请求。窄读调查继续暂缓，历史0/3、签名400与限流部分结果保留；本次整包仅面向当前Intel macOS主机，不能据此宣称其它平台包已构建或运行验收完成。
+- 无本地提交阻塞；本次按要求不跑测试。真实 Multica daemon/task/issue/通知、外部宿主旅程、Windows/Linux/arm64 与收费模型未在本批验收；Multica 不是常驻订阅者，插话原文和 VS Code 后续新轮不承诺回到其 UI，成功重试不改写其原失败任务。只打当前 Intel macOS 整包，不安装、不重启在用服务、不推送、不打 tag 或创建 release。
 
 ### DONE：Gemini 原始 parts 回放与读取文案纠错（2026-11-13；窄读改善按用户决定暂缓）
 

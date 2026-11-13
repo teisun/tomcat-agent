@@ -185,6 +185,40 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 - Windows 下 Multica Job 可能不允许 Tomcat ACP 再脱离创建共享服务。执行任务前在相同账号和配置目录的独立终端执行 `tomcat serve start`，再派任务；不要修改 Job 权限绕过这个边界。
 - 这是同一台执行机器上的本地进程和本机 IPC，不是让浏览器直接访问远程 Tomcat。远程任务必须把 daemon、Tomcat 和 cwd 一起部署到目标执行机。
 
+### 6.1 Sharing a session with VS Code
+
+```text
+Multica 的 ACP 轮次 -> 同一 serve 会话 -> VS Code 同项目打开并持续收流
+  VS Code：待发 / 立即发送插话 / 停止 / 附件准备
+  会话静止：VS Code 写入接手 -> 引用并修订原计划
+  新 Multica 任务：session/load 接回原会话 -> 新轮
+```
+
+需要支持 `shared_session_input` 的 Tomcat 服务和匹配扩展；旧服务仍只读。`access` 仅表示是否宿主，不再由 `origin` 永久限制输入。插话、停止、附件准备不换宿主；其它写入和 ACP load 仅在旧活宿主没有活工作时接手，并切换执行环境、私有 MCP、确认路由与交互策略。会话历史、模型、模式、planId 与计划文件不变；VS Code 恢复人工确认策略，不自动开工。删除不接手；他端活宿主（含空闲）仍会阻止，断开后的 ACP 来源本身不阻止。
+
+运行提示只显示当前宿主名称，例如“正在 multica-agent-sdk 中运行”；名称取当前连接上报值，不沿用会话创建来源，也不硬编码品牌别名。接手、换宿主或断开会同步更新/清空；未上报名或旧服务缺字段时显示“正在其他窗口或客户端中运行”，空闲后隐藏，不再附操作说明。
+
+**仅 Tomcat 改动的七个边界（Multica 代码不变）：**
+
+1. 插话原文不出现在 Multica 时间线：Tomcat ACP 实时映射和 Multica `normalizeACPUpdateType` 都不提供该展示；模型会收到插话，原任务期间的后续回复仍回到 Multica，不能把用户输入伪装成助手消息。
+2. VS Code 停止当前轮次，Multica 将任务记为 `aborted`（`tomcat.go` 的 cancelled 分支）。
+3. Multica 仅在自己的 prompt 期间接收，轮次结束关闭 stdin。VS Code 后续新轮不在 Multica 实时显示；其下次 load 继承历史/计划上下文，但不回放到 Multica UI。VS Code 重试成功也不会把原失败 Task 改成成功。
+4. VS Code 正在运行或仍有后台工作时，Multica load 返回 `session_in_use`，不是 fresh 信号；等会话静止后再触发。
+5. 删除对话不删计划文件；之后 Multica 收到 `unknown_session`，按其原有恢复拒绝流程新建会话、从 issue 重建上下文。旧对话和计划关联不会自动恢复。
+6. 仅网络中断附英文诊断；429、5xx、额度、鉴权等如实返回。是否自动重派由 Multica 决定：其当前策略排除 autopilot、triage、`max_attempts ≤ 1` 等情况，并有次数上限。若有 VS Code 正在显示该会话，符合恢复条件的失败也可触发原有 5 分钟倒计时；新轮开始会取消它。Multica 排队超过 5 分钟时 VS Code 可能先接手，随后 load 仍可能被忙碌状态拒绝。
+7. VS Code 接手不继承已结束任务的 `MULTICA_TOKEN`、任务 ID 或临时目录；之后运行 `multica` 使用本机 CLI 登录身份，通常是用户本人，未登录可能失败。若要求 Agent 身份，须另行在 Multica 侧设计有效授权。
+
+**网络诊断是对 Multica 当前分类词表的依赖，不是新重试协议。** serve 的失败 `agent_idle` 携带与 transcript 相同来源的 `failure {kind, phase}`。仅 `kind=stream_interrupted` 时，ACP `session/prompt` 的 `error.data` 附下列不本地化文本，`message` 保留原摘要：
+
+| phase | data |
+| --- | --- |
+| Connect | `network error: unable to connect to the model provider` |
+| Send | `network error: error sending request to the model provider` |
+| ReadTimeout | `network error: i/o timeout waiting for the model provider` |
+| BodyRead / IdleTimeout / 无阶段 | `network error: model provider stream disconnected` |
+
+Multica `hermes.go` 将 data 拼入错误，`pkg/taskfailure/classify.go` 据关键词识别 `provider_network`，`internal/service/task.go` 决定重派并保留原会话引用。若词表或结构化错误协议变化，需要重新验证。当前工作仅用 Tomcat 的真实 ACP 新进程模拟重派、同会话 load；**没有运行真实 Multica 全链路**，不据此声称 issue 评论或通知行为已实测。本节只更新使用契约，不更改迁移包代码、补丁或来源哈希。
+
 ## 7. 最小验证
 
 环境要求：Go `1.26.9`、Node `>=22`、pnpm `10.28.2`。从 Multica 根目录先执行生产包聚焦测试：

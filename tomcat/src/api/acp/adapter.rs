@@ -67,12 +67,38 @@ impl Replies {
                 let result = match event["outcome"].as_str() {
                     Some("completed") => Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
                     Some("interrupted") => Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
-                    _ => Err(failed(
-                        prompt
-                            .error
-                            .take()
-                            .unwrap_or_else(|| "Agent turn failed".into()),
-                    )),
+                    _ => {
+                        let mut error = failed(
+                            prompt
+                                .error
+                                .take()
+                                .unwrap_or_else(|| "Agent turn failed".into()),
+                        );
+                        if let Ok(failure) = serde_json::from_value::<
+                            crate::infra::events::TurnFailure,
+                        >(event["failure"].clone())
+                        {
+                            use crate::infra::error::{LlmErrorStage, LlmFailureKind};
+                            if failure.kind == LlmFailureKind::StreamInterrupted {
+                                // Keep the display summary; give hosts a locale-independent diagnostic.
+                                // HTTP/account failures deliberately do not enter this branch.
+                                let diagnostic = match failure.phase {
+                                    Some(LlmErrorStage::Connect) => {
+                                        "network error: unable to connect to the model provider"
+                                    }
+                                    Some(LlmErrorStage::Send) => {
+                                        "network error: error sending request to the model provider"
+                                    }
+                                    Some(LlmErrorStage::ReadTimeout) => {
+                                        "network error: i/o timeout waiting for the model provider"
+                                    }
+                                    _ => "network error: model provider stream disconnected",
+                                };
+                                error = error.data(Value::String(diagnostic.into()));
+                            }
+                        }
+                        Err(error)
+                    }
                 };
                 let _ = completion.send(result);
             }
@@ -700,3 +726,7 @@ fn json(value: impl Serialize) -> acp::Result<Value> {
 #[cfg(test)]
 #[path = "tests/setup_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/prompt_failure_test.rs"]
+mod prompt_failure_test;

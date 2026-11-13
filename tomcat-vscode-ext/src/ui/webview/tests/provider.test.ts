@@ -74,6 +74,30 @@ it("explains an empty window's missing workspace without inventing a session", a
   }
 });
 
+describe("shared-session draft hydration", () => {
+  it.each([false, true])("renews observed drafts only with shared-input capability (%s)", async sharedInput => {
+    const retainAttachmentLeases = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({ capabilities: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: { retainAttachmentLeases } as never,
+    });
+    const host = provider as any;
+    host.initialized = { capabilities: sharedInput ? ["shared_session_input"] : [] };
+    host.stateStore.setActiveSession("host");
+    host.stateStore.applySessionOpen({ sessionId: "host", access: "observe" });
+    const attachment = { id: "image", blobSha: "a".repeat(64), bytes: 10, filename: "image.png", kind: "image", mimeType: "image/png" };
+    vi.spyOn(host.draftStore, "hydrate").mockResolvedValue({ text: "saved", segments: [], attachments: [attachment] });
+    try {
+      await host.hydrateDraft("host");
+      if (sharedInput) expect(retainAttachmentLeases).toHaveBeenCalledExactlyOnceWith("host", [{ blobSha: attachment.blobSha, providerSha: null }]);
+      else expect(retainAttachmentLeases).not.toHaveBeenCalled();
+      expect(provider.currentState().sessionViews.host.access).toBe("observe");
+    } finally { provider.dispose(); }
+  });
+});
+
 describe("observer question lifecycle", () => {
   it("reuses pending answers and drops remote termination without caching or closing a reissued question", async () => {
     __testing.reset();

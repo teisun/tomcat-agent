@@ -33,6 +33,32 @@ pub(super) async fn handle(
     state.writer.send(OutFrame::Response(response))
 }
 
+/// Shared by deletion and control acquisition; callers separately reserve/check busy.
+pub(super) fn slot_has_live_work(state: &ServeState, slot: &super::registry::SessionSlot) -> bool {
+    slot.ctx
+        .session_runtime
+        .bash_task_registry
+        .list()
+        .iter()
+        .any(|task| {
+            matches!(
+                task.status,
+                BashTaskStatus::Running | BashTaskStatus::DrainingOutput
+            )
+        })
+        || slot
+            .run_task
+            .lock()
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        || slot.ctx.agent_registry.has_children(&slot.session_id)
+        || state.ask_question.has_pending_session(&slot.session_id)
+        || state.confirmation.has_pending_session(&slot.session_id)
+        || slot
+            .resume_pending_ask_question
+            .load(std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn delete(state: &Arc<ServeState>, id: &str) -> Result<DeleteSessionOutcome, AppError> {
     validate_session_id(id)?;
     let manager = if let Some(active) = state
@@ -54,35 +80,13 @@ async fn delete(state: &Arc<ServeState>, id: &str) -> Result<DeleteSessionOutcom
         return Err(AppError::Config("session_scope_mismatch".into()));
     }
     if let Some(slot) = state.registry.get(id) {
+        if state.shared && super::ownership::has_other_live_controller(state, &slot) {
+            return Err(AppError::Config("session_in_use".into()));
+        }
         if !slot.mark_busy() {
             return Err(AppError::Config("busy".into()));
         }
-        let background_running = slot
-            .ctx
-            .session_runtime
-            .bash_task_registry
-            .list()
-            .iter()
-            .any(|task| {
-                matches!(
-                    task.status,
-                    BashTaskStatus::Running | BashTaskStatus::DrainingOutput
-                )
-            });
-        let unjoined = slot
-            .run_task
-            .lock()
-            .as_ref()
-            .is_some_and(|task| !task.is_finished());
-        if background_running
-            || unjoined
-            || slot.ctx.agent_registry.has_children(id)
-            || state.ask_question.has_pending_session(id)
-            || state.confirmation.has_pending_session(id)
-            || slot
-                .resume_pending_ask_question
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if slot_has_live_work(state, &slot) {
             slot.mark_idle();
             return Err(AppError::Config("busy".into()));
         }

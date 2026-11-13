@@ -2812,13 +2812,20 @@ export class WebviewStateStore {
     }
   }
 
-  /** Only a successful open may change the displayed session's access. */
+  /** Opening and ordered control-transfer events are authoritative for host identity. */
   applySessionOpen(open: import("../../serveClient/sessionRouter").SessionOpenResult): void {
     const session = this.ensureSession(open.sessionId);
-    session.access = open.access;
     session.origin = open.origin;
-    session.ownedByThisFrontend = open.access === "control";
-    this.syncTabOwnedByFrontend(open.sessionId);
+    this.applySessionAccess(open.sessionId, open.access, open.controllerName);
+  }
+
+  private applySessionAccess(sessionId: string, access: "control" | "observe", controllerName?: string | null): void {
+    const session = this.state.sessionViews[sessionId];
+    if (!session) return;
+    session.access = access;
+    session.controllerName = controllerName?.trim() || null;
+    session.ownedByThisFrontend = access === "control";
+    this.syncTabOwnedByFrontend(sessionId);
   }
 
   applySessionState(
@@ -3174,6 +3181,11 @@ export class WebviewStateStore {
   }
 
   private applyEventUnchecked(frame: HostEventFrameContent): SessionRenderMutation {
+    if (frame.type === "session_access") {
+      if (!this.state.sessionViews[frame.sessionId] || (frame.access !== "control" && frame.access !== "observe")) return NO_SESSION_RENDER_MUTATION;
+      this.applySessionAccess(frame.sessionId, frame.access, frame.controllerName);
+      return sessionRenderMutation(frame.sessionId);
+    }
     if (
       frame.type === "__test.capture_dom" ||
       frame.type === "ping" ||

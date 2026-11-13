@@ -7,7 +7,7 @@ use super::AppError;
 
 /// LLM 失败的语义类别。它刻意不等同于 HTTP 状态码：同一个 403 既可能是鉴权，
 /// 也可能是余额不足；流内错误则根本没有 HTTP 状态码。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmFailureKind {
     ContextOverflow,
@@ -79,7 +79,7 @@ impl LlmFailure {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum LlmErrorStage {
     Connect,
     Send,

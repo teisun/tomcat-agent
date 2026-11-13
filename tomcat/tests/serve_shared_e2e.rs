@@ -600,10 +600,10 @@ async fn native_connections_keep_request_ids_selection_and_cwd_separate() {
         .request(json!({"type":"switch_session","id":"observe","sessionId":sa}))
         .await;
     assert_eq!(observed["payload"]["access"], "observe");
-    let denied = same_project
-        .request(json!({"type":"interrupt","id":"deny","sessionId":sa}))
+    let stopped = same_project
+        .request(json!({"type":"interrupt","id":"stop","sessionId":sa}))
         .await;
-    assert_eq!(denied["error"], "read_only_session");
+    assert_eq!(stopped["success"], true);
     drop(same_project);
     drop(b);
     assert_eq!(fx.action("status")["instanceId"], info["instanceId"]);

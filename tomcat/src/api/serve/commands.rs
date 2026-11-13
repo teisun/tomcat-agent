@@ -311,8 +311,24 @@ pub(crate) async fn handle_command(
         return Ok(());
     }
     let command = resume_current_command(&state, command)?;
-    if !super::ownership::authorize(&state, &command)? {
-        return Ok(());
+    match super::ownership::authorize(&state, &command)? {
+        super::ownership::Admission::Denied => return Ok(()),
+        super::ownership::Admission::Allowed => {}
+        super::ownership::Admission::Acquire(slot) => {
+            if let Err(error) = super::ownership::acquire(&state, &slot, None).await {
+                let message = match error {
+                    AppError::Config(message) => message,
+                    other => other.to_string(),
+                };
+                send_error(
+                    &state,
+                    command.command_id().map(str::to_owned),
+                    Some(slot.session_id.clone()),
+                    message,
+                )?;
+                return Ok(());
+            }
+        }
     }
     if control::handle_control_or_interrupt(Arc::clone(&state), command.clone()).await? {
         return Ok(());
@@ -718,7 +734,13 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(session_id.clone()),
-                Some(serde_json::json!({ "activeSessionId": session_id, "access": access, "origin": state.registry.get(&session_id).and_then(|slot| slot.origin.clone()) })),
+                Some(serde_json::json!({
+                    "activeSessionId": session_id,
+                    "access": access,
+                    "origin": state.registry.get(&session_id).and_then(|slot| slot.origin.clone()),
+                    "controllerName": state.registry.get(&session_id)
+                        .and_then(|slot| super::ownership::controller_name(&state, &slot)),
+                })),
             )))?;
         }
         ServeCommand::GetMessages {
@@ -991,10 +1013,7 @@ pub(crate) async fn handle_command(
                             (slot.origin.clone(), state.controls(&slot))
                         } else {
                             match session_manager.read_session_header_for_session(&session_id) {
-                                Ok(Some(header)) => {
-                                    let writable = header.origin.is_none();
-                                    (header.origin, writable)
-                                }
+                                Ok(Some(header)) => (header.origin, true),
                                 Ok(None) => (None, false),
                                 Err(error) => {
                                     tracing::warn!(%session_id, %error, "session list could not read origin");
@@ -3171,6 +3190,15 @@ async fn start_turn_with_token(
             }
             _ => crate::infra::events::AgentIdleOutcome::Failed,
         };
+        let failure = match &result {
+            Ok(Ok(crate::AgentRunOutcome::Failed(error))) | Ok(Err(error)) => {
+                Some(crate::infra::events::TurnFailure {
+                    kind: crate::infra::error::classify_llm_failure(error).kind,
+                    phase: crate::infra::error::llm_stage(error),
+                })
+            }
+            _ => None,
+        };
         match result {
             Ok(Ok(crate::AgentRunOutcome::Completed(_))) => {}
             Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {
@@ -3221,7 +3249,7 @@ async fn start_turn_with_token(
             slot_for_task.mark_idle();
             *running = None;
         }
-        emit_agent_idle(&state_for_task, &slot_for_task, outcome);
+        emit_agent_idle(&state_for_task, &slot_for_task, outcome, failure);
     });
     *running = Some(handle);
     Ok(())
@@ -3353,11 +3381,12 @@ fn emit_agent_idle(
     state: &ServeState,
     slot: &super::registry::SessionSlot,
     outcome: crate::infra::events::AgentIdleOutcome,
+    failure: Option<crate::infra::events::TurnFailure>,
 ) {
     let frame = OutFrame::Event(
         serde_json::to_value(WireEvent {
             session_id: Some(slot.session_id.clone()),
-            event: AgentEvent::AgentIdle { outcome },
+            event: AgentEvent::AgentIdle { outcome, failure },
         })
         .expect("agent_idle wire event should serialize"),
     );

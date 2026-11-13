@@ -955,6 +955,8 @@ export const en = {
   "session.choose": "Select session",
   "session.empty": "No sessions",
   "session.running": "running",
+  "session.runningElsewhere": "Running in another window or client",
+  "session.runningIn": "Running in {host}",
   "session.readOnly": "Read-only observation",
   "session.readOnlyFrom": "Read-only observation · From {source}",
   "session.observerCanAnswer": "Observing · You can answer the current question, but cannot send tasks or stop execution.",

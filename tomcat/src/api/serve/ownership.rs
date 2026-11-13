@@ -20,13 +20,95 @@ fn read_command(command: &ServeCommand) -> bool {
     )
 }
 
-/// Explicit allowlist: a new session command is not writable by observers by default.
+/// Commands that only read or change this connection's displayed session.
 fn observer_command(command: &ServeCommand) -> bool {
     read_command(command)
         || matches!(
             command,
             ServeCommand::SwitchSession { .. } | ServeCommand::CloseSession { .. }
         )
+}
+
+/// Commands that never acquire connection-bound execution resources.
+fn shared_input_command(command: &ServeCommand) -> bool {
+    match command {
+        ServeCommand::Steer { params, .. } => params.only_if_running == Some(true),
+        ServeCommand::Interrupt { .. }
+        | ServeCommand::IngestAttachment { .. }
+        | ServeCommand::RetainAttachmentLeases { .. }
+        | ServeCommand::CacheAttachmentThumbnail { .. } => true,
+        _ => false,
+    }
+}
+
+pub(super) enum Admission {
+    Denied,
+    Allowed,
+    Acquire(Arc<SessionSlot>),
+}
+
+pub(super) fn has_other_live_controller(state: &ServeState, slot: &SessionSlot) -> bool {
+    let controller = *slot.controller.lock();
+    controller
+        .filter(|id| *id != state.connection_id)
+        .and_then(|id| {
+            state
+                .connections
+                .read()
+                .get(&id)
+                .and_then(std::sync::Weak::upgrade)
+        })
+        .is_some_and(|connection| !connection.is_closed())
+}
+
+/// Display-only name of the live controller, never the session's original source.
+pub(super) fn controller_name(state: &ServeState, slot: &SessionSlot) -> Option<String> {
+    let id = (*slot.controller.lock())?;
+    let connection = state.connections.read().get(&id)?.upgrade()?;
+    if connection.is_closed() {
+        return None;
+    }
+    let crate::core::session::SessionOrigin::Acp { client_name } = connection.source()?;
+    client_name.and_then(|name| {
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    })
+}
+
+/// Called under the slot's replay lock, before any events from the new controller.
+/// Observers need the new name even when their own access remains unchanged.
+pub(super) fn notify_session_access(
+    state: &ServeState,
+    slot: &SessionSlot,
+    previous: Option<uuid::Uuid>,
+) -> Result<(), AppError> {
+    let controller = *slot.controller.lock();
+    let name = controller_name(state, slot);
+    let connections: Vec<_> = state
+        .connections
+        .read()
+        .values()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    for connection in connections {
+        if connection.is_acp() || connection.is_closed() {
+            continue;
+        }
+        let controls = controller == Some(connection.connection_id);
+        if controls || previous == Some(connection.connection_id) || connection.observes(slot) {
+            let result = connection.writer.send(OutFrame::Event(serde_json::to_value(
+                super::types::ServePlanEvent::SessionAccess {
+                    session_id: slot.session_id.clone(),
+                    access: if controls { "control" } else { "observe" }.into(),
+                    controller_name: name.clone(),
+                },
+            )?));
+            if connection.connection_id == state.connection_id {
+                result?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn needs_admission(command: &ServeCommand) -> bool {
@@ -73,9 +155,9 @@ fn connection_command(command: &ServeCommand) -> bool {
     )
 }
 
-pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<bool, AppError> {
+pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<Admission, AppError> {
     if !state.shared {
-        return Ok(true);
+        return Ok(Admission::Allowed);
     }
     let permitted = if state.is_closed() {
         false
@@ -120,9 +202,21 @@ pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<bo
                             Some(id),
                             "unknown_session",
                         )))?;
-                        return Ok(false);
+                        return Ok(Admission::Denied);
                     }
-                    observer_command(command) || state.controls(&slot)
+                    if observer_command(command) || state.controls(&slot) {
+                        true
+                    } else if !state.is_acp() {
+                        if shared_input_command(command)
+                            || matches!(command, ServeCommand::DeleteSession { .. })
+                        {
+                            true
+                        } else {
+                            return Ok(Admission::Acquire(slot));
+                        }
+                    } else {
+                        false
+                    }
                 }
                 // Cold opens already validate the same key in open_existing_session_slot.
                 None if observer_command(command) => true,
@@ -139,9 +233,7 @@ pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<bo
                             if entry.session_key != manager.current_session_key() {
                                 return Ok(false);
                             }
-                            Ok(manager
-                                .read_session_header_for_session(&id)?
-                                .is_some_and(|header| header.origin.is_none()))
+                            Ok(manager.read_session_header_for_session(&id)?.is_some())
                         })
                         .transpose()?
                         .unwrap_or(false)
@@ -164,7 +256,11 @@ pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<bo
             },
         )))?;
     }
-    Ok(permitted)
+    Ok(if permitted {
+        Admission::Allowed
+    } else {
+        Admission::Denied
+    })
 }
 
 /// Called under runtime admission. Selection is separate from acquisition of control.
@@ -176,9 +272,6 @@ pub(super) async fn open_session(
     if !state.shared {
         return Ok("control");
     }
-    if !state.is_acp() && slot.origin.is_some() {
-        return Ok("observe");
-    }
     let controller = *slot.controller.lock();
     if controller == Some(state.connection_id) && session_mcp.is_none() {
         if !slot.is_busy() {
@@ -186,15 +279,32 @@ pub(super) async fn open_session(
         }
         return Ok("control");
     }
-    if controller.is_some() && controller != Some(state.connection_id) {
-        if state.is_acp() {
+    if has_other_live_controller(state, slot) {
+        if !state.is_acp() {
+            return Ok("observe");
+        }
+        if slot.is_busy() || super::session_delete::slot_has_live_work(state, slot) {
             return Err(AppError::Config("session_in_use".into()));
         }
-        return Ok("observe");
     }
     if slot.is_busy() && controller == Some(state.connection_id) {
         return Err(AppError::Config("busy".into()));
     }
+    acquire(state, slot, session_mcp).await
+}
+
+/// All control transfers run under admission and leave every display selection intact.
+pub(super) async fn acquire(
+    state: &Arc<ServeState>,
+    slot: &Arc<SessionSlot>,
+    session_mcp: Option<&crate::core::connector::mcp::manager::SessionMcpConfig>,
+) -> Result<&'static str, AppError> {
+    if has_other_live_controller(state, slot)
+        && (slot.is_busy() || super::session_delete::slot_has_live_work(state, slot))
+    {
+        return Err(AppError::Config("busy".into()));
+    }
+    let controller = *slot.controller.lock();
     if let Some(directory) = state.skills_dir.as_deref() {
         crate::core::skill::discovery::validate_connection_root(directory)?;
     }
@@ -225,6 +335,9 @@ pub(super) async fn open_session(
         let replay = slot.message_replay.lock();
         let already_receiving = state.controls(slot) || state.observes(slot);
         *slot.controller.lock() = Some(state.connection_id);
+        if controller != Some(state.connection_id) {
+            notify_session_access(state, slot, controller)?;
+        }
         if !already_receiving && !state.is_acp() {
             replay.send(&slot.session_id, &state.writer)?;
         }

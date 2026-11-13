@@ -1536,7 +1536,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const commandPending = activeSession?.commandPending === true;
-  const readOnly = activeSession?.access === "observe";
+  const readOnly = activeSession?.access === "observe" && !state.sharedInputSupported;
+  const runningElsewhere = activeSession?.access === "observe" && state.sharedInputSupported && activeSession.busy;
   const queueEditingItem = !readOnly && state.messageQueueSupported ? activeSession?.messageQueue?.items.find(item => item.userMessageId === activeSession.messageQueue?.editingId && item.status === "queued") : undefined;
   const previousQueueEditor = useRef<{ sessionId?: string; id?: string }>({});
   useEffect(() => {
@@ -2720,6 +2721,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         onSetPinned={state.pinSupported ? (sessionId, pinned) => postIntent(vscodeApi, "setSessionPinned", { sessionId, pinned }) : undefined}
         onDeleteSession={(sessionId) => postIntent(vscodeApi, "deleteSession", { sessionId })}
         deleteSupported={state.deleteSupported}
+        sharedInputSupported={state.sharedInputSupported}
         actionFeedback={state.sessionActionFeedback}
         onNewSession={handleNewSession}
         connectionStatus={state.connectionStatus}
@@ -2797,7 +2799,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             hasTranscriptContent ? (
               <TranscriptView
                 readOnly={readOnly}
-                onEditUserMessage={state.rewindSupported && activeSession.ownedByThisFrontend && !commandPending && !queueEditingItem
+                onEditUserMessage={state.rewindSupported && !readOnly && !commandPending && !queueEditingItem
                   ? handleEditUserMessage : undefined}
                 renderUserEditor={(message) => !readOnly && editingMessage?.id === message.id ? (
                   <InlineMessageEditor
@@ -2922,8 +2924,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <ImageLightbox image={zoomedImage} onClose={() => setZoomedImage(null)} />
 
       <div className="tc-footer" data-testid="composer-footer">
-        {readOnly ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
-          {activePendingApproval ? t("session.observerCanAnswer") : activeSession?.origin
+        {readOnly || runningElsewhere ? <div className="tc-observer-notice" data-testid="observer-notice" role="status">
+          {runningElsewhere ? (activeSession?.controllerName
+            ? t("session.runningIn", { host: activeSession.controllerName })
+            : t("session.runningElsewhere")) : activePendingApproval ? t("session.observerCanAnswer") : activeSession?.origin
             ? t("session.readOnlyFrom", { source: activeSession.origin.clientName?.trim() || t("session.acpClient") })
             : t("session.readOnly")}
         </div> : null}

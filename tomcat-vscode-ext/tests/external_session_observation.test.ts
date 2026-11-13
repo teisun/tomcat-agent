@@ -16,7 +16,13 @@ it("observes a real ACP task through the ordinary disk/open flow across reconnec
   const hold = new Promise<void>(resolve => { release = resolve; });
   const prefix = "Generated before joining. ";
   const suffix = "Continued after reconnect.";
-  const model = await spawnScriptedOpenAiStreamServer([{ parts: [sseDelta(prefix), { body: "", waitFor: hold }, sseDelta(suffix), sseFinish("stop"), sseDone()] }]);
+  let releaseStop!: () => void;
+  const stopHold = new Promise<void>(resolve => { releaseStop = resolve; });
+  const model = await spawnScriptedOpenAiStreamServer([
+    { parts: [sseDelta(prefix), { body: "", waitFor: hold }, sseDelta(suffix), sseToolCall("todo", "todos", JSON.stringify({ ops: [{ kind: "upsert", id: "check", content: "Check input" }] })), sseFinish("tool_calls"), sseDone()] },
+    { parts: [sseDelta("Steering acknowledged."), sseFinish("stop"), sseDone()] },
+    { parts: [sseDelta("Ready to stop."), { body: "", waitFor: stopHold }, sseFinish("stop"), sseDone()] },
+  ]);
   const fixture = await setupServeFixture(model.baseUrl);
   const executable = await ensureTomcatBinary();
   const foreignCwd = path.join(fixture.homePath, "another-project");
@@ -57,33 +63,44 @@ it("observes a real ACP task through the ordinary disk/open flow across reconnec
     const assistant = () => store.snapshot().sessionViews[created.sessionId]?.timeline.filter(item => item.type === "message" && item.kind === "assistant");
     await expect.poll(() => assistant()).toEqual([expect.objectContaining({ text: prefix })]);
     expect(store.snapshot().sessionViews[created.sessionId]).toMatchObject({ access: "observe", ownedByThisFrontend: false, busy: true });
-    for (const command of [{ type: "prompt", text: "must not send" }, { type: "interrupt" }, { type: "delete_session" }] as const) {
-      expect(await first.request({ ...command, sessionId: created.sessionId })).toMatchObject({ success: false, error: "read_only_session" });
-    }
+    expect(native.capabilities).toContain("shared_session_input");
+    expect(await first.request({ type: "prompt", text: "must wait", sessionId: created.sessionId })).toMatchObject({ success: false, error: "busy" });
+    expect(await first.request({ type: "delete_session", sessionId: created.sessionId })).toMatchObject({ success: false, error: "session_in_use" });
     expect(await first.request({ type: "close_session", sessionId: created.sessionId })).toMatchObject({ success: true });
     await first.disposeAsync();
     await initializeServe(reconnected);
     await open(reconnected);
     await expect.poll(() => assistant()).toEqual([expect.objectContaining({ text: prefix })]);
+    expect(await reconnected.request({ type: "steer", sessionId: created.sessionId, text: "Test before implementation.", params: { onlyIfRunning: true } })).toMatchObject({ success: true, payload: { queued: true } });
     release();
     await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
-    await expect.poll(() => assistant()).toEqual([expect.objectContaining({ text: prefix + suffix })]);
+    const completedMessages = [expect.objectContaining({ text: prefix + suffix }), expect.objectContaining({ text: "Steering acknowledged." })];
+    await expect.poll(() => assistant()).toEqual(completedMessages);
+    const nextRequest = JSON.parse(model.capturedNonTitleRequests()[1].split("\r\n\r\n")[1]);
+    expect(nextRequest.messages).toContainEqual(expect.objectContaining({ role: "user", content: "Test before implementation." }));
     // Reopening after completion overlaps persisted history with the replayed tail.
     await open(reconnected);
-    expect(assistant()).toEqual([expect.objectContaining({ text: prefix + suffix })]);
+    expect(assistant()).toEqual(completedMessages);
     const after = await new SessionRouter(reconnected, () => fixture.workspacePath).listSessions("disk");
     expect(after.sessionKey).toBe(list.sessionKey);
     expect(after.sessions).toHaveLength(2);
     expect(foreignEvents.some(event => event.sessionId === created.sessionId)).toBe(false);
     const otherList = await new SessionRouter(foreignWindow, () => foreignCwd).listSessions("disk");
     expect(otherList.sessions.some(row => row.sessionId === created.sessionId)).toBe(false);
+    const stoppedTurn = host.request("session/prompt", { sessionId: created.sessionId, prompt: [{ type: "text", text: "Stop from VS Code" }] });
+    void stoppedTurn.catch(() => undefined);
+    await expect.poll(() => JSON.stringify(host.updates)).toContain("Ready to stop.");
+    expect(await reconnected.request({ type: "interrupt", sessionId: created.sessionId })).toMatchObject({ success: true });
+    await expect(stoppedTurn).resolves.toMatchObject({ stopReason: "cancelled" });
+    releaseStop();
     await host.close();
     await open(reconnected);
-    expect(store.snapshot().sessionViews[created.sessionId].access).toBe("observe");
+    expect(store.snapshot().sessionViews[created.sessionId].access).toBe("control");
     await initializeHost(nextHost);
     await expect(nextHost.request("session/load", { sessionId: created.sessionId, cwd: fixture.workspacePath, mcpServers: [] })).resolves.toBeDefined();
-    expect(model.capturedNonTitleRequests()).toHaveLength(1);
+    expect(model.capturedNonTitleRequests()).toHaveLength(3);
   } finally {
+    releaseStop();
     release();
     try { await Promise.all([host.close(), nextHost.close(), first.disposeAsync(), reconnected.disposeAsync(), foreignWindow.disposeAsync()]); }
     finally { try { await fixture.cleanup(); } finally { await model.close(); } }
@@ -145,9 +162,7 @@ it("answers an ACP question after the observer reconnects without granting task 
     const card = pending(next.provider);
     expect(card?.type).toBe("approval");
     if (card?.type !== "approval") throw new Error("Missing live question card");
-    for (const command of [{ type: "interrupt" }, { type: "prompt", text: "must not send" }] as const) {
-      expect(await next.messenger.request({ ...command, sessionId })).toMatchObject({ success: false, error: "read_only_session" });
-    }
+    expect(await next.messenger.request({ type: "prompt", text: "must wait", sessionId })).toMatchObject({ success: false, error: "busy" });
     await next.provider.dispatchTestIntent({ type: "answerQuestion", messageId: "choose-non-recommended", data: {
       sessionId, requestId: card.request.requestId, result: { outcome: "answered", cancelled: false,
         answers: [{ questionId: "choice", optionIds: ["first"], pickedRecommended: false }],

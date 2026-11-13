@@ -13,21 +13,21 @@ describe("SessionRouter session access", () => {
 
   it("keeps the server's access and origin through ordinary open and disk listing", async () => {
     const origin = { kind: "acp", clientName: "paperclip" };
-    const messenger = { request: vi.fn().mockResolvedValue({ success: true, sessionId: "host", payload: { access: "observe", origin } }) };
+    const messenger = { request: vi.fn().mockResolvedValue({ success: true, sessionId: "host", payload: { access: "observe", origin, controllerName: "current host" } }) };
     const router = new SessionRouter(messenger as never, () => "/workspace");
-    await expect(router.switchSession("host")).resolves.toEqual({ sessionId: "host", access: "observe", origin });
+    await expect(router.switchSession("host")).resolves.toEqual({ sessionId: "host", access: "observe", origin, controllerName: "current host" });
     messenger.request.mockResolvedValueOnce({ success: true, payload: { sessionKey: "project-A", sessions: [{ sessionId: "host", access: "observe", origin }] } });
     expect((await router.listSessions("disk")).sessions[0]).toMatchObject({ sessionId: "host", access: "observe", origin });
     expect(messenger.request).toHaveBeenLastCalledWith({ type: "list_sessions", scope: "disk" });
     // Display provenance must not be used to guess access.
     messenger.request.mockResolvedValueOnce({ success: true, sessionId: "host", payload: { access: "control", origin } });
-    expect((await router.switchSession("host")).access).toBe("control");
+    expect(await router.switchSession("host")).toMatchObject({ access: "control", controllerName: null });
   });
 
   it("preserves private stdio compatibility but rejects malformed access and failed opens", async () => {
     const messenger = { request: vi.fn().mockResolvedValue({ success: true, sessionId: "old", payload: {} }) };
     const router = new SessionRouter(messenger as never, () => undefined);
-    await expect(router.switchSession("old")).resolves.toEqual({ sessionId: "old", access: "control", origin: null });
+    await expect(router.switchSession("old")).resolves.toEqual({ sessionId: "old", access: "control", origin: null, controllerName: null });
     messenger.request.mockResolvedValueOnce({ success: true, sessionId: "old", payload: { access: false } });
     await expect(router.switchSession("old")).rejects.toThrow("Invalid session access");
     messenger.request.mockResolvedValueOnce({ success: false, error: "unknown_session" });

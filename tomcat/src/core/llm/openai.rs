@@ -1517,6 +1517,7 @@ fn parse_sse_buffer(
 struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
     usage: Option<OpenAiUsage>,
+    error: Option<Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1617,6 +1618,35 @@ fn openai_chunk_to_stream_events_with_state(
     reasoning_state: &mut OpenAiReasoningState,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
+
+    // A provider's explicit stream failure is terminal, not a missing-DONE
+    // network interruption. Reuse the same error events as the other adapters.
+    if let Some(error) = chunk.error {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .or_else(|| error.get("type").and_then(Value::as_str))
+            .map(str::to_owned);
+        let reason = code
+            .as_deref()
+            .map(|code| format!("error:{code}"))
+            .unwrap_or_else(|| "error".into());
+        return vec![
+            StreamEvent::LlmError {
+                reason: reason.clone(),
+                message,
+                code,
+            },
+            StreamEvent::FinishReason { reason },
+        ];
+    }
 
     if let Some(choices) = chunk.choices {
         if let Some(choice) = choices.into_iter().next() {

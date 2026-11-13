@@ -935,6 +935,8 @@ export const zhCN = {
   "session.choose": "选择会话",
   "session.empty": "暂无会话",
   "session.running": "运行中",
+  "session.runningElsewhere": "正在其他窗口或客户端中运行",
+  "session.runningIn": "正在 {host} 中运行",
   "session.readOnly": "只读观察",
   "session.readOnlyFrom": "只读观察 · 来自 {source}",
   "session.observerCanAnswer": "旁观中；可回答当前问题，不能发送任务或停止执行。",

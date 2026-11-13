@@ -100,6 +100,22 @@ When Tomcat asks a clarification question:
 - switching sessions or reloading the webview keeps your unsubmitted selection;
 - answering, skipping the whole request, interrupting, or losing the host connection produces a distinct history card. A VS Code window / Extension Host restart is an irrecoverable disconnect, while a webview-only reload keeps the live question pending.
 
+## Shared ACP sessions
+
+```text
+ACP host + VS Code -> one session in tomcat serve -> both connected views update
+  Busy: Send queues a message; Send now steers; Stop cancels the current task
+  Idle: send or change settings -> safely take control -> continue the same session
+```
+
+Open the host's project (or its exact worktree), then select its session in the ordinary picker. With a CLI advertising `shared_session_input`, the composer stays writable, including attachment preparation. Model/mode settings remain disabled while running. Once idle, you can quote a plan selection and ask for changes to the **same plan file and ID**, without starting implementation. Taking control changes the execution environment, private MCP tools and confirmation policy to this window's; it does not copy history or reuse the ended host task's credentials. Older services keep the read-only behavior.
+
+Eligible failures seen live can be retried manually or by the existing cancellable **five-minute recovery countdown**, even when another client started the turn. A new turn cancels the countdown. Network failures also carry an ACP diagnostic for Multica's existing redispatch policy; this is not a guarantee that every failure will be retried.
+
+**Multica is not a permanent subscriber:** it does not display the steering text itself, and closes its connection at the end of its turn. Stop marks its task aborted; later VS Code turns or successful retries do not change that Multica task's status or stream back to its UI. Its next task can load the same session, unless it is busy. Commands run after VS Code takes control use the local CLI login, not the ended Multica task's identity. See the [integration boundaries](../tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/README.md#61-sharing-a-session-with-vs-code).
+
+Deletion never takes control: another live controller blocks it even while idle; a disconnected ACP origin does not. Deleting a conversation keeps its plan file, but a later fresh Multica session does not automatically recover that plan association.
+
 ## Sessions, Settings and plan review
 
 ```text

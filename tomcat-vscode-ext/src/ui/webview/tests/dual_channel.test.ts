@@ -3,21 +3,32 @@ import { describe, expect, it } from "vitest";
 import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
-  it("keeps observation across state/history refreshes and changes it only on open", () => {
+  it("keeps host identity across state/history refreshes and changes it on open or session_access", () => {
     const store = new WebviewStateStore();
     const origin = { kind: "acp" as const, clientName: "paperclip" };
-    store.applySessionOpen({ sessionId: "host", access: "observe", origin });
+    store.applySessionOpen({ sessionId: "host", access: "observe", origin, controllerName: "current host" });
     for (const busy of [true, false]) {
       store.applySessionState({ sessionId: "host", agentMode: "chat", model: "gpt-5.4", busy, activePlan: null });
       store.hydrateHistory("host", { sessionId: "host", messages: [], hasMore: false });
-      expect(store.snapshot().sessionViews.host).toMatchObject({ access: "observe", origin, ownedByThisFrontend: false, busy });
+      expect(store.snapshot().sessionViews.host).toMatchObject({ access: "observe", origin, controllerName: "current host", ownedByThisFrontend: false, busy });
       expect(store.snapshot().sessions[0]).toMatchObject({ origin, ownedByThisFrontend: false });
     }
     store.syncSessionList({ scope: "disk", activeSessionId: "host", sessions: [{ sessionId: "host", access: "control", origin, busy: false, isCurrent: true, title: null, updatedAt: 1 }] });
     expect(store.snapshot().sessionViews.host.access).toBe("observe");
+    for (const controllerName of ["second host", null, "third host"]) {
+      store.applyEvent({ type: "session_access", sessionId: "host", access: "observe", controllerName });
+      expect(store.snapshot().sessionViews.host).toMatchObject({ access: "observe", origin, controllerName });
+    }
     store.applySessionOpen({ sessionId: "native", access: "observe", origin: null });
     store.applySessionOpen({ sessionId: "native", access: "control", origin: null });
     expect(store.snapshot().sessionViews.native).toMatchObject({ access: "control", ownedByThisFrontend: true });
+    for (const access of ["control", "observe"] as const) {
+      store.applyEvent({ type: "session_access", sessionId: "host", access });
+      expect(store.snapshot().sessionViews.host).toMatchObject({ access, origin, controllerName: null, ownedByThisFrontend: access === "control" });
+      expect(store.snapshot().sessions.find(s => s.sessionId === "host")).toMatchObject({ ownedByThisFrontend: access === "control" });
+    }
+    store.applyEvent({ type: "session_access", sessionId: "not-open", access: "control" });
+    expect(store.snapshot().sessionViews["not-open"]).toBeUndefined();
     expect(store.snapshot().sessionViews.host.access).toBe("observe");
   });
 

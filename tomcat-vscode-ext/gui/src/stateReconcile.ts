@@ -152,6 +152,7 @@ export function reconcileSessionSnapshot(
     previous.thinkingLevel === next.thinkingLevel &&
     previous.ownedByThisFrontend === next.ownedByThisFrontend &&
     previous.access === next.access &&
+    previous.controllerName === next.controllerName &&
     previous.origin === origin &&
     previous.sessionId === next.sessionId &&
     previous.timeline === timeline &&
@@ -236,6 +237,7 @@ export function reconcileStateSnapshot(
     previous.modelAdminSupported === next.modelAdminSupported &&
     previous.sessionFilesSupported === next.sessionFilesSupported &&
     previous.messageQueueSupported === next.messageQueueSupported &&
+    previous.sharedInputSupported === next.sharedInputSupported &&
     previous.pinSupported === next.pinSupported &&
     previous.deleteSupported === next.deleteSupported &&
     previous.locale === next.locale &&

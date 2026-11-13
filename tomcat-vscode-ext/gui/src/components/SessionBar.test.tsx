@@ -6,17 +6,21 @@ import { en } from "../../../src/shared/i18n/en";
 
 afterEach(cleanup);
 describe("SessionBar settings entry", () => {
-  it("labels a host in the existing list and blocks deletion without blocking selection or pinning", () => {
+  it.each([false, true])("keeps the source label but gates deletion on shared-input capability (%s)", (sharedInputSupported) => {
     const choose = vi.fn(); const remove = vi.fn(); const pin = vi.fn();
     const session = { sessionId: "host", title: "Host task", origin: { kind: "acp" as const, clientName: "paperclip" }, updatedAt: Date.now(), busy: false, isCurrent: true, ownedByThisFrontend: false };
-    render(<SessionBar activeSessionId="host" sessions={[session]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={choose} onDeleteSession={remove} onSetPinned={pin} deleteSupported />);
+    render(<SessionBar activeSessionId="host" sessions={[session]} ready onOpenSettings={vi.fn()} onNewSession={vi.fn()} onSwitchSession={choose} onDeleteSession={remove} onSetPinned={pin} deleteSupported sharedInputSupported={sharedInputSupported} />);
     expect(screen.getByTestId("session-select").textContent).toContain("paperclip");
     fireEvent.click(screen.getByTestId("session-select"));
     const trash = screen.getByRole("button", { name: en["session.delete"] });
-    expect(trash).toHaveProperty("disabled", true);
-    expect(trash.getAttribute("title")).toBe(en["session.readOnly"]);
+    expect(trash).toHaveProperty("disabled", !sharedInputSupported);
+    expect(trash.getAttribute("title")).toBe(en[sharedInputSupported ? "session.delete" : "session.readOnly"]);
     fireEvent.click(trash);
     expect(remove).not.toHaveBeenCalled();
+    if (sharedInputSupported) {
+      fireEvent.click(screen.getByTestId("delete-session-delete"));
+      expect(remove).toHaveBeenCalledExactlyOnceWith("host");
+    }
     fireEvent.click(screen.getByRole("button", { name: en["session.pin"] }));
     expect(pin).toHaveBeenCalledWith("host", true);
     fireEvent.click(screen.getByTestId("session-option"));

@@ -113,6 +113,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "prompt",
         "steer",
         "message_queue",
+        "shared_session_input",
         "follow_up",
         "get_state",
         "set_plan_mode",

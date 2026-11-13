@@ -51,22 +51,22 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
       assert.equal(state().access, "observe");
       assert.equal(state().busy, true, "the real host task is still running");
       await until(() => chat.evaluate<boolean>(`document.body.innerText.includes(${JSON.stringify(fixture.prefix)}) && !!document.querySelector('[data-testid="observer-notice"]')`), "rendered prefix and notice");
-      const checkReadOnly = async () => {
+      const checkSharedInput = async () => {
         const dom = await chat.evaluate<{ editable: string; disabled: string[]; fits: boolean }>(`({
           editable: document.querySelector('[data-testid="composer-input"]')?.getAttribute('contenteditable'),
           disabled: [...document.querySelectorAll('button[disabled]')].map(button => button.dataset.testid),
           fits: [...document.querySelectorAll('[data-testid="mode-select"], [data-testid="model-select"], [data-testid="stop-button"]')].every(button => { const r = button.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })
         })`);
-        assert.equal(dom.editable, "false");
-        for (const id of ["mode-select", "model-select", "thinking-level-select"]) assert.ok(dom.disabled.includes(id), `${id} disabled`);
-        assert.ok(dom.disabled.includes("stop-button") || dom.disabled.includes("send-button"), "task controls stay read-only");
+        assert.equal(dom.editable, "true");
+        for (const id of ["mode-select", "model-select", "thinking-level-select"]) assert.equal(dom.disabled.includes(id), state().busy, `${id} follows busy`);
+        assert.equal(dom.disabled.includes("stop-button"), false, "shared input can stop the host");
         assert.ok(dom.fits);
       };
-      await checkReadOnly();
+      await checkSharedInput();
       await chat.capture(path.join(artifacts, "observer-desktop.png"));
       await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
       await chat.setViewport(390, 844);
-      await checkReadOnly();
+      await checkSharedInput();
       await chat.capture(path.join(artifacts, "observer-narrow.png"));
       if (fixture.answer !== undefined) {
         await until(() => state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), "current host question");
@@ -75,10 +75,10 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
         await chat.setViewport(1440, 900);
         await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
         await chat.waitForSnapshot(snapshot => snapshot.viewport.width >= 1000, "wide question card");
-        await checkReadOnly();
+        await checkSharedInput();
         await chat.capture(path.join(artifacts, "question-pending-desktop.png"));
         await chat.setViewport(390, 844);
-        await checkReadOnly();
+        await checkSharedInput();
         await chat.capture(path.join(artifacts, "question-pending-narrow.png"));
         const expectedAnswers: typeof submitted = [];
         for (let index = 0; index < card.request.questions.length; index++) {
@@ -108,10 +108,10 @@ export async function assertExternalHostObservation(getApi: () => Promise<Tomcat
         const result = JSON.parse(tool.summary ?? "");
         assert.equal(result.outcome, "answered");
         assert.deepEqual(result.answers, expectedAnswers);
-        await checkReadOnly();
+        await checkSharedInput();
         await chat.capture(path.join(artifacts, "question-answered-narrow.png"));
         await chat.setViewport(1440, 900);
-        await checkReadOnly();
+        await checkSharedInput();
         await chat.capture(path.join(artifacts, "question-answered-desktop.png"));
       }
       assert.equal(state().timeline.filter(item => item.type === "message" && item.text.includes(fixture.prefix)).length, 1);

@@ -15,7 +15,7 @@ import type {
 
 export type SessionAccess = "control" | "observe";
 export interface SessionOrigin { kind: "acp"; clientName: string | null }
-export interface SessionOpenResult { sessionId: string; access: SessionAccess; origin: SessionOrigin | null }
+export interface SessionOpenResult { sessionId: string; access: SessionAccess; origin: SessionOrigin | null; controllerName?: string | null }
 
 function parseAccess(value: unknown): SessionAccess {
   // Older private stdio responses omit access; a present but invalid value is not control.
@@ -273,6 +273,7 @@ export class SessionRouter {
       sessionId: requireSessionId(response),
       access: parseAccess(payload.access),
       origin: parseOrigin(payload.origin),
+      controllerName: typeof payload.controllerName === "string" ? payload.controllerName : null,
     };
   }
 

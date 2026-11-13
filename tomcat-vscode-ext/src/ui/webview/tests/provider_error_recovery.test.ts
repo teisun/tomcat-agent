@@ -142,10 +142,24 @@ describe("recovery lifecycle and ownership", () => {
     await click(); expect(f.resume).toHaveBeenCalledTimes(2);
   });
 
-  it("does not schedule a failed observed session", async () => {
+  it.each([false, true])("gates observed-session recovery on shared-input capability (%s) and cancels on another host's turn", async sharedInput => {
     const f = fixture(); f.host.stateStore.view().sessionViews.s1.access = "observe";
-    await f.failed(); f.time.advance(300_000); await flush();
+    f.host.initialized = { capabilities: sharedInput ? ["shared_session_input"] : [] };
+    expect(f.provider.currentState().sharedInputSupported).toBe(sharedInput);
+    await f.failed();
+    expect(!!f.projection()).toBe(sharedInput);
+    await f.emit({ type: "agent_start", sessionId: "s1" });
+    f.time.advance(300_000); await flush();
     expect(f.projection()).toBeUndefined(); expect(f.retry).not.toHaveBeenCalled();
+  });
+
+  it("automatically retries a shared observed session if nobody has resumed it after five minutes", async () => {
+    const f = fixture();
+    f.host.initialized = { capabilities: ["shared_session_input"] };
+    f.host.stateStore.applySessionOpen({ sessionId: "s1", access: "observe" });
+    await f.failed();
+    f.time.advance(300_000); await flush();
+    expect(f.retry).toHaveBeenCalledExactlyOnceWith("s1", "user-1");
   });
 
   it("never schedules from old history, interrupted runs or ordinary error notifications", async () => {
@@ -164,7 +178,7 @@ describe("recovery lifecycle and ownership", () => {
     expect(f.retry).toHaveBeenCalledTimes(1); ack.resolve(); await Promise.all([first, second]);
   });
 
-  it.each(["busy", "command", "in-flight", "running", "question", "deleting", "observe", "missing", "changed-action"])("rechecks %s at the deadline without dispatching", async reason => {
+  it.each(["busy", "command", "in-flight", "running", "question", "deleting", "legacy-observe", "missing", "changed-action"])("rechecks %s at the deadline without dispatching", async reason => {
     const f = fixture(); await f.failed();
     const view = f.host.stateStore.view().sessionViews.s1;
     if (reason === "busy") view.busy = true;
@@ -173,7 +187,7 @@ describe("recovery lifecycle and ownership", () => {
     if (reason === "running") vi.spyOn(f.host.messageQueue, "isRunning").mockReturnValue(true);
     if (reason === "question") f.host.pendingQuestions.set("pending", { sessionId: "s1", settled: false, resolve() {} });
     if (reason === "deleting") f.host.pendingDeletions.set("s1", {});
-    if (reason === "observe") view.access = "observe";
+    if (reason === "legacy-observe") view.access = "observe";
     if (reason === "missing") view.timeline = [];
     if (reason === "changed-action") view.timeline.find((v: any) => v.id === "error-1").recoveryAction = "resume";
     f.time.advance(300_000); await flush();

@@ -362,6 +362,7 @@ export interface WebviewSessionSnapshot {
   requestRetry?: import("../../src/ui/webview/protocol").WebviewSessionSnapshot["requestRetry"];
   errorRecovery?: { errorId: string; dueAt: number };
   access?: import("../../src/serveClient/sessionRouter").SessionAccess;
+  controllerName?: string | null;
   origin?: import("../../src/serveClient/sessionRouter").SessionOrigin | null;
   modelReady?: boolean;
   messageQueue?: import("../../src/ui/webview/protocol").WebviewMessageQueue;
@@ -426,6 +427,7 @@ export interface WebviewStateSnapshot {
   sessionActionFeedback?: import("../../src/ui/webview/protocol").SessionActionFeedback | null;
   locale?: import("../../src/shared/i18n").Locale;
   messageQueueSupported?: boolean;
+  sharedInputSupported?: boolean;
   sessionFilesSupported?: boolean;
   rewindSupported?: boolean;
   activeSessionId: string | null;

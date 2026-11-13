@@ -28,6 +28,10 @@ fn serve_dts_preserves_wire_event_session_id() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
     assert!(dts.contains("type: \"agent_idle\";"));
+    assert!(dts.contains("failure?: TurnFailure | null;"));
+    assert!(dts.contains("export interface TurnFailure {"));
+    assert!(dts.contains("type: \"session_access\";"));
+    assert!(dts.contains("controllerName?: null | string;"));
     assert!(dts.contains("type: \"sub_agent_start\";"));
     assert!(dts.contains("subagentType: string;"));
     assert!(dts.contains("type: \"background_task_finished\";"));
@@ -212,9 +216,21 @@ fn serve_emitted_event_validates_against_generated_schema() {
             session_id: Some("s1".to_string()),
             event: AgentEvent::AgentIdle {
                 outcome: crate::infra::events::AgentIdleOutcome::Completed,
+                failure: None,
             },
         })
         .expect("agent_idle sample"),
+        serde_json::to_value(WireEvent {
+            session_id: Some("s1".into()),
+            event: AgentEvent::AgentIdle {
+                outcome: crate::infra::events::AgentIdleOutcome::Failed,
+                failure: Some(crate::infra::events::TurnFailure {
+                    kind: crate::infra::error::LlmFailureKind::StreamInterrupted,
+                    phase: Some(crate::infra::error::LlmErrorStage::BodyRead),
+                }),
+            },
+        })
+        .expect("agent_idle failure sample"),
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::SubAgentStart {
@@ -240,6 +256,15 @@ fn serve_emitted_event_validates_against_generated_schema() {
         .expect("out_frame schema should exist");
     let out_frame_validator =
         jsonschema::validator_for(&out_frame_schema).expect("compile out_frame schema");
+    for (access, controller_name) in [("control", None), ("observe", Some("test host"))] {
+        let event = serde_json::to_value(ServePlanEvent::SessionAccess {
+            session_id: "s1".into(),
+            access: access.into(),
+            controller_name: controller_name.map(str::to_owned),
+        })
+        .unwrap();
+        assert!(out_frame_validator.is_valid(&event), "{event}");
+    }
     let started_frame_sample = serde_json::to_value(OutFrame::Event(
         serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReviewStarted {
             session_id: Some("s1".to_string()),
