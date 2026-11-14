@@ -4328,6 +4328,30 @@
           {
             "type": "object",
             "required": [
+              "message",
+              "sessionId",
+              "type",
+              "userMessageId"
+            ],
+            "properties": {
+              "message": true,
+              "sessionId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.user_message"
+                ]
+              },
+              "userMessageId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
               "access",
               "sessionId",
               "type"

@@ -134,6 +134,65 @@
 
 旅程身份为 `sessionId = 1794594312250_a5965ba4f528d437`、`planId = plan_shared_revision_fixture_d28e4c34`；完整临时路径保存在 `observer-journey.json`。沿用 C.2 的未受影响测试结果及未运行边界；不把此前两次非零整批改记为全绿，也不把本批模拟宿主验收写成真实 Multica 验收。没有安装或重启用户正在使用的 Tomcat，没有改动 Multica 仓库。
 
+## C.4 追加：普通 ACP 续接提示词实时补气泡
+
+2026-11-14，按 `plan_multica_acp_vs_code_transcript_serve_id_b9a29f4f` 修复普通 `prompt` 保存后没有用户正文通知的问题。范围仅限 Tomcat 服务和扩展，不改 Multica、模型循环或历史重建规则。首轮曾保留扩展 0.2.13 / CLI 0.1.95 并用 `acp-live-prompt` 文件后缀区分，用户指出同版本两包容易混淆；现升为扩展 0.2.14 / CLI 0.1.96，重新构建标准文件名整包，不覆盖旧产物。
+
+```text
+保存原始输入 → 沿既有流发 session.user_message → 缺少同 ID 则补普通用户气泡
+             → 本端回执按 ID 更新；后续历史仍按原逻辑加载
+```
+
+复用 reference 历史投影和用户行/附件 URI 转换，事件先于成功回执和新轮输出；不重读 transcript，不轮询，不新建订阅或历史协调集合。事件不覆盖已有气泡的发送状态，也不清草稿、出队或切换宿主。保存前失败不发事件，保存后模型失败仍显示已保存输入，ACP 不收到本条通知的 user_message_chunk 回显。
+
+### 检查与失败复验
+
+| 检查 | 结果 | 本地任务日志 ID |
+| --- | --- | --- |
+| 修复前服务端红测 | 1 通过 / 1 失败；保存成功通知断言实得 0 条、期望 1 条，保存失败负例通过 | `1794624839296-eqnk0k` |
+| 修复前状态红测 | 3 通过 / 3 失败 / 17 skipped；复现缺气泡、误建未打开视图与富输入不出现 | `1794624874923-ukzwp4` |
+| 修复后服务端聚焦 | 4 通过：成功与模型失败顺序、保存失败负例、富输入逐字段对比 reference 历史、schema 必填字段；生成 wire/fixtures 成功 | `1794625527942-atpbqd` |
+| 其余 serve 模块 | 258 通过，显式跳过已通过的 4 条通知用例，包含 busy/附件拒绝、rewind 和现有跨项目订阅隔离 | `1794626074549-a7pm6m` |
+| 扩展 core | 两个改动文件 122 通过，其余 56 文件 836 通过，合计 958；未把同一家族重复计数 | `1794625484354-edmifa`、`1794626395380-27re6o` |
+| GUI / 扩展集成 | GUI 83 文件 910 通过；external_session_observation 2 通过 | `1794626395380-27re6o` |
+| lint / 构建 / 协议 | 扩展与 GUI 类型检查通过，GUI build 与 extension compile 通过；wire 与 Rust fixture 逐字一致，版本核对通过 | `1794625952237-mguz4f`、`1794626546337-ee8v6l`、`1794626721749-q7dv2z` |
+| 真实 DevHost | 首轮新提示词与草稿断言已通过，后续旧 Stop 旅程因保留的测试草稿令主按钮保持 Send 而失败；验证草稿保留后显式清空夹具草稿，保持产品按钮及原 Stop 断言不变；复验 1 通过（19 秒）、exit 0 | 首轮 `1794625952237-mguz4f`；复验 `1794626546337-ee8v6l` |
+| PNG/ARIA/console 核对 | 10 组产物非空；新场景两屏 DOM 均含唯一完整提示词、旧回复、保留草稿与具名宿主提示，且尚无模型提问；各份 console errors/events 均为空 | `1794626683348-u8offp` |
+| Rust 严格 lint / 其余库测试 | `cargo clippy --all-targets -- -D warnings` 完成；其余库测试 3283 通过 / 7 ignored，跳过前述已通过的 262 条 serve 用例，库测试合计 3545 通过 / 7 ignored | `1794626629582-2yddq7`（后续 doctest 编译阶段非零，见下） |
+| doctest / Rust 集成续跑 | doctest 成功（0 条）；nextest 并行组 399 通过 / 28 skipped、串行组 94 通过 / 3 skipped，包含 schema fixture、新 ACP load/prompt 首回复前通知与不回显、shared serve、rewind；release（Mach-O x86_64）构建成功，整批 exit 0 | `1794628918262-yxoi8q` |
+
+类型检查曾在生成 wire 前失败（`1794625507236-efph81`），生成后复验通过；不是放宽事件类型。产物核对脚本首次误按失败截图的多目标格式解析普通单帧 ARIA 而报错（`1794626629633-aqkvg1`），改用产物已有 `dom/tree` 格式后核对通过，未改写采集内容。上述非零任务保留，不改记为全绿。
+
+Rust 最终批 `1794626629582-2yddq7` 在 clippy 和库测试通过后，doctest 编译输出文件写入失败（exit 101），该失败批次未执行后续集成和 release，不计整批通过。当时磁盘可用仅约 478MiB、容量 100%；`target/debug/incremental` 占 129G。经用户明确同意，仅删除该可再生缓存（`1794628850288-q8b0sx`，exit 0），恢复约 100GiB 可用，保留源码、deps、release 和旧包。后续批使用临时 `CARGO_INCREMENTAL=0` 只续跑未完成项目，不改项目配置，不重复已通过的 lint/库测试。
+
+### 视觉、身份与边界
+
+最终产物目录 `.agents/acceptance/acp-live-prompt/gui-z9Nqye/`，`result.json` 为 passed / exitCode 0；10 份 PNG、ARIA 和 console 均已读回。新增 `acp-live-prompt-{desktop,narrow}` 在放行模型首个片段前采集，长提示词窄屏正常换行，草稿和具名宿主提示可见且无重叠。其余 8 个 stem 与 C.3 相同，覆盖待发、运行工具、提问及原计划引用/修订；空闲时无宿主运行提示。工作台 1440×900 / 390×844，实际聊天面板 1392×808 / 342×752；计划预览 CSS 792×786（PNG 为 2×）。console 结论仅限采集范围，不声称全进程无警告。首轮失败目录 `gui-tdmezc/` 已被复验截图替代，不作为最终通过证据。
+
+旅程 `sessionId = 1794626595225_f4321b726324b70b`，`planId = plan_shared_revision_fixture_e8fe6f07`，模型夹具 10 次请求。新 ACP 在 VS Code 始终停留原视图时 load/prompt，完整提示词在首个回复前已显示一次；之后回答、Stop 和原计划修订均完成。当时未安装、重启用户服务、升版、提交或发布；后续仅按用户反馈修正发布版本与包身份，见下文。
+
+**明确保留的边界：**旧历史快照晚到或分页重建仍可能暂时移除新气泡，重新读取最新历史恢复；若在实际使用中频繁复现，再在历史重建层统一处理。本次不扩展 steer/retry/rewind，不承诺异常 PDF 转引用永远不传内联内容；新旧 CLI/扩展混配不会获得本条修复。未运行真实 Multica daemon/task/issue/通知全链路、外部宿主旅程、Windows 或付费模型；不以可控 ACP/DevHost 代签这些项目。
+
+### 首轮同版本包（已由下方 0.2.14 替代，不再推荐）
+
+- 产物：`tomcat-vscode-ext/tomcat-vscode-ext-0.2.13-darwin-x64-acp-live-prompt.vsix`，10,533,583 bytes（10.05 MiB），240 entries，目标 darwin-x64；扩展 0.2.13，内置本次 release CLI 0.1.95。旧同版本包保留且 SHA-256 未变，新包 CLI 和消息状态模块均与旧包不同。
+- SHA-256：`4e42c867f93ad1a6bff3e26e39c0d85142333aa425c5ec790a97be63bef929dc`。
+- 构建 `1794631476680-qezmbc` exit 0：现有 package:vsix 完整 build（wire → GUI → extension），`--target darwin-x64 --bundle-binary <本次 release CLI> --out <新路径>`；现有安装器同款解压读取校验成功，官方 `check:wire` 通过。Vite 的大 chunk 和 vsce 的未合并 JS 文件数为警告，不记为测试失败，也未借机更改构建策略。
+- 产物核对 `1794631553782-mcmun9` exit 0：ZIP CRC 正常；manifest 平台、版本、publisher 正确；内置 CLI 与 release 逐字节相同且具执行位；227 个 GUI/extension 构建文件与本地逐字节一致，CHANGELOG 匹配并含新消息处理；无源码、测试、scripts 或 node_modules。release CLI 在隔离 HOME 导出的 schema/d.ts 与 Rust fixtures 逐字节一致，且包含新事件；版本与 diff 空白检查通过。
+- 未安装、重启、提交或发布；要让现有服务使用新 CLI，仍需用户在确认运行任务后自行明确重启。最终视觉证据为上列 10 套，辅助 HTTP 服务已停止。
+
+### 最终交付版本纠正：扩展 0.2.14 / CLI 0.1.96
+
+用户指出两个 0.2.13 包容易混淆后，改用正常 patch 版本，不再靠文件后缀区分修复内容；两个旧包均保留，但不再推荐安装。本次只纠正发布身份、CHANGELOG 和本记录，不改功能行为。
+
+- 产物：`tomcat-vscode-ext/tomcat-vscode-ext-0.2.14-darwin-x64.vsix`，10,534,716 bytes（10.05 MiB），240 entries；内置本次构建的 Intel macOS CLI 0.1.96。
+- SHA-256：`372e8e6390cb3ae3bc181b34b7568adfc8a891a2713554ccf07d518f2ed41a71`。
+- `1794635533573-2mp2rv` exit 0：沿用仓库 `release-version.mjs bump --all patch` 同步五个版本文件，再以 `cargo build --release --locked --bin tomcat` 重建；版本输出为 0.1.96，Mach-O x86_64。
+- `1794636199838-2wh6h0` exit 0：逐项对比 HEAD，五个版本文件仅含预期版本变化，依赖声明与解析未变；功能代码、测试和 wire 的 diff 指纹与本次升版前一致。因此复用上列功能及视觉验收，本次不重复跑测试套件或采集截图。
+- `1794636479634-moc5eb` exit 0：完整 package:vsix 构建（wire → GUI → extension），标准 darwin-x64 文件名，内置新 release CLI；安装器同款解压校验、官方 check:wire 与版本一致性检查通过。沿用的 chunk/JS 文件数警告未阻断构建。
+- `1794636799476-2590kx` exit 0：manifest 版本/平台正确，ZIP CRC 正常，CLI 与 release 逐字节一致且具执行位，227 个 GUI/extension 文件同时与本地和上一轮已验收修复包逐字节一致；新 CLI 在隔离 HOME 导出的 schema/d.ts 与 fixtures 一致，修复处理存在，两个旧包 SHA-256 未变，未打入源码/测试/开发依赖。
+- 未安装、重启、提交或发布；用户安装时应选择本节 0.2.14 包，并在确认运行任务后自行明确重启共享服务，重启会停止所有任务。
+
 ## D. 公司分支结论
 
 受控协议测试通过后，还必须在公司 daemon、数据库和实际 runtime profile 下跑一次完整任务。未跑完前，不要写“公司 Multica 已接入成功”。

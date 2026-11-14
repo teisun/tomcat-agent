@@ -271,6 +271,11 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.stalled";
 } | {
+  message: any;
+  sessionId: string;
+  type: "session.user_message";
+  userMessageId: string;
+} | {
   path?: null | string;
   planId?: null | string;
   sessionId?: null | string;

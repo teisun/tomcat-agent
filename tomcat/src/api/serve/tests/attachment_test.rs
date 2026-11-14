@@ -704,6 +704,9 @@ async fn prompt_rejects_a_blob_sha_that_was_never_ingested() {
         error.contains("unknown attachment blob") && error.contains("ingest_attachment"),
         "实际错误：{error}"
     );
+    assert!(!lines
+        .iter()
+        .any(|line| line["type"] == "session.user_message"));
 }
 
 #[tokio::test]
@@ -917,6 +920,112 @@ async fn get_messages_payload(
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some(command_id))
         .expect("get_messages response")["payload"]
         .clone()
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn user_message_notification_matches_reference_history_with_rich_input() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot, _requests) =
+        build_initialized_state_with_recorded_streams(vec![ok_stream()]).await;
+    let image = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "live-image",
+        image_input(&png_bytes(), "image/png"),
+    )
+    .await;
+    let file = ingest(
+        &state,
+        &buffer,
+        &slot,
+        "live-pdf",
+        file_input(&pdf_bytes(), "application/pdf"),
+    )
+    .await;
+    let attachments = [
+        (&image, ServeAttachmentKind::Image, "pic.png", "image/png"),
+        (
+            &file,
+            ServeAttachmentKind::File,
+            "brief.pdf",
+            "application/pdf",
+        ),
+    ]
+    .into_iter()
+    .map(|(reply, kind, name, mime)| ServeAttachment {
+        kind,
+        filename: Some(name.into()),
+        mime_type: Some(mime.into()),
+        blob_sha: Some(reply["payload"]["blobSha"].as_str().unwrap().into()),
+        provider_sha: None,
+        file_id: None,
+    })
+    .collect();
+    handle_command(
+        state.clone(),
+        ServeCommand::Prompt {
+            id: Some("rich-live".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "inspect".into(),
+            params: ServeMessageParams {
+                user_message_id: Some("rich-user".into()),
+                attachments,
+                segments: vec![
+                    ServeContentSegment::Text {
+                        text: "inspect ".into(),
+                    },
+                    ServeContentSegment::Reference {
+                        reference: ServeContextReference {
+                            kind: ServeContextRefKind::Selection,
+                            path: "src/app.rs".into(),
+                            label: "app.rs:1".into(),
+                            line_start: Some(1),
+                            line_end: Some(1),
+                            text: Some("fn main() {}".into()),
+                        },
+                    },
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let history = get_messages_payload(
+        &state,
+        &buffer,
+        &slot,
+        "rich-live-history",
+        AttachmentMode::Reference,
+    )
+    .await;
+    let frames = read_ndjson_lines(&buffer);
+    let events: Vec<_> = frames
+        .iter()
+        .filter(|f| f["type"] == "session.user_message")
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["userMessageId"], "rich-user");
+    let row = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "rich-user")
+        .unwrap();
+    assert_eq!(events[0]["message"], row["message"]);
+    let body = events[0]["message"].to_string();
+    assert!(body.contains("input_reference") && body.contains("blobSha"));
+    assert!(!body.contains("image_b64") && !body.contains("file_b64"));
+    assert_eq!(row["message"]["rewindEligible"], true);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while slot.is_busy() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

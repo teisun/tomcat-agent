@@ -3,6 +3,85 @@ import { describe, expect, it } from "vitest";
 import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
+  describe("live user input", () => {
+    const input = (id = "remote-user") => ({
+      type: "session.user_message" as const, sessionId: "s1", userMessageId: id,
+      message: { role: "user", content: "same prompt", rewindEligible: true },
+    });
+    const users = (store: WebviewStateStore) => store.snapshot().sessionViews.s1.timeline.filter(item => item.type === "message" && item.kind === "user");
+
+    it("appends a missing input once as a patch without changing the selected session or draft", () => {
+      const store = new WebviewStateStore();
+      store.applySessionOpen({ sessionId: "s1", access: "observe", origin: null });
+      store.setActiveSession("other");
+      const before = store.snapshot();
+      const event = input();
+      expect(store.applyEvent(event)).toMatchObject({ kind: "patch", sessionId: "s1", ops: [expect.objectContaining({ type: "upsert", item: expect.objectContaining({ id: "remote-user", kind: "user" }) })] });
+      expect(store.applyEvent(event)).toEqual({ kind: "none" });
+      store.applyEvent(input("another-id"));
+      expect(users(store)).toHaveLength(2);
+      expect(store.snapshot().activeSessionId).toBe("other");
+      expect(store.snapshot().sessionViews.s1.composerDraft).toEqual(before.sessionViews.s1.composerDraft);
+      expect(store.snapshot().sessionViews.s1.access).toBe("observe");
+    });
+
+    it.each(["event-first", "local-first"])("keeps a single local bubble and its delivery lifecycle: %s", order => {
+      const store = new WebviewStateStore();
+      store.setActiveSession("s1");
+      const local = () => store.appendLocalUserMessage("s1", "same prompt", { messageId: "remote-user", submitKind: "prompt" });
+      if (order === "event-first") { store.applyEvent(input()); local(); }
+      else { local(); store.applyEvent(input()); }
+      expect(users(store)).toEqual([expect.objectContaining({ id: "remote-user", deliveryState: "pending", submitKind: "prompt" })]);
+      store.markLocalUserMessageConfirmed("s1", "remote-user");
+      store.applyEvent(input());
+      expect(users(store)).toEqual([expect.objectContaining({ id: "remote-user", rewindEligible: true })]);
+      expect(users(store)[0]).not.toHaveProperty("deliveryState");
+    });
+
+    it("converges to history order and never inserts a live row into the history cache", () => {
+      const store = new WebviewStateStore();
+      store.setActiveSession("s1");
+      store.applyEvent(input());
+      const row = { type: "message", id: "remote-user", message: input().message };
+      store.hydrateHistory("s1", { sessionId: "s1", messages: [row, { type: "message", id: "answer", message: { role: "assistant", content: "answer" } }] });
+      store.applyEvent(input());
+      expect(store.snapshot().sessionViews.s1.timeline.map(item => item.id)).toEqual(["remote-user", "answer"]);
+      store.replaceHistory("s1", { sessionId: "s1", messages: [] }, new Set(["remote-user", "answer"]));
+      expect(users(store)).toHaveLength(0);
+      store.prependHistory("s1", { sessionId: "s1", messages: [] });
+      expect(users(store)).toHaveLength(0);
+    });
+
+    it("ignores an unopened view and preserves the existing confirmed-row window rules", () => {
+      const store = new WebviewStateStore();
+      expect(store.applyEvent(input())).toEqual({ kind: "none" });
+      expect(store.snapshot().sessionViews.s1).toBeUndefined();
+      store.setActiveSession("s1");
+      store.applyEvent(input());
+      store.hydrateHistory("s1", { sessionId: "s1", messages: [] });
+      expect(users(store)).toHaveLength(0);
+      store.prependHistory("s1", { sessionId: "s1", messages: [{ type: "message", id: "remote-user", message: input().message }] });
+      expect(users(store)).toHaveLength(1);
+    });
+
+    it("uses the history conversion and attachment URI resolver for rich input", () => {
+      const store = new WebviewStateStore();
+      store.setAttachmentUriResolver(attachment => ({ fullUri: `test-blob/${attachment.blobSha}`, thumbUri: null }));
+      store.setActiveSession("s1");
+      const event = { ...input(), message: { role: "user", content: [
+        { type: "input_text", text: "inspect " },
+        { type: "input_reference", ref_kind: "selection", path: "src/app.ts", label: "app.ts:1", text: "hello", line_start: 1, line_end: 1 },
+        { type: "input_image_ref", blobSha: "a".repeat(64), mime_type: "image/png", hasThumb: false },
+        { type: "input_file", blobSha: "b".repeat(64), filename: "brief.pdf", mimeType: "application/pdf", bytes: 42 },
+      ], rewindEligible: true } };
+      store.applyEvent(event);
+      const live = users(store);
+      store.hydrateHistory("s1", { sessionId: "s1", messages: [{ type: "message", id: event.userMessageId, message: event.message }] });
+      expect(users(store)).toEqual(live);
+      expect(live[0]).toMatchObject({ rewindEligible: true, attachments: [expect.objectContaining({ kind: "image", fullUri: `test-blob/${"a".repeat(64)}` }), expect.objectContaining({ kind: "file", filename: "brief.pdf" })] });
+    });
+  });
+
   it("keeps host identity across state/history refreshes and changes it on open or session_access", () => {
     const store = new WebviewStateStore();
     const origin = { kind: "acp" as const, clientName: "paperclip" };

@@ -39,7 +39,7 @@ use crate::core::session::attachments::{
 };
 use crate::core::session::tool_display_sidecar::read_tool_displays_for_calls;
 use crate::core::session::transcript::{
-    entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
+    entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset, MessageEntry,
     TranscriptEntry, TranscriptPage,
 };
 use crate::infra::config::AppConfig;
@@ -53,8 +53,9 @@ use super::types::{
     IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, ListRemoteModelsPayload,
     ListSessionsScope, OutFrame, RemoveModelResponse, RemoveProviderResponse, ResponseFrame,
     ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment, ServeContextRefKind,
-    ServeContextReference, ServeMessageParams, ServeSessionMode, SetConnectorToolEnabledResponse,
-    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse, UpsertModelsResponse,
+    ServeContextReference, ServeMessageParams, ServePlanEvent, ServeSessionMode,
+    SetConnectorToolEnabledResponse, SetPlanModeAction, SetProviderKeyResponse,
+    UpsertModelResponse, UpsertModelsResponse,
 };
 use super::{cleanup_session_slot, register_slot_hooks, run_slot_turn, ServeState};
 
@@ -395,11 +396,34 @@ pub(crate) async fn handle_command(
                     }
                 };
             let persisted = persist_turn_input_message(&slot, &archival_message, &params)?;
-            input_message.msg_id = Some(persisted.row_id);
+            input_message.msg_id = Some(persisted.row_id.clone());
             if persisted.settled_pending_question && !slot.is_busy() {
                 rehydrate_slot_context_state(&slot)?;
             }
             release_attachment_leases(&slot, &params);
+
+            // Publish the saved original before acceptance/output. Reuse the reference
+            // history projection, without reading the transcript or inventing a second cache.
+            let mut entry = MessageEntry {
+                id: Some(persisted.row_id.clone()),
+                parent_id: None,
+                timestamp: String::new(), // Only `message` is sent, not the entry envelope.
+                message: serde_json::to_value(&archival_message)?,
+            };
+            entry.message["rewindEligible"] = json!(SessionManager::is_rewind_candidate(&entry));
+            let mut entries = [TranscriptEntry::Message(entry)];
+            dereference_page_attachments(&slot, &mut entries);
+            let TranscriptEntry::Message(entry) = &entries[0] else {
+                unreachable!()
+            };
+            state.emit_event(
+                &slot.session_id,
+                serde_json::to_value(ServePlanEvent::SessionUserMessage {
+                    session_id: slot.session_id.clone(),
+                    user_message_id: persisted.row_id,
+                    message: entry.message.clone(),
+                })?,
+            );
 
             start_turn_with_token(
                 state,

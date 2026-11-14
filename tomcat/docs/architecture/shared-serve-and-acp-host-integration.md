@@ -101,6 +101,21 @@ Paperclip tomcat-local        Multica tomcat backend         VS Code
 | 旁观中 | 切走/关闭视图/断开 | 结束旁观 | 停止接收该会话事件，不修改任务或控制者 | 关直播不等于关机器。 |
 | 服务就绪 | stop/restart | 关闭所有会话 | 执行现有清理，不设客户端否决 | 明确停服会影响大家。 |
 
+### 普通提示词的实时显示修复
+
+```text
+普通 prompt 保存成功 → session.user_message → 现有 Native 订阅 → 缺少同 ID 时追加气泡
+                    → 原有回执和助手回复；历史加载仍是已保存内容的最终来源
+```
+
+事件字段为 `sessionId`、真实 transcript 行 ID `userMessageId` 和 `message`。正文由保存的原始用户消息套用 `get_messages(attachmentMode=reference)` 的同一投影，含 `rewindEligible`、引用和附件；不回读整段历史。PDF 转引用失败仍沿用历史接口的内联退化，不承诺异常时绝无附件字节。保存前拒绝或失败不通知；保存后即使模型失败，已保存输入仍会显示。发布先于本端成功回执与新轮输出，ACP 不把本条通知回显成 user_message_chunk。
+
+VS Code 复用用户历史气泡转换和附件 URI 解析；通知只补缺，不覆盖已有气泡的发送状态。本端追加按 ID 原位更新，历史加载按原规则重建；通知不改草稿、队列、当前会话或宿主身份。不新增轮询、订阅、消息缓存、临时 ID 集合或历史请求结算。
+
+**范围与已知退化：**只补普通 `prompt`，不扩展 `steer`、retry、rewind 等路径。旧历史请求晚到或翻页重建时，缺少这条新输入的历史窗口仍可能让新气泡暂时消失；重新读取最新历史后恢复，数据未丢失。若实际使用频繁触发这一问题，再在历史重建层统一处理本地与远端已确认消息，不为远端单独维护另一套顺序。新 CLI 与扩展必须配套；旧 CLI 没有该事件，旧扩展忽略未知事件而维持原行为。可执行文件更新不替换已经运行的服务，需用户检查活跃任务后明确重启。
+
+修复验收见集成目录 `multica-tomcat-acp-integration/ACCEPTANCE.md` 的 C.4；可控 ACP peer/DevHost 不代替真实 Multica daemon/task/issue/通知或 Windows 部署验证。
+
 ## 1. 术语统一
 
 本节区分进程寿命、连接寿命和一次执行的寿命。后文“整轮结束”专指最外层任务结束、工具收尾及必要持久化完成，不是某条 `MessageEnd` 到达。

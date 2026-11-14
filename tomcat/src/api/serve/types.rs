@@ -1185,6 +1185,14 @@ impl ServeCommand {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServePlanEvent {
+    #[serde(rename = "session.user_message")]
+    SessionUserMessage {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "userMessageId")]
+        user_message_id: String,
+        message: Value,
+    },
     #[serde(rename = "session_access")]
     SessionAccess {
         #[serde(rename = "sessionId")]

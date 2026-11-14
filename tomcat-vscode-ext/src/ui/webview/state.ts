@@ -1770,6 +1770,25 @@ function applyHistoryPlanCustomEntry(
   }
 }
 
+function userMessageBlock(
+  id: string,
+  message: Record<string, unknown>,
+): WebviewMessageBlock | undefined {
+  const text = extractMessageText(message.content);
+  if (!text && !Array.isArray(message.content)) return undefined;
+  const attachments = extractAttachments(message.content, id);
+  return {
+    ...(typeof message.rewindEligible === "boolean" ? { rewindEligible: message.rewindEligible } : {}),
+    ...(message.superseded === true && message.turn_failed === true ? { abandoned: true } : {}),
+    id,
+    kind: "user",
+    segments: contentToMessageSegments(message.content),
+    text: text ?? "",
+    type: "message",
+    ...(attachments.length ? { attachments } : {}),
+  };
+}
+
 function applyHistoryEntry(
   session: WebviewSessionSnapshot,
   entry: unknown,
@@ -1879,26 +1898,8 @@ function applyHistoryEntry(
         } satisfies WebviewBoundaryBlock);
         return;
       }
-      if (!text && !Array.isArray(entry.message.content)) {
-        return;
-      }
-      const segments = contentToMessageSegments(entry.message.content);
-      const attachments = extractAttachments(entry.message.content, id);
-      const block: WebviewMessageBlock = {
-        ...(typeof entry.message.rewindEligible === "boolean" ? {rewindEligible:entry.message.rewindEligible} : {}),
-        ...(entry.message.superseded === true && entry.message.turn_failed === true
-          ? { abandoned: true }
-          : {}),
-        id,
-        kind: "user",
-        segments,
-        text: text ?? "",
-        type: "message",
-      };
-      if (attachments.length > 0) {
-        block.attachments = attachments;
-      }
-      session.timeline.push(block);
+      const block = userMessageBlock(id, entry.message);
+      if (block) session.timeline.push(block);
       return;
     }
     if (role === "assistant") {
@@ -3020,10 +3021,14 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     this.dropOtherFailedLocalUserMessages(sessionId, options.messageId);
-    pushMessage(session, "user", text, options.messageId, {
+    upsertTimelineItem(session, {
+      id: options.messageId,
+      type: "message",
+      kind: "user",
+      text,
       deliveryState: "pending",
-      attachments: options.attachments,
-      segments: options.segments,
+      ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+      ...(options.segments?.length ? { segments: options.segments } : {}),
       submitKind: options.submitKind,
     });
     runtime.localUserMessageIds.add(options.messageId);
@@ -3181,6 +3186,17 @@ export class WebviewStateStore {
   }
 
   private applyEventUnchecked(frame: HostEventFrameContent): SessionRenderMutation {
+    if (frame.type === "session.user_message") {
+      const session = this.state.sessionViews[frame.sessionId];
+      if (!session || session.timeline.some(item => item.id === frame.userMessageId)) return NO_SESSION_RENDER_MUTATION;
+      if (!isRecord(frame.message) || frame.message.role !== "user") return NO_SESSION_RENDER_MUTATION;
+      const block = userMessageBlock(frame.userMessageId, frame.message);
+      if (!block) return NO_SESSION_RENDER_MUTATION;
+      this.resolveItemAttachmentUris(block);
+      session.timeline.push(block);
+      const op = buildUpsertPatchOpForItem(session, block);
+      return patchRenderMutation(session.sessionId, op ? [op] : []);
+    }
     if (frame.type === "session_access") {
       if (!this.state.sessionViews[frame.sessionId] || (frame.access !== "control" && frame.access !== "observe")) return NO_SESSION_RENDER_MUTATION;
       this.applySessionAccess(frame.sessionId, frame.access, frame.controllerName);
@@ -3852,15 +3868,13 @@ export class WebviewStateStore {
    * resolver produces the same ones from the same hash, so a rebuild is idempotent.
    */
   private resolveHistoryAttachmentUris(session: WebviewSessionSnapshot): void {
+    for (const item of session.timeline) this.resolveItemAttachmentUris(item);
+  }
+
+  private resolveItemAttachmentUris(item: WebviewTimelineItem): void {
     const resolve = this.attachmentUriResolver;
-    if (!resolve) return;
-    for (const item of session.timeline) {
-      if ((item.type !== "message" && item.type !== "tool") || !item.attachments?.length) continue;
-      item.attachments = item.attachments.map((attachment) => ({
-        ...attachment,
-        ...resolve(attachment),
-      }));
-    }
+    if (!resolve || (item.type !== "message" && item.type !== "tool") || !item.attachments?.length) return;
+    item.attachments = item.attachments.map(attachment => ({ ...attachment, ...resolve(attachment) }));
   }
 
   private applyPlanEvent(

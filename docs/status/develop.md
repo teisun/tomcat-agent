@@ -1,28 +1,33 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-14 07:48 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-14 17:03 +0800 | ACTIVE | develop | - |
 
-### DONE：ACP / VS Code 共享输入、宿主提示与版本升级（2026-11-14）
+### DONE：ACP / VS Code 共享输入与续接提示词实时显示（2026-11-14）
 
 ```text
 同项目 ACP 与 VS Code → serve 中的同一会话 → 连接期间持续刷新
   运行中：待发 / 插话 / 停止 / 附件准备，不换执行宿主
   静止后：写入安全接手，继续原会话和计划；提示显示当前宿主名
+  普通续接 prompt：保存后通知 VS Code 补气泡，无需切会话或重读历史
 ```
 
-- **提交范围**：本仓库 Rust serve/ACP、OpenAI 流内错误分类、VS Code 扩展、协议 fixtures、回归用例及相关文档；检查 staged / unstaged / untracked，将新增 `prompt_failure_test.rs` 一并纳入。Multica 仓库未修改，忽略目录内验收产物不提交。
+- **提交范围**：共享输入主迭代已在 `f55afff8` 本地提交；本次提交后续普通提示词实时显示修复、发布版本、schema/wire fixtures、回归用例及相关文档。检查 staged / unstaged / untracked，将原有 21 个相关改动与本文件共 22 个文件全部纳入；Multica 仓库不改，忽略目录内验收产物与 VSIX 不提交。
+- **续接修复**：普通 Prompt 保存成功后经现有流发布单条 `session.user_message`；VS Code 复用历史用户行和附件 URI 转换，仅在缺少真实消息 ID 时追加气泡，本地追加按 ID 原位更新，避免广播先到产生重复。不新增轮询、订阅、临时 ID 集合或历史协调机制，不改变草稿、队列与宿主身份。
 - **实现与边界**：输入权限与执行宿主身份分离，去掉 ACP 来源永久只读限制；复用现有事件多播、接手流程及删除静止检查，不加服务端队列或独立订阅层。插话/停止/附件准备不换宿主；删除独立准入，仍受其它活宿主与未完成工作保护。接手保留 sessionId / planId / 计划文件，不自动开工；旧服务按能力保留只读兼容。
 - **宿主与恢复**：运行提示仅显示当前连接名，未知回退短句、空闲隐藏，接手/断开同步刷新旁观者；不从 origin 猜宿主。可写窗口复用现有错误动作与五分钟恢复，ACP 仅给传输中断附英文网络诊断；OpenAI 明确的流内鉴权/额度等错误保留自身分类，避免误触发网络重派。
-- **实施阶段验证（非本次重跑）**：最终扩展 core 951、GUI 910、受影响扩展集成 6、真实 DevHost 1 通过；Rust serve 261 通过/1 ignored、受影响集成 17 通过/2 skipped，严格 Clippy、类型检查与 wire 一致性通过。8 组宽窄屏 PNG/ARIA/console 已读取。此前 Rust 全库缺 rg、并行集成漏更新 schema fixture 的非零整批及单项复验如实保留，不冒称整批重跑全绿。完整任务、失败分流与边界见 `tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/ACCEPTANCE.md` C.2/C.3。
-- **本次版本与提交检查**：按用户请求，仅执行一次 `node scripts/release-version.mjs bump --all patch`：CLI `0.1.94 → 0.1.95`、EXT `0.2.12 → 0.2.13`、内置 CLI `0.1.94 → 0.1.95`；前后版本一致性及五文件空白检查通过，只改允许的版本字段，依赖及私有 GUI 版本未变。本次不重跑测试或覆盖率，Cov% 保持 `-`，提交信息不编造数值；本地提交后再编译并打 `darwin-x64` 内置 CLI 整包，产物结果以实际命令为准。
+- **实施阶段验证（非本次重跑）**：续接补丁分批 Rust 库测试 3545 通过/7 ignored、集成并行 399 通过/28 skipped 与串行 94 通过/3 skipped；扩展 core 958、GUI 910、受影响扩展集成 2、真实 DevHost 1 通过，10 组宽窄屏 PNG/ARIA/console 已读取。原始红测、类型与夹具失败、磁盘耗尽后的缺项续跑均保留，不改记为整批一次全绿。完整记录见 `tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/ACCEPTANCE.md` C.4；共享输入主迭代的既有结果见 C.2/C.3。
+- **版本与制品**：CLI `0.1.96`、EXT `0.2.14`、内置 CLI `0.1.96`；五个版本文件仅改预期版本字段，依赖不变。已交付标准文件名的 `tomcat-vscode-ext-0.2.14-darwin-x64.vsix`，此前两份 0.2.13 包保留但不再推荐；新 CLI、前端资产、ZIP/manifest 与 schema 的构建核验见 C.4，不把升版重建说成重跑功能测试。
+- **本次提交检查**：按用户要求不跑测试、覆盖率、构建或视觉验收；仅核对提交范围、差异、版本一致性和提交格式。Cov% 保持 `-`，提交信息不编造数值。
 
 ### INTERFACE：共享输入与当前宿主
 
 - 新能力 `shared_session_input`；新增 `session_access` 推送及可选显示字段 `controllerName`，打开回复也带回当前宿主名；`access` 仍表示宿主身份，`origin` 仍为创建来源。失败 `agent_idle` 可附现有失败分类 `failure`，ACP 保留原错误摘要并仅对传输中断补充诊断。不新增持久化格式、配置、Reviewer 入口或跨端消息伪装。
+- 普通提示词保存成功后发布 `session.user_message { sessionId, userMessageId, message }`，正文复用 reference 历史投影，先于回执与新轮输出；ACP 不回显本通知。CLI 与扩展需配套升级，旧端仍沿用既有行为；不扩展 steer/retry/rewind 的跨端同步。
 
 ### BLOCKED：部署与交付边界
 
-- 无本地提交阻塞；本次按要求不跑测试。真实 Multica daemon/task/issue/通知、外部宿主旅程、Windows/Linux/arm64 与收费模型未在本批验收；Multica 不是常驻订阅者，插话原文和 VS Code 后续新轮不承诺回到其 UI，成功重试不改写其原失败任务。只打当前 Intel macOS 整包，不安装、不重启在用服务、不推送、不打 tag 或创建 release。
+- 无本地提交阻塞；本次按要求不跑测试、不推送、不打 tag 或创建 release。真实 Multica daemon/task/issue/通知全链路仍待用户分步验收，客户端与守护程序启动不等于任务链路通过；外部宿主旅程、Windows/Linux/arm64 与收费模型未在本批验收。Multica 不是常驻订阅者，插话原文和 VS Code 后续新轮不承诺回到其 UI，成功重试不改写其原失败任务。
+- 普通提示词仍沿用原有历史窗口规则：旧历史请求晚到或分页重建可能暂时盖掉新气泡，重读最新历史恢复；PDF 转引用失败保留历史接口的内联退化。可执行文件更新不替换在用服务；本次提交不安装或重启服务。
 
 ### DONE：Gemini 原始 parts 回放与读取文案纠错（2026-11-13；窄读改善按用户决定暂缓）
 

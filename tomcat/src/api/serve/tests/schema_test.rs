@@ -68,6 +68,19 @@ fn serve_dts_includes_user_message_id_on_message_params() {
 }
 
 #[test]
+fn user_message_notification_schema_requires_identity_and_message() {
+    let schema = serde_json::to_value(schemars::schema_for!(ServePlanEvent)).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let sample = json!({"type":"session.user_message","sessionId":"s1","userMessageId":"u1","message":{"role":"user","content":"hello","rewindEligible":true}});
+    assert!(validator.is_valid(&sample));
+    for key in ["sessionId", "userMessageId", "message"] {
+        let mut missing = sample.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(!validator.is_valid(&missing), "{key} must be required");
+    }
+}
+
+#[test]
 fn serve_dts_includes_checkpoint_commands() {
     let dts = serve_dts();
     assert!(dts.contains("type: \"list_checkpoints\";"));

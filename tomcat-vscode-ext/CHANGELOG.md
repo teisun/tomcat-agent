@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.14
+
+- Fix ordinary ACP continuation prompts missing from the open VS Code transcript: publish saved user input through the existing event stream and display it once by message ID, without reloading history or changing drafts. CLI and extension must both include this fix; history-window rebuild behavior is unchanged.
+- Bundle CLI 0.1.96 in platform-specific packages. Use this release instead of the same-version 0.2.13 ACP live-prompt rebuild. Updating the executable does not update a running shared service; check active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.13
 
 - Allow shared input on same-project ACP sessions: queue, steer, stop and prepare attachments while another host runs; idle writes take control. Show the current host name when busy; old servers stay read-only.

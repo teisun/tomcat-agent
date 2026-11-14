@@ -4440,7 +4440,7 @@ dependencies = [
 
 [[package]]
 name = "tomcat"
-version = "0.1.95"
+version = "0.1.96"
 dependencies = [
  "aes-gcm",
  "agent-client-protocol",

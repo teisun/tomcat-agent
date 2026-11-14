@@ -261,7 +261,15 @@ async fn native_steers_and_stops_real_acp_then_both_clients_relay_the_same_sessi
             done("heard the steering"),
             done("cancel this turn"),
             done("native continuation"),
-            done("returned to ACP"),
+            response(vec![
+                ScriptedPart {
+                    delay_ms: 0,
+                    body: String::new(),
+                },
+                delta(json!({"content":"returned to ACP"})),
+                sse_finish("stop"),
+                sse_done(),
+            ]),
         ],
         1,
         release.clone(),
@@ -349,12 +357,32 @@ async fn native_steers_and_stops_real_acp_then_both_clients_relay_the_same_sessi
         |v| v["params"]["update"]["sessionUpdate"] == "user_message_chunk"
             && v["params"]["update"]["content"]["text"] == "continue from VS Code"
     ));
+    release.store(false, Ordering::Release);
     acp::prompt(&mut returned, "return", &session, "continue in ACP again");
+    // The view stays on the same session: no switch or get_messages repairs it.
+    let mut frames = native.until(|v| v["type"] == "agent_start").await;
+    let user_events: Vec<_> = frames
+        .iter()
+        .filter(|v| v["type"] == "session.user_message")
+        .collect();
+    assert_eq!(user_events.len(), 1, "{frames:?}");
+    assert_eq!(user_events[0]["sessionId"], session);
     assert_eq!(
-        acp::ok(&returned.recv_until(WAIT, |v| v["id"] == "return"))["stopReason"],
-        "end_turn"
+        user_events[0]["message"]["content"],
+        "continue in ACP again"
     );
-    let frames = native.until(|v| v["type"] == "agent_idle").await;
+    assert!(!user_events[0]["userMessageId"].as_str().unwrap().is_empty());
+    assert!(!frames.iter().any(|v| v["type"] == "message_update"));
+    release.store(true, Ordering::Release);
+    let returned_frames = returned.recv_until(WAIT, |v| v["id"] == "return");
+    assert_eq!(acp::ok(&returned_frames)["stopReason"], "end_turn");
+    assert!(
+        !returned_frames
+            .iter()
+            .any(|v| v["params"]["update"]["sessionUpdate"] == "user_message_chunk"),
+        "live input must not echo to ACP"
+    );
+    frames.extend(native.until(|v| v["type"] == "agent_idle").await);
     assert!(frames
         .iter()
         .any(|v| v["type"] == "session_access" && v["access"] == "observe"));

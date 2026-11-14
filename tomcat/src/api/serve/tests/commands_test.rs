@@ -1232,6 +1232,7 @@ async fn serve_same_session_second_prompt_is_busy() {
         response.get("error").and_then(serde_json::Value::as_str),
         Some("busy")
     );
+    assert_eq!(count_event(&lines, "session.user_message"), 0);
 }
 
 #[tokio::test]
@@ -1264,6 +1265,95 @@ async fn serve_prompt_unknown_session_returns_error() {
         response.get("error").and_then(serde_json::Value::as_str),
         Some("unknown_session")
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn user_message_notification_precedes_ack_and_survives_model_failure() {
+    let _api_key = install_test_api_key();
+    for stream in [
+        vec![Ok(StreamEvent::FinishReason {
+            reason: "stop".into(),
+        })],
+        vec![Err(crate::AppError::Config("fixture model failure".into()))],
+    ] {
+        let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+        handle_command(
+            state.clone(),
+            ServeCommand::Prompt {
+                id: Some("notify-prompt".into()),
+                session_id: Some(slot.session_id.clone()),
+                text: "input from another client".into(),
+                params: ServeMessageParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let lines = wait_for_line(&buffer, |f| f["type"] == "agent_idle").await;
+        let notifications: Vec<_> = lines
+            .iter()
+            .filter(|f| f["type"] == "session.user_message")
+            .collect();
+        assert_eq!(
+            notifications.len(),
+            1,
+            "saved input must be broadcast: {lines:?}"
+        );
+        let event = notifications[0];
+        assert_eq!(event["sessionId"], slot.session_id);
+        let row_id = event["userMessageId"].as_str().unwrap();
+        assert_ne!(row_id, "notify-prompt");
+        assert_eq!(event["message"]["content"], "input from another client");
+        assert_eq!(event["message"]["rewindEligible"], true);
+        assert_eq!(count_message_entries_with_id(&slot, row_id), 1);
+        let event_index = lines
+            .iter()
+            .position(|f| f["type"] == "session.user_message")
+            .unwrap();
+        for (index, frame) in lines.iter().enumerate() {
+            if frame["id"] == "notify-prompt"
+                || frame["type"] == "agent_start"
+                || frame["type"] == "message_update"
+            {
+                assert!(
+                    event_index < index,
+                    "input must precede acceptance and output"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn user_message_notification_is_not_emitted_when_persistence_fails() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let _readonly = ReadonlyTranscript::new(&slot);
+    let result = handle_command(
+        state.clone(),
+        ServeCommand::Prompt {
+            id: Some("unsaved".into()),
+            session_id: Some(slot.session_id.clone()),
+            text: "must not appear".into(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    // A response on this writer flushes any notification that would precede it.
+    handle_command(
+        state,
+        ServeCommand::GetState {
+            id: Some("flush-unsaved".into()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |f| f["id"] == "flush-unsaved").await;
+    assert_eq!(count_event(&lines, "session.user_message"), 0);
+    assert!(!slot.is_busy());
 }
 
 #[tokio::test]

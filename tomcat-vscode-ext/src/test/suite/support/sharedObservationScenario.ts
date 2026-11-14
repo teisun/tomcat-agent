@@ -38,10 +38,13 @@ export async function assertSharedObservationFlow(
   const readPlan = sseToolCall("read-plan", "read", "{}");
   const revisePlan = sseToolCall("revise-plan", "edit", "{}");
   const command = "printf running > observer-tool.running; while [ ! -f observer-tool.release ]; do sleep 0.05; done; printf done > observer-tool.done; printf 'tool completed'";
+  let releaseResumedPrompt!: () => void;
+  const resumedPromptHold = new Promise<void>(resolve => { releaseResumedPrompt = resolve; });
+  const resumedPrompt = "Ask the fixture question. Continue in the same conversation after reconnecting, preserve the earlier discussion, and show this complete instruction before generating any reply.";
   const model = await spawnScriptedOpenAiStreamServer([
     { parts: [sseDelta(prefix), { body: "", waitFor: hold }, sseToolCall("observer-shell", "bash", JSON.stringify({ command, cwd: "", foreground_wait_ms: 16000, run_in_background: false })), sseFinish("tool_calls"), sseDone()] },
     { parts: [sseDelta("The tool completed. The task is finished."), sseFinish("stop"), sseDone()] },
-    { parts: [sseToolCall("observer-question", "ask_question", JSON.stringify({ questions: [{ id: "observer-choice", prompt: "Choose a fixture option.", options: [{ id: "a", label: "Option A", recommended: true }, { id: "b", label: "Option B", recommended: false }] }] })), sseFinish("tool_calls"), sseDone()] },
+    { parts: [{ body: "", waitFor: resumedPromptHold }, sseToolCall("observer-question", "ask_question", JSON.stringify({ questions: [{ id: "observer-choice", prompt: "Choose a fixture option.", options: [{ id: "a", label: "Option A", recommended: true }, { id: "b", label: "Option B", recommended: false }] }] })), sseFinish("tool_calls"), sseDone()] },
     { parts: [sseDelta("The observer answered the question."), sseFinish("stop"), sseDone()] },
     { parts: [sseToolCall("cancelled-shell", "bash", JSON.stringify({ command: command.replaceAll("observer-tool", "cancelled-tool"), cwd: "", foreground_wait_ms: 16000, run_in_background: false })), sseFinish("tool_calls"), sseDone()] },
     { parts: [sseToolCall("create-plan", "create_plan", JSON.stringify({ goal: "Shared revision fixture", draft: "## Approach\nImplement before testing.", todos: [{ id: "implement", content: "Implement after agreement", status: "pending" }] })), sseFinish("tool_calls"), sseDone()] },
@@ -50,7 +53,7 @@ export async function assertSharedObservationFlow(
     { parts: [revisePlan, sseFinish("tool_calls"), sseDone()] },
     { parts: [sseDelta("Plan revised in place."), sseFinish("stop"), sseDone()] },
   ], [], port);
-  const host = startAcpTestHost(binary, cwd, process.env);
+  let host = startAcpTestHost(binary, cwd, process.env);
   let chat: SettingsFrameDriver | undefined;
   try {
     const api = await getApi();
@@ -180,8 +183,29 @@ export async function assertSharedObservationFlow(
     assert.ok(model.capturedNonTitleRequests()[1].includes("Test before implementing."), "the host model receives steering at the safe point");
     await until(() => !state().busy && state().timeline.some(item => item.type === "message" && item.text.includes("The task is finished.")), "tool and task completion");
     assert.ok(state().timeline.some(item => item.type === "tool" && item.toolCallId === "observer-shell" && item.status === "complete"));
-    const questionTurn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Ask the fixture question." }] }, 180_000);
+    // Reconnect the external host while VS Code stays on the original view.
+    await host.close();
+    host = startAcpTestHost(binary, cwd, process.env);
+    await host.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "ACP test host", version: "1" } });
+    await host.request("session/load", { sessionId, cwd, mcpServers: [] });
+    const keptDraft = "Keep this local draft while ACP resumes.";
+    await chat.fill('[data-testid="composer-input"]', keptDraft);
+    await until(() => state().composerDraft?.text === keptDraft, "local draft synchronized before remote input");
+    const questionTurn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: resumedPrompt }] }, 180_000);
     void questionTurn.catch(() => undefined);
+    await until(() => model.capturedNonTitleRequests().length === 3, "resumed model paused before first reply");
+    const livePromptCount = () => chat!.evaluate<number>(`[...document.querySelectorAll('[data-message-kind="user"] [data-testid="message-text"]')].filter(row => row.textContent === ${JSON.stringify(resumedPrompt)}).length`);
+    await until(async () => await livePromptCount() === 1, "resumed prompt visible once before the first reply");
+    assert.equal(state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), false, "model is still paused before the question");
+    for (const [width, height, name] of [[1440, 900, "desktop"], [390, 844, "narrow"]] as const) {
+      await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
+      await chat.setViewport(width, height);
+      assert.equal(await livePromptCount(), 1);
+      assert.equal(state().composerDraft?.text, keptDraft);
+      assert.equal(api.__testing.getWebviewState().activeSessionId, sessionId);
+      await chat.capture(path.join(artifacts, `acp-live-prompt-${name}.png`));
+    }
+    releaseResumedPrompt();
     await until(() => state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), "observer can answer the host question");
     await chat.setViewport(1440, 900);
     await api.__testing.executeCommand("workbench.action.maximizeAuxiliaryBar");
@@ -204,6 +228,11 @@ export async function assertSharedObservationFlow(
     assert.equal(answer.outcome, "answered");
     assert.deepEqual(answer.answers, [{ question_id: "observer-choice", option_ids: ["b"], picked_recommended: false }]);
     await sharedInputDom();
+    assert.equal(state().composerDraft?.text, keptDraft, "answering the remote question also keeps the local draft");
+    // The existing Stop journey starts with an empty composer; otherwise its
+    // primary action intentionally remains Send (queue this draft).
+    await chat.fill('[data-testid="composer-input"]', "");
+    await until(() => !state().composerDraft?.text, "clear the fixture draft before testing Stop");
     const stoppedTurn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Start the cancellable check." }] }, 180_000);
     void stoppedTurn.catch(() => undefined);
     await until(() => fs.stat(path.join(cwd, "cancelled-tool.running")).then(() => true, () => false), "cancellable tool is really running");
@@ -220,6 +249,7 @@ export async function assertSharedObservationFlow(
     await host.request("session/set_config_option", { sessionId, configId: "plan_review", value: "skip" });
     const planned = await host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Create the fixture plan without implementing it." }] }, 180_000);
     assert.equal(planned.stopReason, "end_turn");
+    assert.equal(await livePromptCount(), 1, "later reply does not duplicate the prompt");
     await until(() => !state().busy, "plan is ready to revise");
     const created = api.__testing.getObservedEvents().find(event => event.type === "plan.create" && event.sessionId === sessionId);
     assert.ok(created?.type === "plan.create" && created.path && created.planId);
@@ -275,9 +305,10 @@ export async function assertSharedObservationFlow(
     await api.__testing.sendWebviewIntent({ messageId: "observe-return-own", type: "switchSession", data: { sessionId: ownId } });
     await until(() => chat!.evaluate<boolean>("document.querySelector('[data-testid=\"composer-input\"]')?.getAttribute('contenteditable') === 'true'"), "own session becomes writable again");
     assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, planId, planPath, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "real running and completed tool", "shared input busy and idle", "Send queues and Send now steers", "Stop cancels the real shell", "observer answers non-recommended question without task control", "quote and revise the same plan without execution", "own session writable"] }, null, 2));
+    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, planId, planPath, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "new ACP load/prompt visible once before first reply", "remote prompt preserves local draft", "real running and completed tool", "shared input busy and idle", "Send queues and Send now steers", "Stop cancels the real shell", "observer answers non-recommended question without task control", "quote and revise the same plan without execution", "own session writable"] }, null, 2));
   } finally {
     release();
+    releaseResumedPrompt();
     await fs.writeFile(toolRelease, "cleanup");
     await fs.writeFile(cancelledRelease, "cleanup");
     chat?.close();

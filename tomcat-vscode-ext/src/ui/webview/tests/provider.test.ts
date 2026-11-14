@@ -74,6 +74,35 @@ it("explains an empty window's missing workspace without inventing a session", a
   }
 });
 
+it("projects live remote input through the provider without fetching history or touching the queue", async () => {
+  const getMessages = vi.fn();
+  let receive!: (event: any) => void;
+  const provider = new TomcatWebviewViewProvider({
+    extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+    initialize: async () => ({ capabilities: [] } as never),
+    messenger: { onEvent: (callback: typeof receive) => { receive = callback; return { dispose() {} }; } } as never,
+    sessionRouter: { getMessages } as never,
+  });
+  const host = provider as any;
+  host.stateStore.setActiveSession("s1");
+  host.stateStore.applySessionOpen({ sessionId: "s1", access: "observe", origin: null });
+  host.draftStore.update("s1", () => ({ text: "keep my draft", segments: [], attachments: [] }));
+  host.messageQueue.pause("s1");
+  const draft = host.draftStore.peek("s1");
+  const queue = host.messageQueue.view("s1");
+  const broadcast = vi.spyOn(host, "broadcastMutation").mockResolvedValue(undefined);
+  try {
+    receive({ type: "session.user_message", sessionId: "s1", userMessageId: "remote", message: { role: "user", content: "continued in ACP", rewindEligible: true } });
+    await host.serveEventQueue;
+    expect(provider.currentState().sessionViews.s1.timeline).toEqual([expect.objectContaining({ id: "remote", kind: "user", text: "continued in ACP" })]);
+    expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({ kind: "patch" }), expect.anything());
+    expect(getMessages).not.toHaveBeenCalled();
+    expect(host.draftStore.peek("s1")).toEqual(draft);
+    expect(host.messageQueue.view("s1")).toEqual(queue);
+    expect(provider.currentState().sessionViews.s1.access).toBe("observe");
+  } finally { provider.dispose(); }
+});
+
 describe("shared-session draft hydration", () => {
   it.each([false, true])("renews observed drafts only with shared-input capability (%s)", async sharedInput => {
     const retainAttachmentLeases = vi.fn().mockResolvedValue(undefined);
