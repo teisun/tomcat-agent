@@ -1,6 +1,20 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-15 13:22 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-15 20:22 +0800 | ACTIVE | develop | - |
+
+### CURRENT RELEASE：TOMC-8 CLI 0.1.97 / EXT 0.2.15（准备发布，远端结果待核验）
+
+```text
+已批准现值 → 补 0.2.15 CHANGELOG → release 提交 R
+  → develop/main/master 仅快进 → R 的 CI/version-sync
+  → CLI 四包下载校验 → EXT 四平台原生验收 → GitHub / Marketplace / OpenVSX 分渠道核验
+```
+
+- **批准与版本**：TOMC-8 计划 v1 已由创建人 lilongtao 于 2026-11-15 20:18 明确批准，Mika 已交接实施。复用 `.cursor/commands/release-cli-ext.md`，跳过再次 bump；保留 CLI `0.1.97`、EXT `0.2.15`、bundled CLI `0.1.97`，五个版本文件预期零差异。升级 diff 已在 `dec0f7d8`；本次 R 仅补 CHANGELOG 与本状态，完整发布树同时包含正确版本和日志。
+- **变更归属**：按上个实际公开 EXT `ext-v0.2.9` 至当前提交的 diff 核对新日志，覆盖 Gemini 原生协议与签名回放、共享会话输入、ACP 续接正文显示、会话推理强度和计划预览同步。保留 0.2.13/0.2.14 历史条目，注明纳入此前未发布准备内容；不以日志声明真实收费模型或 Multica 全链路验证通过。
+- **执行边界**：只暂存两份说明文件；运行时未跟踪 `AGENTS.md` 保留且不提交。不改产品代码、依赖、workflow、版本或账号权限，不强推、不覆盖标签或资产、不安装或重启在用共享服务。R 的分支 CI 与三分支 version-sync 成功前不打正式 tag，CLI 四包与清单实际下载核验前不打 EXT tag。当前尚未推送或发布，不预填成功 URL/hash。
+- **分渠道就绪缺口**：现有 `PUBLISH_MARKETPLACE=true`，marketplace 环境身份参数存在，但实际认证/上传待 workflow 证明。仓库 Actions secrets 复核为空，缺少 `OVSX_PAT`，OpenVSX 公开 API 返回扩展未找到；该渠道仍在批准范围，若跳过或缺包必须报部分完成，不把 workflow 绿色当三渠道成功。不新增凭据或放宽权限，由 Mika 协调维护者。
+- **验证与风险**：提交前版本工具 19/19 通过（0 skipped），版本 check、CLI/EXT tag guard、空白检查通过；五版本文件相对 `dec0f7d8` 零差异。本轮只做发布定向检查并收取 R 的现有自动 CI，不重跑无关全仓本地套件；远端结果与制品哈希发布后另行回填。下方历史测试失败、真实模型/跨宿主待验及部署限制仍保留，升级二进制不代表正在运行的共享服务已更新；用户显式重启会停止全部任务。Cov% 未测量，保持 `-`。
 
 ### DONE：Multica 会话推理强度与原版本适配包（2026-11-15）
 

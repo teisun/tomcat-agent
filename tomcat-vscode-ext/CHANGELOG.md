@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.15
+
+Includes the changes prepared for the unpublished extension versions since 0.2.9, including 0.2.13 and 0.2.14.
+
+- Add the native Google Gemini protocol (`google-gemini`) and Google provider preset. Preserve ordered response parts and thought signatures for same-route conversation replay; when Gemini rejects a thought signature, retry that request once using visible history without rewriting the saved transcript.
+- Allow shared input on same-project ACP sessions: queue, steer, stop and prepare attachments while another host runs, then take control when idle. Show the current host name, retain eligible error-recovery actions, and keep older servers read-only. Ordinary ACP continuation prompts now appear live in the open VS Code transcript without duplicating messages or changing drafts; history-window rebuild behavior is unchanged.
+- Support per-session reasoning effort through ACP, independently of the model default. Refresh the VS Code session and plan preview from the current session's model and effective effort when work starts. Default clears the session override rather than disabling reasoning. Multica hosts need the matching adapter integration to send this setting.
+- Bundle CLI 0.1.97 in platform-specific packages. CLI and extension must both include these changes; pure-extension users must update their external CLI. Updating the executable does not update a running shared service; check active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.14
 
 - Fix ordinary ACP continuation prompts missing from the open VS Code transcript: publish saved user input through the existing event stream and display it once by message ID, without reloading history or changing drafts. CLI and extension must both include this fix; history-window rebuild behavior is unchanged.
