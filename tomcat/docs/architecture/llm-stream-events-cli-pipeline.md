@@ -153,7 +153,7 @@
    - 豆包 / Moonshot / Kimi / MiMo：只发 `thinking: { type: "enabled" }`，**没有 `reasoning_effort`**；因此 UI 退化为 `Thinking On/Off` 两态，而不是多档位
    - Anthropic classic：`thinking: { type: "enabled", budget_tokens }`（老 Messages extended thinking）
    - Anthropic adaptive：`thinking: { type: "adaptive" } + output_config: { effort }`（Claude Opus 4.6/4.7/4.8 与新模型）
-   - Qwen：`enable_thinking` / `chat_template_kwargs`（仍占位）
+   - Qwen 专用格式占位已删除；千问模型按配置的 API 和已实现格式接入，不按模型名判断。旧 `thinking_format=qwen` / `thinking.format=qwen` 与其他未知值一样回到 Auto，可能开始发送原先遗漏的 effort 参数，不自动改写配置。
 
 2. **响应表（Inbound）**：`(provider, stream_chunk_shape) -> Vec<StreamEvent>`  
    - Chat Completions：`delta.reasoning_content` / `delta.reasoning` / `delta.reasoning_text`（报告 §3.5：三路检测）。**该类 provider（deepseek/mimo/doubao 等）只有单一 reasoning 流，不存在 Responses 那种独立 summary/raw 双流，故统一发成 `source=summary`**——这是该类模型唯一对用户可见的思考面，使默认 `show="summary"` 档位即可显示（若退回 `raw` 会被渲染器过滤、导致 thinking UI 空白）。  

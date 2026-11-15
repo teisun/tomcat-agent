@@ -357,9 +357,10 @@ impl SharedModelCatalog {
         &self,
         prefs: &ModelPrefsStore,
         model_id: &str,
+        session_level: Option<ThinkingLevel>,
     ) -> ThinkingLevel {
         self.with_catalog(|catalog| {
-            let requested = prefs.reasoning_for(model_id);
+            let requested = session_level.unwrap_or_else(|| prefs.reasoning_for(model_id));
             catalog
                 .lookup_explicit(model_id)
                 .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))

@@ -71,6 +71,162 @@ fn live_text(frames: &[Value], message_id: &str, channel: &str) -> String {
 }
 
 #[tokio::test]
+async fn acp_effort_is_session_local_durable_and_reaches_the_real_request() {
+    fn option(result: &Value) -> &Value {
+        result["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == "effort")
+            .unwrap()
+    }
+    fn set(
+        host: &mut common::serve::ServeChild,
+        session: &str,
+        config: &str,
+        value: &str,
+    ) -> Value {
+        let frames = acp::request(
+            host,
+            json!(format!("set-{session}-{config}-{value}")),
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":config,"value":value}),
+        );
+        acp::ok(&frames).clone()
+    }
+    let server = common::serve::spawn_scripted_openai_stream_server_with_auto_title(
+        (0..3)
+            .map(|_| {
+                response(vec![
+                    delta(json!({"content":"effort done"})),
+                    sse_finish("stop"),
+                    sse_done(),
+                ])
+            })
+            .collect(),
+    );
+    let fx = ServiceFixture::new(&server.base_url);
+    fx.configure(|cfg| cfg.llm.thinking.level = "medium".into());
+    let models_path = fx.0.home_path.join(".tomcat/models.toml");
+    let models = std::fs::read_to_string(&models_path).unwrap();
+    std::fs::write(
+        &models_path,
+        models.replace(
+            "id = \"utility-flash\"",
+            "id = \"utility-flash\"\nsupported_reasoning_levels = []",
+        ),
+    )
+    .unwrap();
+    let mut host = acp::spawn(&fx);
+    acp::initialize(&mut host);
+    let a = acp::new_session(&mut host, &fx.0.workspace);
+    let b = acp::new_session(&mut host, &fx.0.workspace);
+    let prefs_path = fx.0.home_path.join(".tomcat/model-thinking.json");
+    let prefs_before = std::fs::read(&prefs_path).ok();
+    let selected = set(&mut host, &a, "effort", "high");
+    assert_eq!(option(&selected)["category"], "thought_level");
+    assert_eq!(option(&selected)["currentValue"], "high");
+    assert_eq!(
+        option(&set(&mut host, &b, "effort", "low"))["currentValue"],
+        "low"
+    );
+    assert_eq!(
+        option(&set(&mut host, &a, "model", "gpt-5.4"))["currentValue"],
+        "high",
+        "same effective model must preserve the override even when it was implicit"
+    );
+    let invalid = acp::request(
+        &mut host,
+        json!("invalid-effort"),
+        "session/set_config_option",
+        json!({"sessionId":a,"configId":"effort","value":"turbo"}),
+    );
+    assert!(invalid.last().unwrap().get("error").is_some());
+
+    let mut foreign = acp::spawn(&fx);
+    acp::initialize(&mut foreign);
+    let denied = acp::request(
+        &mut foreign,
+        json!("foreign-effort"),
+        "session/set_config_option",
+        json!({"sessionId":a,"configId":"effort","value":"low"}),
+    );
+    assert!(denied.last().unwrap().get("error").is_some(), "{denied:?}");
+    acp::close(foreign);
+
+    let sessions_dir = fx.0.home_path.join(".tomcat/agents/main/sessions");
+    let lock = sessions_dir.join("sessions.json.lock");
+    let backup = lock.with_extension("backup");
+    std::fs::rename(&lock, &backup).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let failed = acp::request(
+        &mut host,
+        json!("save-failed"),
+        "session/set_config_option",
+        json!({"sessionId":b,"configId":"effort","value":"high"}),
+    );
+    assert!(failed.last().unwrap().get("error").is_some(), "{failed:?}");
+    std::fs::remove_dir(&lock).unwrap();
+    std::fs::rename(&backup, &lock).unwrap();
+
+    let info = fx.action("status");
+    let mut observer = window(&info, &fx.0.workspace).await;
+    for (session, level) in [(&a, "high"), (&b, "low")] {
+        watch(&mut observer, session, "observe").await;
+        let state = observer
+            .request(
+                json!({"type":"get_state","id":format!("state-{session}"),"sessionId":session}),
+            )
+            .await;
+        assert_eq!(state["payload"]["thinkingLevel"], level);
+        acp::prompt(&mut host, level, session, "check the selected effort");
+        acp::ok(&host.recv_until(WAIT, |v| v["id"] == level));
+    }
+    assert_eq!(
+        std::fs::read(&prefs_path).ok(),
+        prefs_before,
+        "ACP must not write model defaults"
+    );
+    drop(observer);
+    acp::close(host);
+    fx.action("stop");
+    let mut host = acp::spawn(&fx);
+    acp::initialize(&mut host);
+    for (session, level) in [(&a, "high"), (&b, "low")] {
+        let restored = acp::request(
+            &mut host,
+            json!(format!("restore-{session}")),
+            "session/load",
+            json!({"sessionId":session,"cwd":fx.0.workspace,"mcpServers":[]}),
+        );
+        assert_eq!(option(acp::ok(&restored))["currentValue"], level);
+    }
+    assert_eq!(
+        option(&set(&mut host, &a, "effort", "default"))["currentValue"],
+        "default"
+    );
+    acp::prompt(&mut host, "default-request", &a, "check inherited effort");
+    acp::ok(&host.recv_until(WAIT, |v| v["id"] == "default-request"));
+    let changed = set(&mut host, &b, "model", "utility-flash");
+    assert_eq!(option(&changed)["currentValue"], "default");
+    assert_eq!(option(&changed)["options"].as_array().unwrap().len(), 1);
+    set(&mut host, &b, "effort", "default");
+    assert_eq!(std::fs::read(&prefs_path).ok(), prefs_before);
+    acp::close(host);
+    let requests: Vec<Value> = captured_non_title_requests(&server)
+        .iter()
+        .map(|request| serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap())
+        .collect();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["reasoning_effort"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["high", "low", "medium"]
+    );
+}
+
+#[tokio::test]
 async fn live_acp_observation_reconnects_without_gaps_and_foreign_project_never_receives_it() {
     // The provider cannot finish until the test has opened/reopened the view.
     let release = Arc::new(AtomicBool::new(false));

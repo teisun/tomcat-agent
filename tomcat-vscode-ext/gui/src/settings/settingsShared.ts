@@ -47,8 +47,6 @@ export function defaultThinkingFormatForApi(api: string): string {
       return "deepseek";
     case "zai":
       return "zai";
-    case "qwen":
-      return "qwen";
     case "doubao":
     case "moonshot":
       return "doubao";

@@ -74,7 +74,7 @@ func TestTomcatModelsPreserveIDsCommandIdentityAndFreshCatalog(t *testing.T) {
 	cmd, root := tomcatModelsFixture(t, "ok", payload)
 	prefix := append([]string(nil), cmd.Prefix...)
 	catalog, err := ListModels(t.Context(), "tomcat", cmd)
-	want := []Model{{ID: "alias-one", Label: "alias-one", Provider: "team"}, {ID: "team/alias-two", Label: "team/alias-two", Provider: "team"}}
+	want := []Model{{ID: "alias-one", Label: "alias-one", Provider: "team", Default: true}, {ID: "team/alias-two", Label: "team/alias-two", Provider: "team"}}
 	if err != nil || !reflect.DeepEqual(catalog.Models, want) || catalog.Fallback || len(catalog.Unavailable) != 0 {
 		t.Fatalf("catalog=%+v err=%v", catalog, err)
 	}
@@ -120,6 +120,24 @@ func TestTomcatModelsPreserveIDsCommandIdentityAndFreshCatalog(t *testing.T) {
 	completed, err := ListModels(t.Context(), "tomcat", cmd)
 	if err != nil || !reflect.DeepEqual(completed.Models, fresh.Models) {
 		t.Fatalf("default-name completion lost the profile: %+v, %v", completed, err)
+	}
+}
+
+func TestTomcatModelsExposeRuntimeTiersAndDefaultWithoutGuessing(t *testing.T) {
+	cmd, _ := tomcatModelsFixture(t, "ok", `{"defaultModelId":"qwen-relay","models":[{"id":"qwen-relay","provider":"relay","keyPresent":true,"supportedReasoningLevels":["low","high","xhigh"]},{"id":"toggle-only","provider":"relay","keyPresent":true,"supportedReasoningLevels":[]},{"id":"no-key","provider":"relay","keyPresent":false,"supportedReasoningLevels":["max"]}]}`)
+	catalog, err := ListModels(t.Context(), "tomcat", cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Model{
+		{ID: "qwen-relay", Label: "qwen-relay", Provider: "relay", Default: true, Thinking: &ModelThinking{SupportedLevels: []ThinkingLevel{{Value: "low", Label: "Low"}, {Value: "high", Label: "High"}, {Value: "xhigh", Label: "Extra high"}}}},
+		{ID: "toggle-only", Label: "toggle-only", Provider: "relay"},
+	}
+	if !reflect.DeepEqual(catalog.Models, want) {
+		t.Fatalf("catalog=%+v, want %+v", catalog.Models, want)
+	}
+	if !ThinkingControlSupported("tomcat") || !IsKnownThinkingValue("tomcat", "high") {
+		t.Fatal("Tomcat dynamic effort capability is not registered")
 	}
 }
 

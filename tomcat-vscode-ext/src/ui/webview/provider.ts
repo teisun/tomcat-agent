@@ -407,6 +407,7 @@ export function buildAttachmentOpenDialogOptions(kind: "files" | "folders"): vsc
 
 function shouldReconcileSessionState(event: ServeEvent): boolean {
   return (
+    event.type === "agent_start" ||
     event.type === "agent_end" ||
     event.type === "agent_interrupted" ||
     event.type === "turn_end" ||

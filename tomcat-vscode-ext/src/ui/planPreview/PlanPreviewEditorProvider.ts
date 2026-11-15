@@ -136,6 +136,8 @@ export interface PlanPreviewEditorProviderDeps {
   getBuildModel(): string;
   /** Model the chat session is on, "" when there is no session yet. */
   getSessionModel(): string;
+  /** Read this sidebar session's model and effective effort from one GetState. */
+  getSessionModelAndEffort(): Promise<{ model: string; thinkingLevel: string | null } | null>;
   messenger: TomcatMessenger;
   openExternal(href: string): Promise<void> | void;
   openFile(filePath: string, line?: number): Promise<void> | void;
@@ -581,6 +583,7 @@ export class PlanPreviewEditorProvider
       raw: parsed.raw,
       sessionModel: this.deps.getSessionModel(),
       state: ui.stateHint ?? parsed.state,
+      sessionThinkingLevel: null,
       title: parsed.title,
       todos: parsed.todos,
       toolbarStyle: ui.toolbarStyle,
@@ -605,6 +608,17 @@ export class PlanPreviewEditorProvider
       !availableModels.includes(rawBuildModel)
         ? ""
         : rawBuildModel;
+    let sessionModel = this.deps.getSessionModel();
+    let sessionThinkingLevel: string | null = null;
+    try {
+      const settings = await this.deps.getSessionModelAndEffort();
+      if (settings) {
+        sessionModel = settings.model;
+        sessionThinkingLevel = settings.thinkingLevel;
+      }
+    } catch {
+      // Optional enrichment must not hide the plan when serve is unavailable.
+    }
     const state = ui.stateHint ?? parsed.state;
     const canBuild = deriveCanBuild(
       state,
@@ -621,8 +635,9 @@ export class PlanPreviewEditorProvider
       path: planPath,
       planId: parsed.planId,
       raw: parsed.raw,
-      sessionModel: this.deps.getSessionModel(),
+      sessionModel,
       state,
+      sessionThinkingLevel,
       title: parsed.title,
       todos: parsed.todos,
       toolbarStyle: ui.toolbarStyle,

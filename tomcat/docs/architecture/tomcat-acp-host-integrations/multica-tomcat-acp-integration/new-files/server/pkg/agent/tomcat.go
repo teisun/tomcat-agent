@@ -257,6 +257,13 @@ func (b *tomcatBackend) runTomcatTurn(ctx context.Context, c *hermesClient, prom
 			return fail("session/set_config_option", err), model
 		}
 		model = tomcatCurrentModel(configured)
+		session = configured
+	}
+	if err := setTomcatEffort(ctx, c.request, result.SessionID, opts.ThinkingLevel, session); err != nil {
+		if setupFailureWithholdsSessionID(opts) {
+			result.SessionID = ""
+		}
+		return fail("session/set_config_option effort", err), model
 	}
 	trySend(messages, Message{Type: MessageStatus, Status: "running", SessionID: result.SessionID})
 	streaming.Store(true)
@@ -268,6 +275,33 @@ func (b *tomcatBackend) runTomcatTurn(ctx context.Context, c *hermesClient, prom
 	}
 	result.Error = "tomcat returned no valid prompt result"
 	return result, model
+}
+
+// Tomcat setup is strict: a requested effort must be applied before any prompt.
+func setTomcatEffort(ctx context.Context, request acpRequestFn, sessionID, level string, configured json.RawMessage) error {
+	option, ok := parseACPEffortOption(configured)
+	if !ok {
+		if level == "" {
+			return nil
+		}
+		return errors.New("running Tomcat does not provide an effort option; update and restart Tomcat, or select Default")
+	}
+	if level == "" {
+		level = "default"
+	}
+	if !option.supports(level) {
+		return fmt.Errorf("Tomcat session does not support effort %q", level)
+	}
+	reply, err := request(ctx, "session/set_config_option", map[string]any{
+		"sessionId": sessionID, "configId": option.ConfigID, "value": level,
+	})
+	if err != nil {
+		return err
+	}
+	if current, ok := acpConfigOptionCurrentValue(reply, option.ConfigID); !ok || current != level {
+		return fmt.Errorf("Tomcat did not confirm effort %q", level)
+	}
+	return nil
 }
 
 func tomcatCurrentModel(raw json.RawMessage) string {

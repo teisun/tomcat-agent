@@ -663,7 +663,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             ),
         )?;
 
-        session.switch_current_model(Some("deepseek"), Some(&switched_model))?;
+        session.switch_current_model(Some("deepseek"), Some(&switched_model), None)?;
         let entry = session
             .current_session_entry()?
             .expect("切 model 后当前 session 应存在");

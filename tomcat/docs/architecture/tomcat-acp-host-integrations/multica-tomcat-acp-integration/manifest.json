@@ -1,5 +1,5 @@
 {
-  "tomcat_code_revision": "9d7221317e272645128d090bc38151f943d6a2aa",
+  "tomcat_code_revision": "bfea42a7625fee14c1a74e83e2ff471bd8209fb3",
   "host": {
     "name": "multica",
     "base_revision": "06835b8f50606ca3f8bebbb5d07ac8901f831e69",
@@ -150,21 +150,21 @@
         "status": "A",
         "group": "runtime",
         "delivery": "new-files/server/pkg/agent/tomcat.go",
-        "sha256_after_integration": "f26151b73090eb1f3b88aa6e9c8f8dce23f3dac7b32cfd32a53eb03516d15efc"
+        "sha256_after_integration": "ccbc582e405dd625d35541faa3830ba2d326f7b9a6b1e14915afecca9d412605"
       },
       {
         "path": "server/pkg/agent/tomcat_integration_test.go",
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/pkg/agent/tomcat_integration_test.go",
-        "sha256_after_integration": "83d1643f9d9e31e66d787e5048265e806787219becb95b62d08b258d9456ec20"
+        "sha256_after_integration": "5d842a458446f8ea8c39884d9816c88636e2a51b04eeae528bf3ffaea651e087"
       },
       {
         "path": "server/pkg/agent/tomcat_test.go",
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/pkg/agent/tomcat_test.go",
-        "sha256_after_integration": "e3be47c3d29144ae2418e252ef37d6baca623ca077173527284a89ab9443a784"
+        "sha256_after_integration": "c5d041d85ee1b7961e8d459c5919d8ea66209930910a59f2e82c12ff0d22515e"
       },
       {
         "path": "server/pkg/agent/version.go",
@@ -185,14 +185,14 @@
         "status": "A",
         "group": "runtime",
         "delivery": "new-files/server/pkg/agent/tomcat_models.go",
-        "sha256_after_integration": "4b8ed604062943f741bbbe572854f2411935aee85112caab4791c3a62b563954"
+        "sha256_after_integration": "39c29e1c089d184fe6d848e26617030856a41a48a8f2ead987ccef9ea17eaa05"
       },
       {
         "path": "server/pkg/agent/tomcat_models_test.go",
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/pkg/agent/tomcat_models_test.go",
-        "sha256_after_integration": "2b42551c9fb1cbc63d7dc5abb39ca7c7df651dc22cc6ecad5da8b848fd22a7ae"
+        "sha256_after_integration": "ae32b02fb1eed7583d06a890bbced716e324889ea76f1713a2ea1fa2070bc2f7"
       },
       {
         "path": "server/pkg/agent/tomcat_fixture_test.go",
@@ -206,7 +206,7 @@
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/server/internal/daemon/tomcat_models_test.go",
-        "sha256_after_integration": "7b259ad960a4caf9d4715ff3857c627b0009ffc79ac7a04068ff01ee304b8a5d"
+        "sha256_after_integration": "bceeefa00f9caf418d507427d9d6e34ed2389ca39c9cd409f0ac4e152e3d2067"
       },
       {
         "path": "server/internal/daemon/model_list_binary_test.go",
@@ -220,13 +220,20 @@
         "status": "A",
         "group": "tests",
         "delivery": "tests/new-files/e2e/tomcat-model-discovery.spec.ts",
-        "sha256_after_integration": "db268792f4b09214111a911d9e2357aac6c8c7d47fc1650a6f759f16d288ca1c"
+        "sha256_after_integration": "cdc7ebfa61d9d717ae186e842068d4c214d2713a80907a887aa0f8b685693598"
+      },
+      {
+        "path": "server/pkg/agent/thinking.go",
+        "status": "M",
+        "group": "runtime",
+        "delivery": "existing-files.patch",
+        "sha256_after_integration": "4ed0386f3ab4b1af6492355596f332fd05ce1fcd8b4f8e2422541c73cba86660"
       }
     ],
     "patches": [
       {
         "path": "existing-files.patch",
-        "sha256": "ff9c97821b22a9fef3510a5009ed06de30a508f30dd1fc1b3c708daec42d6bf1",
+        "sha256": "432ed002862bee57b7248fce867f439290dd6417713647b8933527c67313b353",
         "target_paths": [
           "packages/core/types/agent.ts",
           "server/internal/daemon/agents_probe.go",
@@ -238,7 +245,8 @@
           "server/pkg/agent/launch.go",
           "server/pkg/agent/models.go",
           "server/pkg/agent/version.go",
-          "server/pkg/taskfailure/failure.go"
+          "server/pkg/taskfailure/failure.go",
+          "server/pkg/agent/thinking.go"
         ]
       },
       {
@@ -268,7 +276,7 @@
     "package": "multica-tomcat-acp-integration",
     "catalog_repair": {
       "source_base_revision": "3c7b4cde72ab4c8389dcec933e2573855b04cb7e",
-      "source_state": "historical reviewed working-tree catalog repair; current model adapter is unchanged and matches adapter_refresh.source_revision",
+      "source_state": "Historical provenance; later adapter refresh and reasoning-effort changes are recorded separately",
       "production_paths": [
         "server/pkg/agent/models.go",
         "server/pkg/agent/tomcat_models.go"
@@ -282,6 +290,40 @@
       "scope": "Tomcat launch-policy tests, authoritative terminal and cleanup handoff, native argument-parse diagnostics",
       "backport": "Original host baseline retained; only Session cleanup acknowledgement, daemon result/cancellation/worktree handling and failure reason are backported; local merge audit additionally preserves fresh-retry cleanup uncertainty and task-temp locks for daemon lifetime; no Pi, desktop, scheduler or native CLI shutdown-confirmation changes",
       "test_adaptations": "Assert configured executable path and command are preserved; decode actual snake_case cancellation wire fields; move session_config_failed classification into default unit tests; observer identity follows actual service version"
+    },
+    "reasoning_effort": {
+      "source_base_revision": "5e36721c1329372d272e8c4b72f4ada2e31115a7",
+      "source_state": "uncommitted working tree; semantic replay on original host baseline, no new commit claimed",
+      "production_paths": [
+        "server/pkg/agent/tomcat.go",
+        "server/pkg/agent/tomcat_models.go",
+        "server/pkg/agent/thinking.go"
+      ],
+      "source_sha256": {
+        "server/pkg/agent/tomcat.go": "ccbc582e405dd625d35541faa3830ba2d326f7b9a6b1e14915afecca9d412605",
+        "server/pkg/agent/tomcat_models.go": "39c29e1c089d184fe6d848e26617030856a41a48a8f2ead987ccef9ea17eaa05",
+        "server/pkg/agent/thinking.go": "838f840b3b6d8d54b87e58b3a83a2c85b0e638e64dc8734f5efb4345355d7379",
+        "server/pkg/agent/tomcat_test.go": "c644d112060d5befb862532847b7de0e4cffb1cb0b15a1b83e3f21f7bfd180ee",
+        "server/pkg/agent/tomcat_models_test.go": "ae32b02fb1eed7583d06a890bbced716e324889ea76f1713a2ea1fa2070bc2f7",
+        "server/pkg/agent/tomcat_integration_test.go": "15122c227ea477cab3195c29b4a77248bc74b62f90e15e62441af3223b07c4e3",
+        "e2e/tomcat-model-discovery.spec.ts": "cdc7ebfa61d9d717ae186e842068d4c214d2713a80907a887aa0f8b685693598",
+        "server/internal/daemon/thinking_level_warning_test.go": "4be1993319277e0a337f999b66cc5f3331de65d81e67b3effe966abb4d8fdab1"
+      },
+      "tomcat_source_base_revision": "bfea42a7625fee14c1a74e83e2ff471bd8209fb3",
+      "tomcat_source_state": "uncommitted worktree; effort support is required in both CLI and running shared service",
+      "tomcat_source_sha256": {
+        "tomcat/src/api/acp/adapter.rs": "739c78e37dcf6cee1ecba8d66140bfcba2249fa7d242ed2d3ca4ae8e4543ebde",
+        "tomcat/src/api/serve/commands.rs": "da746a4e9ae93cf61f182fb8814fdf7aa65a1a47eb32a2fb1c44f5855f7ca439",
+        "tomcat/src/api/serve/types.rs": "de69f7f794847f022d91e79f8bb5daa64432427cc0431bae6900868220e0bfc7",
+        "tomcat/src/api/chat/context.rs": "c53fc4f27f2a2b50e88a751ff6eba61d82828391498fa98bb31d5cf7d2974d66",
+        "tomcat/src/core/llm/catalog.rs": "6df8014c4c9ebe33058d6aca835451ef99573565e0d1768ba5672f0e7166ac3c",
+        "tomcat/src/core/session/manager/session_impl.rs": "38642654daca516208e5417492a236ce6a3631ee7716be88cc4e92cd3ac08331",
+        "tomcat/src/core/plan_runtime/prod_reviewer.rs": "e8f07349c5ef1534a1160c0516081e4db567a5aa527ba27d87777725e1d84b85",
+        "tomcat/src/core/plan_runtime/verify.rs": "8880e81aed5a5c27b49b603ebbc4afe3734ee03ea662181bc686e77a938d4567"
+      },
+      "scope": "catalog tiers/defaultModelId, one dynamic-thinking registration, confirmed model -> effort -> prompt; session-local persistence and default clearing; no other Agent production changes",
+      "test_adaptations": "Preserve the default-unit-test placement of session_config_failed and actual service-version observer identity. The original baseline lacks thinking_level_warning_test.go and persisted warning messages: Tomcat selection tests live in existing tomcat_models_test.go and assert its existing log-and-drop behavior instead; no new warning mechanism. Browser source targets the current branch, not an imported UI migration."
     }
-  }
+  },
+  "tomcat_source_state": "base revision plus uncommitted reasoning-effort worktree; see host.reasoning_effort"
 }

@@ -757,6 +757,14 @@ pub enum ServeCommand {
         #[serde(default)]
         params: NewSessionParams,
     },
+    /// Internal ACP-only effort override; absent level inherits the model default.
+    #[serde(skip)]
+    #[schemars(skip)]
+    SetSessionThinkingLevel {
+        id: Option<String>,
+        session_id: Option<String>,
+        level: Option<crate::core::llm::ThinkingLevel>,
+    },
     /// Internal ACP-only controller policy change; never deserializable from Native wire.
     #[serde(skip)]
     #[schemars(skip)]
@@ -986,6 +994,7 @@ impl ServeCommand {
             | Self::GetInstructionCatalog { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetInteractionPolicy { id, .. }
+            | Self::SetSessionThinkingLevel { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
             | Self::SetSpeed { id, .. }
@@ -1045,6 +1054,7 @@ impl ServeCommand {
             | Self::GetInstructionCatalog { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetInteractionPolicy { session_id, .. }
+            | Self::SetSessionThinkingLevel { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
             | Self::SetSpeed { session_id, .. }
@@ -1136,6 +1146,7 @@ impl ServeCommand {
             Self::GetInstructionCatalog { .. } => "get_instruction_catalog",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetInteractionPolicy { .. } => "internal_set_interaction_policy",
+            Self::SetSessionThinkingLevel { .. } => "internal_set_session_thinking_level",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",
             Self::SetSpeed { .. } => "set_speed",

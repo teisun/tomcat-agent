@@ -611,7 +611,7 @@ export function PlanPreviewApp({
           }
           sessionContextWindow={sessionModelDetails?.selectedContextWindow}
           sessionModel={state.sessionModel}
-          sessionThinkingLevel={sessionModelDetails?.selectedReasoningLevel}
+          sessionThinkingLevel={state.sessionThinkingLevel}
         />
       ) : null}
       <main

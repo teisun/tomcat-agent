@@ -879,6 +879,7 @@
   "slash.effort.usage": "Usage error: /effort supports only off|minimal|low|medium|high|xhigh|max.",
   "slash.effort.invalid": "Usage error: /effort supports only off|minimal|low|medium|high|xhigh|max; received `{value}`.",
   "slash.effort.set": "[effort] Model {model} reasoning effort set to {level}",
+  "slash.effort.defaultSavedOverrideNotCleared": "Model default saved, but this session's override could not be cleared: {detail}",
   "slash.thinking.invalid": "Usage error: /thinking supports minimal/summary/full/toggle (on/off aliases); received `{value}`.",
   "slash.thinking.usage": "Usage error: /thinking accepts 0 or 1 argument (minimal/summary/full/toggle).",
   "slash.thinking.set": "[thinking] Switched to {mode} mode",

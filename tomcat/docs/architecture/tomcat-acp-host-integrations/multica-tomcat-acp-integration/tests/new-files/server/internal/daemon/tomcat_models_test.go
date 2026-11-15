@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +16,36 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
+
+// The old host logs rejected tiers; retain that workflow rather than importing
+// the newer host's persisted warning-message mechanism.
+func TestTomcatThinkingSelectionUsesCatalog(t *testing.T) {
+	catalog := agent.Catalog{Models: []agent.Model{
+		{ID: "effort-model", Default: true, Thinking: &agent.ModelThinking{SupportedLevels: []agent.ThinkingLevel{{Value: "low"}, {Value: "high"}}}},
+		{ID: "no-effort"},
+	}}
+	for _, tc := range []struct{ name, model, level, want string }{
+		{"selected model", "effort-model", "high", "high"},
+		{"default model", "", "low", "low"},
+		{"stale tier", "effort-model", "max", ""},
+		{"no effort", "no-effort", "high", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := stubModelDiscovery(t, map[string]agent.Catalog{"tomcat": catalog})
+			var logs bytes.Buffer
+			selected := resolveTaskModelSelection(context.Background(), "tomcat", agent.Command{}, taskModelSelection{Model: tc.model, ThinkingLevel: tc.level}, slog.New(slog.NewTextHandler(&logs, nil)))
+			if selected.Model != tc.model || selected.ThinkingLevel != tc.want || reads() != 1 {
+				t.Fatalf("selection=%+v, catalog reads=%d; want model %q, effort %q and one read", selected, reads(), tc.model, tc.want)
+			}
+			if strings.Contains(logs.String(), "thinking_level:") != (tc.want == "") {
+				t.Fatalf("invalid tiers must use the original warning path: %s", logs.String())
+			}
+		})
+	}
+}
 
 // A test-owned executable supports both discovery and ACP, so the daemon's
 // production command binding and model precedence remain in the tested path.

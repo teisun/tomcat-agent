@@ -1083,7 +1083,7 @@ pub(crate) async fn handle_command(
             };
             let entry = slot.ctx.session_runtime.session.current_session_entry()?;
             let model = slot.ctx.effective_model(entry.as_ref());
-            let thinking_level = slot.ctx.resolve_thinking_level(&model);
+            let thinking_level = slot.ctx.resolve_thinking_level(&model, entry.as_ref());
             let agent_mode = slot.ctx.session_runtime.plan_runtime.mode();
             let policy = slot.ctx.session_runtime.plan_runtime.interaction_policy();
             let active_plan = slot.ctx.session_runtime.plan_runtime.active_plan();
@@ -1381,10 +1381,11 @@ pub(crate) async fn handle_command(
             let model_changed = slot.ctx.effective_model(previous_entry.as_ref()) != model;
             if let Err(error) = with_current_model_catalog(&state.cfg, |catalog| {
                 catalog.lookup_explicit(&model)?;
-                slot.ctx
-                    .session_runtime
-                    .session
-                    .switch_current_model(None, Some(model.as_str()))
+                slot.ctx.session_runtime.session.switch_current_model(
+                    None,
+                    Some(model.as_str()),
+                    Some(&slot.ctx.effective_model(None)),
+                )
             }) {
                 send_error(
                     &state,
@@ -1420,6 +1421,54 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::SetSessionThinkingLevel {
+            id,
+            session_id,
+            level,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id).await? else {
+                return Ok(());
+            };
+            let entry = slot.ctx.session_runtime.session.current_session_entry()?;
+            let model = slot.ctx.effective_model(entry.as_ref());
+            if let Some(level) = level {
+                let catalog_entry = slot
+                    .ctx
+                    .global_services
+                    .model_catalog
+                    .lookup_explicit(&model)?;
+                if !catalog_entry
+                    .supported_reasoning_levels
+                    .iter()
+                    .any(|value| value == level.as_str())
+                {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        "invalid_thinking_level",
+                    )?;
+                    return Ok(());
+                }
+            }
+            if let Err(error) = slot.ctx.session_runtime.session.update_session(
+                slot.ctx.session_runtime.session.current_session_key(),
+                |entry| entry.thinking_level = level.map(|level| level.as_str().to_owned()),
+            ) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                None,
+            )))?;
+        }
         ServeCommand::SetThinkingLevel {
             id,
             session_id,
@@ -1453,10 +1502,15 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             };
-            slot.ctx
-                .global_services
-                .model_prefs
-                .set_reasoning(&model, parsed_level)?;
+            if let Err(error) = slot.ctx.set_model_reasoning_level(&model, parsed_level) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),

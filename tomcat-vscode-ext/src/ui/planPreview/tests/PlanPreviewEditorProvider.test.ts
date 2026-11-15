@@ -173,6 +173,7 @@ function makeDeps(
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getBuildModel: vi.fn().mockReturnValue(""),
     getSessionModel: vi.fn().mockReturnValue(""),
+    getSessionModelAndEffort: vi.fn().mockResolvedValue(null),
     messenger: {
       sendListModels: vi.fn().mockResolvedValue({
         payload: { models: [{ id: "gpt-5.4", keyPresent: true }] },
@@ -313,6 +314,60 @@ describe("PlanPreviewEditorProvider.buildState", () => {
     expect(snapshot.bodyLineMap).toHaveLength(bodyLines.length);
     expect(snapshot.bodyLineMap[0]).toBe(15);
     expect(snapshot.bodyLineMap[bodyLines.indexOf("Body paragraph.")]).toBe(17);
+  });
+
+  it("uses the sidebar session's effective effort and rereads it after a manual update", async () => {
+    let effort = "low";
+    const sendSetThinkingLevel = vi.fn(async (sessionId: string, model: string, level: string) => {
+      expect(sessionId).toBe("sidebar-session");
+      effort = level;
+      return { success: true };
+    });
+    const provider = new PlanPreviewEditorProvider(makeDeps({
+      ensureSession: vi.fn().mockResolvedValue("sidebar-session"),
+      getSessionModel: () => "gpt-5.4",
+      getSessionModelAndEffort: async () => ({ model: "gpt-5.4", thinkingLevel: effort }),
+      messenger: { sendSetThinkingLevel, sendListModels: vi.fn().mockResolvedValue({ success: true,
+        payload: { models: [{ id: "gpt-5.4", keyPresent: true, selectedReasoningLevel: "high", supportedReasoningLevels: ["low", "high"] }] },
+      }) } as never,
+    }));
+    let snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md");
+    expect(snapshot.sessionModel).toBe("gpt-5.4");
+    expect(snapshot.sessionThinkingLevel).toBe("low");
+    expect(snapshot.availableModelDetails["gpt-5.4"].selectedReasoningLevel).toBe("high");
+    await provider.handleIntent({ messageId: "effort", type: "setThinkingLevel", data: { modelId: "gpt-5.4", level: "high" } }, makeDoc(), async () => {
+      snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md");
+    });
+    expect(snapshot.sessionThinkingLevel).toBe("high");
+    provider.dispose();
+  });
+
+  it("uses the live service model with its effort instead of a stale sidebar model", async () => {
+    const serviceState = { model: "service-model", thinkingLevel: "low" };
+    const provider = new PlanPreviewEditorProvider(makeDeps({
+      getSessionModel: () => "stale-sidebar-model",
+      getSessionModelAndEffort: async () => serviceState,
+    }));
+    const snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md");
+    expect(snapshot.sessionModel).toBe(serviceState.model);
+    expect(snapshot.sessionThinkingLevel).toBe(serviceState.thinkingLevel);
+    provider.dispose();
+  });
+
+  it("keeps the model and effort together if the sidebar changes during the effort read", async () => {
+    let model = "session-a-model";
+    const provider = new PlanPreviewEditorProvider(makeDeps({
+      getSessionModel: () => model,
+      getSessionModelAndEffort: async () => {
+        await Promise.resolve();
+        model = "session-b-model";
+        return { model: "session-a-model", thinkingLevel: "low" };
+      },
+    }));
+    const snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md");
+    expect(snapshot.sessionModel).toBe("session-a-model");
+    expect(snapshot.sessionThinkingLevel).toBe("low");
+    provider.dispose();
   });
 
   it("keeps the build model when it is a known model", async () => {

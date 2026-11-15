@@ -93,8 +93,6 @@ pub enum ThinkingFormat {
     Deepseek,
     /// 智谱 / Z.AI：与 OpenAI Responses 同形态；占位。
     Zai,
-    /// Qwen：占位（不在本期接通）。
-    Qwen,
     /// 豆包 / Moonshot：`thinking: {"type":"enabled", "max_tokens": ?}` 对象。
     Doubao,
     /// Anthropic Messages：`thinking: {"type":"enabled","budget_tokens": ...}`。
@@ -113,7 +111,6 @@ impl ThinkingFormat {
             Self::Openrouter => "openrouter",
             Self::Deepseek => "deepseek",
             Self::Zai => "zai",
-            Self::Qwen => "qwen",
             Self::Doubao => "doubao",
             Self::Anthropic => "anthropic",
             Self::AnthropicAdaptive => "anthropic-adaptive",
@@ -129,7 +126,6 @@ impl ThinkingFormat {
                 "openrouter" => Self::Openrouter,
                 "deepseek" => Self::Deepseek,
                 "zai" => Self::Zai,
-                "qwen" => Self::Qwen,
                 "doubao" | "moonshot" => Self::Doubao,
                 "anthropic" => Self::Anthropic,
                 "anthropic-adaptive" => Self::AnthropicAdaptive,
@@ -152,15 +148,6 @@ impl ThinkingFormat {
         }
         thinking_format_for_api(api)
     }
-
-    /// 旧的按 model 名启发式推断，仅保留给工具函数/单测。
-    /// 运行时解析不再调用该路径，避免名字骗过 wire。
-    pub fn resolve_for_model(&self, model: &str) -> Self {
-        if !matches!(self, Self::Auto) {
-            return *self;
-        }
-        thinking_format_for_model(model)
-    }
 }
 
 /// 按 wire `api` 归一到默认 thinking 请求格式。
@@ -175,7 +162,6 @@ pub fn default_thinking_format_for_api(api: &str) -> &'static str {
         "openai" | "openai-responses" => "openai",
         "deepseek" => "deepseek",
         "zai" => "zai",
-        "qwen" => "qwen",
         "doubao" | "moonshot" => "doubao",
         // Modern Claude models use adaptive thinking. Older models are covered
         // by the provider's one-shot compatibility fallback after a 400.
@@ -187,38 +173,6 @@ pub fn default_thinking_format_for_api(api: &str) -> &'static str {
 
 pub fn thinking_format_for_api(api: &str) -> ThinkingFormat {
     ThinkingFormat::parse_or_auto(Some(default_thinking_format_for_api(api)))
-}
-
-/// 按 model 归一到 thinking 请求格式。
-///
-/// 设计目标：
-/// - 单输入（model 字符串）即可决定默认格式；
-/// - 同厂商多个 model 可以复用同一种 format；
-/// - 未来某个特殊 model 也可以单独映射到独立 format。
-///
-/// 注意：该函数仅保留给测试/工具代码；运行时解析已改为 [`thinking_format_for_api`]。
-pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
-    let lower = model.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-") {
-        ThinkingFormat::Deepseek
-    } else if lower.starts_with("qwen") {
-        ThinkingFormat::Qwen
-    } else if lower.starts_with("doubao")
-        || lower.starts_with("moonshot")
-        || lower.starts_with("kimi")
-        || lower.starts_with("mimo-")
-    {
-        ThinkingFormat::Doubao
-    } else if matches!(
-        lower.as_str(),
-        "claude-opus-4-6" | "claude-opus-4-7" | "claude-opus-4-8"
-    ) {
-        ThinkingFormat::AnthropicAdaptive
-    } else if lower.starts_with("claude-") {
-        ThinkingFormat::Anthropic
-    } else {
-        ThinkingFormat::Openai
-    }
 }
 
 /// `resolve_request_fields` 的输出：大多数 format 最多只写一个字段；DeepSeek 例外。
@@ -287,7 +241,7 @@ pub fn safe_supported_reasoning_levels_for(
             ThinkingLevel::Medium,
             ThinkingLevel::High,
         ],
-        ThinkingFormat::Qwen | ThinkingFormat::Auto => &[
+        ThinkingFormat::Auto => &[
             ThinkingLevel::Low,
             ThinkingLevel::Medium,
             ThinkingLevel::High,
@@ -367,7 +321,6 @@ pub fn thinking_config_for_request(
 /// - DeepSeek：按官方 thinking mode，同时写 `reasoning_effort + thinking={"type":"enabled"}`；
 ///   本函数不再折叠档位，caller 应保证传入 level 已经在模型支持集内；
 /// - 豆包/Moonshot：`thinking={"type":"enabled"}`，带 `max_tokens` 时附带；
-/// - Qwen：当前无显式请求字段；响应解析仍走 reasoning_content 三路兜底。
 pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> ThinkingRequestFields {
     if !cfg.enabled {
         return ThinkingRequestFields::default();
@@ -412,11 +365,10 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
                 thinking: Some(serde_json::Value::Object(obj)),
             }
         }
-        // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`；Gemini 走 `gemini_thinking_level`。
-        ThinkingFormat::Qwen
-        | ThinkingFormat::Anthropic
-        | ThinkingFormat::AnthropicAdaptive
-        | ThinkingFormat::Gemini => ThinkingRequestFields::default(),
+        // Anthropic and Gemini encode thinking in their native request builders.
+        ThinkingFormat::Anthropic | ThinkingFormat::AnthropicAdaptive | ThinkingFormat::Gemini => {
+            ThinkingRequestFields::default()
+        }
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
     }
@@ -524,7 +476,7 @@ fn anthropic_default_budget(level: ThinkingLevel) -> u32 {
 /// - `strip_on_resend=true` 时按 `format` 分支：
 ///   - `Deepseek`：必须剥离（否则 400 cls error），返回 true；
 ///   - `Anthropic`（未来）：必须保留（带 signature），返回 false；
-///   - 其它（OpenAI/OpenRouter/Doubao/Qwen 等）：默认剥离（true）。
+///   - 其它（OpenAI/OpenRouter/Doubao 等）：默认剥离（true）。
 pub fn should_strip_on_resend(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> bool {
     if !cfg.strip_on_resend {
         return false;

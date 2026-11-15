@@ -950,6 +950,11 @@ export async function activate(
         .getConfiguration(TOMCAT_CONFIG_SECTION)
         .get<string>("plan.buildModel", "") ?? "",
     getSessionModel: () => webviewProvider.activeSessionModel(),
+    getSessionModelAndEffort: async () => {
+      const sessionId = webviewProvider.currentState().activeSessionId;
+      const state = sessionId ? await sessionRouter.getState(sessionId) : null;
+      return state ? { model: state.model ?? "", thinkingLevel: state.thinkingLevel ?? null } : null;
+    },
     messenger,
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));

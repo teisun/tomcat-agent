@@ -896,7 +896,7 @@ fn chat_context_stays_pinned_after_external_session_new() {
         .write_transcript_custom(json!({ "customType": "nested-session-guard" }));
     ctx.session_runtime
         .session
-        .switch_current_model(Some("openai"), Some("chat-runtime-model"))
+        .switch_current_model(Some("openai"), Some("chat-runtime-model"), None)
         .expect("model update should stay on pinned session");
 
     assert_eq!(current_session_id(&ctx), original_session_id);

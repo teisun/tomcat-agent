@@ -363,7 +363,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - Webview↔Host：`searchContext` 请求/响应与 context search 相关消息；Composer 经 Suggestion 插件驱动，关闭统一 `exitSuggestion` / `closeMention()`。
 - `ModelCatalog::is_builtin_seed(id)` / `SharedModelCatalog::is_builtin_seed(id)`：新增；按内嵌 `builtin_models.toml` 出厂清单判定。
 - `ModelView.source`：语义从「是否在用户 models.toml」改为「是否在出厂 seed 清单」；GUI Delete 可见性随之变化（seeded 官方模型隐藏 Delete）。
-- `ThinkingFormat::Auto`：运行时仅按 wire `api` 解析；`resolve_for_model` 仅保留给测试/工具路径。
+- `ThinkingFormat::Auto`：运行时仅按 wire `api` 解析；旧的按模型名猜测函数已删除，测试也按配置 API 或显式的已实现格式解析。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |

@@ -1120,6 +1120,7 @@ impl SessionManager {
         &self,
         provider: Option<&str>,
         model_id: Option<&str>,
+        default_model: Option<&str>,
     ) -> Result<(), AppError> {
         let key = self.current_session_key();
         if self.get_session(key)?.is_none() {
@@ -1133,6 +1134,11 @@ impl SessionManager {
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned);
         self.update_session(key, |entry| {
+            if entry.model_override.as_deref().or(default_model)
+                != normalized_model.as_deref().or(default_model)
+            {
+                entry.thinking_level = None;
+            }
             entry.model_override = normalized_model.clone();
         })?;
         self.append_model_change(provider, normalized_model.as_deref())

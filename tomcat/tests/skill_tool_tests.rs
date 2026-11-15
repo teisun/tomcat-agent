@@ -119,7 +119,8 @@ impl FixedResolver {
         call.provider = "idatatlas".to_string();
         call.base_url = Some(common::IDATATLAS_TEST_BASE_URL.to_string());
         call.key_source = common::IDATATLAS_TEST_API_KEY_ENV.to_string();
-        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.thinking_format =
+            tomcat::core::llm::thinking_policy::thinking_format_for_api(&call.api);
         call.capabilities = Capabilities {
             vision: false,
             files: false,

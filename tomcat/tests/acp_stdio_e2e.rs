@@ -33,7 +33,7 @@ fn acp_startup_config_applies_before_new_load_and_resets_per_controller() {
             .unwrap()["currentValue"]
     }
     fn contract(options: &Value) {
-        assert_eq!(options.as_array().unwrap().len(), 5);
+        assert_eq!(options.as_array().unwrap().len(), 6);
         for option in options.as_array().unwrap() {
             assert_eq!(option["type"], "select");
             assert!(option["options"]
@@ -269,7 +269,7 @@ fn acp_agent_plan_execution_notifies_mode_change_once() {
     let options = updates[0]["params"]["update"]["configOptions"]
         .as_array()
         .unwrap();
-    assert_eq!(options.len(), 5);
+    assert_eq!(options.len(), 6);
     assert_eq!(
         options
             .iter()

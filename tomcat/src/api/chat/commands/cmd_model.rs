@@ -140,11 +140,11 @@ fn run_use(ctx: &ChatContext, model_id: &str) -> ChatCommandOutcome {
         }
     };
 
-    match ctx
-        .session_runtime
-        .session
-        .switch_current_model(Some(&entry.provider), Some(&entry.id))
-    {
+    match ctx.session_runtime.session.switch_current_model(
+        Some(&entry.provider),
+        Some(&entry.id),
+        Some(&ctx.effective_model(None)),
+    ) {
         Ok(()) => {
             println!(
                 "{}",

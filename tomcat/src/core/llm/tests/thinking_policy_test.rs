@@ -4,8 +4,7 @@ use super::super::thinking_policy::{
     clamp_reasoning_level, default_thinking_format_for_api, lowest_supported_reasoning_level,
     resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
     should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_config_for_request,
-    thinking_format_for_api, thinking_format_for_model, ThinkingFormat, ThinkingLevel,
-    ThinkingRequestFields,
+    thinking_format_for_api, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -125,28 +124,6 @@ fn format_resolve_auto_by_wire_api() {
 }
 
 #[test]
-fn format_resolve_auto_by_model_name() {
-    assert_eq!(
-        thinking_format_for_model("deepseek-v4-pro"),
-        ThinkingFormat::Deepseek
-    );
-    assert_eq!(
-        thinking_format_for_model("deepseek-v4-flash"),
-        ThinkingFormat::Deepseek
-    );
-    assert_eq!(thinking_format_for_model("gpt-5"), ThinkingFormat::Openai);
-    // MiMo 走豆包系 thinking 线格式（thinking: {"type":"enabled"}）。
-    assert_eq!(
-        thinking_format_for_model("mimo-v2.5-pro"),
-        ThinkingFormat::Doubao
-    );
-    assert_eq!(
-        thinking_format_for_model("claude-opus-4-6"),
-        ThinkingFormat::AnthropicAdaptive
-    );
-}
-
-#[test]
 fn explicit_format_wins_over_wire_auto_detection() {
     assert_eq!(
         ThinkingFormat::Openai.resolve_for_api("anthropic-messages"),
@@ -251,10 +228,10 @@ fn clamp_reasoning_level_uses_safe_toggle_default_for_empty_list() {
 }
 
 #[test]
-fn qwen_has_no_request_field() {
+fn removed_qwen_format_uses_the_existing_unknown_value_fallback() {
     assert_eq!(
-        resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
-        ThinkingRequestFields::default()
+        ThinkingFormat::parse_or_auto(Some("qwen")),
+        ThinkingFormat::Auto
     );
 }
 

@@ -339,6 +339,7 @@ describe("PlanPreviewApp", () => {
     render(<PlanPreviewApp vscodeApi={api} />);
     pushState(
       makeState({
+        sessionThinkingLevel: "low",
         availableModelDetails: {
           "gpt-5.6": {
             capabilities: [],
@@ -366,7 +367,7 @@ describe("PlanPreviewApp", () => {
     expect(
       screen
         .getAllByTestId("thinking-level-option")
-        .find((option) => option.textContent === "High")
+        .find((option) => option.textContent === "Low")
         ?.querySelector('[aria-label="Selected"]'),
     ).toBeTruthy();
   });

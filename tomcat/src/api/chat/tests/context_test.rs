@@ -396,11 +396,11 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
     );
 
     assert_eq!(
-        ctx.resolve_thinking_level("relay/gpt-sol"),
+        ctx.resolve_thinking_level("relay/gpt-sol", None),
         ThinkingLevel::Xhigh
     );
     assert_eq!(
-        ctx.resolve_thinking_level("gpt-sol"),
+        ctx.resolve_thinking_level("gpt-sol", None),
         ThinkingLevel::High,
         "wire model_name key miss should still fall back to the configured default level"
     );
@@ -451,7 +451,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         .expect("persist toggle override");
 
     assert_eq!(
-        ctx.resolve_thinking_level("relay/toggle-only"),
+        ctx.resolve_thinking_level("relay/toggle-only", None),
         ThinkingLevel::High,
         "empty supported_reasoning_levels should keep the existing Thinking On/Off fallback"
     );

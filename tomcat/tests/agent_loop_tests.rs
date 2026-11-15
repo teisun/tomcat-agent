@@ -485,7 +485,8 @@ impl FixedResolver {
         call.provider = "openai".to_string();
         call.base_url = Some("https://api.openai.com".to_string());
         call.key_source = "DEEPSEEK_API_KEY".to_string();
-        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.thinking_format =
+            tomcat::core::llm::thinking_policy::thinking_format_for_api(&call.api);
         call.capabilities = capabilities;
         call
     }

@@ -153,7 +153,11 @@ impl FixedResolver {
         call.provider = provider.to_string();
         call.base_url = Some(base_url.to_string());
         call.key_source = "DEEPSEEK_API_KEY".to_string();
-        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.thinking_format = if provider == "deepseek" {
+            tomcat::core::llm::thinking_policy::ThinkingFormat::Deepseek
+        } else {
+            tomcat::core::llm::thinking_policy::thinking_format_for_api(api)
+        };
         call.capabilities = capabilities;
         call
     }

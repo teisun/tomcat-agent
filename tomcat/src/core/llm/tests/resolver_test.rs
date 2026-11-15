@@ -465,6 +465,22 @@ provider = "relay"
 api_key_env = "RELAY_API_KEY"
 base_url = "https://gateway.example.test/v1"
 capabilities = { vision = false, files = false, tools = true, reasoning = true }
+
+[[models]]
+id = "qwen-chat"
+model_name = "qwen-test"
+api = "openai"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
+
+[[models]]
+id = "qwen-responses"
+model_name = "qwen-test"
+api = "openai-responses"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
 "#,
     )
     .unwrap();
@@ -477,10 +493,12 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
         std::env::set_var("RELAY_API_KEY", "stub");
     }
 
-    let resolved = resolver
-        .resolve(LlmScene::Main, Some("claude-relay"))
-        .expect("relay model should resolve");
-    assert_eq!(resolved.thinking_format, ThinkingFormat::Openai);
+    for id in ["claude-relay", "qwen-chat", "qwen-responses"] {
+        let resolved = resolver
+            .resolve(LlmScene::Main, Some(id))
+            .expect("relay model should resolve");
+        assert_eq!(resolved.thinking_format, ThinkingFormat::Openai, "{id}");
+    }
 
     unsafe {
         std::env::remove_var("RELAY_API_KEY");

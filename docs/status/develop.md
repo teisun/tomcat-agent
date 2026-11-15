@@ -1,33 +1,36 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-14 17:03 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-15 13:22 +0800 | ACTIVE | develop | - |
 
-### DONE：ACP / VS Code 共享输入与续接提示词实时显示（2026-11-14）
+### DONE：Multica 会话推理强度与原版本适配包（2026-11-15）
 
 ```text
-同项目 ACP 与 VS Code → serve 中的同一会话 → 连接期间持续刷新
-  运行中：待发 / 插话 / 停止 / 附件准备，不换执行宿主
-  静止后：写入安全接手，继续原会话和计划；提示显示当前宿主名
-  普通续接 prompt：保存后通知 VS Code 补气泡，无需切会话或重读历史
+Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强度 → 确认后发任务
+                                             │
+                        Tomcat 会话独立保存 ←───┘ → 请求参数 / VS Code 任务开始刷新
+原版本适配包 → 重放与重点回归通过 → 新 ZIP 逐文件校验；本功能验收通过，全仓另有无关失败
 ```
 
-- **提交范围**：共享输入主迭代已在 `f55afff8` 本地提交；本次提交后续普通提示词实时显示修复、发布版本、schema/wire fixtures、回归用例及相关文档。检查 staged / unstaged / untracked，将原有 21 个相关改动与本文件共 22 个文件全部纳入；Multica 仓库不改，忽略目录内验收产物与 VSIX 不提交。
-- **续接修复**：普通 Prompt 保存成功后经现有流发布单条 `session.user_message`；VS Code 复用历史用户行和附件 URI 转换，仅在缺少真实消息 ID 时追加气泡，本地追加按 ID 原位更新，避免广播先到产生重复。不新增轮询、订阅、临时 ID 集合或历史协调机制，不改变草稿、队列与宿主身份。
-- **实现与边界**：输入权限与执行宿主身份分离，去掉 ACP 来源永久只读限制；复用现有事件多播、接手流程及删除静止检查，不加服务端队列或独立订阅层。插话/停止/附件准备不换宿主；删除独立准入，仍受其它活宿主与未完成工作保护。接手保留 sessionId / planId / 计划文件，不自动开工；旧服务按能力保留只读兼容。
-- **宿主与恢复**：运行提示仅显示当前连接名，未知回退短句、空闲隐藏，接手/断开同步刷新旁观者；不从 origin 猜宿主。可写窗口复用现有错误动作与五分钟恢复，ACP 仅给传输中断附英文网络诊断；OpenAI 明确的流内鉴权/额度等错误保留自身分类，避免误触发网络重派。
-- **实施阶段验证（非本次重跑）**：续接补丁分批 Rust 库测试 3545 通过/7 ignored、集成并行 399 通过/28 skipped 与串行 94 通过/3 skipped；扩展 core 958、GUI 910、受影响扩展集成 2、真实 DevHost 1 通过，10 组宽窄屏 PNG/ARIA/console 已读取。原始红测、类型与夹具失败、磁盘耗尽后的缺项续跑均保留，不改记为整批一次全绿。完整记录见 `tomcat/docs/architecture/tomcat-acp-host-integrations/multica-tomcat-acp-integration/ACCEPTANCE.md` C.4；共享输入主迭代的既有结果见 C.2/C.3。
-- **版本与制品**：CLI `0.1.96`、EXT `0.2.14`、内置 CLI `0.1.96`；五个版本文件仅改预期版本字段，依赖不变。已交付标准文件名的 `tomcat-vscode-ext-0.2.14-darwin-x64.vsix`，此前两份 0.2.13 包保留但不再推荐；新 CLI、前端资产、ZIP/manifest 与 schema 的构建核验见 C.4，不把升版重建说成重跑功能测试。
-- **本次提交检查**：按用户要求不跑测试、覆盖率、构建或视觉验收；仅核对提交范围、差异、版本一致性和提交格式。Cov% 保持 `-`，提交信息不编造数值。
+- **会话与请求**：复用 `SessionEntry.thinking_level`；会话覆盖优先于模型默认，主轮、GetState、同模型 reviewer/verifier 统一计算。切换不同模型清覆盖，同模型重复设置保留；Default 清覆盖，不是关闭推理。手动修改模型默认后只清目标会话的同模型覆盖，部分保存失败明确报告。
+- **ACP / Multica**：复用 `session/set_config_option` 的 `effort` / `thought_level`，严格 new/load → model → effort → prompt；设置未确认就报错、不发任务。Multica 生产变更仅两个 Tomcat adapter 和 `thinking.go` 一行能力登记，目录/默认模型使用现有 `serve models` 字段，不改其他 Agent、回复指引、`reply.md` 或 PLAN 权限。
+- **遗留清理**：删除 Qwen 格式空壳、假档位和旧模型名猜测；旧 `qwen` 格式值按原未知值规则回到 Auto、按 API 解析，不改用户配置。模型名称不受限，DeepSeek 夹具的原显式格式保留；该清理不进入 Multica 适配包。
+- **Rust / 扩展验证**：Rust 默认门禁按既有子批次通过；终审修复“默认模型刷新后子 Agent 误继承其它模型强度”，只改强度归属、不改模型路由。最新 plan_runtime 153 项、fmt、all-targets strict Clippy、debug CLI 构建全过（`1794677740119-yh4ei1`）；库列表 3556 项，其余有效结果复用、7 ignored 不计通过。扩展 core 962、GUI 910、TypeScript、wire 和最新真实 DevHost 通过，保留首次参数错误的整批 exit 1。
+- **同会话显示**：任务开始沿用 GetState 刷新；计划预览从同一 live service 快照取模型/强度，补齐侧栏切换和缓存落后的两项红测。四张最新 PNG 已逐张复核：任务开始 Low、计划 Low → 手动 Medium、草稿保留；窄栏沿用标签省略号，ARIA 保留完整名称，捕获 console 无错误。证据见 `.agents/acceptance/multica-reasoning/devhost-20261115-r3/visual-review.md`。
+- **适配包 / 真实浏览器**：保留 `06835b8f` 基线和 32 目标、2 补丁、2 许可证；原版四包聚焦 race、整个 Go module 构建和五场景真实 ACP 通过。最终 r11 浏览器旅程 1 passed，同一 session 三次任务 completed，主请求 high → low → high；13 张 Multica + 4 张 DevHost 原图逐图复核，配套 ARIA/console 无捕获错误、102 个资源无 4xx/5xx。终审仅为登记行补一个 gofmt 分组空行并同步补丁/哈希，其余测试按未受影响范围复用；ZIP 字节核对与 SHA-256 以本机归档报告为准，旧目录快照不冒充新版。
+- **既有共享输入与版本**：`f55afff8` / `bfea42a7` 已提交的共享输入与续接气泡修复保留，宿主身份、Stop/插话/附件、删除准入和五分钟网络恢复边界不变。按用户后续授权，项目版本脚本仅运行一次，将 CLI `0.1.96 → 0.1.97`、EXT `0.2.14 → 0.2.15`，内置 CLI 同步为 `0.1.97`；五个版本文件只改版本字段，升级前后版本一致性与空白检查通过。
+- **本次提交与整包**：验收 todo 已按本计划范围完成、计划 7/7 收口。将本仓源码、回归、适配包、文档及版本变更完整纳入本地提交；Multica 的配套适配代码在其分支独立提交。用户明确要求不跑测试，本次只做差异/版本/格式与提交范围检查，复用上述已执行验收，不将测试文件随提交纳入误称为重新运行。提交后使用项目流程构建当前 CLI 与 `darwin-x64` 插件整包，产物成功与否以实际构建结果为准，不提前声称已打包。
 
-### INTERFACE：共享输入与当前宿主
+### INTERFACE：会话强度与既有共享输入
+
+- ACP 增加 `configId=effort`（分类 `thought_level`）；复用已有会话字段与服务命令队列，不扩 Native wire、目录输出结构、事件类型或存储格式。CLI 和实际运行的共享服务都必须含本功能；版本号相同不代表服务已更新。
 
 - 新能力 `shared_session_input`；新增 `session_access` 推送及可选显示字段 `controllerName`，打开回复也带回当前宿主名；`access` 仍表示宿主身份，`origin` 仍为创建来源。失败 `agent_idle` 可附现有失败分类 `failure`，ACP 保留原错误摘要并仅对传输中断补充诊断。不新增持久化格式、配置、Reviewer 入口或跨端消息伪装。
 - 普通提示词保存成功后发布 `session.user_message { sessionId, userMessageId, message }`，正文复用 reference 历史投影，先于回执与新轮输出；ACP 不回显本通知。CLI 与扩展需配套升级，旧端仍沿用既有行为；不扩展 steer/retry/rewind 的跨端同步。
 
 ### BLOCKED：部署与交付边界
 
-- 无本地提交阻塞；本次按要求不跑测试、不推送、不打 tag 或创建 release。真实 Multica daemon/task/issue/通知全链路仍待用户分步验收，客户端与守护程序启动不等于任务链路通过；外部宿主旅程、Windows/Linux/arm64 与收费模型未在本批验收。Multica 不是常驻订阅者，插话原文和 VS Code 后续新轮不承诺回到其 UI，成功重试不改写其原失败任务。
-- 普通提示词仍沿用原有历史窗口规则：旧历史请求晚到或分页重建可能暂时盖掉新气泡，重读最新历史恢复；PDF 转引用失败保留历史接口的内联退化。可执行文件更新不替换在用服务；本次提交不安装或重启服务。
+- **本功能验收通过，全仓门禁未全绿**：功能旅程 r11 与原版适配包通过，按用户明确的计划边界收口，不把 Multica 无关全仓失败作为本计划前置。原 E2E r13 为 42 passed / 36 failed；后续两批干净 HEAD/当前对照合计 28 项双边失败，26 个选定错误签名一致、2 个不同。原仅当前失败的多选/快捷操作已单独复核：两边各一过一超时；快捷操作双边通过，多选双边达到 60 秒总时限，原失败与新冷启动的超时阶段不同，不宣称全部性能根因已定位。全量 Go regular 两个 dashboard exact-window 用例双边失败，repocache/webhook 的原错误定向双边未重现；完整 agent guard/race 子批与 TS 分包/定向补验通过。原始失败、清理和环境边界继续保留，不将局部或采集器 exit 0 写成全仓通过。
+- **交付与部署边界**：本次按用户要求仅升级版本、本地提交及构建整包；不安装、重启正式服务、推送、打标签或发布，不运行测试。Cov% 未测量，保持 `-`。共享输入的真实 Multica 写计划 → VS Code 修改 → Multica 接回及 task/issue/通知全链路仍独立待验，DevHost 不替代它。收费模型、公司分支和 Windows/Linux/arm64 未代签；构建可执行文件不替换在用入口或共享服务。
 
 ### DONE：Gemini 原始 parts 回放与读取文案纠错（2026-11-13；窄读改善按用户决定暂缓）
 

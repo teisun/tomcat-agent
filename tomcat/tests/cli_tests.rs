@@ -644,7 +644,11 @@ impl FixedResolver {
         call.provider = provider.to_string();
         call.base_url = Some(base_url.to_string());
         call.key_source = "DEEPSEEK_API_KEY".to_string();
-        call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
+        call.thinking_format = if provider == "deepseek" {
+            tomcat::core::llm::thinking_policy::ThinkingFormat::Deepseek
+        } else {
+            tomcat::core::llm::thinking_policy::thinking_format_for_api(api)
+        };
         call.capabilities = capabilities;
         call
     }
@@ -7802,7 +7806,7 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
 
     ctx.session_runtime
         .session
-        .switch_current_model(Some("openai"), Some("gpt-5.2"))
+        .switch_current_model(Some("openai"), Some("gpt-5.2"), None)
         .expect("model switch should succeed");
     assert_eq!(
         ctx.session_runtime
@@ -7898,7 +7902,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     let ctx = ChatContext::from_config(cfg.clone()).expect("chat context should be created");
     ctx.session_runtime
         .session
-        .switch_current_model(Some("deepseek"), Some("deepseek-v4-pro"))
+        .switch_current_model(Some("deepseek"), Some("deepseek-v4-pro"), None)
         .expect("session model override should persist");
 
     let reopened = ChatContext::from_config(cfg).expect("reopened chat context");

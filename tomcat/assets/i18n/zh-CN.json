@@ -875,6 +875,7 @@
   "slash.effort.usage": "用法错误：/effort 仅支持 off|minimal|low|medium|high|xhigh|max。",
   "slash.effort.invalid": "用法错误：/effort 仅支持 off|minimal|low|medium|high|xhigh|max，收到 `{value}`。",
   "slash.effort.set": "[effort] 模型 {model} 的思考深度已设为 {level}",
+  "slash.effort.defaultSavedOverrideNotCleared": "默认已保存，但本会话覆盖未清除：{detail}",
   "slash.thinking.invalid": "用法错误：/thinking 仅支持 minimal/summary/full/toggle（兼容 on/off），收到 `{value}`。",
   "slash.thinking.usage": "用法错误：/thinking 仅接受 0 或 1 个参数（minimal/summary/full/toggle）。",
   "slash.thinking.set": "[thinking] 已切换到 {mode} 模式",

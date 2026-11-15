@@ -52,8 +52,17 @@ func TestTomcatHelperProcess(t *testing.T) {
 	log := json.NewEncoder(trace)
 	cwd, _ := os.Getwd()
 	_ = log.Encode(map[string]any{"cwd": cwd, "args": os.Args, "marker": os.Getenv("TOMCAT_TEST_MARKER")})
+	effort, selectedModel := "high", "configured-model"
 	options := func(model string) []any {
-		return []any{map[string]any{"id": "model", "currentValue": model, "type": "select", "options": []any{map[string]any{"value": model, "name": model}}}}
+		out := []any{map[string]any{"id": "model", "currentValue": model, "type": "select", "options": []any{map[string]any{"value": model, "name": model}}}}
+		if strings.HasPrefix(mode, "effort-") {
+			choices := []any{map[string]any{"value": "default", "name": "Default"}, map[string]any{"value": "low", "name": "Low"}}
+			if model != "limited-model" {
+				choices = append(choices, map[string]any{"value": "high", "name": "High"})
+			}
+			out = append(out, map[string]any{"id": "effort", "currentValue": effort, "type": "select", "category": "thought_level", "options": choices})
+		}
+		return out
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -86,8 +95,18 @@ func TestTomcatHelperProcess(t *testing.T) {
 		case "session/set_config_option":
 			if mode == "bad-model" {
 				response["error"] = map[string]any{"code": -32602, "message": "unknown_model"}
+			} else if req.Params["configId"] == "effort" {
+				if mode == "effort-reject" {
+					response["error"] = map[string]any{"code": -32602, "message": "invalid_thinking_level"}
+				} else {
+					if mode != "effort-unconfirmed" {
+						effort = fmt.Sprint(req.Params["value"])
+					}
+					response["result"] = map[string]any{"configOptions": options(selectedModel)}
+				}
 			} else {
-				response["result"] = map[string]any{"configOptions": options(fmt.Sprint(req.Params["value"]))}
+				selectedModel = fmt.Sprint(req.Params["value"])
+				response["result"] = map[string]any{"configOptions": options(selectedModel)}
 			}
 		case "session/prompt":
 			_ = os.WriteFile(filepath.Join(root, "prompted"), []byte("yes"), 0600)
@@ -204,6 +223,93 @@ func TestTomcatExecutionAndResume(t *testing.T) {
 			}
 			if resume != "" && (strings.Contains(text, "session/new") || !strings.Contains(text, "session/load")) {
 				t.Errorf("resume forked: %s", text)
+			}
+		})
+	}
+}
+
+func TestTomcatEffortSetupOrdersCallsAndNeverPromptsOnFailure(t *testing.T) {
+	for _, tc := range []struct{ name, mode, resume, model, level, want string }{
+		{"new-high", "effort-ok", "", "custom-model", "high", "completed"},
+		{"resume-low", "effort-ok", "tomcat-fixture", "custom-model", "low", "completed"},
+		{"resume-default", "effort-ok", "tomcat-fixture", "custom-model", "", "completed"},
+		{"implicit-model", "effort-ok", "", "", "low", "completed"},
+		{"rejected", "effort-reject", "tomcat-fixture", "custom-model", "low", "failed"},
+		{"not-confirmed", "effort-unconfirmed", "", "custom-model", "low", "failed"},
+		{"model-narrows-tiers", "effort-ok", "", "limited-model", "high", "failed"},
+		{"old-tomcat-requested", "complete", "tomcat-fixture", "custom-model", "high", "failed"},
+		{"old-tomcat-default", "complete", "", "custom-model", "", "completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, root := tomcatTestBackend(t, tc.mode)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			session, err := backend.Execute(ctx, "effort task", ExecOptions{Cwd: root, ResumeSessionID: tc.resume, Model: tc.model, ThinkingLevel: tc.level})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := tomcatResult(t, session)
+			if result.Status != tc.want || result.ResumeRejected {
+				t.Fatalf("result: %+v", result)
+			}
+			data, err := os.ReadFile(filepath.Join(root, "trace.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var frame struct {
+					Method string         `json:"method"`
+					Params map[string]any `json:"params"`
+				}
+				if err := json.Unmarshal([]byte(line), &frame); err != nil {
+					t.Fatal(err)
+				}
+				if frame.Method == "" {
+					continue
+				}
+				call := frame.Method
+				if call == "session/set_config_option" {
+					call += ":" + fmt.Sprint(frame.Params["configId"])
+					if frame.Params["configId"] == "effort" {
+						want := tc.level
+						if want == "" {
+							want = "default"
+						}
+						if frame.Params["value"] != want || frame.Params["sessionId"] != "tomcat-fixture" {
+							t.Fatalf("wrong effort params: %+v", frame.Params)
+						}
+					}
+				}
+				calls = append(calls, call)
+			}
+			opening := "session/new"
+			if tc.resume != "" {
+				opening = "session/load"
+			}
+			want := []string{"initialize", opening}
+			if tc.model != "" {
+				want = append(want, "session/set_config_option:model")
+			}
+			if strings.HasPrefix(tc.mode, "effort-") && tc.model != "limited-model" {
+				want = append(want, "session/set_config_option:effort")
+			}
+			if tc.want == "completed" {
+				want = append(want, "session/prompt")
+			}
+			if strings.Join(calls, ",") != strings.Join(want, ",") {
+				t.Fatalf("setup order %v, want %v", calls, want)
+			}
+			if tc.want == "failed" {
+				if result.Error == "" {
+					t.Fatal("setup failed without an error")
+				}
+				for message := range session.Messages {
+					t.Errorf("message before successful setup: %+v", message)
+				}
+				if tc.resume != "" && result.SessionID != tc.resume {
+					t.Fatalf("lost resumable session: %+v", result)
+				}
 			}
 		})
 	}

@@ -283,6 +283,22 @@ impl Adapter {
                         model: value,
                     })
                     .await?;
+                } else if config_id == "effort" {
+                    let level = if value == "default" {
+                        None
+                    } else {
+                        Some(
+                            crate::core::llm::ThinkingLevel::parse(&value)
+                                .filter(|level| level.as_str() == value)
+                                .ok_or_else(|| invalid("invalid_thinking_level"))?,
+                        )
+                    };
+                    self.call(|id| ServeCommand::SetSessionThinkingLevel {
+                        id: Some(id),
+                        session_id: Some(session_id.clone()),
+                        level,
+                    })
+                    .await?;
                 } else if config_id == "agent_mode" {
                     self.set_mode(&session_id, parse_choice(&value)?).await?;
                 } else {
@@ -506,6 +522,41 @@ impl Adapter {
                 })
             })
             .collect::<Vec<_>>();
+        let mut effort_choices = vec![acp::SessionConfigSelectOption::new("default", "Default")];
+        if let Some(levels) = catalog["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == current))
+            .and_then(|model| model["supportedReasoningLevels"].as_array())
+        {
+            effort_choices.extend(levels.iter().filter_map(Value::as_str).map(|level| {
+                acp::SessionConfigSelectOption::new(level.to_owned(), level.to_owned())
+            }));
+        }
+        let slot = self
+            .state
+            .registry
+            .get(session_id)
+            .ok_or_else(|| failed("unknown_session"))?;
+        let entry = slot
+            .ctx
+            .session_runtime
+            .session
+            .current_session_entry()
+            .map_err(|error| failed(error.to_string()))?;
+        let effort = if effort_choices.len() > 1
+            && entry
+                .as_ref()
+                .and_then(|entry| entry.thinking_level.as_deref())
+                .and_then(crate::core::llm::ThinkingLevel::parse)
+                .is_some()
+        {
+            slot.ctx
+                .resolve_thinking_level(current, entry.as_ref())
+                .as_str()
+                .to_owned()
+        } else {
+            "default".to_owned()
+        };
         use crate::core::plan_runtime::{PlanReviewPolicy, PlanStartPolicy, QuestionPolicy};
         Ok(vec![
             acp::SessionConfigOption::select("model", "Model", current.to_owned(), choices)
@@ -523,6 +574,8 @@ impl Adapter {
                 ],
             )
             .category(acp::SessionConfigOptionCategory::Mode),
+            acp::SessionConfigOption::select("effort", "Reasoning Effort", effort, effort_choices)
+                .category(acp::SessionConfigOptionCategory::ThoughtLevel),
             policy_option::<PlanReviewPolicy>("plan_review", "Plan Review", &state["planReview"])?,
             policy_option::<QuestionPolicy>(
                 "question_policy",

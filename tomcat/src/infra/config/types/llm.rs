@@ -277,8 +277,8 @@ pub struct OpenAiResponsesConfig {
 ///
 /// - `level`: `off | minimal | low | medium | high | xhigh`，由
 ///   [`crate::core::llm::thinking_policy::ThinkingLevel`] 解析。
-/// - `format`: `openai | openrouter | deepseek | zai | qwen | doubao` 等；`None`
-///   表示按 provider 名称自动推断。
+/// - `format`: `openai | openrouter | deepseek | zai | doubao` 等；`None`
+///   或未知值（包括已删除的 `qwen`）回到 Auto，按 API 推断，不按模型或 provider 名称。
 /// - `max_tokens`: 仅豆包 / Moonshot 等走 `thinking: { type, max_tokens? }` 时生效；
 ///   `openai-responses` / OpenAI 路径用 `reasoning.effort`，**不写**该字段。
 ///
@@ -296,8 +296,8 @@ pub struct ThinkingConfig {
     /// 字符串形式由 `core/llm/thinking_policy::ThinkingLevel` 解析。
     #[serde(default = "default_thinking_level")]
     pub level: String,
-    /// 厂商请求格式：`openai | openrouter | deepseek | zai | qwen | doubao` 等；
-    /// `None` 表示按 provider 名称自动推断。
+    /// 厂商请求格式：`openai | openrouter | deepseek | zai | doubao` 等；
+    /// `None` 或未知值回到 Auto，按 API 推断。旧 `qwen` 值可能因此开始发送 effort。
     #[serde(default)]
     pub format: Option<String>,
     /// 仅豆包 / Moonshot 等走 `thinking: { type, max_tokens? }` 时进入请求体；

@@ -26,17 +26,19 @@ Multica daemon / task workspace
 - `manifest.json`：来源提交和 SHA-256。
 - `LICENSE`、`NOTICE`：来源 Multica 许可证和归属文件副本。
 
-来源：Multica 原基线 `06835b8f50606ca3f8bebbb5d07ac8901f831e69` → 原接入 `e12a45e59d8bfddf2aba192f163899a9eb290a3b`。本轮 adapter 来源为已提交的 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`；Tomcat 配套源码为 `9d7221317e272645128d090bc38151f943d6a2aa`。
+来源：Multica 原基线 `06835b8f50606ca3f8bebbb5d07ac8901f831e69` → 原接入 `e12a45e59d8bfddf2aba192f163899a9eb290a3b`。上一轮 adapter 来源为 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`；本轮推理强度来自该基线上的未提交工作树，配套 Tomcat 为 `bfea42a7625fee14c1a74e83e2ff471bd8209fb3` 基线加本轮工作树。`manifest.json.host.reasoning_effort` 记录逐文件哈希，不把未提交功能冒称为已有提交。
 
-**保留原迁移基线，不升级整个宿主。** 此前目录修复来自 Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；本轮保留该目录实现，更新 `tomcat.go`、启动策略/取消回归，以及旧基线所需的 `Session.CleanupRequired`、daemon handoff、取消回报和工作树保留接线。文件与补丁的精确内容由 `manifest.json` 的 SHA-256 标识，不能把混合来源包说成某个完整宿主提交。
+**保留原迁移基线，不升级整个宿主。** 此前目录修复来自 Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 的已审工作树；此前保留目录实现，更新 `tomcat.go`、启动策略/取消回归，以及旧基线所需的 `Session.CleanupRequired`、daemon handoff、取消回报和工作树保留接线。文件与补丁的精确内容由 `manifest.json` 的 SHA-256 标识，不能把混合来源包说成某个完整宿主提交。
 
-本轮不引入新版 Pi 能力、桌面代码、实时 usage、调度或 native CLI 停机确认协议；模型发现实现 `tomcat_models.go` 不变。公司分支若已具备等价清理契约，应复用现有实现，不重复添加。**不能只替换 `tomcat.go`**：旧 daemon 若把取消/超时直接视为清理成功，仍可能提前清理被后台进程使用的目录。
+本轮不引入新版 Pi 能力、桌面代码、实时 usage、调度或 native CLI 停机确认协议；在原有修复之上，仅补充 `tomcat.go`、`tomcat_models.go` 和 `thinking.go` 的 Tomcat 推理强度接线。公司分支若已具备等价清理契约，应复用现有实现，不重复添加。**不能只替换 `tomcat.go`**：旧 daemon 若把取消/超时直接视为清理成功，仍可能提前清理被后台进程使用的目录。
+
+**验收状态：本功能、受影响流程和原版本适配包已验收通过。**Multica 全仓门禁另有与本功能无关的失败（部分已由原 HEAD 对照复现，其余未逐项归因），原始结果、未测范围和归档校验见 `VALIDATION.md`；本包不代表全仓或公司部署验收。
 
 ## 2. 合并前必须核对
 
 公司二开版本需要具备或等价实现：
 
-- `Backend.Execute`、`ExecOptions`（特别是 `Cwd`、`Model`、`ResumeSessionID`、`CustomArgs`、`McpConfig`）；
+- `Backend.Execute`、`ExecOptions`（特别是 `Cwd`、`Model`、`ThinkingLevel`、`ResumeSessionID`、`CustomArgs`、`McpConfig`）；
 - `Config`、`hermesClient`、ACP RPC pending/tool 表、通知门控、usage 和 prompt completion 回调；
 - 进程树所有权、stderr tail、deliverable tracker、MCP capability 过滤和 resume 错误分类；
 - daemon 的 runtime discovery、agent factory、local directory/worktree、`AGENTS.md` 与 `.agents/skills` sidecar 清理；
@@ -70,6 +72,7 @@ git apply /absolute/path/multica-tomcat-acp-integration/existing-files.patch
 - daemon 探测与配置增加 `MULTICA_TOMCAT_PATH`、`MULTICA_TOMCAT_MODEL`；
 - execenv 把 `AGENTS.md` 和 `.agents/skills` 接入 Tomcat 运行目录；
 - agent factory、launch 参数过滤、模型/版本登记；
+- `thinking.go` 的动态目录能力登记：Tomcat 档位由本地目录提供，任务执行前由 ACP 确认；不改其他 Agent 或通用校验算法。
 - `Session.CleanupRequired` 与 daemon 结果交接：未收到清理结果或结果为 `cleanup_unconfirmed` 时，不得自动当作取消成功；
 - `cleanup_unconfirmed` 的 task failure reason、取消确认回报，以及未确认时保留 sidecar/worktree，不自动提交或删除。
 - 迁移之外的 runtime profile API 仍复用原有流程。
@@ -112,6 +115,7 @@ git apply /absolute/path/multica-tomcat-acp-integration/existing-files.patch
 Agent 绑定和执行参数分别负责：
 
 - `agent.model`：可选 Tomcat 模型 ID；空值使用 Tomcat 自己的默认模型；
+- `agent.thinking_level`：下次新建或续接任务的推理强度；空值是 Default，重新继承 Tomcat 默认，不是关闭推理；
 - `PUT /api/agents/{id}/env` 的 `custom_env`：只放允许的任务环境变量，不放 `HOME`、`PATH`、`TMP` 或 `MULTICA_*`；
 - task 的 `local_directory`：决定 cwd，支持 `in_place` 或 `worktree`；
 - `mcp_config`：由已有 ACP MCP 流程构造并按能力过滤；
@@ -147,7 +151,7 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 失败 → adapter error → 原 daemon failed/error → 创建页原有失败原因/手填提示
 ```
 
-在 daemon 的实际账号与目录下执行 `tomcat serve models`，而不是开发者 shell 中的另一份 `tomcat`。该命令不用已运行服务，不建会话、不调用模型/MCP；保留配置校验可能初始化常规temp目录的既有边界。文本 `tomcat model list` 的shell视角不变。目录包含 `models/defaultModelId/utilityModelId` 及可选warnings；adapter只消费ID/provider/keyPresent，不把端点、Key槽或偏好传到服务端。
+在 daemon 的实际账号与目录下执行 `tomcat serve models`，而不是开发者 shell 中的另一份 `tomcat`。该命令不用已运行服务，不建会话、不调用模型/MCP；保留配置校验可能初始化常规temp目录的既有边界。文本 `tomcat model list` 的shell视角不变。目录包含 `models/defaultModelId/utilityModelId` 及可选warnings；adapter 消费 ID/provider/keyPresent，以及 `supportedReasoningLevels` 和 `defaultModelId`，不把端点、Key 槽或偏好传到服务端。
 
 - 保存/删除凭据或修改目录后点刷新；adapter不加缓存，不要求重启daemon。
 - 目录只证明本地配置及凭据存在，不证明网关、余额或网络可用。
@@ -171,9 +175,28 @@ Tomcat adapter → 仅保留有凭据的原始ID/provider → 原菜单 → agen
 
 不新增对应的 `TOMCAT_ACP_*` 环境变量，也不由 Go 改写成布尔值。manual 等待沿用同机、同 HOME、同项目的 VS Code observer；Multica 不新增答题入口，无 observer 时继续等待，取消须撤回真实待答卡片。
 
-使用这些参数前，在 daemon 的实际账号下核对实际可执行文件的 `acp --help`；本轮配套 CLI 为 `0.1.89`，原 `0.1.80` ACP 最低版本并不证明支持新策略。内建 runtime 在握手前、stdout 为空、未超时且退出码恰为 2 时，报告参数错误及实际执行路径，保留恢复引用；自定义命令、有 stdout 或其它退出码仍按清理未确认处理。
+使用这些参数前，在 daemon 的实际账号下核对实际可执行文件的 `acp --help`；早期策略适配使用 CLI `0.1.89`，原 `0.1.80` ACP 最低版本并不证明支持新策略。本轮强度需要更新 CLI 和运行中的服务，版本与能力判定见 §5.3。内建 runtime 在握手前、stdout 为空、未超时且退出码恰为 2 时，报告参数错误及实际执行路径，保留恢复引用；自定义命令、有 stdout 或其它退出码仍按清理未确认处理。
 
 同一后端只保留桌面 daemon 或一个 CLI profile 执行 Tomcat。启动前分别核对状态；更新 PATH 或安装文件不会改写已运行 daemon 继承的 `MULTICA_TOMCAT_PATH`。若仍指向旧 VS Code 扩展目录，应由用户安排切换和重启，不由本包自动安装、重启或回退到另一份二进制。
+
+### 5.3 推理强度：下次任务生效，不改别的会话
+
+```text
+Multica：选择模型/强度 -> 保存智能体 -> 下次新建或续接任务
+                                           |
+                           new/load -> model -> effort -> prompt
+                                                   |
+                             设置失败或未确认 ------+--> 报错，不执行
+```
+
+- 档位和默认模型来自现有 `serve models`。没有档位的模型不显示强度控件；不拿目录第一项冒充默认模型。
+- **High/Low 等明确档位**写入当前 Tomcat 会话。两个智能体使用同模型时可以各选不同档位，ACP 不修改共享模型默认；恢复会话保留选择，每次续接仍会应用当时的智能体配置。
+- **Default** 在 ACP 中发送 `effort=default`，清除会话覆盖并继承 Tomcat 模型默认。`off` 若在目录中，是一个档位，不是 Default。切到不同模型时清除旧覆盖，再应用新选择；重复设置同一模型不清除。
+- 严格先设置模型，再设置强度，确认回显后才发任务。非空要求没有 `effort` 选项、被拒或未确认时明确失败，不发 prompt、不另建会话重试；恢复失败保留原会话引用，新会话设置失败不保留新引用。
+- 旧 Tomcat 可以发现档位，但执行时可能没有 `effort`。此时选 Default 仍可沿原路径执行；要使用明确档位，须由部署者更新 CLI，并在确认任务后重启对应共享服务。**只看 `0.1.96` 等版本号不够**：同版本旧工作树或未重启服务不一定包含本功能。以运行服务返回的 ACP `effort` / `thought_level` 选项为准；本包不含 CLI/扩展二进制，也不会自动安装或重启。
+- VS Code 在任务开始时刷新同会话模型/强度，不承诺无任务时跨窗口即时同步。计划预览显示该会话的有效值；手动修改和 CLI `/effort` 仍保存模型默认，并清除目标会话的同模型覆盖。部分失败如实报告“默认已保存，但本会话覆盖未清除”。
+- Tomcat 现有限制不变：`llm.thinking.enabled=false` 或 `level=off` 时，有声明档位的模型按原策略取最低档；classic Anthropic 的固定 `max_tokens` 预算可覆盖档位预算。目录两端一致，不为 ACP 另做过滤；本地声明不证明中转站接受或转发参数。
+- 原 Multica 基线对过期档位保留原来的**日志告警并丢弃**；新版宿主可把告警写进任务时间线。本包不为此导入新版告警机制或改校验算法。相应用例回迁到包内 `tomcat_models_test.go`。
 
 ## 6. 取消、恢复和 Windows
 
@@ -257,7 +280,7 @@ pnpm typecheck
 
 它使用明确的 Tomcat 二进制、隔离 HOME、本地 HTTP fixture 和假 Key，会真实启动并停止**私有**本地服务但不调用外部模型；包含发现零请求、会话清单前后不变、原始 ID/model_name、四项启动策略作用于同一计划，以及人工待答卡片取消后撤回。普通测试仍经过 CLI guard，不会自动发现或启动用户的 Tomcat。
 
-`tests/new-files/e2e/tomcat-model-discovery.spec.ts` 是显式opt-in的创建页旅程，使用现有 `TestApiClient`，不修改页面或mock目录API。运行前按 `VALIDATION.md` 准备独立HOME/registry/PGDATA/端口、loopback provider和本轮二进制；`--ephemeral` 本身不是隔离。测试根与证据目录通过 `TOMCAT_DISCOVERY_FIXTURE_ROOT` / `TOMCAT_DISCOVERY_EVIDENCE` 指定；未准备时skip不计通过。旧基线的页面路径/英文资源/任务载荷可能不同，此E2E源码面向记录的3c7b4cde7版本，不冒称在旧页面上已重放；旧基线接线由Go测试验证。
+`tests/new-files/e2e/tomcat-model-discovery.spec.ts` 是显式opt-in的创建页旅程，使用现有 `TestApiClient`，不修改页面或mock目录API。运行前按 `VALIDATION.md` 准备独立HOME/registry/PGDATA/端口、loopback provider和本轮二进制；`--ephemeral` 本身不是隔离。测试根与证据目录通过 `TOMCAT_DISCOVERY_FIXTURE_ROOT` / `TOMCAT_DISCOVERY_EVIDENCE` 指定；未准备时skip不计通过。旧基线的页面路径/英文资源/任务载荷可能不同，此版 E2E 源码面向 `5e36721c` 基线加本轮工作树，验证选档、保存、刷新、续接与 Default；不把新版页面倒入原基线，也不冒称旧页面已运行此浏览器脚本；原基线接线由独立 Go/真实 ACP 重放验证。
 
 真实宿主的其它部署验收仍需另外执行：runtime profile → 本地目录 → 新任务 → 单任务取消 → 原目录/会话继续或明确 fresh → worktree 清理。
 

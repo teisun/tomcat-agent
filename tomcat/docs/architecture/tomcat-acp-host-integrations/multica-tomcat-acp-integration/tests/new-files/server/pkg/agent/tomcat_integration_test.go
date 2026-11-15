@@ -93,6 +93,7 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 	}
 	var requestCount atomic.Int64
 	catalogRequestModels := make(chan string, 8)
+	catalogRequestEfforts := make(chan any, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 		var body map[string]any
@@ -133,6 +134,7 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 			send(map[string]any{"content": "Fixture title"}, "stop")
 		case strings.Contains(text, "catalog-execute-fixture"):
 			catalogRequestModels <- fmt.Sprint(body["model"])
+			catalogRequestEfforts <- body["reasoning_effort"]
 			send(map[string]any{"content": "catalog-fixture-done"}, "stop")
 		case strings.Contains(text, "startup-policy-fixture"):
 			toolResult := func(id string) map[string]any {
@@ -213,8 +215,8 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 	t.Cleanup(server.Close)
 	run("init")
 	write(filepath.Join(home, ".tomcat", "mcp.json"), `{"mcpServers":{}}`)
-	write(filepath.Join(home, ".tomcat", "tomcat.config.toml"), fmt.Sprintf("[llm]\ndefault_model = \"mock\"\ntitle_model = \"mock\"\n[context]\ncompaction_model = \"mock\"\n[skills]\nenabled = false\n[workspace]\nworkspace_roots = [%s]\n", strconv.Quote(workspace)))
-	write(filepath.Join(home, ".tomcat", "models.toml"), fmt.Sprintf("[[models]]\nid = \"mock\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n\n[[models]]\nid = \"catalog-alias\"\nmodel_name = \"alias-wire\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n", strconv.Quote(server.URL), strconv.Quote(server.URL)))
+	write(filepath.Join(home, ".tomcat", "tomcat.config.toml"), fmt.Sprintf("[llm.thinking]\nlevel = \"medium\"\n[llm]\ndefault_model = \"mock\"\ntitle_model = \"mock\"\n[context]\ncompaction_model = \"mock\"\n[skills]\nenabled = false\n[workspace]\nworkspace_roots = [%s]\n", strconv.Quote(workspace)))
+	write(filepath.Join(home, ".tomcat", "models.toml"), fmt.Sprintf("[[models]]\nid = \"mock\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\ncapabilities = { tools = true, vision = false, files = false, reasoning = false, web_search = false }\n\n[[models]]\nid = \"catalog-alias\"\nmodel_name = \"alias-wire\"\napi = \"openai\"\nprovider = \"openai\"\nbase_url = %s\nsupported_reasoning_levels = [\"low\", \"medium\", \"high\"]\ncapabilities = { tools = true, vision = false, files = false, reasoning = true, web_search = false }\n", strconv.Quote(server.URL), strconv.Quote(server.URL)))
 	write(filepath.Join(workspace, "AGENTS.md"), "fixture-project-instruction\n")
 	run("model", "key", "set", "openai", "local-fixture-key")
 	t.Cleanup(func() {
@@ -437,6 +439,34 @@ func TestTomcatSharedServeWithHermesClient(t *testing.T) {
 		var service map[string]any
 		if err := json.Unmarshal(run("serve", "status"), &service); err != nil || service["running"] != true {
 			t.Fatalf("cancelling one question stopped the private shared service: %v", err)
+		}
+	})
+
+	t.Run("effort_reaches_provider_on_new_resume_and_clear", func(t *testing.T) {
+		backend, err := New("tomcat", Config{ExecutablePath: binary, Env: tomcatHostEnv(env), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resume := ""
+		for _, tc := range []struct{ effort, wire string }{{"high", "high"}, {"low", "low"}, {"", "medium"}} {
+			session, err := backend.Execute(ctx, "catalog-execute-fixture", ExecOptions{Cwd: workspace, Model: selectedID, ThinkingLevel: tc.effort, ResumeSessionID: resume})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := tomcatResult(t, session)
+			if result.Status != "completed" || result.SessionID == "" {
+				t.Fatalf("effort execution: %+v", result)
+			}
+			if resume != "" && result.SessionID != resume {
+				t.Fatalf("effort setup must retain resumed session: %+v", result)
+			}
+			resume = result.SessionID
+			if model := <-catalogRequestModels; model != "alias-wire" {
+				t.Fatalf("wrong model: %s", model)
+			}
+			if effort := <-catalogRequestEfforts; effort != tc.wire {
+				t.Fatalf("effort %q reached provider as %v; want %s", tc.effort, effort, tc.wire)
+			}
 		}
 	})
 

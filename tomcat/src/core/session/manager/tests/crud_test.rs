@@ -482,7 +482,7 @@ fn switch_current_model_updates_override_and_appends_event() {
     let key = mgr.current_session_key();
     mgr.create_session(key, None).unwrap();
 
-    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"))
+    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"), None)
         .unwrap();
 
     let entry = mgr.get_session(key).unwrap().unwrap();
@@ -500,6 +500,44 @@ fn switch_current_model_updates_override_and_appends_event() {
     assert_eq!(model_change.model_id.as_deref(), Some("deepseek-v4-flash"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_effort_survives_same_model_and_clears_atomically_when_switching() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    mgr.update_session(key, |entry| entry.thinking_level = Some("high".into()))
+        .unwrap();
+    mgr.switch_current_model(None, Some("default-model"), Some("default-model"))
+        .unwrap();
+    assert_eq!(
+        mgr.current_session_entry()
+            .unwrap()
+            .unwrap()
+            .thinking_level
+            .as_deref(),
+        Some("high")
+    );
+    mgr.switch_current_model(None, Some("default-model"), Some("default-model"))
+        .unwrap();
+    assert_eq!(
+        mgr.current_session_entry()
+            .unwrap()
+            .unwrap()
+            .thinking_level
+            .as_deref(),
+        Some("high")
+    );
+    mgr.switch_current_model(None, Some("other-model"), Some("default-model"))
+        .unwrap();
+    let reloaded = SessionManager::new(dir.path().to_path_buf())
+        .current_session_entry()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.model_override.as_deref(), Some("other-model"));
+    assert_eq!(reloaded.thinking_level, None);
 }
 
 #[test]
@@ -615,7 +653,7 @@ fn switch_current_model_updates_pinned_session_after_external_repoint() {
         .new_current_session(None)
         .expect("hijacked session");
 
-    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"))
+    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"), None)
         .unwrap();
 
     let original_entry = mgr

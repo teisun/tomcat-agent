@@ -4625,7 +4625,7 @@ async fn serve_prompt_with_invalid_model_override_emits_agent_idle_once() {
     slot.ctx
         .session_runtime
         .session
-        .switch_current_model(None, Some("totally-missing-model"))
+        .switch_current_model(None, Some("totally-missing-model"), None)
         .expect("seed stale model override");
 
     handle_command(
@@ -4691,7 +4691,7 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
     slot.ctx
         .session_runtime
         .session
-        .switch_current_model(None, Some("totally-missing-model"))
+        .switch_current_model(None, Some("totally-missing-model"), None)
         .expect("seed stale model override");
 
     handle_command(
@@ -4750,7 +4750,7 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
     slot.ctx
         .session_runtime
         .session
-        .switch_current_model(None, Some("gpt-5.4"))
+        .switch_current_model(None, Some("gpt-5.4"), None)
         .expect("restore valid model");
     handle_command(
         Arc::clone(&state),
@@ -6218,6 +6218,99 @@ async fn speed_serve_persists_lists_rejects_and_keeps_failed_save_unchanged() {
         .unwrap();
     assert_eq!(model["selectedSpeed"], "fast");
     assert_eq!(model["supportedSpeeds"], serde_json::json!(["fast"]));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn effort_native_setting_clears_session_override_and_returns_partial_failure() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let session = &slot.ctx.session_runtime.session;
+    let key = session.current_session_key();
+    session
+        .update_session(key, |entry| entry.thinking_level = Some("low".into()))
+        .unwrap();
+    handle_command(
+        state.clone(),
+        ServeCommand::SetThinkingLevel {
+            id: Some("manual-effort".into()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".into(),
+            level: "high".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session
+            .current_session_entry()
+            .unwrap()
+            .unwrap()
+            .thinking_level,
+        None
+    );
+    assert_eq!(
+        slot.ctx
+            .global_services
+            .model_prefs
+            .reasoning_for("gpt-5.4"),
+        crate::ThinkingLevel::High
+    );
+    session
+        .update_session(key, |entry| entry.thinking_level = Some("low".into()))
+        .unwrap();
+    let lock = crate::resolve_sessions_dir(&state.cfg)
+        .unwrap()
+        .join("sessions.json.lock");
+    let backup = lock.with_extension("backup");
+    std::fs::rename(&lock, &backup).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    handle_command(
+        state.clone(),
+        ServeCommand::SetThinkingLevel {
+            id: Some("manual-effort-partial".into()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".into(),
+            level: "xhigh".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |v| v["id"] == "manual-effort-partial").await;
+    let reply = lines
+        .iter()
+        .find(|v| v["id"] == "manual-effort-partial")
+        .unwrap();
+    assert_eq!(reply["success"], false, "{reply}");
+    let partial = crate::infra::i18n::tr(
+        "slash.effort.defaultSavedOverrideNotCleared",
+        &[("detail", "")],
+    );
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains(partial.trim_end()),
+        "{reply}"
+    );
+    assert_eq!(
+        slot.ctx
+            .global_services
+            .model_prefs
+            .reasoning_for("gpt-5.4"),
+        crate::ThinkingLevel::Xhigh
+    );
+    assert_eq!(
+        session
+            .current_session_entry()
+            .unwrap()
+            .unwrap()
+            .thinking_level
+            .as_deref(),
+        Some("low")
+    );
+    std::fs::remove_dir(&lock).unwrap();
+    std::fs::rename(&backup, &lock).unwrap();
 }
 
 #[tokio::test]

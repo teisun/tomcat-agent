@@ -1,7 +1,7 @@
 use crate::api::chat::ChatContext;
 use crate::core::llm::ThinkingLevel;
 use crate::infra::i18n::tr;
-use crate::{AppError, ModelPrefsStore};
+use crate::AppError;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -24,12 +24,8 @@ pub fn parse_effort_level(level: &str) -> Option<ThinkingLevel> {
     ThinkingLevel::parse(level)
 }
 
-pub fn apply_level(
-    store: &ModelPrefsStore,
-    model: &str,
-    level: ThinkingLevel,
-) -> Result<(), AppError> {
-    store.set_reasoning(model, level)
+pub fn apply_level(ctx: &ChatContext, model: &str, level: ThinkingLevel) -> Result<(), AppError> {
+    ctx.set_model_reasoning_level(model, level)
 }
 
 pub(crate) fn run(ctx: &ChatContext, level: ThinkingLevel) -> ChatCommandOutcome {
@@ -51,7 +47,7 @@ pub(crate) fn run(ctx: &ChatContext, level: ThinkingLevel) -> ChatCommandOutcome
         }
     };
     let model = ctx.effective_model(entry.as_ref());
-    match apply_level(&ctx.global_services.model_prefs, &model, level) {
+    match apply_level(ctx, &model, level) {
         Ok(()) => {
             println!(
                 "{}",

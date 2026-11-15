@@ -873,7 +873,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
     ctx.session_runtime
         .plan_runtime
         .set_session_model(&thinking_model_id);
-    let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id));
+    let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id, entry.as_ref()));
     let speed = ctx.resolve_speed(&thinking_model_id);
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();

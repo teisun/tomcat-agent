@@ -1413,6 +1413,31 @@ describe("mutation diff stat injection", () => {
     }
   });
 
+  it("refreshes the event session's model and effort on agent_start without changing other sessions", async () => {
+    const getState = vi.fn(async (sessionId: string) => ({
+      sessionId, busy: true, model: "relay/selected", thinkingLevel: "low",
+    }));
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace", ide: {} as never,
+      initialize: async () => ({ capabilities: [], slashCommands: [] } as never),
+      messenger: { onEvent: () => ({ dispose() {} }) } as never,
+      sessionRouter: { getState } as never,
+    });
+    const host = provider as unknown as {
+      stateStore: WebviewStateStore;
+      handleServeEvent(event: Record<string, unknown>): Promise<void>;
+    };
+    try {
+      host.stateStore.applySessionState({ sessionId: "other", busy: false, model: "other-model", thinkingLevel: "high" });
+      host.stateStore.applySessionState({ sessionId: "acp-session", busy: false, model: "old-model", thinkingLevel: "high" });
+      await host.handleServeEvent({ type: "agent_start", sessionId: "acp-session" });
+      expect(getState).toHaveBeenCalledExactlyOnceWith("acp-session");
+      expect(provider.currentState().sessionViews["acp-session"]).toMatchObject({ model: "relay/selected", thinkingLevel: "low", busy: true });
+      expect(provider.currentState().sessionViews.other).toMatchObject({ model: "other-model", thinkingLevel: "high", busy: false });
+    } finally { provider.dispose(); }
+  });
+
   it("keeps an errored edit tool settled as complete+error through turn_end and agent_idle", async () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),

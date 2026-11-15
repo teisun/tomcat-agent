@@ -1140,10 +1140,54 @@ impl ChatContext {
             .selected_model_id(entry.and_then(|entry| entry.model_override.as_deref()))
     }
 
-    pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
+    pub(crate) fn resolve_thinking_level(
+        &self,
+        model_id: &str,
+        entry: Option<&SessionEntry>,
+    ) -> ThinkingLevel {
+        let session_level = entry
+            .filter(|_| self.effective_model(entry) == model_id)
+            .and_then(|entry| entry.thinking_level.as_deref())
+            .and_then(ThinkingLevel::parse);
+        self.global_services.model_catalog.resolve_reasoning_level(
+            self.global_services.model_prefs.as_ref(),
+            model_id,
+            session_level,
+        )
+    }
+
+    /// Manual settings still change the model default, then clear only this session's override.
+    pub(crate) fn set_model_reasoning_level(
+        &self,
+        model: &str,
+        level: ThinkingLevel,
+    ) -> Result<(), AppError> {
         self.global_services
-            .model_catalog
-            .resolve_reasoning_level(self.global_services.model_prefs.as_ref(), model_id)
+            .model_prefs
+            .set_reasoning(model, level)?;
+        let clear = || -> Result<(), AppError> {
+            let entry = self.session_runtime.session.current_session_entry()?;
+            if self.effective_model(entry.as_ref()) == model
+                && entry.as_ref().is_some_and(|e| e.thinking_level.is_some())
+            {
+                self.session_runtime.session.update_session(
+                    self.session_runtime.session.current_session_key(),
+                    |entry| {
+                        // Compare under the session store lock, not just in the earlier read.
+                        if self.effective_model(Some(entry)) == model {
+                            entry.thinking_level = None;
+                        }
+                    },
+                )?;
+            }
+            Ok(())
+        };
+        clear().map_err(|error| {
+            AppError::Config(crate::infra::i18n::tr(
+                "slash.effort.defaultSavedOverrideNotCleared",
+                &[("detail", &error.to_string())],
+            ))
+        })
     }
 
     pub(crate) fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {

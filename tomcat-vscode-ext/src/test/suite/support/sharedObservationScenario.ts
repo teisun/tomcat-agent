@@ -62,9 +62,13 @@ export async function assertSharedObservationFlow(
     await until(() => api.__testing.getWebviewState().ready && !!api.__testing.getWebviewState().activeSessionId, "native window initialization and selected session");
     const ownId = api.__testing.getWebviewState().activeSessionId;
     assert.ok(ownId);
+    const ownThinking = (await api.__testing.getSessionState(ownId)).thinkingLevel;
+    const resumedEffort = ownThinking === "low" ? "high" : "low";
+    const initialEffort = resumedEffort === "low" ? "high" : "low";
     await host.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "ACP test host", version: "1" } });
     const { sessionId } = await host.request<{ sessionId: string }>("session/new", { cwd, mcpServers: [] });
     const foreign = await host.request<{ sessionId: string }>("session/new", { cwd: foreignCwd, mcpServers: [] });
+    await host.request("session/set_config_option", { sessionId, configId: "effort", value: initialEffort });
     const turn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Inspect this project and run the check." }] }, 180_000);
     void turn.catch(() => undefined);
     await until(() => JSON.stringify(host.updates).includes(prefix), "host prefix before opening");
@@ -86,6 +90,7 @@ export async function assertSharedObservationFlow(
     const state = () => api.__testing.getWebviewState().sessionViews[sessionId];
     await until(() => state()?.timeline.some(item => item.type === "message" && item.text === prefix) === true, "replayed prefix");
     assert.equal(state().access, "observe");
+    assert.equal(state().thinkingLevel, initialEffort);
     const sharedInputDom = async () => {
       const dom = await chat!.evaluate<{ notice: string; editable: string; disabled: string[]; actions: Array<{ disabled: boolean }>; controlsFit: boolean }>(`({
         notice: document.querySelector('[data-testid="observer-notice"]')?.textContent ?? '',
@@ -188,12 +193,19 @@ export async function assertSharedObservationFlow(
     host = startAcpTestHost(binary, cwd, process.env);
     await host.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "ACP test host", version: "1" } });
     await host.request("session/load", { sessionId, cwd, mcpServers: [] });
+    await host.request("session/set_config_option", { sessionId, configId: "effort", value: resumedEffort });
+    assert.equal(state().thinkingLevel, initialEffort, "no task means no new cross-window settings-push promise");
     const keptDraft = "Keep this local draft while ACP resumes.";
     await chat.fill('[data-testid="composer-input"]', keptDraft);
     await until(() => state().composerDraft?.text === keptDraft, "local draft synchronized before remote input");
     const questionTurn = host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: resumedPrompt }] }, 180_000);
     void questionTurn.catch(() => undefined);
     await until(() => model.capturedNonTitleRequests().length === 3, "resumed model paused before first reply");
+    await until(() => state().thinkingLevel === resumedEffort, "agent_start refreshes the already observed session effort before any reply");
+    assert.equal((await api.__testing.getSessionState(ownId)).thinkingLevel, ownThinking, "ACP must not change the other session's default");
+    const requestEffort = (index: number) => JSON.parse(model.capturedNonTitleRequests()[index].split("\r\n\r\n")[1]).reasoning_effort;
+    assert.equal(requestEffort(0), initialEffort);
+    assert.equal(requestEffort(2), resumedEffort);
     const livePromptCount = () => chat!.evaluate<number>(`[...document.querySelectorAll('[data-message-kind="user"] [data-testid="message-text"]')].filter(row => row.textContent === ${JSON.stringify(resumedPrompt)}).length`);
     await until(async () => await livePromptCount() === 1, "resumed prompt visible once before the first reply");
     assert.equal(state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), false, "model is still paused before the question");
@@ -204,6 +216,7 @@ export async function assertSharedObservationFlow(
       assert.equal(state().composerDraft?.text, keptDraft);
       assert.equal(api.__testing.getWebviewState().activeSessionId, sessionId);
       await chat.capture(path.join(artifacts, `acp-live-prompt-${name}.png`));
+      await chat.capture(path.join(artifacts, `effort-start-${name}.png`));
     }
     releaseResumedPrompt();
     await until(() => state().timeline.some(item => item.type === "approval" && item.live && !item.resolved), "observer can answer the host question");
@@ -268,6 +281,18 @@ export async function assertSharedObservationFlow(
     const preview = await SettingsFrameDriver.connectFromEnvironment(".tc-plan-preview__body");
     try {
       await until(() => preview.evaluate<boolean>("document.body.innerText.includes('Implement before testing.')"), "real ACP plan preview");
+      await preview.click("plan-build-model-select");
+      await preview.click("model-edit-gpt-5.4");
+      const selectedEffort = () => preview.evaluate<string>(`document.querySelector('[data-testid="thinking-level-option"][aria-pressed="true"]')?.getAttribute('aria-label') ?? ''`);
+      await until(async () => await selectedEffort() === translate("en", `term.effort.${resumedEffort}`), "plan preview uses this session's effort instead of the shared default");
+      await preview.capture(path.join(artifacts, "effort-plan-preview.png"));
+      const mediumIndex = await preview.evaluate<number>(`[...document.querySelectorAll('[data-testid="thinking-level-option"]')].findIndex(button => button.getAttribute('aria-label') === ${JSON.stringify(translate("en", "term.effort.medium"))})`);
+      assert.ok(mediumIndex >= 0);
+      await preview.click("thinking-level-option", mediumIndex);
+      await until(async () => (await api.__testing.getSessionState(sessionId)).thinkingLevel === "medium", "plan preview manual setting clears this session override");
+      await until(async () => await selectedEffort() === translate("en", "term.effort.medium"), "plan preview reads back the manual setting");
+      await preview.capture(path.join(artifacts, "effort-plan-manual.png"));
+      await preview.click("plan-build-model-select");
       await preview.evaluate(`(() => { const paragraph = [...document.querySelectorAll('.tc-plan-preview__body p')].find(p => p.textContent.includes('Implement before testing.')); if (!paragraph) throw new Error('plan paragraph missing'); paragraph.id = 'revision-quote'; })()`);
       await api.__testing.dispatchPlanPreviewDomAction(planPath, { kind: "selectText", selector: "#revision-quote" });
       await until(() => preview.evaluate<boolean>("!!document.querySelector('[data-testid=\"plan-selection-add\"]')"), "plan quote action");
@@ -305,7 +330,7 @@ export async function assertSharedObservationFlow(
     await api.__testing.sendWebviewIntent({ messageId: "observe-return-own", type: "switchSession", data: { sessionId: ownId } });
     await until(() => chat!.evaluate<boolean>("document.querySelector('[data-testid=\"composer-input\"]')?.getAttribute('contenteditable') === 'true'"), "own session becomes writable again");
     assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, planId, planPath, ownId, foreignSessionId: foreign.sessionId, replacement, modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "new ACP load/prompt visible once before first reply", "remote prompt preserves local draft", "real running and completed tool", "shared input busy and idle", "Send queues and Send now steers", "Stop cancels the real shell", "observer answers non-recommended question without task control", "quote and revise the same plan without execution", "own session writable"] }, null, 2));
+    await fs.writeFile(path.join(artifacts, "observer-journey.json"), JSON.stringify({ sessionId, planId, planPath, ownId, foreignSessionId: foreign.sessionId, replacement, initialEffort, resumedEffort, ownThinking, manualEffort: "medium", modelCalls: model.capturedNonTitleRequests().length, assertions: ["same-project disk list", "foreign project hidden and unreadable", "mid-stream prefix", "webview reload without duplication", "new ACP load/prompt visible once before first reply", "remote prompt preserves local draft", "real running and completed tool", "shared input busy and idle", "Send queues and Send now steers", "Stop cancels the real shell", "observer answers non-recommended question without task control", "quote and revise the same plan without execution", "own session writable"] }, null, 2));
   } finally {
     release();
     releaseResumedPrompt();

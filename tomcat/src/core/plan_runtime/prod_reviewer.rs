@@ -95,24 +95,34 @@ pub struct ProdReviewerDeps {
 }
 
 impl ProdReviewerDeps {
-    fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
-        let session_model =
-            match read_parent_session_model(&self.sessions_dir, &self.parent_session_id) {
-                // A readable parent entry with no override is authoritative: deletion has cleared
-                // the selection, so never revive PlanRuntime's previous in-memory choice.
-                Some(model) => model,
-                None => plan_runtime.session_model(),
-            };
-        resolve_dispatch_model(
+    fn resolve_model_settings(
+        &self,
+        plan_runtime: &PlanRuntime,
+    ) -> (String, crate::core::llm::ThinkingLevel) {
+        let parent = read_parent_session_settings(&self.sessions_dir, &self.parent_session_id);
+        let session_model = match parent.as_ref() {
+            // A readable entry with no override must not revive the runtime's stale choice.
+            Some((model, _)) => model.clone(),
+            None => plan_runtime.session_model(),
+        };
+        let model = resolve_dispatch_model(
             self.model_override.as_deref(),
             session_model.as_deref(),
             &self.fallback_model,
-        )
-    }
-
-    fn resolve_thinking_level(&self, model_id: &str) -> crate::core::llm::ThinkingLevel {
-        self.model_catalog
-            .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
+        );
+        // A refreshed default can differ from the child's original fallback model.
+        let session_level = parent.and_then(|(_, level)| level).filter(|_| {
+            let current_model = self
+                .llm_resolver
+                .selected_model_id(session_model.as_deref());
+            model == current_model
+        });
+        let level = self.model_catalog.resolve_reasoning_level(
+            self.model_prefs.as_ref(),
+            &model,
+            session_level,
+        );
+        (model, level)
     }
 
     fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
@@ -182,19 +192,23 @@ pub(crate) fn resolve_subagent_runtime(
     })
 }
 
-/// Reads the parent session at child-dispatch time. `Some(None)` means the record was read and
-/// deliberately has no override, so callers must not fall through to a stale in-memory cache.
-pub(crate) fn read_parent_session_model(
+/// Reads the parent's model and effort together at child-dispatch time. A readable record
+/// without a model override must not fall through to a stale in-memory selection.
+pub(crate) fn read_parent_session_settings(
     sessions_dir: &std::path::Path,
     parent_session_id: &str,
-) -> Option<Option<String>> {
+) -> Option<(Option<String>, Option<crate::core::llm::ThinkingLevel>)> {
     let manager = SessionManager::new(sessions_dir.to_path_buf());
     match manager.get_session_by_id(parent_session_id) {
-        Ok(Some(entry)) => Some(
+        Ok(Some(entry)) => Some((
             entry
                 .model_override
                 .filter(|model| !model.trim().is_empty()),
-        ),
+            entry
+                .thinking_level
+                .as_deref()
+                .and_then(crate::core::llm::ThinkingLevel::parse),
+        )),
         Ok(None) | Err(_) => None,
     }
 }
@@ -266,8 +280,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(expose_skills));
-        let model_id = deps.resolve_model(&plan_runtime);
-        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
+        let thinking_level = Some(level);
         let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
@@ -526,8 +540,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(expose_skills));
-        let model_id = deps.resolve_model(&plan_runtime);
-        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
+        let thinking_level = Some(level);
         let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
@@ -897,8 +911,8 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let bash_ast = deps.bash_ast.clone();
         let bash_cwd = deps.agent_workspace_dir.clone();
         let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
-        let model_id = deps.resolve_model(&plan_runtime);
-        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
+        let thinking_level = Some(level);
         let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();

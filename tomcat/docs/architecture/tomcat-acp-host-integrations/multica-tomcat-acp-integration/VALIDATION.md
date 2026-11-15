@@ -2,18 +2,51 @@
 
 ```text
 06835b8f5 精确基线 → 原接入23项 → 目录修复29项
-                  → 本轮adapter/清理接线31项 → patch重放 → 全文件SHA-256 → Go回归
+                  → 上轮adapter/清理接线31项 → 本轮强度32项 → patch重放 → 全文件SHA-256 → Go回归
 ```
 
 本文件区分资料包重放、当前分支受控旅程与正式部署；不代替公司分支验收。
+
+## 本轮推理强度同步（2026-11-14/15）
+
+- 原 Multica 基线不变：`06835b8f50606ca3f8bebbb5d07ac8901f831e69`。先重放原包并核对 31 个目标与许可证，再移入本次能力；新包 32 个目标，仅新增一个 `thinking.go` 补丁目标。新增文件与补丁目标不重复。
+- 来源是 Multica `5e36721c` 和 Tomcat `bfea42a7` 基线上的**未提交工作树**，不是新提交；`manifest.json.host.reasoning_effort` 记录当前来源哈希及原基线测试适配。原基线没有新版的任务告警消息机制，保留日志告警/丢弃行为，四项选择测试放在已有 Tomcat daemon 测试中，不扩生产范围。
+- 本轮检查记录在下表；历史结果仅保留追溯，不代替本轮。
+
+| 检查 | 本轮实际结果 | 证据 |
+| --- | --- | --- |
+| Tomcat 会话/请求 | effort 库用例 27 通过；真实 ACP observer 4、stdio 27 通过；包含隔离、重启、Default、部分保存失败与实际 effort 参数 | `1794661649704-a8t1xf` exit 0 |
+| Tomcat 默认门禁（终审前） | Clippy 严格检查、doctest（0 用例）、库其余 3417（7 ignored）、默认集成并行 399 / 串行 63 均通过；逐名审计确认当前 thinking/effort 并集 131/131 已有有效通过记录，不把两个筛选集的重叠项相加 | `1794662819175-m22fka` exit 0；`rust-library-coverage.json` 的 missing=[]；聚焦和 ACP 为 `1794659720205-aytheq` / `1794661649704-a8t1xf` |
+| 终审子 Agent 强度归属 | 默认模型刷新后，只让当前会话模型继承会话档位，不改原模型路由；新红测先失败，再由整个 plan_runtime 153 项复验通过。fmt、all-targets strict Clippy、debug CLI 构建及反向依赖检查均通过；当前库列表 3556 项，其余仍有效结果复用 | `1794677740119-yh4ei1` exit 0；`subagent-default-effort/{README.md,red.json,green.json}`；红测采集器的错误 Off 预期未冒称通过 |
+| 扩展门禁 | 分批覆盖 core 962、GUI 910；双端 TypeScript 与 check:wire 通过；最后一次 DevHost 重新构建当前 GUI/host | core 807：`1794663767107-y5gr33`；provider 100：`1794660323249-y5tqub`；plan 55 与 lint：`1794668228726-mwq0m3`；GUI 56+854、wire：`1794660323249-y5tqub` / `1794662872995-qbustd` |
+| VS Code 真实旅程与视觉 | 直接从同一次 GetState 取模型与强度，避免侧栏切换或模型缓存落后的错配；DevHost 再次 1 通过，4 组最终 PNG/ARIA/console 已读回：任务开始 Low、计划预览 Low→手动 Medium，草稿保留；控件无重叠，窄屏按原样省略模型文字、ARIA 保留完整档位，采集范围 errors/events 为空 | 两项红测 `1794664198856-m2bknp` / `1794668126888-qf4ml7`；最终复验 `1794668228726-mwq0m3` exit 0；`devhost-20261115-r3/gui-8s2d68` |
+| 原包核对 | 更新前 31/31 目标、两份补丁与两个许可证匹配 | `1794662109462-a04skx` exit 0 |
+| 新包精确重放与回归 | 干净原基线上两份补丁 check/apply、32/32 目标及 2 个许可证匹配；四包 guard 聚焦 race、整个 Go module 构建及真实 ACP 五子场景全部通过（包括强度新建/续接/清空） | `1794662587945-eoz857` exit 0；本机 `bundle-replay.json` 保存 3 项退出码 0 |
+| 当前 Multica 聚焦与类型 | Tomcat/thinking 的 guard race、真实跨仓 ACP、整仓 typecheck 通过；生产仍仅三个既定文件 | `current-20261115-r3` 的 focused-go / cross-repo-acp / full-typecheck 均 exit 0 |
+| 最终浏览器旅程 | 1 passed（1.4m）；保存 High→新任务、Low→原会话续接、Default→原会话续接，三个任务均 completed，实际主请求 high→low→high；四项清理均 exit 0 | `1794673959317-ia8m5o` exit 0；`current-20261115-r11/{journey.json,provider-models.jsonl,commands.json,cleanup.json}` |
+| 最终 Multica 视觉 | 1440×1000 / 390×844 共 13 张原始 PNG 逐图读取，ARIA/console 配套核对；Low/High 在窄屏视口内。无 console/page errors；20 条字体 preload 警告单列，102 个捕获资源响应无 4xx/5xx | `current-20261115-r11/visual-review.md`；与 DevHost r3 四图合计 17 图，不用 superseded 截图代签 |
+| 其余 TS 单测 | core 2588、ui 326、web 292、desktop 837 通过；views 原批 6876 通过/4 超时，四条保持源码与 HEAD 一致后单独补验全部通过 | r4 分包日志；`1794673847481-2jqz6w` exit 0，`views-failure-check.log` 4 passed / 56 skipped；不把原失败整批改为 exit 0 |
+| 最新全量 Go | 清除 28 个探测路径覆盖后重跑，regular 批次仍 exit 1（make exit 2）；repocache 1 项、handler 3 项失败，agent 半批未执行。随后独立完整 agent guard/race 子批 exit 0（478.317s），不改写原失败 | regular：`1794674310916-irf1r9`，四项清理成功；agent：`1794675314787-aobcpy`，`go-agent-full-clean/{test.log,result.json}` |
+| Go 失败受控对照 | 原 HEAD 和当前分别使用全新已迁移私有数据库；四项均实际运行、0 skip。两个 dashboard exact-window 用例两边同样失败，确认不是本轮新增；repocache 和 webhook 两边均通过，原失败未复现、根因未确认 | `1794675880987-2z026p` 调查脚本 exit 0，但两组 Go 各 exit 1；`go-regular-failure-comparison/{baseline.jsonl,current.jsonl,result.json}`；私有 PostgreSQL/worktree/HOME 清理完成 |
+| 中间快照重放（终审前） | 更新最后执行的浏览器源后，在另一干净原基线 check/apply 成功，32/32 目标、两份补丁完整 index、两个许可证、FILES 和全部来源哈希匹配；其他目标与已测 Go 副本相同 | `1794674592084-y08og4` exit 0；`bundle-final-replay.json`；manifest SHA-256 `6a26d1c1949e9a057ec73055acd1137820dfd0853f8a7c3f74d2ae25813339d8` |
+| 终审交付重放 | 当前 32 目标、两份补丁完整 index、两个许可证、FILES、两仓来源哈希和全部交付 Go 文件的 gofmt 均通过；thinking.go 比旧 Go 测试副本只多一个独立空行，精确删除即可逐字节还原，其余非浏览器目标同字节，不冒称重跑 Go | `1794679465802-as08x3` exit 0；`bundle-delivery-verification.json`；当前 manifest SHA-256 `4582649f706400b5b4c9a0b627f75d38e51de8be9f53e74761fa3af9840cc8b4`；终审 Rust 修复的两份来源哈希已同步 |
+| 其余浏览器 E2E | 最终串行补验实际完成：42 passed / 36 failed（37.9m），runner exit 1 / make exit 2；包含 MCP 按钮缺失、请求/断言失败、开发 overlay 拦截和超时。未做干净 HEAD 浏览器对照，不能一概归为既有失败 | `1794676082978-eulxlv`；`current-20261115-r13/{remaining-e2e.log,failure-summary.json}`；保留 28 份中途错误上下文，最终四项清理 exit 0、临时根已删除 |
+| 最终 ZIP | 使用 `multica-tomcat-acp-integration-reasoning-20261115.zip` 新文件名，逐成员核对目录字节、CRC 与 SHA-256；结果以外置校验报告为准，不把旧快照当新包 | 本机 `.agents/acceptance/multica-reasoning/` 下同名 `.sha256` 与 `archive-verification.json` |
+| 复核整改与重新打包 | Tomcat 档位显示名复用已有 `claudeEffortLabel`（`xhigh` 显示 Extra high，未知值仍首字母大写），与其他 Agent 一致；文档验收结论按已确认范围改写，失败明细不变。当前 Multica 聚焦 race 通过；干净 `06835b8f` 重放 32 目标、2 补丁、2 许可证、gofmt 一致，聚焦 race 与 `go build -p 2 ./...` 通过，临时 worktree 已删除。只改显示文字，浏览器旅程与真实 ACP 结果沿用上表 | 新 ZIP `multica-tomcat-acp-integration-reasoning-20261115-r2.zip` 及同名 `.sha256`、`archive-verification-r2.json`；上一版 ZIP 保留 |
+
+首次扩展补余门禁 `1794662872995-qbustd` 的 core 命令误叠加两次 `--maxWorkers`，未启动测试；以同 runner 的直接 Vitest 调用补验 807，通过，未改产品代码。该整批 exit 1 保留，GUI 854 与 wire 子命令各自成功；不把整批改记为 exit 0。Multica 早期浏览器因菜单触发器名称、设置页入口和冷编译导航失败，原日志保留；最终 r11 已完成完整旅程，不再称最新旅程仍失败。r10 窄屏强度图未拍到菜单，最终脚本先滚到 Thinking 再打开菜单，并加入视口断言，r11 复验通过；这是测试采集修正，不是修改产品布局。
+
+**本功能、受影响流程和原版本适配包已验收通过；Multica 全仓检查不是全绿**，以下失败与本功能无关（部分已由原 HEAD 对照复现，其余未逐项归因），原始结果保留，本包不代表全仓或公司部署验收：`make test` 的 Docker 前置在本机不可用；隔离 PostgreSQL+vector 已实际迁移并运行数据库测试，但不因此抹去原命令失败。首次全量 TS 的失败和超时保留，views 四个超时已聚焦补验；其余 E2E 首次因 `plugin-surface-document.spec.ts` 旧导出而收集失败，r4 扩大回归被主动中断。最终 r13 排除此收集失败文件后跑完 78 项，42 通过 / 36 失败，不能记为通过。原始断言包括 MCP Apps / Activity 按钮找不到、附件上传 404、日期/项目过滤断言、Next 开发 overlay 拦截点击及导航超时；Node 源码/清单/锁文件与 HEAD 无差异不等于这些失败已被基线证实。下一步需对照干净基线分组定位，未授权扩大修改其它产品路径来凑绿。r4 和 r13 的 managed/Tomcat/PostgreSQL/worktree 四项 finally 清理均成功；最初 provider readiness 失败残留已清理。Go 对照只确认两个 dashboard 失败在原 HEAD 同样存在；repocache 的 `stop process tree: operation not permitted` 和 webhook 的无可领取工作错误在两边定向复验均未重现，不宣称根因已解决。
+
+本包不含 Tomcat 内部 Qwen 占位清理；不改 Multica 的 Qwen Code Agent，也不修改回复指引、`reply.md` 或 PLAN 权限。
 
 ## 来源与范围
 
 - 原基线：`06835b8f50606ca3f8bebbb5d07ac8901f831e69`。
 - 原接入：`e12a45e59d8bfddf2aba192f163899a9eb290a3b`；原Tomcat依赖：`401b6f0cbd8be8478b5453815450f7ce6ada00e7`。
 - 历史目录修复：Multica `3c7b4cde72ab4c8389dcec933e2573855b04cb7e` 和 Tomcat `1f0fbf0c` 基线上的当时已审工作树，记录保留在 `manifest.json.host.catalog_repair`。
-- 本轮 adapter：已提交 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`，配套 Tomcat 源码 `9d7221317e272645128d090bc38151f943d6a2aa`；`host.adapter_refresh` 记录来源与语义回迁边界。
-- 原 29 项先在精确基线上重放且全部哈希一致，再同步 adapter 与必要宿主接线/测试，最终 31 项。相对原包，24 个原目标文件哈希不变；新增 `daemon.go`、`taskfailure/failure.go` 两个补丁目标，并更新原 `agent.go` 的清理契约、`tomcat.go` 和三份测试快照。不导入整个新版宿主，不包含新版 Pi、桌面、调度或 native CLI 停机确认协议。
+- 上轮 adapter：已提交 Multica `5e36721c1329372d272e8c4b72f4ada2e31115a7`，当时配套 Tomcat 源码 `9d7221317e272645128d090bc38151f943d6a2aa`；`host.adapter_refresh` 保留历史来源与回迁边界。本轮未提交的强度改动另见 `host.reasoning_effort`。
+- 上轮原 29 项先在精确基线上重放且全部哈希一致，再同步 adapter 与必要宿主接线/测试，达到 31 项。相对当时原包，24 个原目标文件哈希不变；新增 `daemon.go`、`taskfailure/failure.go` 两个补丁目标，并更新原 `agent.go` 的清理契约、`tomcat.go` 和三份测试快照。本轮在这 31 项上接通强度，达到 32 项。不导入整个新版宿主，不包含新版 Pi、桌面、调度或 native CLI 停机确认协议。
 
 ## 可复核方法
 
@@ -25,7 +58,7 @@ from pathlib import Path
 bundle = Path('/absolute/path/multica-tomcat-acp-integration')
 checkout = Path('/absolute/path/disposable-replayed-baseline')
 m = json.loads((bundle / 'manifest.json').read_text())['host']
-assert m['name'] == 'multica' and len(m['files']) == 31
+assert m['name'] == 'multica' and len(m['files']) == 32
 for row in m['files']:
     assert hashlib.sha256((checkout / row['path']).read_bytes()).hexdigest() == row['sha256_after_integration'], row['path']
 for row in m['patches'] + m['licenses']:
@@ -42,7 +75,7 @@ for row in m['patches'] + m['licenses']:
 - 全新精确重放 `1794213272064-evn22h` exit 0：两份补丁 check/apply、31/31 目标、18 条完整旧/新 Git blob index、FILES 与许可证通过；与实际测试副本逐目标字节相同。manifest SHA-256 `b037a7097e7352fd06cf29b5107fc5a4866190bed64ad813398d72002131d9c9`，本机记录 `.agents/acceptance/merge-multica-20261109/bundle-replay.json`。
 - 旧 ZIP 和下表历史结果不包含本次补漏，不能据此声称修复后的包已重新交付或公司分支已部署。
 
-## 本轮 adapter 同步证据（2026-11-09）
+## 历史 adapter 同步证据（2026-11-09，非本轮重跑）
 
 | 检查 | 实际结果 | 证据与边界 |
 | --- | --- | --- |
@@ -87,4 +120,4 @@ E2E源码面向记录的3c7b4cde7页面/API/测试fixture；旧基线页面没�
 
 ## 未包含与未代签
 
-没有真实Key、公司仓库地址、数据库内容、node_modules、编译产物或宿主日志。PNG/ARIA/console与脱敏journey记录位于本机 `.agents/shots/multica-discovery/`，不纳入包。没有安装、发布、修改PATH或重启正式服务；本机macOS结果不代签Windows、公司二开分支或真实网关额度。正式升级必须更新该runtime实际绑定的CLI及daemon，并由用户安排共享服务重启。
+没有真实Key、公司仓库地址、数据库内容、node_modules、编译产物或宿主日志。本机本轮强度 PNG/ARIA/console 与脱敏旅程在 `.agents/{shots,acceptance}/multica-reasoning/`，不纳入包；上述历史目录修复证据的旧目录是 `.agents/shots/multica-discovery/`。没有安装、发布、修改PATH或重启正式服务；本机macOS结果不代签Windows、公司二开分支或真实网关额度。正式升级必须更新该runtime实际绑定的CLI及daemon，并由用户安排共享服务重启。

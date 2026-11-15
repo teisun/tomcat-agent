@@ -267,24 +267,36 @@ pub struct ProdVerifierDeps {
 }
 
 impl ProdVerifierDeps {
-    fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
-        let session_model = match super::prod_reviewer::read_parent_session_model(
+    fn resolve_model_settings(
+        &self,
+        plan_runtime: &PlanRuntime,
+    ) -> (String, crate::core::llm::ThinkingLevel) {
+        let parent = super::prod_reviewer::read_parent_session_settings(
             &self.sessions_dir,
             &self.parent_session_id,
-        ) {
-            Some(model) => model,
+        );
+        let session_model = match parent.as_ref() {
+            Some((model, _)) => model.clone(),
             None => plan_runtime.session_model(),
         };
-        super::prod_reviewer::resolve_dispatch_model(
+        let model = super::prod_reviewer::resolve_dispatch_model(
             self.model_override.as_deref(),
             session_model.as_deref(),
             &self.fallback_model,
-        )
-    }
-
-    fn resolve_thinking_level(&self, model_id: &str) -> crate::core::llm::ThinkingLevel {
-        self.model_catalog
-            .resolve_reasoning_level(self.model_prefs.as_ref(), model_id)
+        );
+        // Compare against the live parent selection, not the child's startup fallback.
+        let session_level = parent.and_then(|(_, level)| level).filter(|_| {
+            let current_model = self
+                .llm_resolver
+                .selected_model_id(session_model.as_deref());
+            model == current_model
+        });
+        let level = self.model_catalog.resolve_reasoning_level(
+            self.model_prefs.as_ref(),
+            &model,
+            session_level,
+        );
+        (model, level)
     }
 
     fn resolve_speed(&self, model_id: &str) -> Option<crate::core::llm::Speed> {
@@ -348,8 +360,8 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
-        let model_id = deps.resolve_model(&plan_runtime);
-        let thinking_level = Some(deps.resolve_thinking_level(&model_id));
+        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
+        let thinking_level = Some(level);
         let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();

@@ -44,10 +44,12 @@ func discoverTomcatModels(ctx context.Context, runtimeCmd Command) (Catalog, err
 	// ListModelsPayload, including preferences and warnings, belongs to Tomcat.
 	var payload struct {
 		Models []struct {
-			ID         string `json:"id"`
-			Provider   string `json:"provider"`
-			KeyPresent *bool  `json:"keyPresent"`
+			ID                       string   `json:"id"`
+			Provider                 string   `json:"provider"`
+			KeyPresent               *bool    `json:"keyPresent"`
+			SupportedReasoningLevels []string `json:"supportedReasoningLevels"`
 		} `json:"models"`
+		DefaultModelID string `json:"defaultModelId"`
 	}
 	if err := json.Unmarshal(stdout, &payload); err != nil || payload.Models == nil {
 		return Catalog{}, errors.New("Tomcat returned an invalid model catalog from serve models; check the runtime command and update Tomcat")
@@ -60,7 +62,21 @@ func discoverTomcatModels(ctx context.Context, runtimeCmd Command) (Catalog, err
 		}
 		seen[entry.ID] = true
 		if *entry.KeyPresent {
-			models = append(models, Model{ID: entry.ID, Label: entry.ID, Provider: entry.Provider})
+			model := Model{ID: entry.ID, Label: entry.ID, Provider: entry.Provider, Default: entry.ID == payload.DefaultModelID}
+			for _, level := range entry.SupportedReasoningLevels {
+				if level == "" {
+					continue
+				}
+				if model.Thinking == nil {
+					model.Thinking = &ModelThinking{}
+				}
+				label, ok := claudeEffortLabel[level]
+				if !ok {
+					label = strings.ToUpper(level[:1]) + level[1:]
+				}
+				model.Thinking.SupportedLevels = append(model.Thinking.SupportedLevels, ThinkingLevel{Value: level, Label: label})
+			}
+			models = append(models, model)
 		}
 	}
 	if len(models) == 0 {

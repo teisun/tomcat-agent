@@ -57,6 +57,8 @@ export interface PlanPreviewStateSnapshot {
   raw: string;
   /** Model the chat session is currently on; the build-model dropdown falls back to it. */
   sessionModel: string;
+  /** Effective session effort; omitted by older host snapshots. */
+  sessionThinkingLevel?: string | null;
   state: PlanFileState | null;
   title: string | null;
   todos: PlanTodo[];

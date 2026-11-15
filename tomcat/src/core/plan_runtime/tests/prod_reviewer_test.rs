@@ -4,7 +4,7 @@ use super::super::file_store::{
 };
 use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
 use super::super::prod_reviewer::{
-    read_parent_session_model, ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher,
+    read_parent_session_settings, ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher,
 };
 use super::super::review::resolve_internal_tools;
 use super::super::{
@@ -60,8 +60,8 @@ fn persisted_parent_selection_overrides_or_clears_the_cached_child_model() {
         })
         .expect("persist parent model");
     assert_eq!(
-        read_parent_session_model(sessions.path(), &entry.session_id),
-        Some(Some("selected-now".to_string()))
+        read_parent_session_settings(sessions.path(), &entry.session_id),
+        Some((Some("selected-now".to_string()), None))
     );
 
     manager
@@ -70,11 +70,14 @@ fn persisted_parent_selection_overrides_or_clears_the_cached_child_model() {
         })
         .expect("clear parent model as deletion does");
     assert_eq!(
-        read_parent_session_model(sessions.path(), &entry.session_id),
-        Some(None),
+        read_parent_session_settings(sessions.path(), &entry.session_id),
+        Some((None, None)),
         "a cleared persisted selection must be distinguishable from an unreadable session"
     );
-    assert_eq!(read_parent_session_model(sessions.path(), "missing"), None);
+    assert_eq!(
+        read_parent_session_settings(sessions.path(), "missing"),
+        None
+    );
 }
 
 #[test]

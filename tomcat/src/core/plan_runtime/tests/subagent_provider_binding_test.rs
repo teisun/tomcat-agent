@@ -980,6 +980,146 @@ summary: verify ok
 }
 
 #[tokio::test]
+async fn session_effort_is_inherited_only_by_same_model_subagents() {
+    let _g = home_lock().lock().unwrap();
+    for role in ["plan", "verifier", "independent"] {
+        let answer = if role == "plan" {
+            "<review>\nverdict: pass\nsummary: ok\nchanges_summary: none\napplied_changes: false\n</review>"
+        } else {
+            "<verify>\nverdict: pass\nsummary: ok\nchecks: []\n</verify>"
+        };
+        let (parent, parent_requests) = RecordingProvider::success("parent", answer);
+        let (child, child_requests) = RecordingProvider::success("child", answer);
+        let fx = build_fixture(
+            parent,
+            child,
+            parent_requests.clone(),
+            child_requests.clone(),
+            false,
+        );
+        let session = crate::SessionManager::new(fx.agent_trail_dir.join("sessions"));
+        let entry = session
+            .create_session(session.current_session_key(), None)
+            .unwrap();
+        session
+            .update_session(session.current_session_key(), |entry| {
+                entry.model_override = Some("fcodex/gpt-5.6-sol".into());
+                entry.thinking_level = Some("off".into());
+            })
+            .unwrap();
+        let _parent = fx.registry.register_root(&entry.session_id).unwrap();
+        match role {
+            "plan" => {
+                let mut deps = reviewer_deps(&fx, None);
+                deps.parent_session_id = entry.session_id;
+                let summary = ProdPlanReviewerDispatcher::new("effort", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n", true)
+                    .await;
+                assert!(!summary.aborted, "{}", summary.summary);
+            }
+            "verifier" => {
+                let mut deps = verifier_deps(&fx);
+                deps.parent_session_id = entry.session_id;
+                let summary = ProdVerifierDispatcher::new("effort", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n")
+                    .await;
+                assert_eq!(summary.verdict, "pass", "{}", summary.summary);
+            }
+            _ => {
+                let mut deps = reviewer_deps(&fx, Some("deepseek-v4-flash"));
+                deps.parent_session_id = entry.session_id;
+                let summary = ProdExplorerDispatcher::new("effort", deps)
+                    .dispatch(&ExplorerTask {
+                        id: "effort".into(),
+                        prompt: "inspect".into(),
+                    })
+                    .await;
+                assert!(!summary.aborted, "{}", summary.report);
+            }
+        }
+        if role == "independent" {
+            assert!(parent_requests.lock().is_empty());
+            assert_eq!(
+                child_requests.lock()[0].thinking_level,
+                Some(ThinkingLevel::High)
+            );
+        } else {
+            assert!(child_requests.lock().is_empty());
+            assert_eq!(
+                parent_requests.lock()[0].thinking_level,
+                Some(ThinkingLevel::Off)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn session_effort_tracks_live_default_model_for_subagents() {
+    let _g = home_lock().lock().unwrap();
+    for role in ["plan", "verifier"] {
+        for same_model in [false, true] {
+            let answer = if role == "plan" {
+                "<review>\nsummary: ok\nchanges_summary: none\napplied_changes: false\n</review>"
+            } else {
+                "<verify>\nverdict: pass\nsummary: ok\nchecks: []\n</verify>"
+            };
+            let (current, current_requests) = RecordingProvider::success("current", answer);
+            let (startup, startup_requests) = RecordingProvider::success("startup", answer);
+            let mut fx = build_fixture(
+                current,
+                startup,
+                current_requests.clone(),
+                startup_requests.clone(),
+                false,
+            );
+            // The live resolver was refreshed, but child dispatch retains its original fallback.
+            Arc::get_mut(&mut fx.resolver).unwrap().default_model = "fcodex/gpt-5.6-sol".into();
+            let session = crate::SessionManager::new(fx.agent_trail_dir.join("sessions"));
+            let entry = session
+                .create_session(session.current_session_key(), None)
+                .unwrap();
+            session
+                .update_session(session.current_session_key(), |entry| {
+                    entry.model_override = None;
+                    entry.thinking_level = Some("off".into());
+                })
+                .unwrap();
+            let _parent = fx.registry.register_root(&entry.session_id).unwrap();
+            let model_override = same_model.then(|| "fcodex/gpt-5.6-sol".to_string());
+            if role == "plan" {
+                let mut deps = reviewer_deps(&fx, model_override.as_deref());
+                deps.parent_session_id = entry.session_id;
+                let summary = ProdPlanReviewerDispatcher::new("effort", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n", true)
+                    .await;
+                assert!(!summary.aborted, "{}", summary.summary);
+            } else {
+                let mut deps = verifier_deps(&fx);
+                deps.parent_session_id = entry.session_id;
+                deps.model_override = model_override;
+                let summary = ProdVerifierDispatcher::new("effort", deps)
+                    .dispatch("binding_plan", "## Goal\nbinding\n")
+                    .await;
+                assert_eq!(summary.verdict, "pass", "{}", summary.summary);
+            }
+            let (requests, unused, expected) = if same_model {
+                (&current_requests, &startup_requests, ThinkingLevel::Off)
+            } else {
+                (&startup_requests, &current_requests, ThinkingLevel::High)
+            };
+            assert!(unused.lock().is_empty(), "model selection must not change");
+            let requests = requests.lock();
+            assert_eq!(requests.len(), 1, "{role}, same_model={same_model}");
+            assert_eq!(
+                requests[0].thinking_level,
+                Some(expected),
+                "{role}, same_model={same_model}: only the live session model inherits effort"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn speed_subagent_override_does_not_inherit_parent_paid_preference() {
     use crate::core::llm::Speed;
     let _g = home_lock().lock().unwrap();
