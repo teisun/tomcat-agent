@@ -1,20 +1,21 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-15 20:22 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-15 21:44 +0800 | ACTIVE | develop | - |
 
-### CURRENT RELEASE：TOMC-8 CLI 0.1.97 / EXT 0.2.15（准备发布，远端结果待核验）
+### CURRENT RELEASE：TOMC-8 CLI 0.1.97 / EXT 0.2.15（GitHub 与 Marketplace 已发布；OpenVSX 阻塞，部分完成）
 
 ```text
-已批准现值 → 补 0.2.15 CHANGELOG → release 提交 R
-  → develop/main/master 仅快进 → R 的 CI/version-sync
-  → CLI 四包下载校验 → EXT 四平台原生验收 → GitHub / Marketplace / OpenVSX 分渠道核验
+R + 两个 tag → CLI 四包校验 → EXT 四平台原生验收 → GitHub 五份 VSIX
+                                                        ├→ Marketplace 四平台公开、下载哈希一致
+                                                        └→ OpenVSX 跳过 / 404，不能算三渠道完成
+发布内容固定在 R；随后结果文档提交 D 仅快进同步三分支，不移动 tag
 ```
 
-- **批准与版本**：TOMC-8 计划 v1 已由创建人 lilongtao 于 2026-11-15 20:18 明确批准，Mika 已交接实施。复用 `.cursor/commands/release-cli-ext.md`，跳过再次 bump；保留 CLI `0.1.97`、EXT `0.2.15`、bundled CLI `0.1.97`，五个版本文件预期零差异。升级 diff 已在 `dec0f7d8`；本次 R 仅补 CHANGELOG 与本状态，完整发布树同时包含正确版本和日志。
-- **变更归属**：按上个实际公开 EXT `ext-v0.2.9` 至当前提交的 diff 核对新日志，覆盖 Gemini 原生协议与签名回放、共享会话输入、ACP 续接正文显示、会话推理强度和计划预览同步。保留 0.2.13/0.2.14 历史条目，注明纳入此前未发布准备内容；不以日志声明真实收费模型或 Multica 全链路验证通过。
-- **执行边界**：只暂存两份说明文件；运行时未跟踪 `AGENTS.md` 保留且不提交。不改产品代码、依赖、workflow、版本或账号权限，不强推、不覆盖标签或资产、不安装或重启在用共享服务。R 的分支 CI 与三分支 version-sync 成功前不打正式 tag，CLI 四包与清单实际下载核验前不打 EXT tag。当前尚未推送或发布，不预填成功 URL/hash。
-- **分渠道就绪缺口**：现有 `PUBLISH_MARKETPLACE=true`，marketplace 环境身份参数存在，但实际认证/上传待 workflow 证明。仓库 Actions secrets 复核为空，缺少 `OVSX_PAT`，OpenVSX 公开 API 返回扩展未找到；该渠道仍在批准范围，若跳过或缺包必须报部分完成，不把 workflow 绿色当三渠道成功。不新增凭据或放宽权限，由 Mika 协调维护者。
-- **验证与风险**：提交前版本工具 19/19 通过（0 skipped），版本 check、CLI/EXT tag guard、空白检查通过；五版本文件相对 `dec0f7d8` 零差异。本轮只做发布定向检查并收取 R 的现有自动 CI，不重跑无关全仓本地套件；远端结果与制品哈希发布后另行回填。下方历史测试失败、真实模型/跨宿主待验及部署限制仍保留，升级二进制不代表正在运行的共享服务已更新；用户显式重启会停止全部任务。Cov% 未测量，保持 `-`。
+- **批准、版本与提交**：TOMC-8 计划 v1 已由创建人 lilongtao 于 2026-11-15 20:18 批准并由 Mika 交接。跳过再次 bump，保留 CLI `0.1.97` / EXT `0.2.15` / bundled CLI `0.1.97`；五版本文件相对 `dec0f7d8` 逐字未变。R=`faffc91ccee83f024407e37d2ec8c41c6e0dbd25` 仅修改 CHANGELOG 与本状态；`cli-v0.1.97`、`ext-v0.2.15` 均固定在 R。结果另以仅文档 D 提交，不重写发布快照。
+- **R 的门禁**：正式 tag 前，develop/main 常规 CI [43713584337](https://github.com/teisun/tomcat-agent/actions/runs/43713584337) / [43713596820](https://github.com/teisun/tomcat-agent/actions/runs/43713596820) 及三分支 version-sync [43713584275](https://github.com/teisun/tomcat-agent/actions/runs/43713584275) / [43713596768](https://github.com/teisun/tomcat-agent/actions/runs/43713596768) / [43713609663](https://github.com/teisun/tomcat-agent/actions/runs/43713609663) 均已成功。手动 opt-in job 的 skipped 不计通过；先前 main 尚在运行的检查点保留为历史，不冒称当时已通过。
+- **GitHub 制品**：[CLI 0.1.97](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.1.97)（[run 43717213628](https://github.com/teisun/tomcat-agent/actions/runs/43717213628)）四平台 tar.gz 与 SHA256SUMS 均下载校验成功，随后才放行 EXT。[EXT 0.2.15](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.2.15)（[run 43718308405](https://github.com/teisun/tomcat-agent/actions/runs/43718308405)）四平台 VSIX、纯包与 SHA256SUMS 全部核验；包内 CLI 哈希对应已发布 CLI，纯包不含 CLI，五份包内 CHANGELOG 均与 R 相同。完整名称、字节数、64 位哈希与下载 URL 随任务验收附件交付，两份公开 SHA256SUMS 保留为下载核对入口。
+- **市场逐渠道**：[VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext) 的 darwin-arm64 / darwin-x64 / linux-x64 / win32-x64 0.2.15 于 21:38 +0800 公开 API 均为 `validated`；四份 CDN 包实际下载，SHA256 全部与 GitHub 对应包一致。初次未传播/未验证的快照保留，未重复上传。**OpenVSX 未发布**：仓库 secrets 未配 `OVSX_PAT`，发布 step `skipped`，版本 API `/api/tomcat-agent/tomcat-vscode-ext/0.2.15` 返回 404；四平台与纯包共五目标均未验收成功。保持该渠道在范围内，由 Mika 协调维护者另行授权凭据配置，不重跑整个发布 job 或覆盖已成功包。
+- **原生与验证边界**：四平台 exact-package job 全过，7 份现有 VSIX/CLI 回执（四平台与三平台旧版升级）与正式包哈希一致；14 张最终宽/窄 PNG、对应 ARIA 及全部 98 份 console 已读回。各平台 workbench 均记录一次测试 harness 市场更新查询 404，不是正式扩展下载；未捕获 JS exception/console.error，不宣称全系统零告警。升级 ARIA 还保留旧的 `Question waiting` live 文本，而回答、计划完成及实际执行断言通过；其持续性未定位，不扩成此次代码修复。本地版本工具 19/19 与版本/tag guards 的仍有效结果复用；仅补制品、渠道、文档与提交边界检查，不重跑无关全仓套件。下方历史失败、收费模型和 Multica 全链路待验仍保留。未强推、改旧 tag/资产、改凭据、安装或重启在用服务；原 `AGENTS.md` 不提交。Cov% 未测量，保持 `-`。
 
 ### DONE：Multica 会话推理强度与原版本适配包（2026-11-15）
 
