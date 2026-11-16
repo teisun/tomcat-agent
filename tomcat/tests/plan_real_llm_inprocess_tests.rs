@@ -899,6 +899,325 @@ async fn inprocess_full_plan_path_with_real_llm() {
     }
 }
 
+// Opt-in writing-quality comparison. Run these same cases before and after the
+// prompt-only commit, using separate TOMCAT_REAL_LLM_E2E_ARTIFACTS directories.
+const AUTHORING_MODEL: &str = "idatatlas/gpt-6-astra";
+
+struct AuthoringRules(String);
+impl tomcat::core::llm::system_prompt::SystemPromptSection for AuthoringRules {
+    fn section_name(&self) -> &str {
+        "user_custom_instructions"
+    }
+    fn render(&self, _: &WorkspaceContext) -> String {
+        self.0.clone()
+    }
+    fn priority(&self) -> u32 {
+        60
+    }
+}
+
+fn authoring_system_text(ctx: &ChatContext) -> String {
+    let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
+    let skills = tomcat::core::skill::discover(&ctx.config, &ctx.scope_services.resource_root);
+    assert!(skills.by_name.contains_key("write-plans"));
+    *ctx.scope_services.skill_set.write() = skills.clone();
+    let root = &ctx.scope_services.resource_root;
+    let gate = ctx.global_services.gate.as_ref();
+    let discovery = tomcat::core::project_instructions::discover_rules(
+        root,
+        &ctx.scope_services.agent_workspace_dir,
+        &ctx.config.workspace.project_resource_dir,
+        gate,
+    );
+    let (rules, diagnostics, loaded) =
+        tomcat::core::project_instructions::render_rules(&discovery, root, gate, budget);
+    assert!(diagnostics.is_empty(), "project rules: {diagnostics:?}");
+    assert_eq!(loaded, 1, "the copied project rule must actually load");
+    let mut builder = SystemPromptBuilder::default();
+    builder.register(Box::new(AuthoringRules(rules)));
+    builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
+        read_write: Vec::new(),
+        read_only: Vec::new(),
+        path_rules: Vec::new(),
+    })));
+    if let Some(section) =
+        AvailableSkillsSection::from_skill_set(&skills, budget, &ctx.config.skills)
+    {
+        builder.register(Box::new(section));
+    }
+    builder.build(&WorkspaceContext {
+        agent_workspace_dir: ctx.scope_services.agent_workspace_dir.display().to_string(),
+        agent_definition_dir: ctx
+            .scope_services
+            .agent_definition_dir
+            .display()
+            .to_string(),
+        agent_plans_dir: current_home().join(".tomcat/plans").display().to_string(),
+        agent_trail_dir: ctx.scope_services.agent_trail_dir.display().to_string(),
+        tool_lines: Some(tomcat::core::tools::contract::catalog::render_core_identity_tool_lines()),
+    })
+}
+
+fn copy_authoring_fixture(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target).expect("create fixture directory");
+    for entry in std::fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("fixture entry");
+        if entry.file_type().expect("fixture type").is_file() {
+            std::fs::copy(entry.path(), target.join(entry.file_name())).expect("copy fixture file");
+        }
+    }
+}
+
+fn authoring_entries(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .map(|line| serde_json::from_str(line).expect("valid transcript JSONL"))
+        .collect()
+}
+
+async fn run_authoring_case(case: &str, requirement: &str) {
+    use futures_util::FutureExt;
+    use serde_json::json;
+    use tomcat::core::llm::{Speed, ThinkingLevel};
+
+    // Resolve real inputs before HOME isolation. Only the existing helper reads
+    // credentials; none of these files or environment values are archived.
+    let models = common::real_models_toml_path();
+    let runtime_env = common::real_runtime_env_path();
+    let artifact_root = PathBuf::from(
+        std::env::var_os("TOMCAT_REAL_LLM_E2E_ARTIFACTS")
+            .expect("set TOMCAT_REAL_LLM_E2E_ARTIFACTS for this paid evaluation"),
+    );
+    assert!(
+        artifact_root.is_absolute(),
+        "artifact path must be absolute"
+    );
+    std::fs::create_dir_all(&artifact_root).expect("create artifact root");
+    let artifacts = artifact_root.join(case);
+    std::fs::create_dir(&artifacts)
+        .expect("use a fresh artifact directory; preserve earlier attempts");
+    let commit = StdCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git HEAD");
+    assert!(commit.status.success());
+    let commit = String::from_utf8(commit.stdout).expect("commit UTF-8");
+    let _home = common::TempHomeGuard::new();
+    let workdir = common::dot_tomcat_e2e_workdir(case);
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plan_authoring");
+    copy_authoring_fixture(&fixture_root.join(case), &workdir);
+    copy_authoring_fixture(&fixture_root.join(case), &artifacts.join("fixture"));
+    let rule = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repository root")
+        .join(".cursor/rules/avoid-overengineering.mdc");
+    std::fs::create_dir_all(workdir.join(".cursor/rules")).expect("create rules directory");
+    std::fs::copy(
+        &rule,
+        workdir.join(".cursor/rules/avoid-overengineering.mdc"),
+    )
+    .expect("copy project rule");
+    std::fs::copy(&rule, artifacts.join("project-rule.mdc")).expect("archive project rule");
+    let _cwd = common::CwdGuard::set(&workdir);
+    let mut config = tomcat::AppConfig::default();
+    config.storage.work_dir = Some(current_home().join(".tomcat").display().to_string());
+    common::apply_models_toml_entry_app_config(&mut config, &models, &runtime_env, AUTHORING_MODEL)
+        .unwrap_or_else(|error| panic!("authoring model unavailable: {error}"));
+    config.llm.title_model = None;
+    config.llm.thinking.enabled = true;
+    config.llm.thinking.level = "xhigh".into();
+    config.primitive.bash_forbidden = vec![".*".into()];
+    let prefs = tomcat::ModelPrefsStore::load(
+        tomcat::resolve_model_thinking_path(&config).expect("fixture preferences path"),
+        ThinkingLevel::Xhigh,
+    )
+    .expect("fixture preferences");
+    prefs
+        .set_reasoning(AUTHORING_MODEL, ThinkingLevel::Xhigh)
+        .expect("set reasoning");
+    prefs
+        .set_speed(AUTHORING_MODEL, Speed::Fast)
+        .expect("set speed");
+    let sessions = resolve_sessions_dir(&config).expect("fixture sessions");
+    let _session = common::begin_fresh_default_session(&sessions, Some(&workdir));
+    let ctx = ChatContext::from_config_with_overrides(
+        config,
+        tomcat::api::chat::ChatContextOverrides::default()
+            .with_ask_question_panel(std::sync::Arc::new(ReviewConsentPanel)),
+    )
+    .expect("authoring context");
+    ensure_session(&ctx);
+    assert_eq!(
+        ctx.global_services
+            .model_prefs
+            .reasoning_for(AUTHORING_MODEL),
+        ThinkingLevel::Xhigh
+    );
+    assert_eq!(
+        ctx.global_services.model_prefs.speed_for(AUTHORING_MODEL),
+        Speed::Fast
+    );
+    let system = authoring_system_text(&ctx);
+    let prompt = format!(
+        "请为当前项目编写开发计划：{requirement}\n当前项目目录是 `{}`。只规划，使用 create_plan 保存完整方案；不要实施代码或启动执行。create_plan 中的独立评审结束后即可结束本轮。",
+        workdir.display()
+    );
+    std::fs::write(artifacts.join("request.md"), &prompt).expect("archive request");
+    std::fs::write(artifacts.join("author-system.txt"), &system).expect("archive author system");
+    let revised = include_str!("../assets/skills/write-plans/references/plan-structure.md")
+        .contains("Give each fact one home");
+    std::fs::write(
+        artifacts.join("run.json"),
+        serde_json::to_vec_pretty(&json!({
+            "case": case, "commit": commit.trim(), "model": AUTHORING_MODEL,
+            "reasoning": "xhigh", "speed": "fast", "revised": revised
+        }))
+        .unwrap(),
+    )
+    .expect("archive run metadata");
+    let mut state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system)
+        .expect("authoring context state");
+    ctx.session_runtime
+        .plan_runtime
+        .enter_plan()
+        .expect("enter Plan");
+    let mut diagnostics = InprocessDiagState::default();
+    let outcome = std::panic::AssertUnwindSafe(run_chat_turn_with_transient_retry(
+        &current_home(),
+        &ctx,
+        case,
+        None,
+        &mut diagnostics,
+        &prompt,
+        &system,
+        &mut state,
+        Duration::from_secs(30 * 60),
+    ))
+    .catch_unwind()
+    .await;
+
+    // Preserve both successful and failed model attempts before TempHomeGuard drops.
+    let transcript_path = ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .expect("transcript path")
+        .expect("main transcript");
+    let transcript = std::fs::read_to_string(&transcript_path).expect("read main transcript");
+    std::fs::write(artifacts.join("main.jsonl"), &transcript).expect("archive main transcript");
+    let children = ctx.scope_services.agent_trail_dir.join("subagent-sessions");
+    if children.is_dir() {
+        copy_authoring_fixture(&children, &artifacts.join("subagent-sessions"));
+    }
+    for entry in std::fs::read_dir(current_home().join(".tomcat/plans")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), artifacts.join(entry.file_name())).expect("archive plan");
+        }
+    }
+    let entries = authoring_entries(&transcript);
+    let calls: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter_map(|entry| entry["message"]["tool_calls"].as_array())
+        .flatten()
+        .collect();
+    for call in calls
+        .iter()
+        .filter(|call| call["function"]["name"] == "create_plan")
+    {
+        let args: serde_json::Value =
+            serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        std::fs::write(
+            artifacts.join("author-draft.json"),
+            serde_json::to_vec_pretty(&args).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifacts.join("author-draft.md"),
+            args["draft"].as_str().unwrap(),
+        )
+        .unwrap();
+    }
+    let outcome = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "planning failed: {outcome:?}"
+    );
+    let created = created_plan_from_outcome(&outcome).expect("successful create_plan result");
+    let plan = read_plan(&created.path).expect("read final planning plan");
+    std::fs::copy(&created.path, artifacts.join("reviewed.plan.md")).expect("archive final plan");
+    assert_eq!(plan.frontmatter.state, PlanFileState::Planning);
+    assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Plan);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call["function"]["name"] == "load_skill"
+                && serde_json::from_str::<serde_json::Value>(
+                    call["function"]["arguments"].as_str().unwrap()
+                )
+                .is_ok_and(|args| args["name"] == "write-plans")),
+        "author must load the real skill"
+    );
+    let review = entries
+        .iter()
+        .rev()
+        .find(|entry| entry["event"] == "plan.review")
+        .expect("plan.review result");
+    std::fs::write(
+        artifacts.join("review.json"),
+        serde_json::to_vec_pretty(review).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        review["aborted"], false,
+        "review did not complete: {review}"
+    );
+    let child = review["child_session_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("review child id");
+    let child_text = std::fs::read_to_string(children.join(format!("{child}.jsonl")))
+        .expect("review child transcript");
+    let child_entries = authoring_entries(&child_text);
+    let child_system = child_entries
+        .iter()
+        .find(|entry| entry["message"]["role"] == "system")
+        .expect("persisted reviewer system")["message"]["content"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        child_system.contains("Rewrite rather than append"),
+        revised,
+        "reviewer build mismatch"
+    );
+    assert_eq!(
+        transcript.contains("Give each fact one home"),
+        revised,
+        "loaded skill build mismatch"
+    );
+    eprintln!("authoring {case}: artifacts={}", artifacts.display());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+#[ignore = "paid real-LLM plan-writing comparison"]
+async fn plan_authoring_simple() {
+    run_authoring_case("simple", "文件统计 CLI 新增 --json 输出。默认文本输出保持不变；空文件计数为 0；文件不可读时非零退出并给出原因。").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+#[ignore = "paid real-LLM plan-writing comparison"]
+async fn plan_authoring_medium() {
+    run_authoring_case("medium", "把选中的笔记批量导出为 Markdown。按稳定顺序导出；有无效 ID 时在写入前拒绝整批；默认不覆盖已有文件；单个写入失败不留半截文件，并报告成功与失败项。").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+#[ignore = "paid real-LLM plan-writing comparison"]
+async fn plan_authoring_complex() {
+    run_authoring_case("complex", "用户报告：重建索引时查询变空，重建中途失败后索引一直为空。请调查原因并改成后台重建：重建期间仍能查询旧索引，成功后整体切换；失败或取消保留旧索引；重建中再次请求有明确处理；重启后处理未完成产物，已有索引照常可查。").await;
+}
+
 /// 强制 SessionManager 在 lib 端被引用，避免 unused-import 警告。
 #[allow(dead_code)]
 fn _force_use(_: &SessionManager) {}
