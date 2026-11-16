@@ -34,6 +34,19 @@ Technical design, prose, and visual guidelines for development plans.
                 ├─ What the user sees: the project moves to Trash.
                 ├─ How it works: mark the project as deleted without removing its data yet.
                 └─ Implementation locations: the relevant interfaces, files, and tests.
+
+        Example 3: Give each list item one decision and each fact one section.
+            Overloaded: 3. Save in the background and disable Submit meanwhile; clear the form only on
+                success, and on failure keep the input and show Retry, reusing the in-memory form state
+                rather than adding a draft store, with a test that makes storage fail.
+
+            Split: 3. Save in the background without losing input.
+                | While saving | Submit is disabled.                       |
+                | On success   | The form is cleared.                      |
+                | On failure   | Input is kept; the reason and Retry show. |
+                Moved: the reason for reusing form state goes to the key decisions table, the
+                failing-storage check to Test Cases.
+                Deleted: "rather than adding a draft store"; no reader expected one.
 ```
 
 ## Visual and Verbal Expression

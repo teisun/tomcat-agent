@@ -36,7 +36,7 @@ Use the canonical names below for English plans; [§3](#3-plan-language-titles) 
 | `#### UI Mockup` | OPTION | Show the proposed UI with a diagram as needed; otherwise omit this subsection. |
 | `### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.2, not just prose or a reference to the table. |
 | `### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.3. |
-| Other optional chapters | OPTION | Add supporting content as needed; use `##` for standalone chapters. |
+| Other optional chapters | OPTION | Add a chapter only for content that no required section can hold; use `##` for standalone chapters. |
 | `## Acceptance` | MUST | For a coding plan, state observable overall completion conditions, behavior to review, regression boundaries, expected impact radius, necessary cross-feature checks, checking methods, and delivery close-out; keep specific test cases in their problem or feature chapters. |
 | `## Todos Board` | MUST | Use the host's task board for implementation tasks, dependencies, and status; refer to chapters for technical details and to task IDs in prose; do not create a second task list or progress record. |
 
@@ -80,7 +80,7 @@ Issue N: Description                  Requirement N: Description
 - Omit Root Cause and Evidence for requirements. For issues, include prose and add a diagram as needed.
 - Solution Explanation includes a diagram and prose. UI Mockup is a separate subsection under Solution, included only as needed.
 - Within the solution explanation, move from the expected experience to the mechanism and then the implementation locations. This is an explanation sequence, not an additional set of subsection headings.
-- Explain the reasons and trade-offs behind the choices in the key decisions table.
+- Give each fact one home, and refer to it from other sections instead of restating it: evidence in Root Cause and Evidence, reasons and trade-offs in the key decisions table, verification steps in Test Cases.
 
 ### 2.2 Key Decisions: Read the Question, Choice, and Cost Together
 

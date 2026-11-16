@@ -387,6 +387,16 @@ fn write_plans_preserves_heading_and_reader_contracts() {
             "write-plans must not restore the removed instruction: {removed}"
         );
     }
+    assert!(PLAN_STRUCTURE.contains(
+        "Give each fact one home, and refer to it from other sections instead of restating it"
+    ));
+    assert!(
+        PLAN_STRUCTURE.contains("Add a chapter only for content that no required section can hold")
+    );
+    assert!(FINAL_CHECK.contains("Remove them without leaving a note about what the plan will not build; state a scope boundary once, in Goal"));
+    assert!(FINAL_CHECK.contains("Write the outcomes into the plan (decisions, blockers, consent), not an account of the checks."));
+    assert!(WRITING_STANDARDS
+        .contains("Example 3: Give each list item one decision and each fact one section."));
     assert!(FINAL_CHECK.contains("## Reader check:"));
     assert!(FINAL_CHECK.contains("does not require another model call or review workflow"));
     assert!(WRITE_PLANS_SKILL.contains(concat!(
@@ -533,6 +543,10 @@ fn plan_review_prompt_challenges_the_design_without_becoming_a_gate() {
     }
     let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(normalized.contains("text, diagrams, decisions, and tests consistent"));
+    assert!(s.contains(
+        "Rewrite rather than append: restate the affected passage as if it had been written once"
+    ));
+    assert!(load(PromptKey::ReviewerPlanBrief).contains("passages where stacked conditions, caveats, or repetition hide the decision (apply the rewrite rule)"));
     // advisory-only 定位不变：不引入 verdict / 门禁。
     assert!(!s.contains("emit a verdict"));
 }

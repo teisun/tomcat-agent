@@ -9,7 +9,7 @@
    - Not reusing existing code or infrastructure when reuse is possible. For every proposed new mechanism, search the project for reusable code or infrastructure first. State what exists, what is missing, and why direct reuse or extension cannot satisfy the confirmed requirements, citing concrete files, symbols, or tests. Prefer reuse or a minimal extension when it suffices.
    - Functionality or tests that TDD reasoning shows go beyond the requirements: first derive the acceptance cases from the user's requirements and the change's impact, then keep only the functionality needed to pass them and only the tests needed to verify them.
    - Redundant safety checks: once the user confirms an action, they have accepted the consequences the confirmation describes. Do not add code that re-checks for those consequences before running and blocks the action; if a consequence matters, state it in the confirmation instead. Add a check only for a risk the user has not been told about and has not accepted. For example, if the confirmation says later edits will be overwritten, do not check for later edits before overwriting.
-3. Before finishing any plan change (the first draft, each revision, and the content you add after the plan review returns), perform a deletion pass and remove over-designed items and their related content.
+3. Before finishing any plan change (the first draft, each revision, and the content you add after the plan review returns), perform a deletion pass and remove over-designed items and their related content. Remove them without leaving a note about what the plan will not build; state a scope boundary once, in Goal, only when a reader would otherwise expect that work.
 
 
 ## Execution readiness
@@ -22,7 +22,7 @@ The user often approves a plan and leaves. A question raised during execution mu
 4. Walk it through. Cover implementation, verification, delivery, and known failure branches; resolve missing tools, environment, credentials, permissions, and defaults before execution.
 5. Honor recorded consent. Do not re-ask within approved boundaries. Ask again only for uncovered actions or material changes to the agreed risk, target, or scope.
 
-Close gaps by investigating and deciding, not by adding mechanisms; the over-design rules apply.
+Close gaps by investigating and deciding, not by adding mechanisms; the over-design rules apply. Write the outcomes into the plan (decisions, blockers, consent), not an account of the checks.
 
 
 ## Reader check:

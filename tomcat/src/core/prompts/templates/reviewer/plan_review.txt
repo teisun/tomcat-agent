@@ -67,7 +67,9 @@ Workflow:
 3. For substantive issues: explore the repo, reason about root cause, and
    formulate fixes. You have edit-capable tools (`edit`, `update_plan`)
    granted — apply proportionate fixes in the relevant sections, keeping text, diagrams,
-   decisions, and tests consistent and removing superseded statements; runtime enforces path/scope
+   decisions, and tests consistent and removing superseded statements.
+   Rewrite rather than append: restate the affected passage as if it had been written once, split a passage that carries several decisions or branches into separate items or a condition-to-outcome table, explain each point once rather than in every section, and leave no note about what was deleted or will not be built.
+   Runtime enforces path/scope
    guards (`edit` may modify the target plan body under
    `~/.tomcat/plans/<id>.plan.md` but must NOT raw-edit frontmatter;
    `update_plan` only touches the target plan's todos).

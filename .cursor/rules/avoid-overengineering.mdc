@@ -85,7 +85,7 @@ Do not reintroduce a removed mechanism under a different name. Reopen the decisi
 
 ## 7. Keep Evidence and Delivery Proportional
 
-- For consequential decisions, record the requirement, source evidence, simpler alternative, chosen trade-off, and condition for reversal in the development plan itself. A small edit needs a short explanation, not a new architecture document.
+- For consequential decisions, record the requirement, source evidence, simpler alternative, chosen trade-off, and condition for reversal in the development plan itself. Record each once, cite evidence by reference instead of reproducing the investigation, and do not list mechanisms the plan will not build unless a reader would otherwise expect them. A small edit needs a short explanation, not a new architecture document.
 - Separate a review's diagnosis from its proposed fix and test expansion. Accept verified findings without automatically accepting a larger redesign; converting a plan's format or correcting documentation is not authorization to expand behavior.
 - Prove one vertical slice before a broad migration; use existing tests, runners, and acceptance harnesses instead of creating parallel infrastructure.
 - Test the actual risk boundary: failure handling, ownership, concurrency, compatibility, and user-visible behavior. State what each added test proves beyond existing type checks and coverage; do not expand unchanged behavior into a matrix solely for completeness. Mocks must exercise, not bypass, the behavior under test. Retain cross-layer regressions when the changed path needs them, even if a participating layer's code is unchanged. Fewer mechanisms must not mean weaker verification.
