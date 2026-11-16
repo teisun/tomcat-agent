@@ -5,13 +5,25 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-基于 Rust 的轻量 AI Agent 运行时与 VS Code 扩展，为作者学习 Agent 开发而作的实践项目：[`tomcat/`](tomcat/) 提供运行时、CLI、每 Agent 的共享服务与 `tomcat acp`，[`tomcat-vscode-ext/`](tomcat-vscode-ext/) 提供 VS Code 里的 Tomcat Agent Box。
+基于 Rust 的轻量 AI 编程助手，在 VS Code 和终端中使用。
 
-![Tomcat Agent Box screenshot](assets/tomcat-agent-box.png)
+**[前往 VS Code 插件市场安装 Tomcat AI Agent →](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext)**
+
+也可在 VS Code 扩展面板搜索 **Tomcat AI Agent**，认准发布者 **tomcat-agent**。
+
+[![VS Code 扩展面板中的 Tomcat AI Agent，发布者为 tomcat-agent](assets/tomcat-vscode-marketplace.png)](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext)
+
+## 快速开始
+
+1. **安装插件**：点击上方链接安装，需 VS Code **1.106.0+**。
+2. **打开面板**：打开项目文件夹，按 `Cmd/Ctrl+Shift+P`，运行 `Tomcat: Focus Agent Box`。
+3. **配置模型**：在 Tomcat 设置中连接模型供应商、填写 API Key，即可开始对话，无需运行 `tomcat init`。
+
+[插件使用与离线安装](tomcat-vscode-ext/README.zh.md) · [CLI 使用指南](tomcat/docs/user-guide.zh.md)
 
 ## 特性
 
-- **Tomcat Agent Box**：主推 VS Code 二级侧边栏里的对话面板，支持多会话切换、`Chat/Plan` 模式、模型切换、附件、上下文水位，以及产品内的 **Add Models** 设置中心；装好 bundled `.vsix` 就能直接使用。
+- **Tomcat Agent Box**：主推 VS Code 二级侧边栏里的对话面板，支持多会话切换、`Chat/Plan` 模式、模型切换、附件、上下文水位，以及产品内的 **Add Models** 设置中心。
 - **自主 Agent 循环**：三层嵌套循环（对话管理 -> 容错重试 -> 思考-行动），支持 Steering / FollowUp / Abort，长对话自动做上下文压缩（Compaction）与限流退避。
 - **稳健的代码读写**：`read` / `write` / `edit` / `list_dir` 等原语之外，还提供 `hashline_edit` 行锚点编辑；`search_files` 同时支持系统 `rg` / `fd` 与进程内回退实现，统一遵循忽略规则。
 - **命令执行与后台任务**：`bash` 走权限门控；长任务可后台运行，再用 `task_output` / `task_stop` / `task_list` 跨轮驱动，不必把整个会话卡死在单条命令上。
@@ -22,12 +34,7 @@
 - **多模型与安全审计**：支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 等管线；内置 OpenAI / DeepSeek / MiMo / GLM / Kimi / Claude Opus 常用预置；`models.toml` 与 `.env` 共同管理模型目录与凭据；PermissionGate、Checkpoint 影子 Git、JSONL transcript 与审计日志保证可控可回溯。
 - **终端 CLI**：无子命令默认进入 `chat`，覆盖 `init` / `doctor` / 会话 / 配置 / 工作区 / 审计等完整工作流。
 
-## 快速开始
-
-优先入口：
-
-- **VS Code 插件（推荐）**：从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext) 安装 `tomcat-agent.tomcat-vscode-ext`，确认发布者为 **tomcat-agent**；GitHub 平台 VSIX 仍可离线安装。安装后按 `Cmd/Ctrl+Shift+P` 运行 `Tomcat: Focus Agent Box` 打开 **Tomcat Agent Box**；也可以先打开右侧二级侧边栏（Secondary Side Bar）再点击 Tomcat Agent Box 图标。打开项目文件夹，首次使用在 Tomcat 设置里配置模型即可开始对话，无需运行 `tomcat init`。包怎么选、怎么装，见 [`tomcat-vscode-ext/README.zh.md`](tomcat-vscode-ext/README.zh.md)。
-- **CLI**：见 **[用户使用说明](tomcat/docs/user-guide.zh.md)**，覆盖前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
+## 使用前提
 
 支持平台：macOS（Apple Silicon 与 Intel）、Linux x64（glibc）、Windows x64。Windows 上请先安装 [Git for Windows](https://git-scm.com/download/win)：`bash` 工具通过其中的 Git Bash 执行命令。
 

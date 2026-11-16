@@ -5,13 +5,25 @@
   <a href="README.zh.md">简体中文</a>
 </p>
 
-A lightweight Rust-based AI agent runtime and VS Code extension built as a hands-on project for learning agent development: [`tomcat/`](tomcat/) provides the runtime, CLI, per-agent shared service, and `tomcat acp`, while [`tomcat-vscode-ext/`](tomcat-vscode-ext/) provides Tomcat Agent Box inside VS Code.
+A lightweight, Rust-powered AI coding agent for VS Code and the terminal.
 
-![Tomcat Agent Box screenshot](assets/tomcat-agent-box.png)
+**[Install Tomcat AI Agent from the VS Code Marketplace →](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext)**
+
+Or search for **Tomcat AI Agent** in VS Code Extensions and choose publisher **tomcat-agent**.
+
+[![Tomcat AI Agent in VS Code Extensions, published by tomcat-agent](assets/tomcat-vscode-marketplace.png)](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext)
+
+## Quick Start
+
+1. **Install** the extension from the link above (VS Code **1.106.0+**).
+2. **Open** a project folder, then run `Tomcat: Focus Agent Box` from the Command Palette (`Cmd/Ctrl+Shift+P`).
+3. **Connect** your model provider in Tomcat Settings with your API key, and start chatting. No `tomcat init` required.
+
+[Extension guide & offline installation](tomcat-vscode-ext/README.md) · [CLI guide](tomcat/docs/user-guide.md)
 
 ## Features
 
-- **Tomcat Agent Box**: The main experience is a chat panel in the VS Code Secondary Side Bar, with multi-session switching, `Chat/Plan` modes, model switching, attachments, context-watermark controls, and an in-product **Add Models** settings center; install the bundled `.vsix` and start using it right away.
+- **Tomcat Agent Box**: The main experience is a chat panel in the VS Code Secondary Side Bar, with multi-session switching, `Chat/Plan` modes, model switching, attachments, context-watermark controls, and an in-product **Add Models** settings center.
 - **Autonomous agent loop**: A three-layer nested loop (conversation management -> fault-tolerant retry -> think-act) supports Steering / FollowUp / Abort, with automatic context compaction and rate-limit backoff for long conversations.
 - **Robust code read/write**: Beyond primitives such as `read`, `write`, `edit`, and `list_dir`, it also offers `hashline_edit` for line-anchored edits; `search_files` supports both system `rg` / `fd` and an in-process fallback implementation while consistently honoring ignore rules.
 - **Command execution and background tasks**: `bash` runs behind permission gating; long-running work can continue in the background and be driven across turns with `task_output` / `task_stop` / `task_list` instead of blocking the whole session on one command.
@@ -22,12 +34,7 @@ A lightweight Rust-based AI agent runtime and VS Code extension built as a hands
 - **Multi-model support and security auditing**: Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages; ships built-in presets for OpenAI / DeepSeek / MiMo / GLM / Kimi / Claude Opus; `models.toml` plus `.env` manage model catalogs and credentials; PermissionGate, shadow-Git checkpoints, JSONL transcripts, and audit logs keep runs controllable and traceable.
 - **Terminal CLI**: With no subcommand it enters `chat` by default, and also covers full workflows for `init`, `doctor`, sessions, configuration, workspace management, and auditing.
 
-## Quick Start
-
-Recommended entry points:
-
-- **VS Code extension (recommended)**: Install `tomcat-agent.tomcat-vscode-ext` from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext); verify publisher **tomcat-agent**. Platform-specific GitHub VSIX downloads remain available for offline installation. After installing, press `Cmd/Ctrl+Shift+P` and run `Tomcat: Focus Agent Box` to open **Tomcat Agent Box**. You can also open the Secondary Side Bar first and click the Tomcat Agent Box icon. Open a project folder and configure a model in Tomcat Settings to start chatting; no `tomcat init` is required. For package selection and installation details, see [`tomcat-vscode-ext/README.md`](tomcat-vscode-ext/README.md).
-- **CLI**: See the **[User Guide](tomcat/docs/user-guide.md)** for end-to-end steps and sample output covering prerequisites, builds, `init` / `doctor` / `chat`, sessions and workspace handling, configuration, auditing, and integration tests.
+## Requirements
 
 Supported platforms: macOS (Apple Silicon and Intel), Linux x64 (glibc), and Windows x64. On Windows, install [Git for Windows](https://git-scm.com/download/win) first: the `bash` tool runs commands through its Git Bash.
 
@@ -110,5 +117,3 @@ See [Project Overview](tomcat/docs/architecture/project-overview-panorama.md) fo
 ## License
 
 This project is released under the [MIT License](LICENSE).
-
-> Temporary test line added to verify diff behavior.
