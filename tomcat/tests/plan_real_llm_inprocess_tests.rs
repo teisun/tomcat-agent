@@ -901,7 +901,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
 
 // Opt-in writing-quality comparison. Run these same cases before and after the
 // prompt-only commit, using separate TOMCAT_REAL_LLM_E2E_ARTIFACTS directories.
-const AUTHORING_MODEL: &str = "idatatlas/gpt-6-astra";
+const AUTHORING_MODEL: &str = "fcodex/gpt-6-astra";
 
 struct AuthoringRules(String);
 impl tomcat::core::llm::system_prompt::SystemPromptSection for AuthoringRules {
