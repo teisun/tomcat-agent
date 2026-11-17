@@ -12,7 +12,7 @@ Plan: overall diagram + one-sentence overview
   |
 Each problem/requirement: one top-level section
   -> symptoms / requirement description; root cause and evidence (issues only)
-  -> solution explanation (diagram + text)
+  -> solution explanation (diagram + text); UI mockup (as needed)
   -> key decisions table -> test cases
   |
 Other optional chapters -> Acceptance -> Todos Board
@@ -31,8 +31,9 @@ Use the canonical names below for English plans; [§3](#3-plan-language-titles) 
 | `## Issue N: Description` / `## Requirement N: Description` | MUST | Give each problem or requirement its own top-level section and label and number it, followed by a one-sentence description and the headings below. |
 | `### Problem Symptoms` / `### Requirement Description` | MUST | Describe the observed problem or the requested outcome. |
 | `### Root Cause and Evidence` | MUST (issues only) | Explain the cause with evidence; use text(简明扼要) and add a diagram as needed. Omit this section for requirements. |
-| `### Solution` | MUST | Contain the solution explanation as a separate subsection. |
+| `### Solution` | MUST | Contain the solution explanation and, when needed, a UI mockup as separate subsections. |
 | `#### Solution Explanation` | MUST | Explain the solution with a diagram and text(说人话，文字一定要简明扼要). |
+| `#### UI Mockup` | OPTION | Show the proposed UI with a diagram as needed; otherwise omit this subsection. |
 | `### Key Decisions Table` | MUST | Follow Solution at the same heading level. Include the six-column table from §2.2. |
 | `### Test Cases` | MUST | Follow Key Decisions Table at the same heading level. Describe scenarios, steps, expected results, and test file paths using §2.3. |
 | Other optional chapters | OPTION | Add a chapter only for content that no required section can hold; use `##` for standalone chapters. |
@@ -68,8 +69,9 @@ Use separate Markdown headings in the order and hierarchy below, following the l
 Issue N: Description                  Requirement N: Description
 ├─ Problem Symptoms                   ├─ Requirement Description
 ├─ Root Cause and Evidence            ├─ Solution
-├─ Solution                           │  └─ Solution Explanation
-│  └─ Solution Explanation            ├─ Key Decisions Table
+├─ Solution                           │  ├─ Solution Explanation
+│  ├─ Solution Explanation            │  └─ UI Mockup (as needed)
+│  └─ UI Mockup (as needed)            ├─ Key Decisions Table
 ├─ Key Decisions Table                └─ Test Cases
 └─ Test Cases
 ```
@@ -77,6 +79,7 @@ Issue N: Description                  Requirement N: Description
 - Do not invent a root cause for a new requirement.
 - Omit Root Cause and Evidence for requirements. For issues, include text and add a diagram as needed.
 - Solution Explanation includes a diagram and text（说人话，文字简明扼要，能用图例表达的就不需要用文字）.
+- UI Mockup is a separate subsection under Solution, included only as needed.
 
 ### 2.2 Key Decisions: Read the Question, Choice, and Cost Together
 

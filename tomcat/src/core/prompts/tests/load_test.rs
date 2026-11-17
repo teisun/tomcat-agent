@@ -106,52 +106,29 @@ fn write_plans_workflow_routes_tools_and_keeps_only_cross_tool_rules() {
 
 #[test]
 fn write_plans_and_reviewer_carry_anti_over_design_rules() {
-    let planner = FINAL_CHECK;
-    let reviewer = load(PromptKey::ReviewerPlan);
-    for (name, text) in [("write-plans", planner), ("plan reviewer", reviewer)] {
-        for rule in [
-            "Keep the design elegant while strictly avoiding over-design.",
-            "in functionality or in tests",
-            "acceptance case derived from the user's requirements",
-        ] {
-            assert!(text.contains(rule), "{name} must contain {rule:?}");
-        }
-    }
-    assert!(planner.contains("## Avoid over-design"));
-    assert!(reviewer.contains("TDD"));
-    assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
-    for (name, text, reasoning, evidence) in [
-        (
-            "write-plans",
-            planner,
-            "Think through what exists, what is missing, and whether direct reuse or a minimal extension can satisfy the confirmed requirements",
-            "using concrete files, symbols, or tests as evidence",
-        ),
-        (
-            "plan reviewer",
-            reviewer,
-            "State what exists, what is missing, and why direct reuse or extension cannot satisfy the confirmed requirements",
-            "citing concrete files, symbols, or tests",
-        ),
+    let planner = FINAL_CHECK.split_whitespace().collect::<Vec<_>>().join(" ");
+    for rule in [
+        "## Avoid over-design",
+        "Keep the design elegant while strictly avoiding over-design.",
+        "in functionality or in tests",
+        "acceptance case derived from the user's requirements",
+        "search the project for reusable code or infrastructure first",
+        "Think through what exists, what is missing, and whether direct reuse or a minimal extension can satisfy the confirmed requirements",
+        "using concrete files, symbols, or tests as evidence",
+        "Prefer reuse or a minimal extension when it suffices",
     ] {
-        let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        for rule in [
-            "search the project for reusable code or infrastructure first",
-            reasoning,
-            evidence,
-            "Prefer reuse or a minimal extension when it suffices",
-        ] {
-            assert!(normalized.contains(rule), "{name} must contain {rule:?}");
-        }
-        assert!(normalized.to_ascii_lowercase().contains(
-            "locks or versioning without a demonstrated concurrency or data-integrity need"
-        ));
-        assert!(!normalized.contains("for a single-user local workflow"));
+        assert!(planner.contains(rule), "write-plans must contain {rule:?}");
     }
-    let reviewer = reviewer.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(reviewer.contains("Apply this requirement to your own proposed additions as well"));
-    assert!(reviewer.contains("Treat unsupported non-reuse as a concern"));
-    assert!(reviewer.contains("Your output is advisory"));
+    assert!(planner
+        .to_ascii_lowercase()
+        .contains("locks or versioning without a demonstrated concurrency or data-integrity need"));
+    assert!(!planner.contains("for a single-user local workflow"));
+
+    // The compact reviewer states the principle; detailed reuse/TDD checks live in the skill.
+    let reviewer = load(PromptKey::ReviewerPlan);
+    assert!(reviewer.contains("杜绝过度设计"));
+    assert!(reviewer.contains("in functionality or in tests"));
+    assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
 }
 
 #[test]
@@ -189,22 +166,8 @@ fn write_plans_and_reviewer_check_execution_readiness() {
     ] {
         assert!(planner.contains(rule), "write-plans must contain {rule:?}");
     }
-    let reviewer = load(PromptKey::ReviewerPlan);
-    let reviewer = reviewer.split_whitespace().collect::<Vec<_>>().join(" ");
-    for rule in [
-        "Check execution readiness",
-        "unverified premise",
-        "repeated confirmation within unchanged approved boundaries",
-        "never decide or consent for the user",
-        "listing a dependency does not resolve it",
-        "Your output is advisory",
-    ] {
-        assert!(
-            reviewer.contains(rule),
-            "plan reviewer must contain {rule:?}"
-        );
-    }
-    assert!(load(PromptKey::ReviewerPlanBrief).contains("execution-readiness"));
+    // The reviewer brief flags this risk without duplicating the skill's checklist.
+    assert!(load(PromptKey::ReviewerPlanBrief).contains("execution-readiness gaps"));
 }
 
 #[test]
@@ -379,10 +342,8 @@ fn write_plans_preserves_heading_and_reader_contracts() {
         "Use the equivalent labels in the plan's language; always include both the label and the number."
     ));
     assert!(PLAN_STRUCTURE.contains("Do not invent a root cause for a new requirement."));
-    assert!(WRITING_STANDARDS.contains("Lead with the main point, then the evidence."));
-    assert!(
-        WRITING_STANDARDS.contains("cut empty assurances, promotional adjectives, and repetition")
-    );
+    assert!(WRITING_STANDARDS.contains("以图（ASCII 图或 Mermaid 流程图）为主、文字为辅"));
+    assert!(WRITING_STANDARDS.contains("所有文字输出都必须简明扼要、言简意赅"));
     assert!(
         WRITING_STANDARDS.contains("Typically, use ASCII for architecture, and Mermaid for flows")
     );
@@ -421,11 +382,19 @@ fn write_plans_preserves_heading_and_reader_contracts() {
         );
     }
     assert!(PLAN_STRUCTURE.contains(
-        "Give each fact one home, and refer to it from other sections instead of restating it"
+        "Key Decisions Table section must contain exactly one six-column table and no text outside the table."
     ));
     assert!(FINAL_CHECK.contains("Write the outcomes into the plan (decisions, blockers, consent), not an account of the checks."));
-    assert!(WRITING_STANDARDS
-        .contains("Example 3: Give each list item one decision and each fact one section."));
+    for example in [
+        "#### Architecture: responsibilities and boundaries",
+        "#### Sequence: saving, failure, and retry",
+        "#### UI: layout, controls, and feedback",
+    ] {
+        assert!(
+            WRITING_STANDARDS.contains(example),
+            "missing diagram example: {example}"
+        );
+    }
     assert!(FINAL_CHECK.contains("## Reader check:"));
     assert!(FINAL_CHECK.contains("does not require another model call or review workflow"));
     assert!(WRITE_PLANS_SKILL.contains(concat!(
@@ -484,6 +453,7 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         ("`### Root Cause and Evidence`", "MUST (issues only)"),
         ("`### Solution`", "MUST"),
         ("`#### Solution Explanation`", "MUST"),
+        ("`#### UI Mockup`", "OPTION"),
         ("`### Key Decisions Table`", "MUST"),
         ("`### Test Cases`", "MUST"),
         ("Other optional chapters", "OPTION"),
@@ -497,7 +467,8 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
     assert!(
         PLAN_STRUCTURE.contains("Add a chapter only for content that no required section can hold")
     );
-    assert!(!PLAN_STRUCTURE.contains("UI Mockup"));
+    assert!(PLAN_STRUCTURE
+        .contains("UI Mockup is a separate subsection under Solution, included only as needed."));
     assert!(PLAN_STRUCTURE.contains("Other optional chapters -> Acceptance -> Todos Board"));
     for rule in [
         "Chapter Title (English Canonical Name)",
@@ -505,7 +476,7 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         "Keep every required subsection, even in a small plan.",
         "Omit Root Cause and Evidence for requirements.",
         "For issues, include text and add a diagram as needed.",
-        "Solution Explanation includes a diagram and text.",
+        "Solution Explanation includes a diagram and text（",
         "Include the six-column table from §2.2.",
     ] {
         assert!(PLAN_STRUCTURE.contains(rule), "missing rule: {rule}");
@@ -534,8 +505,9 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         "Issue N: Description                  Requirement N: Description\n",
         "├─ Problem Symptoms                   ├─ Requirement Description\n",
         "├─ Root Cause and Evidence            ├─ Solution\n",
-        "├─ Solution                           │  └─ Solution Explanation\n",
-        "│  └─ Solution Explanation            ├─ Key Decisions Table\n",
+        "├─ Solution                           │  ├─ Solution Explanation\n",
+        "│  ├─ Solution Explanation            │  └─ UI Mockup (as needed)\n",
+        "│  └─ UI Mockup (as needed)            ├─ Key Decisions Table\n",
         "├─ Key Decisions Table                └─ Test Cases\n",
         "└─ Test Cases\n",
     )));
@@ -584,29 +556,51 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
 #[test]
 fn plan_review_prompt_challenges_the_design_without_becoming_a_gate() {
     let s = load(PromptKey::ReviewerPlan);
-    assert!(s.contains("challenge the design itself from first principles"));
-    assert!(s.contains("as simple and elegant as the"));
-    assert!(s.contains("does the stated verification really prove the claim"));
-    assert!(s.contains("Report gaps as `concern`"));
-    for rule in [
-        "mixed responsibilities",
-        "missing flow branches",
-        "UI mockups without layout",
-        "tests without steps or expected results",
-        "do not impose a fixed template",
-        "in the relevant sections",
-        "removing superseded statements",
-    ] {
-        assert!(s.contains(rule), "missing reviewer rule: {rule}");
-    }
     let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized.contains("text, diagrams, decisions, and tests consistent"));
-    assert!(s.contains(
-        "Rewrite rather than append: restate the affected passage as if it had been written once"
-    ));
-    assert!(load(PromptKey::ReviewerPlanBrief).contains("passages where stacked conditions, caveats, or repetition hide the decision (apply the rewrite rule)"));
-    // advisory-only 定位不变：不引入 verdict / 门禁。
-    assert!(!s.contains("emit a verdict"));
+    for rule in [
+        "challenge the design itself from first principles",
+        "does the architecture actually hold up",
+        "is the solution as simple",
+        "elegant as the problem allows",
+    ] {
+        assert!(normalized.contains(rule), "missing reviewer rule: {rule}");
+    }
+    for (finding, severity) in [
+        ("Report gaps", "suggestion"),
+        ("Flag over-design", "issues"),
+    ] {
+        let instruction = s
+            .lines()
+            .find(|line| line.contains(finding))
+            .expect("reviewer must classify the finding");
+        assert!(instruction.contains(&format!("`{severity}`")));
+    }
+    assert!(s.contains("Your output is advisory"));
+    assert!(s.contains("you do not gate or approve downstream workflow steps"));
+    let output = s.split_once("<review>\n").expect("review output exists").1;
+    assert!(!output.contains("verdict:"));
+}
+
+#[test]
+fn plan_review_brief_lists_risks_without_deleted_rule_references() {
+    let brief = load(PromptKey::ReviewerPlanBrief);
+    let risks = brief
+        .lines()
+        .find(|line| line.starts_with("- Flag risks"))
+        .expect("review brief must list risks");
+    assert_eq!(risks, "- Flag risks (unclear acceptance criteria, missing dependencies, oversized todos, execution-readiness gaps, over-design, etc.).");
+    for removed in [
+        "apply the execution-readiness rule",
+        "apply the over-design rule",
+        "apply the rewrite rule",
+        "stacked conditions",
+        "`concern`",
+    ] {
+        assert!(!brief.contains(removed), "removed brief text: {removed}");
+    }
+    assert!(brief.contains("Report a missing item as `issues`"));
+    assert_eq!(brief.matches("`issues`").count(), 2);
+    assert!(load(PromptKey::ReviewerPlan).contains("severity: issues|suggestion"));
 }
 
 #[test]
@@ -706,6 +700,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "goal",
         "green_build_pass",
         "in_progress",
+        "issues",
         "log_path",
         "next_offset",
         "next_step",
@@ -717,6 +712,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "pytest",
         "rg",
         "since",
+        "suggestion",
         "task_id",
         "todo_kind",
         "upsert",
@@ -910,13 +906,13 @@ fn write_plans_preserves_decomposition_and_test_design() {
     assert!(PLAN_STRUCTURE.contains("where each layer catches a\n  distinct failure type"));
     assert!(PLAN_STRUCTURE.contains("Source commands from the user, project rules, manifests"));
     assert!(WRITING_STANDARDS.contains("first principles"));
-    assert!(WRITING_STANDARDS.contains("(ASCII or Mermaid diagram)"));
+    assert!(WRITING_STANDARDS.contains("ASCII 图或 Mermaid 流程图"));
     assert!(!WRITING_STANDARDS.contains("(ASCII diagram)"));
     assert!(WRITING_STANDARDS.contains("Put user experience first"));
 }
 
-/// S6/S8 remain shared. Core identity keeps general explanation rules;
-/// the write-plans skill owns plan structure, not the planner or reviewers.
+/// Core identity and code review share design/UI principles; plan review uses
+/// compact Chinese principles. Plan structure remains owned by the skill.
 #[test]
 fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
@@ -935,20 +931,29 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
             "{label} 应逐字出现在 core_identity"
         );
         assert!(
-            reviewer_plan.contains(sentence),
-            "{label} 应逐字出现在 reviewer_plan"
-        );
-        assert!(
             reviewer_code.contains(sentence),
             "{label} 应逐字出现在 reviewer_code"
         );
     }
+    for principle in [
+        "从第一性原理出发",
+        "允许推翻不合理的设计",
+        "保证设计优雅和高性能",
+        "杜绝过度设计",
+    ] {
+        assert!(
+            reviewer_plan.contains(principle),
+            "missing plan-review principle: {principle}"
+        );
+    }
 
+    assert!(!identity.contains(
+        "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background."
+    ));
     let common_explanation_rules = [
         "Explain problems and technical solutions in a way that is easy to read and understand:",
         "Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.",
         "When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.",
-        "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.",
     ];
     let complex_section_rule = "For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.";
     for rule in common_explanation_rules
@@ -977,11 +982,10 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         );
     }
 
-    assert!(reviewer_plan.contains("Check that a reader without chat history can understand"));
-    assert!(reviewer_plan.contains("the change, rationale, and verification"));
-    assert!(reviewer_plan.contains("do not impose a fixed template"));
     assert!(!reviewer_plan.contains("- Explain problems and technical solutions"));
-    assert!(reviewer_plan.contains("one final `kind=Acceptance` todo"));
+    let review_brief = load(PromptKey::ReviewerPlanBrief);
+    assert!(review_brief.contains("one final `kind=Acceptance` todo"));
+    assert!(review_brief.contains("human-readable acceptance section"));
     for output_field in [
         "<review>",
         "findings:",

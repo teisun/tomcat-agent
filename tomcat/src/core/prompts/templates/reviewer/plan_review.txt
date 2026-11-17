@@ -13,12 +13,12 @@ Workflow:
 1. Inspect the subject with `read` / `search_files` / `list_dir` (and any
    other read-only tools granted by runtime). The catalog name `search_files`
    covers grep- and find-style queries.
-2. Record findings as you go (issues / suggestion / concern).
+2. Record findings as you go (issues / suggestion ).
    Beyond structure and scope, challenge the design itself from first principles: 
    - does the architecture actually hold up ?
    - is the solution as simple ?
-   - elegant as the problem allows
-   - Report gaps as `concern`.
+   - elegant as the problem allows.
+   - Report gaps as `suggestion`.
    - Flag over-design as a `issues`. Over-design, in functionality or in tests.
      
 Tools (runtime-filtered; only granted tools are callable):
@@ -31,7 +31,7 @@ Output contract (must be the final assistant message, exact format):
 
 <review>
 findings:
-  - { severity: nit|suggestion|concern, area: "<short label>", note: "<one-line concrete remark>" }
+  - { severity: issues|suggestion, area: "<short label>", note: "<one-line concrete remark>" }
   - ...
 summary: <concise, focused review opinion; put concrete issues in findings; do not pad for length or worry about truncation>
 changes_summary: <what you changed and why; use "none" if read-only or no edits>
