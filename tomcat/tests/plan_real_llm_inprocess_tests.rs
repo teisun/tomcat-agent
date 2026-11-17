@@ -901,7 +901,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
 
 // Opt-in writing-quality comparison. Run these same cases before and after the
 // prompt-only commit, using separate TOMCAT_REAL_LLM_E2E_ARTIFACTS directories.
-const AUTHORING_MODEL: &str = "fcodex/gpt-6-astra";
+const AUTHORING_MODEL: &str = "idatatlas/gpt-6-astra";
 
 struct AuthoringRules(String);
 impl tomcat::core::llm::system_prompt::SystemPromptSection for AuthoringRules {
@@ -916,7 +916,7 @@ impl tomcat::core::llm::system_prompt::SystemPromptSection for AuthoringRules {
     }
 }
 
-fn authoring_system_text(ctx: &ChatContext) -> String {
+fn authoring_system_text(ctx: &ChatContext, expected_rule_count: usize) -> String {
     let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
     let skills = tomcat::core::skill::discover(&ctx.config, &ctx.scope_services.resource_root);
     assert!(skills.by_name.contains_key("write-plans"));
@@ -932,7 +932,10 @@ fn authoring_system_text(ctx: &ChatContext) -> String {
     let (rules, diagnostics, loaded) =
         tomcat::core::project_instructions::render_rules(&discovery, root, gate, budget);
     assert!(diagnostics.is_empty(), "project rules: {diagnostics:?}");
-    assert_eq!(loaded, 1, "the copied project rule must actually load");
+    assert_eq!(
+        loaded, expected_rule_count,
+        "loaded project rules must match the current input"
+    );
     let mut builder = SystemPromptBuilder::default();
     builder.register(Box::new(AuthoringRules(rules)));
     builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
@@ -1010,13 +1013,16 @@ async fn run_authoring_case(case: &str, requirement: &str) {
         .parent()
         .expect("repository root")
         .join(".cursor/rules/avoid-overengineering.mdc");
-    std::fs::create_dir_all(workdir.join(".cursor/rules")).expect("create rules directory");
-    std::fs::copy(
-        &rule,
-        workdir.join(".cursor/rules/avoid-overengineering.mdc"),
-    )
-    .expect("copy project rule");
-    std::fs::copy(&rule, artifacts.join("project-rule.mdc")).expect("archive project rule");
+    let project_rule_present = rule.is_file();
+    if project_rule_present {
+        std::fs::create_dir_all(workdir.join(".cursor/rules")).expect("create rules directory");
+        std::fs::copy(
+            &rule,
+            workdir.join(".cursor/rules/avoid-overengineering.mdc"),
+        )
+        .expect("copy project rule");
+        std::fs::copy(&rule, artifacts.join("project-rule.mdc")).expect("archive project rule");
+    }
     let _cwd = common::CwdGuard::set(&workdir);
     let mut config = tomcat::AppConfig::default();
     config.storage.work_dir = Some(current_home().join(".tomcat").display().to_string());
@@ -1056,7 +1062,7 @@ async fn run_authoring_case(case: &str, requirement: &str) {
         ctx.global_services.model_prefs.speed_for(AUTHORING_MODEL),
         Speed::Fast
     );
-    let system = authoring_system_text(&ctx);
+    let system = authoring_system_text(&ctx, usize::from(project_rule_present));
     let prompt = format!(
         "请为当前项目编写开发计划：{requirement}\n当前项目目录是 `{}`。只规划，使用 create_plan 保存完整方案；不要实施代码或启动执行。create_plan 中的独立评审结束后即可结束本轮。",
         workdir.display()
@@ -1069,7 +1075,8 @@ async fn run_authoring_case(case: &str, requirement: &str) {
         artifacts.join("run.json"),
         serde_json::to_vec_pretty(&json!({
             "case": case, "commit": commit.trim(), "model": AUTHORING_MODEL,
-            "reasoning": "xhigh", "speed": "fast", "revised": revised
+            "reasoning": "xhigh", "speed": "fast", "revised": revised,
+            "project_rule_present": project_rule_present
         }))
         .unwrap(),
     )
@@ -1184,9 +1191,10 @@ async fn run_authoring_case(case: &str, requirement: &str) {
         .expect("persisted reviewer system")["message"]["content"]
         .as_str()
         .unwrap();
-    assert_eq!(
-        child_system.contains("Rewrite rather than append"),
-        revised,
+    let expected_reviewer =
+        tomcat::core::prompts::load(tomcat::core::prompts::PromptKey::ReviewerPlan);
+    assert!(
+        child_system.starts_with(expected_reviewer),
         "reviewer build mismatch"
     );
     assert_eq!(

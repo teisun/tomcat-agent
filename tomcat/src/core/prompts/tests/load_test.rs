@@ -120,12 +120,25 @@ fn write_plans_and_reviewer_carry_anti_over_design_rules() {
     assert!(planner.contains("## Avoid over-design"));
     assert!(reviewer.contains("TDD"));
     assert!(load(PromptKey::ReviewerPlanBrief).contains("over-design"));
-    for (name, text) in [("write-plans", planner), ("plan reviewer", reviewer)] {
+    for (name, text, reasoning, evidence) in [
+        (
+            "write-plans",
+            planner,
+            "Think through what exists, what is missing, and whether direct reuse or a minimal extension can satisfy the confirmed requirements",
+            "using concrete files, symbols, or tests as evidence",
+        ),
+        (
+            "plan reviewer",
+            reviewer,
+            "State what exists, what is missing, and why direct reuse or extension cannot satisfy the confirmed requirements",
+            "citing concrete files, symbols, or tests",
+        ),
+    ] {
         let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
         for rule in [
             "search the project for reusable code or infrastructure first",
-            "State what exists, what is missing, and why direct reuse or extension cannot satisfy the confirmed requirements",
-            "citing concrete files, symbols, or tests",
+            reasoning,
+            evidence,
             "Prefer reuse or a minimal extension when it suffices",
         ] {
             assert!(normalized.contains(rule), "{name} must contain {rule:?}");
@@ -142,16 +155,36 @@ fn write_plans_and_reviewer_carry_anti_over_design_rules() {
 }
 
 #[test]
+fn write_plans_keeps_over_design_reasoning_internal() {
+    let checks = FINAL_CHECK
+        .split_once("## Avoid over-design\n")
+        .expect("over-design checks exist")
+        .1
+        .split_once("## Execution readiness\n")
+        .expect("execution readiness remains a separate section")
+        .0;
+    assert!(checks.contains("Keep the over-design checks and reasoning process out of user-facing explanations and the plan; incorporate only their conclusions into the solution."));
+    assert!(checks.contains("Think through what exists, what is missing, and whether direct reuse or a minimal extension can satisfy the confirmed requirements"));
+    assert!(checks.contains("search the project for reusable code or infrastructure first"));
+    assert!(checks.contains("using concrete files, symbols, or tests as evidence"));
+    assert!(checks.contains("Prefer reuse or a minimal extension when it suffices"));
+    assert!(!checks.contains("State what exists, what is missing"));
+    let deletion = checks
+        .lines()
+        .find(|line| line.starts_with("3. Before finishing any plan change"))
+        .expect("over-design deletion check exists");
+    assert_eq!(deletion, "3. Before finishing any plan change (the first draft, each revision, and the content you add after the plan review returns), perform a deletion pass and remove over-designed items and their related content.");
+}
+
+#[test]
 fn write_plans_and_reviewer_check_execution_readiness() {
     let planner = FINAL_CHECK.split_whitespace().collect::<Vec<_>>().join(" ");
     for rule in [
         "## Execution readiness",
-        "Verify premises",
+        "Identify potential issues in advance and clarify them with `ask_question` during planning; do not wait until execution to ask.",
         "Prefer paths without people",
-        "Record each answer in the plan",
+        "Ensure no human intervention is required during execution",
         "Do not re-ask within approved boundaries",
-        "missing consent for foreseeable risky operations",
-        "skipping, cancellation, or silence is not consent",
         "the over-design rules apply",
     ] {
         assert!(planner.contains(rule), "write-plans must contain {rule:?}");
@@ -390,10 +423,6 @@ fn write_plans_preserves_heading_and_reader_contracts() {
     assert!(PLAN_STRUCTURE.contains(
         "Give each fact one home, and refer to it from other sections instead of restating it"
     ));
-    assert!(
-        PLAN_STRUCTURE.contains("Add a chapter only for content that no required section can hold")
-    );
-    assert!(FINAL_CHECK.contains("Remove them without leaving a note about what the plan will not build; state a scope boundary once, in Goal"));
     assert!(FINAL_CHECK.contains("Write the outcomes into the plan (decisions, blockers, consent), not an account of the checks."));
     assert!(WRITING_STANDARDS
         .contains("Example 3: Give each list item one decision and each fact one section."));
@@ -406,6 +435,32 @@ fn write_plans_preserves_heading_and_reader_contracts() {
     assert!(!WRITE_PLANS_SKILL.contains("# Final Check"));
     assert!(PLAN_STRUCTURE.contains("(final-check.md#avoid-over-design)"));
     assert!(!PLAN_STRUCTURE.contains("../SKILL.md#avoid-over-design"));
+}
+
+#[test]
+fn write_plans_clarifies_issues_early_and_routes_readiness_records_to_optional_chapters() {
+    let placement =
+        "Place these records in an optional chapter of the Plan, not in its opening overview.";
+    let clarification = FINAL_CHECK
+        .lines()
+        .find(|line| line.starts_with("1. Identify potential issues in advance"))
+        .expect("early clarification check exists");
+    let outcomes = FINAL_CHECK
+        .lines()
+        .find(|line| line.starts_with("Close gaps by investigating and deciding"))
+        .expect("readiness outcome guidance exists");
+    assert!(clarification.contains("clarify them with `ask_question` during planning"));
+    assert!(clarification.ends_with("do not wait until execution to ask."));
+    for retained in [
+        "2. Prefer paths without people. Reuse equivalent automation without weakening acceptance; agree unavoidable human steps during planning.",
+        "3. Walk it through. Ensure no human intervention is required during execution.",
+        "4. Honor recorded consent. Do not re-ask within approved boundaries. Ask again only for uncovered actions or material changes to the agreed risk, target, or scope.",
+    ] {
+        assert!(FINAL_CHECK.contains(retained));
+    }
+    assert!(!FINAL_CHECK.contains("Verify premises."));
+    assert!(!FINAL_CHECK.contains("Decide foreseeable branches now."));
+    assert!(outcomes.contains(placement));
 }
 
 #[test]
@@ -429,7 +484,6 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         ("`### Root Cause and Evidence`", "MUST (issues only)"),
         ("`### Solution`", "MUST"),
         ("`#### Solution Explanation`", "MUST"),
-        ("`#### UI Mockup`", "OPTION"),
         ("`### Key Decisions Table`", "MUST"),
         ("`### Test Cases`", "MUST"),
         ("Other optional chapters", "OPTION"),
@@ -439,15 +493,20 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         rows.windows(expected.len()).any(|rows| rows == expected),
         "chapter rows must preserve heading levels, order, and conditional requirements"
     );
+    assert!(PLAN_STRUCTURE.contains("`OPTION`: add a separate chapter as needed."));
+    assert!(
+        PLAN_STRUCTURE.contains("Add a chapter only for content that no required section can hold")
+    );
+    assert!(!PLAN_STRUCTURE.contains("UI Mockup"));
+    assert!(PLAN_STRUCTURE.contains("Other optional chapters -> Acceptance -> Todos Board"));
     for rule in [
         "Chapter Title (English Canonical Name)",
         "Bold text and list items are not substitutes for headings.",
         "Keep every required subsection, even in a small plan.",
         "Omit Root Cause and Evidence for requirements.",
-        "For issues, include prose and add a diagram as needed.",
-        "Solution Explanation includes a diagram and prose.",
-        "UI Mockup is a separate subsection under Solution, included only as needed.",
-        "Include the six-column table from §2.2, not just prose or a reference to the table.",
+        "For issues, include text and add a diagram as needed.",
+        "Solution Explanation includes a diagram and text.",
+        "Include the six-column table from §2.2.",
     ] {
         assert!(PLAN_STRUCTURE.contains(rule), "missing rule: {rule}");
     }
@@ -475,9 +534,8 @@ fn write_plans_chapter_table_and_skeletons_keep_distinct_nested_sections() {
         "Issue N: Description                  Requirement N: Description\n",
         "├─ Problem Symptoms                   ├─ Requirement Description\n",
         "├─ Root Cause and Evidence            ├─ Solution\n",
-        "├─ Solution                           │  ├─ Solution Explanation\n",
-        "│  ├─ Solution Explanation            │  └─ UI Mockup (as needed)\n",
-        "│  └─ UI Mockup (as needed)            ├─ Key Decisions Table\n",
+        "├─ Solution                           │  └─ Solution Explanation\n",
+        "│  └─ Solution Explanation            ├─ Key Decisions Table\n",
         "├─ Key Decisions Table                └─ Test Cases\n",
         "└─ Test Cases\n",
     )));

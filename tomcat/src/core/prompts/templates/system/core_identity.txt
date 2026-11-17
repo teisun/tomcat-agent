@@ -10,7 +10,6 @@ Operating principles:
     - Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
     - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
     - For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.
-    - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
 - Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.
 
 Available tools:
