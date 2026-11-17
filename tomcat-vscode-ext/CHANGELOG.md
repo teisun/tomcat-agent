@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.16
+
+- Refine built-in plan-writing guidance: favor diagrams with concise, plain-language explanations, keep over-design checks and reasoning internal, and limit each key-decisions section to one six-column table. Optional UI mockups remain supported.
+- Simplify plan-review guidance and align review findings as `issues` or `suggestion`; retain risk checks for acceptance criteria, dependencies, todo size, execution readiness and over-design.
+- Bundle CLI 0.1.98 in platform-specific packages. Pure-extension users must update their external CLI to receive the planning and review guidance changes. Updating the executable does not update a running shared service; check active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.15
 
 Includes the changes prepared for the unpublished extension versions since 0.2.9, including 0.2.13 and 0.2.14.
