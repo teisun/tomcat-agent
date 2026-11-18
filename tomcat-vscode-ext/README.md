@@ -73,6 +73,10 @@ You can also open the Secondary Side Bar yourself and click the Tomcat Agent Box
 
 Open a project folder before starting a chat. With no working directory, the panel asks you to open a folder rather than using the background service's directory. The extension verifies the discovered service instance before sending environment variables and waits for `ready` before sending session requests.
 
+## Web Search
+
+Tomcat prepares its built-in search plugin at startup; there is no need to run `tomcat init`. In **Tomcat Settings → Tools → Web Search**, enter keys, enable the providers you want, and use the arrows to set their order. Enable one provider to use it exclusively, or several to try them in order. The first successful response stops the search, even when it contains no results. Saving a DeepSeek key does not enable it; DeepSeek Search API access and billing are separate from a chat subscription.
+
 ## First-time setup
 
 1. Open Tomcat Agent Box. No `tomcat init` is needed.

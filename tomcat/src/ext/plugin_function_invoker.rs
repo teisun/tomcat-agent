@@ -9,6 +9,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+struct CommandWaiterGuard<'a> {
+    dispatcher: &'a HostApiDispatcher,
+    call_id: &'a str,
+}
+
+impl Drop for CommandWaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatcher.drop_command_waiter(self.call_id);
+    }
+}
+
 pub struct PluginFunctionInvoker {
     plugin_manager: Weak<PluginManager>,
     dispatcher: Mutex<Weak<HostApiDispatcher>>,
@@ -75,8 +86,9 @@ impl PluginFunctionInvoker {
             .ok_or_else(|| {
                 AppError::Plugin(tr("plugin.notLoaded", &[("id", &function.plugin_id)]))
             })?;
-        if canonicalize_or_keep(&plugin_info.plugin_root)
-            != canonicalize_or_keep(&function.plugin_root)
+        if plugin_info.source != function.source
+            || canonicalize_or_keep(&plugin_info.plugin_root)
+                != canonicalize_or_keep(&function.plugin_root)
         {
             return Err(AppError::Plugin(tr(
                 "plugin.functionSourceChanged",
@@ -94,6 +106,10 @@ impl PluginFunctionInvoker {
 
         let call_id = self.alloc_call_id(session_id, &function.plugin_id, &function.function);
         let rx = dispatcher.register_command_waiter(&call_id);
+        let _waiter = CommandWaiterGuard {
+            dispatcher: &dispatcher,
+            call_id: &call_id,
+        };
         let dispatched = plugin_manager.dispatch_session_event(
             session_id,
             &function.plugin_id,
@@ -112,10 +128,7 @@ impl PluginFunctionInvoker {
                 "point": function.point,
             }),
         );
-        if let Err(error) = dispatched {
-            dispatcher.drop_command_waiter(&call_id);
-            return Err(error);
-        }
+        dispatched?;
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
@@ -124,13 +137,10 @@ impl PluginFunctionInvoker {
                 "plugin.functionClosed",
                 &[("name", &function.function)],
             ))),
-            Err(_) => {
-                dispatcher.drop_command_waiter(&call_id);
-                Err(AppError::Plugin(tr(
-                    "plugin.functionTimeout",
-                    &[("name", &function.function)],
-                )))
-            }
+            Err(_) => Err(AppError::Plugin(tr(
+                "plugin.functionTimeout",
+                &[("name", &function.function)],
+            ))),
         }
     }
 }

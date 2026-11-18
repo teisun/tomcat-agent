@@ -10,7 +10,8 @@ import type {
 
 import { isSpeed, type Speed } from "./modelSpeed";
 import { isLanguagePreference, type LanguagePreference } from "./i18n";
-export type SettingsRoute = "general" | "models" | "connectors";
+export type SettingsRoute = "general" | "models" | "connectors" | "tools";
+export type { SearchBackendView, WebSearchSettingsPayload } from "../serveClient/wire";
 
 export interface SettingsModelCapabilities {
   files: boolean;
@@ -90,6 +91,7 @@ export interface SettingsCapabilities {
   setDefaultModelIfUnset?: boolean;
   setUtilityModel?: boolean;
   setUiLanguage?: boolean;
+  webSearchSettings?: boolean;
   listModels: boolean;
   listProviderKeys: boolean;
   listRemoteModels?: boolean;
@@ -174,6 +176,8 @@ export interface SettingsStateSnapshot {
 
 
   selectedConnector?: string | null;
+  webSearch?: import("../serveClient/wire").WebSearchSettingsPayload;
+  webSearchReceipt?: { requestId: string; phase: "saving" | "saved" | "failed" };
   ready: boolean;
   route: SettingsRoute;
   serverVersion?: string | null;
@@ -188,6 +192,9 @@ export type SettingsHostFrame = {
 };
 
 export type SettingsIntent =
+  | { messageId: string; type: "setWebSearchRouting"; data: { backends: string[] } }
+  | { messageId: string; type: "clearSearchKey"; data: { backendId: string } }
+  | { messageId: string; type: "saveSearchKey"; data: { backendId: string; value: string } }
   | { messageId: string; type: "viewConnectionLogs" }
   | { messageId: string; type: "setUiLanguage"; data: { language: LanguagePreference } }
   | {
@@ -320,7 +327,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSettingsRoute(value: unknown): value is SettingsRoute {
-  return value === "general" || value === "models" || value === "connectors";
+  return value === "general" || value === "models" || value === "connectors" || value === "tools";
 }
 
 function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapabilities {
@@ -432,6 +439,12 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
         typeof value.data.value === "string" &&
         isOptionalString(value.data.defaultModelId)
       );
+    case "setWebSearchRouting":
+      return isRecord(value.data) && isStringArray(value.data.backends) && value.data.backends.length > 0;
+    case "clearSearchKey":
+      return isRecord(value.data) && typeof value.data.backendId === "string";
+    case "saveSearchKey":
+      return isRecord(value.data) && typeof value.data.backendId === "string" && typeof value.data.value === "string";
     case "listConnectors":
     case "reloadConnectors":
       return true;

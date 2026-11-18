@@ -9,8 +9,8 @@ use tomcat::core::tools::web_search::types::WebSearchArgs;
 use tomcat::core::tools::web_search::WebSearchRuntime;
 use tomcat::{
     AppConfig, DefaultEventBus, DefaultLlmResolver, ExtPluginSearchInvoker, FunctionRegistry,
-    HostApiDispatcher, ManifestFunction, ModelCatalog, PluginEngine, PluginFunctionInvoker,
-    PluginManager, PluginRuntimeManager, SessionMode, TracingAuditRecorder,
+    HostApiDispatcher, ModelCatalog, PluginEngine, PluginFunctionInvoker, PluginManager,
+    PluginRuntimeManager, SessionMode, TracingAuditRecorder,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -82,6 +82,178 @@ async fn runtime_explicit_tavily_works_from_public_api() {
     assert_eq!(output.backend, "tavily");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://tokio.rs/");
+}
+
+#[tokio::test]
+#[serial]
+async fn deepseek_requests_use_rotated_keys_without_reusing_the_old_cache() {
+    use std::time::Duration;
+    use tomcat::api::chat::{ChatContext, ChatContextOverrides};
+    use tomcat::core::llm::auth::refresh_managed_credentials_from_entries;
+
+    struct ResetCredentials;
+    impl Drop for ResetCredentials {
+        fn drop(&mut self) {
+            refresh_managed_credentials_from_entries(&Default::default());
+        }
+    }
+    let _reset = ResetCredentials;
+    let _env = EnvGuard::set_many(&[("DEEPSEEK_API_KEY", None)]);
+    let host = "api.deepseek.com";
+    let server = common::HttpsTestServer::start(
+        host,
+        "200 OK",
+        vec![("Content-Type".into(), "application/json".into())],
+        serde_json::to_vec(&json!({"results":[{"title":"Rust","url":"https://rust-lang.org","snippet":"","summary":"Language"}]})).unwrap(),
+        Duration::ZERO,
+    ).await;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    install_builtin_web_search_plugin(work.path());
+    let mut config = AppConfig::default();
+    config.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    config.tools.web_search.backends = Some(vec!["deepseek".into()]);
+    let client = server.client_for(host, Duration::from_secs(5));
+    let ctx = ChatContext::from_config_with_mode_and_overrides(
+        config,
+        SessionMode::Code,
+        ChatContextOverrides::default()
+            .with_session_cwd_override(workspace.path().to_path_buf())
+            .with_fetch_http_client(client),
+    )
+    .unwrap();
+    let sid = current_session_id(&ctx);
+    let runtime = &ctx.global_services.web_search_runtime;
+    let args = WebSearchArgs {
+        query: "same query".into(),
+        count: None,
+        freshness: None,
+        country: None,
+        language: None,
+        domain_filter: vec![],
+    };
+    for key in ["saved-first", "saved-second"] {
+        refresh_managed_credentials_from_entries(&[("DEEPSEEK_API_KEY".into(), key.into())].into());
+        let result = runtime.search(args.clone(), &sid).await.unwrap();
+        assert!(!result.stats.cached);
+        assert_eq!(result.backend, "deepseek");
+        assert_eq!(result.hits[0].snippet, "Language");
+        assert!(
+            runtime
+                .search(args.clone(), &sid)
+                .await
+                .unwrap()
+                .stats
+                .cached
+        );
+    }
+    refresh_managed_credentials_from_entries(&Default::default());
+    let deleted = runtime.search(args, &sid).await.unwrap_err();
+    end_current_plugin_session(&ctx).await;
+    assert!(
+        deleted.to_string().contains("DEEPSEEK_API_KEY"),
+        "{deleted}"
+    );
+    let requests = server.request_headers();
+    assert_eq!(requests.len(), 2);
+    for (headers, key) in requests.iter().zip(["saved-first", "saved-second"]) {
+        assert!(
+            headers.starts_with("POST /v1/tools/search HTTP/1.1"),
+            "{headers}"
+        );
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains(&format!("\r\nauthorization: bearer {key}")));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn project_search_winner_cannot_borrow_saved_key_from_user_layer() {
+    use tomcat::api::chat::{ChatContext, ChatContextOverrides};
+    use tomcat::core::llm::auth::refresh_managed_credentials_from_entries;
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            refresh_managed_credentials_from_entries(&Default::default());
+        }
+    }
+    let _reset = Reset;
+    let _env = EnvGuard::set_many(&[("DEEPSEEK_API_KEY", None)]);
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let user_layer = work.path().join("agents/main");
+    let agent_plugin = install_builtin_web_search_plugin(&user_layer);
+    std::fs::write(agent_plugin.join("main.js"), r#"tomcat.registerFunction('webSearchBackend', () => ({hits:[{title:'Agent fixture',url:'https://example.com/agent'}]}));"#).unwrap();
+    let project_plugin = workspace.path().join(".agents/plugins/search");
+    std::fs::create_dir_all(&project_plugin).unwrap();
+    std::fs::copy(
+        agent_plugin.join("plugin.json"),
+        project_plugin.join("plugin.json"),
+    )
+    .unwrap();
+    std::fs::write(
+        project_plugin.join("main.js"),
+        "throw new Error('Project plugin should not start');",
+    )
+    .unwrap();
+
+    let mut config = AppConfig::default();
+    config.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    config.agent.id = "main".into();
+    config.tools.web_search.backends = Some(vec!["deepseek".into()]);
+    let args = WebSearchArgs {
+        query: "offline fixture".into(),
+        count: None,
+        freshness: None,
+        country: None,
+        language: None,
+        domain_filter: vec![],
+    };
+    let open = |cwd: &Path| {
+        ChatContext::from_config_with_mode_and_overrides(
+            config.clone(),
+            SessionMode::Code,
+            ChatContextOverrides::default().with_session_cwd_override(cwd.to_path_buf()),
+        )
+        .unwrap()
+    };
+    refresh_managed_credentials_from_entries(
+        &[("DEEPSEEK_API_KEY".into(), "synthetic-key".into())].into(),
+    );
+    let project = open(workspace.path());
+    let sid = current_session_id(&project);
+    let missing = project
+        .global_services
+        .web_search_runtime
+        .search(args.clone(), &sid)
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("DEEPSEEK_API_KEY"),
+        "{missing}"
+    );
+    assert!(!project
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .unwrap()
+        .has_session_vm(&sid, "tomcat.web-search-backends"));
+    end_current_plugin_session(&project).await;
+
+    // A different workspace has no project override. Opening another session in
+    // the first workspace would intentionally reuse its existing scope registry.
+    let clean_workspace = tempfile::tempdir().unwrap();
+    let agent = open(clean_workspace.path());
+    let hits = agent
+        .global_services
+        .web_search_runtime
+        .search(args, &current_session_id(&agent))
+        .await
+        .unwrap();
+    assert_eq!(hits.hits[0].title, "Agent fixture");
+    end_current_plugin_session(&agent).await;
 }
 
 #[tokio::test]
@@ -158,7 +330,7 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
     assert!(output
         .warnings
         .iter()
-        .any(|warning| warning == "backend_unavailable:tavily, fallback=brave"));
+        .any(|warning| warning.starts_with("backend_unavailable:tavily")));
     assert!(output
         .warnings
         .iter()
@@ -167,7 +339,7 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
 
 #[tokio::test]
 #[serial]
-async fn runtime_auto_builtin_plugin_runtime_error_fails_loud() {
+async fn runtime_single_backend_preserves_plugin_runtime_failure() {
     let _env = EnvGuard::set_many(&[
         ("MIMO_API_KEY", Some("mimo-test-key")),
         ("TAVILY_API_KEY", None),
@@ -178,8 +350,13 @@ async fn runtime_auto_builtin_plugin_runtime_error_fails_loud() {
     ]);
 
     let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
-    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    cfg.tools.web_search.backends = Some(vec!["mimo".into()]);
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client_with_patch(
+        cfg,
+        None,
+        None,
+        Some("\nbackends.mimo = async () => { throw new Error('synthetic plugin failure'); };\n"),
+    );
 
     let search_result = harness
         .runtime
@@ -206,9 +383,9 @@ async fn runtime_auto_builtin_plugin_runtime_error_fails_loud() {
     let text = err.to_string();
     assert!(text.contains(&tomcat::infra::tr(
         "search.runtime",
-        &[("backend", "auto"), ("detail", "")]
+        &[("backend", "mimo"), ("detail", "")]
     )));
-    assert!(text.contains("plugin_backend_error (backend=mimo)"));
+    assert!(text.contains("synthetic plugin failure"));
     assert!(
         !text.contains(&tomcat::infra::tr(
             "search.allUnavailable",
@@ -1083,7 +1260,7 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     assert!(output
         .warnings
         .iter()
-        .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave")));
+        .any(|warning| warning.starts_with("backend_unavailable:tavily")));
 }
 
 #[tokio::test]
@@ -1471,15 +1648,15 @@ async fn real_mimo_web_search() {
     ]);
 
     let mimo_model =
-        std::env::var("TOMCAT_E2E_MIMO_MODEL").unwrap_or_else(|_| "mimo-v2.5-pro".to_string());
+        std::env::var("TOMCAT_E2E_MIMO_MODEL").unwrap_or_else(|_| "mimo-v2.6-pro".to_string());
     let mimo_base_url = std::env::var("TOMCAT_E2E_MIMO_BASE_URL")
         .or_else(|_| std::env::var("PI_LIVE_MIMO_BASE_URL"))
         .unwrap_or_else(|_| "https://token-plan-cn.xiaomimimo.com".to_string());
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "mimo".into();
-    cfg.llm.default_model = mimo_model.clone();
-    cfg.context.compaction_model = mimo_model.clone();
+    cfg.llm.default_model = "mimo/mimo-v2.6-pro".into();
+    cfg.context.compaction_model = "mimo/mimo-v2.6-pro".into();
     let harness = build_production_web_search_harness(
         cfg,
         ENV_KEY,
@@ -1658,13 +1835,14 @@ fn build_runtime_with_builtin_plugin_and_fetch_client_with_patch(
     let dispatcher = Arc::new(dispatcher);
     invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
     manager.set_host_dispatcher(dispatcher);
+    let manifest =
+        tomcat::parse_manifest(&std::fs::read_to_string(plugin_root.join("plugin.json")).unwrap())
+            .unwrap();
     function_registry.register_plugin_functions(
-        "tomcat.web-search-backends",
+        &manifest.id,
         &plugin_root,
-        &[ManifestFunction {
-            point: "web_search.backend".to_string(),
-            function: "webSearchBackend".to_string(),
-        }],
+        &manifest.functions,
+        tomcat::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(&plugin_root)
@@ -1744,7 +1922,8 @@ fn mimo_models_toml(model_id: &str, base_url: &str) -> String {
     format!(
         r#"
 [[models]]
-id = "{model_id}"
+id = "mimo/mimo-v2.6-pro"
+model_name = "{model_id}"
 api = "openai"
 provider = "mimo"
 base_url = "{base_url}"

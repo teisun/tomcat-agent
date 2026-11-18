@@ -18,7 +18,7 @@ async function searchWithTavily(req) {
     warnings: warnings,
     request: {
       method: "POST",
-      url: providerBaseUrl(req, "tavilyBaseUrl", TAVILY_BASE_URL) + "/search",
+      url: TAVILY_BASE_URL + "/search",
       headers: {
         Authorization: "Bearer {{secret:TAVILY_API_KEY}}",
         "Content-Type": "application/json"

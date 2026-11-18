@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use super::super::brand::{DEFAULT_WORK_DIR, ENV_PREFIX};
 use super::super::error::AppError;
 use super::super::platform::normalize_path;
-use super::types::AppConfig;
+use super::types::{is_search_backend_id, AppConfig};
 use crate::infra::i18n::tr;
 
 /// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。
@@ -337,6 +337,18 @@ pub fn resolve_sessions_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(resolve_agent_trail_dir(cfg)?.join("sessions"))
 }
 
+pub(crate) fn validate_search_backend_order(backends: &[String]) -> Result<(), AppError> {
+    let mut seen = std::collections::BTreeSet::new();
+    if backends.is_empty()
+        || backends
+            .iter()
+            .any(|id| !is_search_backend_id(id) || !seen.insert(id))
+    {
+        return Err(AppError::Config("tools.web_search.backends must be a non-empty ordered list of unique backend IDs (not auto)".into()));
+    }
+    Ok(())
+}
+
 /// `work_dir/plugins` — 全局共享插件目录。
 pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("plugins"))
@@ -580,26 +592,8 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.tools.web_search.timeout_ms == 0 {
         return Err(must_be_positive("tools.web_search.timeout_ms"));
     }
-    for (label, value) in [
-        (
-            "tools.web_search.tavily_base_url",
-            cfg.tools.web_search.tavily_base_url.trim(),
-        ),
-        (
-            "tools.web_search.brave_base_url",
-            cfg.tools.web_search.brave_base_url.trim(),
-        ),
-        (
-            "tools.web_search.serper_base_url",
-            cfg.tools.web_search.serper_base_url.trim(),
-        ),
-    ] {
-        if !value.starts_with("http://") && !value.starts_with("https://") {
-            return Err(AppError::Config(tr(
-                "config.urlScheme",
-                &[("field", label)],
-            )));
-        }
+    if let Some(backends) = &cfg.tools.web_search.backends {
+        validate_search_backend_order(backends)?;
     }
     if cfg.tools.web_fetch.max_redirects == 0 {
         return Err(must_be_positive("tools.web_fetch.max_redirects"));

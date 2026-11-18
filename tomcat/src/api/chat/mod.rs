@@ -20,7 +20,7 @@ pub mod panels;
 pub mod permission;
 pub mod preflight;
 
-pub(crate) use context::end_cached_plugin_session;
+pub(crate) use context::{collect_host_functions_from_catalog, end_cached_plugin_session};
 pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
 pub use resource_inventory::{InventoryReport, SyncTimings};
 pub(crate) use run_loop::spawn_completion_subscriber;

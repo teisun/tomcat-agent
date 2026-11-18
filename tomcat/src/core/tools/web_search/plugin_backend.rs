@@ -8,6 +8,14 @@ use super::types::{RawHit, WebSearchRequest};
 
 #[async_trait]
 pub trait PluginSearchInvoker: Send + Sync {
+    fn backend_declarations(&self) -> Vec<super::declarations::BackendDeclaration> {
+        Vec::new()
+    }
+
+    fn winner_can_use_saved_keys(&self) -> bool {
+        false
+    }
+
     async fn search(
         &self,
         backend: &str,
@@ -21,6 +29,7 @@ pub struct PluginWebSearchBackend {
     invoker: Arc<dyn PluginSearchInvoker>,
     backend: String,
     session_id: String,
+    model: Option<String>,
 }
 
 impl PluginWebSearchBackend {
@@ -33,7 +42,13 @@ impl PluginWebSearchBackend {
             invoker,
             backend: backend.into(),
             session_id: session_id.into(),
+            model: None,
         }
+    }
+
+    pub(super) fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
     }
 
     fn classify_warning_failure(&self, warnings: &[String]) -> Option<BackendFailure> {
@@ -131,9 +146,7 @@ impl WebSearchBackend for PluginWebSearchBackend {
             "country": request.country,
             "language": request.language,
             "domainFilter": request.domain_filter,
-            "tavilyBaseUrl": request.tavily_base_url,
-            "braveBaseUrl": request.brave_base_url,
-            "serperBaseUrl": request.serper_base_url,
+            "model": self.model,
         });
         let raw = self
             .invoker

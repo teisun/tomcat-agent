@@ -30,6 +30,7 @@ mod slash;
 pub mod stdin;
 pub mod types;
 mod ui_preferences;
+mod web_search_settings;
 pub mod writer;
 
 #[cfg(test)]
@@ -358,6 +359,7 @@ async fn create_or_load_session_slot(
             )
             .with_session_cwd_override(cwd_path.clone());
         overrides.child_environment = state.child_environment();
+        overrides.search_order = Some(state.search_order.clone());
         let current_config =
             crate::infra::config::load_model_selection_config(&state.config_path, &state.cfg)?;
         let ctx =

@@ -10,6 +10,49 @@ import type { InitializeResult } from "../../serveClient/initialize";
 import type { SettingsIntent } from "../../shared/settingsProtocol";
 import { translate } from "../../shared/i18n";
 
+describe("web search settings", () => {
+  it("selects the window workspace, shares model Key saving, and refuses unsupported or unmanaged writes", async () => {
+    const request = vi.fn(async (_command: unknown) => ({ success: true, payload: {
+      order: ["brave"], usingDefaults: false, backends: [
+        { id: "brave", label: "Brave", keyEnv: "BRAVE_API_KEY", canSaveKey: true, sharedModelIds: [] },
+        { id: "custom", label: "Custom", keyEnv: "CUSTOM_API_KEY", canSaveKey: false, sharedModelIds: [] },
+      ],
+    } }));
+    const sendSetProviderKey = vi.fn(async (_name: string, _value: string) => ({ success: true }));
+    const capabilities = ["set_provider_key"];
+    const panel = new SettingsPanel({ showConnectionLogs: vi.fn(), expectedCliVersion: null, extensionVersion: null,
+      extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
+      ensureInitialized: async () => ({ capabilities, protocolVersion: 1, serverVersion: "test", sessionId: null, attachmentRoot: null }),
+      messenger: { request, sendSetProviderKey } as never,
+      selectConnectorWorkspaceRoot: async () => "/workspace/current",
+    });
+    try {
+      const ready = () => panel.__testingDispatchIntent({ type: "settings.ready", messageId: "ready", data: { route: "tools" } });
+      const save = (backendId: string) => panel.__testingDispatchIntent({ type: "saveSearchKey", messageId: backendId, data: { backendId, value: "synthetic-key" } });
+      await ready();
+      expect(request).not.toHaveBeenCalled();
+      await save("brave");
+      expect(sendSetProviderKey).not.toHaveBeenCalled();
+      expect(panel.__testingSnapshot().state.error).toBe(translate("en", "searchSettings.unsupported"));
+      capabilities.push("web_search_settings", "set_web_search_routing", "clear_provider_key");
+      await ready();
+      expect(request).toHaveBeenLastCalledWith({ type: "web_search_settings", context: { workspaceRoot: "/workspace/current" } });
+      await save("custom");
+      expect(sendSetProviderKey).not.toHaveBeenCalled();
+      expect(panel.__testingSnapshot().state.error).toBe(translate("en", "searchSettings.keyUnavailable"));
+      sendSetProviderKey.mockRejectedValueOnce(new Error("Socket closed"));
+      await save("brave");
+      expect(panel.__testingSnapshot().state.error).toBe("Socket closed");
+      await save("brave");
+      expect(sendSetProviderKey).toHaveBeenCalledWith("BRAVE_API_KEY", "synthetic-key");
+      expect(panel.__testingSnapshot().state.webSearchReceipt).toEqual({ requestId: "brave", phase: "saved" });
+      expect(JSON.stringify(panel.__testingSnapshot().state)).not.toContain("synthetic-key");
+    } finally {
+      panel.dispose();
+    }
+  });
+});
+
 describe("settings panel html asset resolution", () => {
   const tempDirs: string[] = [];
 

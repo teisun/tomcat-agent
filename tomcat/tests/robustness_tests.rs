@@ -123,6 +123,7 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
     for i in 0..50 {
         let instance = PluginInstance {
             id: "stress".to_string(),
+            source: tomcat::ext::plugin::PluginSource::Project,
             manifest: manifest.clone(),
             fingerprint: None,
             plugin_vm_instance: None,

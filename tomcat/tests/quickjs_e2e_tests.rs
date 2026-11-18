@@ -74,6 +74,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
     manager
         .register_plugin(PluginInstance {
             id: plugin_id.to_string(),
+            source: tomcat::ext::plugin::PluginSource::Project,
             manifest,
             fingerprint: None,
             plugin_vm_instance: None,
@@ -192,9 +193,18 @@ fn make_function_manager(plugin_dir: &Path) -> FunctionManagerHarness {
     let manifest_json =
         std::fs::read_to_string(plugin_dir.join("plugin.json")).expect("read function manifest");
     let manifest = parse_manifest(&manifest_json).expect("parse function manifest");
-    function_registry.register_plugin_functions(&manifest.id, plugin_dir, &manifest.functions);
+    function_registry.register_plugin_functions(
+        &manifest.id,
+        plugin_dir,
+        &manifest.functions,
+        tomcat::ext::plugin::PluginSource::Project,
+    );
     manager
-        .register_catalog_plugin(plugin_dir, manifest)
+        .register_catalog_plugin(
+            plugin_dir,
+            manifest,
+            tomcat::ext::plugin::PluginSource::Project,
+        )
         .expect("register catalog stub");
     manager
         .load_plugin(plugin_dir)

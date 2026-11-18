@@ -18,6 +18,7 @@ import { buildProviderCards, keyStatusLabel, type ProviderCard } from "./provide
 import type { ProviderPreset } from "./providerPresets";
 import { fieldText, formatApiLabel, formatThinkingLabel, send } from "./settingsShared";
 import { SettingsShell } from "./SettingsShell";
+import { WebSearchSettingsView } from "./WebSearchSettingsView";
 import { ModelRolePicker } from "./ModelRolePicker";
 
 type SettingsDomAction = {
@@ -495,6 +496,10 @@ export function SettingsApp({
 
   if (state.route === "general") {
     return <GeneralSettingsView state={state} vscodeApi={vscodeApi} />;
+  }
+
+  if (state.route === "tools") {
+    return <WebSearchSettingsView state={state} vscodeApi={vscodeApi} />;
   }
 
   if (state.route === "connectors") {

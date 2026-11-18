@@ -147,13 +147,14 @@ impl Default for ToolsBashConfig {
 
 /// `[tools.web_search]` 子表（T2-P1-012 PR-WS-S）。
 ///
-/// 仅承载 `web_search` runtime 的**默认 backend / filter / cache / timeout / base URL**
-/// 配置；provider credentials 继续通过 `TAVILY_API_KEY` / `BRAVE_API_KEY` /
-/// `SERPER_API_KEY` 等环境变量读取，不进 TOML。
+/// Search order, request defaults, filtering, cache and timeout. Credentials live outside TOML.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolsWebSearchConfig {
-    #[serde(default = "default_tools_web_search_backend")]
+    /// Legacy selection, used only when `backends` is absent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backends: Option<Vec<String>>,
     #[serde(default = "default_tools_web_search_count")]
     pub count: u32,
     #[serde(default)]
@@ -174,25 +175,28 @@ pub struct ToolsWebSearchConfig {
     pub cache_capacity: u64,
     #[serde(default = "default_tools_web_search_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default = "default_tools_web_search_tavily_base_url")]
-    pub tavily_base_url: String,
-    #[serde(default = "default_tools_web_search_brave_base_url")]
-    pub brave_base_url: String,
-    #[serde(default = "default_tools_web_search_serper_base_url")]
-    pub serper_base_url: String,
 }
 
-pub const DEFAULT_TOOLS_WEB_SEARCH_BACKEND: &str = "auto";
 pub const DEFAULT_TOOLS_WEB_SEARCH_COUNT: u32 = 5;
 pub const DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS: u64 = 300;
 pub const DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY: u64 = 50;
 pub const DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS: u64 = 12_000;
-pub const DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL: &str = "https://api.tavily.com";
-pub const DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL: &str = "https://api.search.brave.com";
-pub const DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL: &str = "https://google.serper.dev";
 
-fn default_tools_web_search_backend() -> String {
-    DEFAULT_TOOLS_WEB_SEARCH_BACKEND.to_string()
+pub(crate) fn is_search_backend_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "auto"
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+impl ToolsWebSearchConfig {
+    pub(crate) fn configured_backends(&self) -> Option<Vec<String>> {
+        self.backends.clone().or_else(|| {
+            let id = self.backend.trim().to_ascii_lowercase();
+            (!id.is_empty() && id != "auto").then(|| vec![id])
+        })
+    }
 }
 
 fn default_tools_web_search_count() -> u32 {
@@ -211,22 +215,11 @@ fn default_tools_web_search_timeout_ms() -> u64 {
     DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS
 }
 
-fn default_tools_web_search_tavily_base_url() -> String {
-    DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL.to_string()
-}
-
-fn default_tools_web_search_brave_base_url() -> String {
-    DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL.to_string()
-}
-
-fn default_tools_web_search_serper_base_url() -> String {
-    DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL.to_string()
-}
-
 impl Default for ToolsWebSearchConfig {
     fn default() -> Self {
         Self {
-            backend: default_tools_web_search_backend(),
+            backend: String::new(),
+            backends: None,
             count: default_tools_web_search_count(),
             freshness: None,
             country: None,
@@ -237,9 +230,6 @@ impl Default for ToolsWebSearchConfig {
             cache_ttl_secs: default_tools_web_search_cache_ttl_secs(),
             cache_capacity: default_tools_web_search_cache_capacity(),
             timeout_ms: default_tools_web_search_timeout_ms(),
-            tavily_base_url: default_tools_web_search_tavily_base_url(),
-            brave_base_url: default_tools_web_search_brave_base_url(),
-            serper_base_url: default_tools_web_search_serper_base_url(),
         }
     }
 }

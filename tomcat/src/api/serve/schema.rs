@@ -41,6 +41,7 @@ pub(crate) struct ServeSchemaBundle {
     remove_model_response: schemars::schema::RootSchema,
     set_provider_key_response: schemars::schema::RootSchema,
     list_provider_keys_payload: schemars::schema::RootSchema,
+    web_search_settings_payload: schemars::schema::RootSchema,
     connector_reload_receipt: schemars::schema::RootSchema,
     connector_recovery_progress: schemars::schema::RootSchema,
     list_connector_tools_payload: schemars::schema::RootSchema,
@@ -88,6 +89,9 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         remove_model_response: schema_for!(RemoveModelResponse),
         set_provider_key_response: schema_for!(SetProviderKeyResponse),
         list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
+        web_search_settings_payload: schema_for!(
+            super::web_search_settings::WebSearchSettingsPayload
+        ),
         connector_reload_receipt: schema_for!(ConnectorReloadReceipt),
         connector_recovery_progress: schema_for!(ConnectorRecoveryProgress),
         list_connector_tools_payload: schema_for!(ListConnectorToolsPayload),
@@ -146,6 +150,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("UiPreferences", &bundle.ui_preferences),
         ("DeleteSessionOutcome", &bundle.delete_session_outcome),
         ("ServeCommand", &bundle.serve_command),
+        (
+            "WebSearchSettingsPayload",
+            &bundle.web_search_settings_payload,
+        ),
         ("PreviewRewindResponse", &bundle.preview_rewind_response),
         ("SessionFilesResponse", &bundle.session_files_response),
         (

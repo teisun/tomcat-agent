@@ -1,7 +1,6 @@
 //! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认按配置进入 claw/code。
 
 mod audit_cmd;
-mod builtin_plugins;
 mod chat_cmd;
 mod claw_cmd;
 mod code_cmd;
@@ -624,6 +623,7 @@ pub fn run_cli() -> Result<(), AppError> {
     // Materialize before any connector registry can cache an empty configuration.
     // Log a failure only after the logging subscriber is installed below.
     let default_mcp = crate::core::connector::mcp::builtin::materialize_default_mcp_json(&cfg);
+    let builtin_plugins = crate::ext::plugin::builtin::materialize_builtin_plugins(&cfg);
 
     preload_runtime_env(&cfg)?;
 
@@ -640,6 +640,10 @@ pub fn run_cli() -> Result<(), AppError> {
 
     if let Err(error) = default_mcp {
         tracing::warn!(%error, "could not create default MCP configuration; continuing startup");
+    }
+
+    if let Err(error) = builtin_plugins {
+        tracing::warn!(%error, "could not materialize built-in plugins; continuing startup");
     }
 
     crate::infra::config::warn_ignored_config_keys(&ignored_keys);

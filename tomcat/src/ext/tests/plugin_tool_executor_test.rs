@@ -182,7 +182,11 @@ async fn retiring_shared_catalog_leaves_other_sessions_inflight_and_round_untouc
     )
     .unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest.clone(),
+            crate::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("drain", 1);
     let tool = make_tool("drain_tool", "drain");
@@ -208,7 +212,11 @@ async fn retiring_shared_catalog_leaves_other_sessions_inflight_and_round_untouc
     );
     fs::write(fixture.path().join("main.js"), "pi.registerTool({name:'drain_tool',parameters:{type:'object'},execute:function(){return {version:'new'};}});").unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest)
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest,
+            crate::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("drain", 2);
     registry.register_tool(tool.clone(), "drain").await.unwrap();

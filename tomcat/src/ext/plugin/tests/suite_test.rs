@@ -176,6 +176,10 @@ fn parse_manifest_roundtrips_required_secrets_and_allowed_hosts() {
         functions: vec![ManifestFunction {
             point: "web_search.backend".to_string(),
             function: "webSearchBackend".to_string(),
+            metadata: Some(serde_json::Map::from_iter([(
+                "fixture".into(),
+                true.into(),
+            )])),
         }],
         events: vec![],
         activation: PluginActivation::Lazy,
@@ -197,6 +201,10 @@ fn parse_manifest_roundtrips_required_secrets_and_allowed_hosts() {
     );
     assert_eq!(reparsed.functions.len(), 1);
     assert_eq!(reparsed.functions[0].point, "web_search.backend");
+    assert_eq!(
+        reparsed.functions[0].metadata.as_ref().unwrap()["fixture"],
+        true
+    );
 }
 
 #[test]
@@ -217,6 +225,37 @@ fn parse_manifest_missing_id_fails() {
     assert!(r.unwrap_err().to_string().contains("id"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_vm_checks_entry_against_the_registered_plugin_root() {
+    let fixture = plugin_fixture(
+        "entry-root",
+        serde_json::json!([]),
+        PluginActivation::Lazy,
+        "",
+    );
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("main.js"), "// outside fixture").unwrap();
+    std::os::unix::fs::symlink(outside.path(), fixture.path().join("dist")).unwrap();
+    let mut manifest =
+        parse_manifest(&std::fs::read_to_string(fixture.path().join("plugin.json")).unwrap())
+            .unwrap();
+    manifest.main = "dist/main.js".into();
+    let (manager, _, _, runtime) = manager_with_runtime();
+    manager
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest,
+            super::super::PluginSource::Managed,
+        )
+        .unwrap();
+    assert!(matches!(
+        manager.start_session_vm("test", "entry-root").await,
+        Err(AppError::Permission(_))
+    ));
+    assert_eq!(runtime.len(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
     let fixture = plugin_fixture(
@@ -230,7 +269,11 @@ async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
         parse_manifest(&std::fs::read_to_string(fixture.path().join("plugin.json")).unwrap())
             .unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest.clone(),
+            super::super::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("retiring", 1);
     let a = manager.start_session_vm("A", "retiring").await.unwrap();
@@ -250,7 +293,7 @@ async fn retire_plugin_preserves_other_sessions_and_birth_identity() {
         "retiring"
     );
     manager
-        .register_catalog_plugin(fixture.path(), manifest)
+        .register_catalog_plugin(fixture.path(), manifest, super::super::PluginSource::Agent)
         .unwrap();
     manager.set_catalog_fingerprint("retiring", 2);
     assert!(!manager.is_instance_current(&a.instance_id));
@@ -289,7 +332,11 @@ async fn retired_instance_cannot_borrow_replacement_authority_or_channels() {
         parse_manifest(&std::fs::read_to_string(fixture.path().join("plugin.json")).unwrap())
             .unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest.clone(),
+            super::super::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("replaced", 1);
     let old = manager.start_session_vm("A", "replaced").await.unwrap();
@@ -303,7 +350,7 @@ async fn retired_instance_cannot_borrow_replacement_authority_or_channels() {
     manifest.required_permissions = vec!["net:fetch".into()];
     manifest.allowed_hosts = vec!["example.com".into()];
     manager
-        .register_catalog_plugin(fixture.path(), manifest)
+        .register_catalog_plugin(fixture.path(), manifest, super::super::PluginSource::Agent)
         .unwrap();
     manager.set_catalog_fingerprint("replaced", 2);
     manager.stop_stale_session_vms("A").await.unwrap();
@@ -346,6 +393,9 @@ async fn retired_instance_cannot_borrow_replacement_authority_or_channels() {
     let live_older_manifest = manager.instance_manifest(&other_session.instance_id);
     let old_is_current = manager.is_instance_current(&old_id);
     let new_is_current = manager.is_instance_current(&replacement_id);
+    let new_can_use_saved_keys = manager.instance_can_use_saved_keys(&replacement_id);
+    let old_can_use_saved_keys = manager.instance_can_use_saved_keys(&old_id);
+    let other_can_use_saved_keys = manager.instance_can_use_saved_keys(&other_session.instance_id);
     let retired_wait = dispatcher
         .dispatch(
             &old_id,
@@ -387,6 +437,8 @@ async fn retired_instance_cannot_borrow_replacement_authority_or_channels() {
         "missing/replaced VM is never current"
     );
     assert!(new_is_current);
+    assert!(!old_can_use_saved_keys && !other_can_use_saved_keys);
+    assert!(new_can_use_saved_keys);
     assert!(retired_wait.ok);
     assert_eq!(retired_wait.data.unwrap()["type"], "__shutdown");
     assert_eq!(
@@ -444,6 +496,7 @@ fn manager_register_and_unload() {
             activation: PluginActivation::Lazy,
         },
         fingerprint: None,
+        source: super::super::PluginSource::Project,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -485,6 +538,7 @@ fn get_plugin_returns_some_after_register_none_for_unknown() {
             activation: PluginActivation::Lazy,
         },
         fingerprint: None,
+        source: super::super::PluginSource::Project,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -528,6 +582,7 @@ fn register_plugin_duplicate_returns_err() {
             activation: PluginActivation::Lazy,
         },
         fingerprint: None,
+        source: super::super::PluginSource::Project,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -560,6 +615,7 @@ fn register_plugin_duplicate_returns_err() {
             activation: PluginActivation::Lazy,
         },
         fingerprint: None,
+        source: super::super::PluginSource::Project,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
@@ -600,6 +656,7 @@ fn enable_disable_changes_status() {
             activation: PluginActivation::Lazy,
         },
         fingerprint: None,
+        source: super::super::PluginSource::Project,
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],

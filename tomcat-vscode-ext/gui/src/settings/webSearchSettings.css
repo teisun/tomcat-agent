@@ -1,0 +1,51 @@
+.tc-search-settings__rows {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+}
+
+.tc-search-settings__row { padding: 10px 12px; }
+
+.tc-search-settings__line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.tc-search-settings__rank, .tc-search-settings__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tc-search-settings__group h2 { color: var(--vscode-descriptionForeground); font-size: 0.90em; margin: 6px 0 0; }
+.tc-search-settings__rank { width: 96px; flex: 0 0 96px; flex-wrap: nowrap; }
+.tc-search-settings__rank > span { min-width: 2ch; text-align: center; }
+.tc-search-settings__line button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.tc-search-settings__actions { margin-inline-start: auto; }
+.tc-search-settings__key { display: inline-flex; align-items: center; gap: 6px; }
+.tc-session-dropdown.tc-search-settings__key-actions {
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background, Canvas));
+  inset: auto;
+  margin: 4px 0;
+  min-width: 0;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  position-area: block-end span-inline-start;
+  position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+}
+.tc-search-settings__key-actions .tc-session-item { padding-block: 8px; }
+.tc-search-settings__line .tc-search-settings__switch { padding: 4px; width: auto; border: 0; }
+.tc-search-settings__track { display: block; width: 30px; height: 16px; padding: 2px; border: 1px solid var(--vscode-input-border, #818181); border-radius: 999px; }
+.tc-search-settings__track::before { content: ""; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-descriptionForeground, #666); }
+.tc-search-settings__switch[aria-checked="true"] .tc-search-settings__track { background: var(--vscode-button-background, #007acc); border-color: var(--vscode-button-background, #007acc); }
+.tc-search-settings__switch[aria-checked="true"] .tc-search-settings__track::before { transform: translateX(14px); background: var(--vscode-button-foreground, white); }
+.tc-search-settings__edit { flex-wrap: wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .tc-search-settings__actions { margin-inline-start: 0; width: 100%; }
+  .tc-search-settings__line .tc-search-settings__switch { margin-left: auto; }
+}

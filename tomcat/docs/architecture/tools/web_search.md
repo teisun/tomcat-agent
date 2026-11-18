@@ -1,6 +1,8 @@
 # `web_search` 工具：多供应商检索、归一化与 OpenAI server-side 注入
 
-本文档是内置 **`web_search`** 工具的技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），与兄弟文档 [`web_fetch.md`](web_fetch.md) **拆为两份独立满额文档**——双工具协议、PR 节奏、风险表互不依赖；共享术语（`url` / `cache key` / `SSRF` 等）在两篇各自完整书写，便于单篇审阅、单篇冻结。
+**快速理解**：在 VS Code 打开「设置 → 工具 → 网页搜索」，打开你想用的服务、填 Key，再用上下箭头调整顺序。只开一家，就是指定该服务；开多家，才会在失败时按顺序尝试下一家。首次启动不需要手动运行 `tomcat init`。
+
+当前行为见 [§0](#0-当前实现启动配置与搜索)。其余章节保留早期 OpenSpec 方案与调研，仅供追溯；其中的 `autoOrder` 和旧配置不是现行行为。
 
 **文首声明（与 `read.md` 全篇闭环口吻不同）**：
 
@@ -9,7 +11,7 @@
 
 写作约定见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
 
-> **实现锚点校准（2026-06 重构后核对，落地时以此为准）**：本文起草后 `src/` 与参考仓库均有重构，以下锚点已漂移——
+> **历史校准记录（2026-06）**：以下描述当时的代码和设计变迁，不能作为当前实现依据。
 >
 > 1. **`tool_exec` 已从单文件升为目录模块**：`src/core/agent_loop/tool_exec/`。中央分发在 [`tool_exec/mod.rs::execute_tool_tuple_full`](../../../src/core/agent_loop/tool_exec/mod.rs) 的 `match tc.name.as_str()`；每个工具的处理函数放在 `tool_exec/branches/<tool>.rs`（形如 `handle_read` / `handle_bash`），并在 [`tool_exec/branches/mod.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs) 注册。**本文凡提「`tool_exec.rs` 加 `match "web_search"`」均指**：新增 `tool_exec/branches/web_search.rs`（`handle_web_search`）→ 在 `branches/mod.rs` 导出 → 在 `tool_exec/mod.rs` 的 match 增一臂。
 > 2. **工具配置类型已移位**：`src/infra/config/types.rs` → [`src/infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs)；聚合结构为 `ToolsConfig { read, write, bash }`（各 `Tools*Config` 子表）。`ToolsWebSearchConfig` 应作为新子表加进 `ToolsConfig`。
@@ -32,7 +34,7 @@
 
 ## 目录
 
-- [0. 插件后端总图（ASCII）](#0-插件后端总图ascii)
+- [0. 当前实现：启动、配置与搜索](#0-当前实现启动配置与搜索)
 - [1. 目标与设计原则](#1-目标与设计原则)
 - [2. 竞品 / 选型对比](#2-竞品--选型对比)
   - [2.1 检索工具的典型关切](#21-检索工具的典型关切)
@@ -59,96 +61,30 @@
 
 ---
 
-## 0. 插件后端总图（ASCII）
-
-下面这张图只描述**本期把 `web_search` 后端做成可扩展插件**新增的主链路：Rust 负责调度 / 归一化 / 缓存，官方 JS 插件负责具体 backend 逻辑，MiMo 是首个落地点。
+## 0. 当前实现：启动、配置与搜索
 
 ```text
-[安装 / 发现]
-tomcat init
-  └─ ensure_builtin_plugins()
-      └─ ~/.tomcat/plugins/web-search-backends/
-         ├─ plugin.json
-         │    functions = [{ point:"web_search.backend", function:"webSearchBackend" }]
-         ├─ main.js        # 运行时读取的单文件产物
-         ├─ src/           # 仓库内作者源码；安装后默认不分发
-         └─ README.md
+首次启动 CLI / Serve（无需 init）
+  └─ 安装内置搜索包：plugin.json + main.js + README.md
 
-宿主启动 / catalog refresh
-  └─ 扫描 scope > agent > global 三层 plugin roots
-      └─ FunctionRegistry["web_search.backend"]
-          └─ [当前 scope 的赢家 provider]
-             (同 point 按层 override；不会进入 ToolRegistry)
-
-
-[运行时主链路]
-Agent / LLM
-  └─ builtin tool: web_search(query,...)
-      └─ handle_web_search(..., session_id)
-          └─ WebSearchRuntime::search(args, session_id)
-              ├─ cache hit -> WebSearchOutput
-              └─ cache miss -> pick_backend(...)
-                  ├─ explicit openai   -> hosted path
-                ├─ explicit tavily   -> Plugin("tavily")
-                ├─ explicit brave    -> Plugin("brave")
-                ├─ explicit serper   -> Plugin("serper")
-                ├─ explicit mimo     -> Plugin("mimo")
-                  └─ auto
-                      ├─ hosted candidate
-                    └─ plugin slot (backend="auto" -> autoOrder)
-
-
-[插件后端路径]
-PluginWebSearchBackend
-  └─ PluginSearchInvoker        (core trait)
-      └─ ExtPluginSearchInvoker (ext impl)
-          └─ FunctionRegistry["web_search.backend"]
-              └─ PluginFunctionInvoker.execute(fn, params, session_id)
-                  └─ 插件 VM: webSearchBackend(params)
-                      ├─ params = {
-                      │    backend, query, count,
-                      │    freshness, country, language, domainFilter
-                      │  }
-                      ├─ backend == "mimo"
-                      │    └─ pi.createChatCompletion({
-                      │         model: "mimo-v2.5-pro",
-                      │         tools: [{ type:"web_search", ... }]
-                      │       })
-                    ├─ backend == "tavily/brave/serper"
-                    │    └─ pi.fetch({
-                    │         url, method, headers, body
-                    │       })
-                    └─ return {
-                           backend,
-                           hits,
-                           warnings,
-                           unsupported_backend?
-                         }
-
-
-[LLM bridge 增强]
-pi.createChatCompletion(...)
-  └─ HostApiDispatcher.do_chat
-      ├─ parse_chat_request 透传 tools
-      ├─ ChatMessage 保留 annotations
-      ├─ model != "default" 时走 LlmResolver
-      └─ resolver 把 mimo-* 路由到 MiMo provider
-
-
-[结果回流]
-MiMo choices[0].message.annotations[]
-  └─ JS 插件把 url_citation
-      -> { title, url, snippet, published_at }
-          └─ Rust build_output(...)
-              ├─ 丢弃缺 url hit
-              ├─ SSRF / domain filter / normalize
-              ├─ 写正确 output.backend
-              ├─ 缓存
-              └─ 返回统一 WebSearchOutput
+插件声明 ──→ 设置页显示服务、Key 状态、开关、尝试顺序
+                                     │ 保存有序名单
+                                     ▼
+web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按顺序逐项尝试
+                                     ├─ openai → 独立 Responses 请求
+                                     └─ 其他项 → 插件只执行指定后端
+                                                   │
+                  第一个正常响应（含空结果）←───────┘
+                          └─ 过滤、归一化、缓存
 ```
 
-**说人话**：Rust 现在负责“选谁跑、如何回退、如何过滤与缓存”；官方插件负责“具体后端怎么拿结果”。`webSearchBackend` 是宿主函数，不是给模型看的 tool；MiMo 走 `pi.createChatCompletion()`，Tavily/Brave/Serper 走 `pi.fetch()`，最后都回到统一 `hits[]`。
+- **首启即用**：启动会补齐内置搜索插件文件。即使用户已有其他插件的登记簿，内置插件也默认可见；登记簿明确禁用时仍不加载。
+- **谁能收到搜索词**：只有名单里的服务。单项就是指定；多项才会顺序回退。未保存名单（包括旧 `backend = "auto"`）时使用默认顺序：OpenAI 托管 → Tavily → Brave → Serper → MiMo → DeepSeek。DeepSeek 缺 Key 时跳过；已有名单不追加后端，旧的具体名称仍映射为单项名单。
+- **谁实现服务调用**：插件 `web_search.backend` 声明可用后端和依赖。HTTP 适配器用 `pi.fetch`，模型后端使用宿主传入的模型。当前聊天模型不决定搜索目标。
+- **Key 和顺序各管一件事**：保存 Key 不会启用后端。内置层和用户层插件可在声明的 HTTPS 域名上使用已保存的 Key；项目层和显式按路径加载的插件只能用 CLI 的显式环境变量，共享 Serve 不从继承环境找 Key。`{{secret:NAME}}` 只在请求头替换，搜索词所在的请求体原样发送。模型类后端仍由宿主代为调用模型。缓存区分实际可尝试顺序与凭据变更。
+- **实现入口**：[`builtin.rs`](../../../src/ext/plugin/builtin.rs)、[`declarations.rs`](../../../src/core/tools/web_search/declarations.rs)、[`mod.rs`](../../../src/core/tools/web_search/mod.rs)、[随包插件说明](../../../assets/plugins/web-search-backends/README.md)。
 
+下文保留早期 OpenSpec 方案和调研（其中 `autoOrder`、`backend`、各家 `*_base_url` 等描述是历史设计，不代表当前实现）。
 ---
 
 ## 1. 目标与设计原则

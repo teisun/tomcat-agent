@@ -6,60 +6,6 @@ use crate::infra::AppError;
 
 use super::types::{RawHit, WebSearchRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BackendName {
-    Openai,
-    Tavily,
-    Brave,
-    Serper,
-}
-
-impl BackendName {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Openai => "openai",
-            Self::Tavily => "tavily",
-            Self::Brave => "brave",
-            Self::Serper => "serper",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BackendMode {
-    Auto,
-    Openai,
-    Tavily,
-    Brave,
-    Serper,
-    Plugin(String),
-}
-
-impl BackendMode {
-    pub fn parse(raw: &str) -> Result<Self, AppError> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        match normalized.as_str() {
-            "" | "auto" => Ok(Self::Auto),
-            "openai" => Ok(Self::Openai),
-            "tavily" => Ok(Self::Tavily),
-            "brave" => Ok(Self::Brave),
-            "serper" => Ok(Self::Serper),
-            _ => Ok(Self::Plugin(normalized)),
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Auto => "auto",
-            Self::Openai => "openai",
-            Self::Tavily => "tavily",
-            Self::Brave => "brave",
-            Self::Serper => "serper",
-            Self::Plugin(name) => name.as_str(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct HostedCandidateModel {
     /// Tomcat catalog identifier, for diagnostics only.
@@ -69,6 +15,7 @@ pub struct HostedCandidateModel {
     pub api: String,
     pub provider: String,
     pub base_url: Option<String>,
+    pub key_env: String,
 }
 
 pub fn discover_hosted_candidate(catalog: &ModelCatalog) -> Option<HostedCandidateModel> {
@@ -78,50 +25,12 @@ pub fn discover_hosted_candidate(catalog: &ModelCatalog) -> Option<HostedCandida
         .find(|entry| entry.capabilities.web_search)
         .map(|entry| HostedCandidateModel {
             model_name: entry.request_model_name().to_string(),
+            key_env: crate::core::llm::admin::inferred_api_key_env(&entry),
             id: entry.id,
             api: entry.api,
             provider: entry.provider,
             base_url: entry.base_url,
         })
-}
-
-#[derive(Debug, Clone)]
-pub enum BackendPlan {
-    Auto {
-        hosted_candidate: Option<HostedCandidateModel>,
-        plugin_slot: bool,
-    },
-    ExplicitPlugin(String),
-    HostedOnly(HostedCandidateModel),
-}
-
-pub fn pick_backend(
-    backend: BackendMode,
-    hosted_candidate: Option<HostedCandidateModel>,
-) -> Result<BackendPlan, AppError> {
-    match backend {
-        BackendMode::Auto => Ok(BackendPlan::Auto {
-            hosted_candidate,
-            plugin_slot: true,
-        }),
-        BackendMode::Openai => hosted_candidate
-            .map(BackendPlan::HostedOnly)
-            .ok_or_else(|| {
-                AppError::Tool(
-                    "no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry".to_string(),
-                )
-            }),
-        BackendMode::Tavily => Ok(BackendPlan::ExplicitPlugin(
-            BackendName::Tavily.as_str().to_string(),
-        )),
-        BackendMode::Brave => Ok(BackendPlan::ExplicitPlugin(
-            BackendName::Brave.as_str().to_string(),
-        )),
-        BackendMode::Serper => Ok(BackendPlan::ExplicitPlugin(
-            BackendName::Serper.as_str().to_string(),
-        )),
-        BackendMode::Plugin(name) => Ok(BackendPlan::ExplicitPlugin(name)),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -158,30 +67,6 @@ impl BackendFailure {
         Self::MissingKey {
             env_name: env_name_for_provider(provider),
         }
-    }
-
-    pub fn is_retryable_unavailable(&self) -> bool {
-        matches!(
-            self,
-            Self::MissingKey { .. }
-                | Self::Incompatible { .. }
-                | Self::Unauthorized { .. }
-                | Self::RateLimited { .. }
-                | Self::ServerError { .. }
-                | Self::Timeout
-                | Self::Transport { .. }
-        )
-    }
-
-    pub fn is_explicit_degraded(&self) -> bool {
-        matches!(
-            self,
-            Self::Unauthorized { .. }
-                | Self::RateLimited { .. }
-                | Self::ServerError { .. }
-                | Self::Timeout
-                | Self::Transport { .. }
-        )
     }
 
     pub fn to_tool_error(&self, backend: &str) -> AppError {
@@ -226,35 +111,6 @@ impl BackendFailure {
                 &[("backend", backend), ("detail", detail)],
             )),
         }
-    }
-
-    pub fn explicit_degraded_warnings(&self, backend: &str) -> Vec<String> {
-        let mut warnings = vec![format!("backend_unavailable:{backend}")];
-        match self {
-            Self::RateLimited { status } | Self::ServerError { status } => warnings.push(format!(
-                "rate_limited (backend={},status={status})",
-                backend
-            )),
-            Self::Timeout => warnings.push(format!("timeout (backend={backend})")),
-            _ => {}
-        }
-        warnings
-    }
-
-    pub fn auto_fallback_warnings(&self, backend: &str, fallback: Option<&str>) -> Vec<String> {
-        let mut warnings = vec![match fallback {
-            Some(next) => format!("backend_unavailable:{}, fallback={}", backend, next),
-            None => format!("backend_unavailable:{backend}"),
-        }];
-        match self {
-            Self::RateLimited { status } | Self::ServerError { status } => warnings.push(format!(
-                "rate_limited (backend={},status={status})",
-                backend
-            )),
-            Self::Timeout => warnings.push(format!("timeout (backend={backend})")),
-            _ => {}
-        }
-        warnings
     }
 }
 

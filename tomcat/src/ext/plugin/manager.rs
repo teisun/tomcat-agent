@@ -66,7 +66,7 @@
 use super::types::{
     ConfirmPermissionsFn, PluginInfo, PluginInstance, PluginManifest, PluginStatus,
 };
-use super::FunctionRegistry;
+use super::{FunctionRegistry, PluginSource};
 use crate::core::ToolRegistry;
 use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
@@ -146,7 +146,15 @@ impl PluginManager {
 
     /// 从磁盘路径完整加载插件：读清单与 main → 权限校验（可选确认） → 创建插件 VM 实例 → 注册宿主 API → 执行初始化代码 → 注册到管理器。
     pub fn load_plugin(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
-        let path = path.as_ref();
+        self.load_plugin_from_layer(path.as_ref(), PluginSource::Project)
+    }
+
+    // Catalog activation has an already-resolved source; explicit path loading never does.
+    pub(crate) fn load_plugin_from_layer(
+        &self,
+        path: &Path,
+        source: PluginSource,
+    ) -> Result<(), AppError> {
         let (plugin_root, manifest) = match self.resolve_manifest_and_root(path) {
             Ok(t) => t,
             Err(e) => {
@@ -261,6 +269,7 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
+            source,
             fingerprint: self
                 .plugins
                 .read()
@@ -394,6 +403,7 @@ impl PluginManager {
         &self,
         plugin_root: impl AsRef<Path>,
         manifest: PluginManifest,
+        source: PluginSource,
     ) -> Result<(), AppError> {
         let plugin_root = crate::infra::platform::canonicalize(plugin_root.as_ref())
             .unwrap_or_else(|_| plugin_root.as_ref().to_path_buf());
@@ -409,6 +419,7 @@ impl PluginManager {
         let manifest_functions = manifest.functions.clone();
         let instance = PluginInstance {
             id: manifest.id.clone(),
+            source,
             fingerprint: None,
             manifest,
             plugin_vm_instance: None,
@@ -597,6 +608,31 @@ impl PluginManager {
             AppError::Plugin(tr("plugin.notConfigured", &[("field", "plugin_engine")]))
         })?;
 
+        let (plugin_root, entry, birth) = {
+            let map = self.plugins.read();
+            let inst = map.get(plugin_id).ok_or_else(|| {
+                AppError::Plugin(tr("plugin.registryMissing", &[("id", plugin_id)]))
+            })?;
+            (
+                inst.plugin_root.clone(),
+                inst.main_script_path(),
+                crate::ext::runtime_manager::VmBirth {
+                    fingerprint: inst.fingerprint,
+                    manifest: Arc::new(inst.manifest.clone()),
+                    source: inst.source,
+                },
+            )
+        };
+        // Check against the registered plugin root, not the entry's parent:
+        // a nested directory or the entry itself may resolve outside the plugin.
+        let script_path = crate::infra::platform::canonicalize(&entry)?;
+        if !script_path.starts_with(&plugin_root) {
+            return Err(AppError::Permission(tr(
+                "plugin.mainOutside",
+                &[("path", &script_path.display().to_string())],
+            )));
+        }
+
         let instance_id = format!("{session_id}/{}/{plugin_id}", uuid::Uuid::new_v4());
         let mut plugin_vm_instance = engine.create_instance(&instance_id)?;
 
@@ -623,23 +659,9 @@ impl PluginManager {
             dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
         }
 
-        let (plugin_root, birth) = {
-            let map = self.plugins.read();
-            let inst = map.get(plugin_id).ok_or_else(|| {
-                AppError::Plugin(tr("plugin.registryMissing", &[("id", plugin_id)]))
-            })?;
-            (
-                inst.main_script_path(),
-                crate::ext::runtime_manager::VmBirth {
-                    fingerprint: inst.fingerprint,
-                    manifest: Arc::new(inst.manifest.clone()),
-                },
-            )
-        };
-
         let handle = VmActor::spawn_with_startup(
             plugin_vm_instance,
-            plugin_root,
+            script_path,
             self.event_channel_capacity,
             Some(startup),
         );
@@ -834,7 +856,20 @@ impl PluginManager {
         self.plugin_runtime_manager
             .as_ref()
             .and_then(|runtime| runtime.birth_for_instance(instance_id))
-            .is_some_and(|birth| birth.fingerprint == current.fingerprint)
+            .is_some_and(|birth| {
+                birth.fingerprint == current.fingerprint && birth.source == current.source
+            })
+    }
+
+    pub(crate) fn instance_can_use_saved_keys(&self, instance_id: &str) -> bool {
+        // Bare IDs used by the legacy bootstrap do not prove which code is running.
+        // Only a concrete session VM carries the provenance of its own script.
+        self.plugin_runtime_manager
+            .as_ref()
+            .and_then(|runtime| runtime.birth_for_instance(instance_id))
+            .is_some_and(|birth| {
+                birth.source.can_use_saved_keys() && self.is_instance_current(instance_id)
+            })
     }
 
     pub fn instance_manifest(&self, instance_id: &str) -> Option<Arc<PluginManifest>> {

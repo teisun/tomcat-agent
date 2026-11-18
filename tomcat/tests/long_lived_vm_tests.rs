@@ -53,6 +53,7 @@ async fn concurrent_vm_start_is_single_flight() {
         .register_catalog_plugin(
             tmp.path(),
             parse_manifest(&make_manifest_json("single-flight")).unwrap(),
+            tomcat::ext::plugin::PluginSource::Project,
         )
         .unwrap();
     let manager = Arc::new(manager);
@@ -157,6 +158,7 @@ async fn full_event_queue_cleanup_still_stops_vm() {
         .register_catalog_plugin(
             tmp.path(),
             parse_manifest(&make_manifest_json("full-queue")).unwrap(),
+            tomcat::ext::plugin::PluginSource::Project,
         )
         .unwrap();
     let handle = manager
@@ -239,6 +241,7 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
         .as_millis() as i64;
     PluginInstance {
         id: id.to_string(),
+        source: tomcat::ext::plugin::PluginSource::Project,
         manifest,
         fingerprint: None,
         plugin_vm_instance: None,
@@ -429,7 +432,11 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
         std::fs::create_dir_all(&root)?;
         std::fs::write(root.join("plugin.json"), make_manifest_json(id))?;
         std::fs::write(root.join("index.js"), "pi.on('noop', function(){});")?;
-        mgr.register_catalog_plugin(&root, parse_manifest(&make_manifest_json(id))?)?;
+        mgr.register_catalog_plugin(
+            &root,
+            parse_manifest(&make_manifest_json(id))?,
+            tomcat::ext::plugin::PluginSource::Project,
+        )?;
         handles.push(mgr.start_session_vm("sess-x", id).await?);
     }
 

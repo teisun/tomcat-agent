@@ -98,23 +98,12 @@ auto_confirm = true
 max_bytes = 26214400
 
 [tools.web_search]
-# `auto` 会先尝试项目级 hosted web_search 模型；
-# 若没有可用 hosted 候选，则默认交给官方 `web-search-backends` 插件，
-# 再由插件内部 `autoOrder` 决定先试 tavily / brave / serper / mimo。
-backend = "auto"
-# 若想直接走官方插件里的 MiMo 后端，可改成：
-# backend = "mimo"
-# 若想直接点名插件里的 REST 后端，也可以写：
-# backend = "tavily"
-# backend = "brave"
-# backend = "serper"
-#
+# 按顺序尝试名单内的搜索后端，第一个正常返回即停止（包括空结果）。
+# 不写名单时，使用 OpenAI 托管搜索及插件声明的默认后端（含 DeepSeek）；缺 Key 的后端跳过。
+# backends = ["deepseek", "brave"]
+# 只用一个后端：backends = ["deepseek"]
+# 旧版 backend = "brave" 等同于只选 Brave；backend = "auto" 保持默认顺序。
+# 旧版后端专属 *_base_url 字段已移除，忽略并告警。
 count = 5
-# MiMo 通过 models.toml 里的 provider="mimo" 读取凭证：
-# export MIMO_API_KEY="your-mimo-api-key"
-# 插件里的 REST 后端通过 `pi.fetch` 读取凭证：
-# export TAVILY_API_KEY="your-tavily-api-key"
-# export BRAVE_API_KEY="your-brave-api-key"
-# export SERPER_API_KEY="your-serper-api-key"
-# 这些密钥不会进入 JS 沙箱明文，只能由插件 manifest 先报备后在 headers/body 中
-# 用 `{{secret:NAME}}` 占位符请求宿主注入。
+# Key 在「设置 → 工具 → 网页搜索」填写，或使用 `tomcat model key set <槽位>`。
+# 保存 Key 不会把后端加入名单；不要在本文件里填写 Key。

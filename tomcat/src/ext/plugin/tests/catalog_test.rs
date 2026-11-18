@@ -335,6 +335,23 @@ fn catalog_file_read_failure_isolated_to_entry() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn managed_catalog_refuses_an_entry_outside_its_plugin_root() {
+    let work = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    let root = work.path().join("plugins/demo");
+    write_plugin(&root, "demo", "managed");
+    fs::rename(root.join("index.js"), outside.path().join("index.js")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("index.js"), root.join("index.js")).unwrap();
+
+    let catalog = PluginCatalog::discover_host_root(&cfg).unwrap();
+    assert!(catalog.get("demo").is_none());
+    assert_eq!(catalog.diagnostics.len(), 1);
+}
+
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
     fs::write(root.join("index.js"), "// catalog fixture").unwrap();

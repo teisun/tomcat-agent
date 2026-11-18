@@ -8,6 +8,104 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+#[tokio::test]
+async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
+    let fx = ServiceFixture::new("http://127.0.0.1:1");
+    fx.configure(|cfg| cfg.tools.web_search.backend = "auto".into());
+    let managed_plugins = fx.0.home_path.join(".tomcat/plugins");
+    std::fs::create_dir_all(&managed_plugins).unwrap();
+    std::fs::write(
+        managed_plugins.join("registry.json"),
+        r#"{"plugins":[{"id":"another-plugin","enabled":true}]}"#,
+    )
+    .unwrap();
+    let override_cwd = tempfile::tempdir().unwrap();
+    let plugin = override_cwd.path().join(".agents/plugins/search-fixture");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("main.js"),
+        "/* settings must not start a plugin VM */",
+    )
+    .unwrap();
+    std::fs::write(plugin.join("plugin.json"), json!({
+        "id":"tomcat.web-search-backends", "name":"Fixture", "version":"1.0.0", "main":"main.js",
+        "description":"Project search fixture", "author":"tests", "requiredApiVersion":"1.0", "tags":[],
+        "functions":[{"point":"web_search.backend","function":"webSearchBackend","metadata":{
+            "backends":[{"id":"fixture","label":"Fixture","secret":"BRAVE_API_KEY","defaultAuto":true}]
+        }}]
+    }).to_string()).unwrap();
+    let info = output_json(
+        fx.command()
+            .env("BRAVE_API_KEY", "inherited-not-usable")
+            .args(["serve", "start"])
+            .output()
+            .unwrap(),
+    );
+    let mut first = Client::connect(&info).await;
+    let mut second = Client::connect(&info).await;
+    let request = |workspace: &Path| json!({"type":"web_search_settings","id":"settings","context":{"workspaceRoot":workspace}});
+    let initial = first.request(request(&fx.0.workspace)).await;
+    assert_eq!(initial["success"], true, "{initial}");
+    assert_eq!(
+        initial["payload"]["order"],
+        json!(["openai", "tavily", "brave", "serper", "mimo", "deepseek"])
+    );
+    let backend = |reply: &Value, id: &str| {
+        reply["payload"]["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(backend(&initial, "brave")["keySource"], Value::Null);
+    assert_eq!(backend(&initial, "brave")["canSaveKey"], true);
+    assert!(
+        tomcat::parse_manifest(&std::fs::read_to_string(plugin.join("plugin.json")).unwrap())
+            .is_ok()
+    );
+    let overridden = second.request(request(override_cwd.path())).await;
+    assert_eq!(
+        overridden["payload"]["order"],
+        json!(["openai", "fixture"]),
+        "{overridden}"
+    );
+    assert_eq!(backend(&overridden, "fixture")["canSaveKey"], false);
+    let saved = first.request(json!({"type":"set_web_search_routing","id":"route","context":{"workspaceRoot":fx.0.workspace},"backends":["brave"]})).await;
+    assert_eq!(saved["success"], true, "{saved}");
+    let key = first.request(json!({"type":"set_provider_key","id":"key","envName":"BRAVE_API_KEY","value":"synthetic-brave-key"})).await;
+    assert_eq!(key["success"], true, "{key}");
+    let fresh = second.request(request(&fx.0.workspace)).await;
+    assert_eq!(fresh["payload"]["order"], json!(["brave"]));
+    assert_eq!(backend(&fresh, "brave")["keySource"], "saved");
+    assert!(!fresh.to_string().contains("synthetic-brave-key"));
+    let overridden = second.request(request(override_cwd.path())).await;
+    assert_eq!(backend(&overridden, "fixture")["keySource"], Value::Null);
+    let refused = second
+        .request(json!({"type":"clear_provider_key","id":"shared","envName":"DEEPSEEK_API_KEY"}))
+        .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let cleared = first
+        .request(json!({"type":"clear_provider_key","id":"clear","envName":"BRAVE_API_KEY"}))
+        .await;
+    assert_eq!(cleared["payload"]["removed"], true, "{cleared}");
+    let invalid = first
+        .request(json!({"type":"set_web_search_routing","id":"bad","backends":["brave","brave"]}))
+        .await;
+    assert_eq!(invalid["success"], false, "{invalid}");
+    let mut restarted = Client::connect(&fx.action("restart")).await;
+    let persisted = restarted.request(request(&fx.0.workspace)).await;
+    assert_eq!(persisted["payload"]["order"], json!(["brave"]));
+    assert_eq!(persisted["payload"]["usingDefaults"], false);
+    assert_eq!(backend(&persisted, "brave")["keySource"], Value::Null);
+    let config = std::fs::read_to_string(fx.0.home_path.join(".tomcat/tomcat.config.toml"))
+        .unwrap()
+        .parse::<toml::Table>()
+        .unwrap();
+    assert!(config["tools"]["web_search"].get("backend").is_none());
+}
+
 #[test]
 fn stopping_one_private_service_leaves_the_other_instance_running() {
     let first = ServiceFixture::new("http://127.0.0.1:1");

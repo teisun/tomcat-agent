@@ -44,9 +44,11 @@ pub use load::{
     resolve_workspace_roots_paths, validate_config,
 };
 pub(crate) use load::{
-    load_config_with_ignored_keys, load_model_selection_config, warn_ignored_config_keys,
+    load_config_with_ignored_keys, load_model_selection_config, validate_search_backend_order,
+    warn_ignored_config_keys,
 };
 pub use lock::with_config_lock;
+pub(crate) use types::is_search_backend_id;
 pub use types::UiLanguage;
 #[allow(unused_imports)]
 pub use types::WorkspaceEntry;
@@ -77,10 +79,8 @@ pub use types::{
     DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS, DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS,
     DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES, DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS,
     DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS, DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS,
-    DEFAULT_TOOLS_WEB_SEARCH_BACKEND, DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL,
     DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY, DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS,
-    DEFAULT_TOOLS_WEB_SEARCH_COUNT, DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL,
-    DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS,
+    DEFAULT_TOOLS_WEB_SEARCH_COUNT, DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS,
     DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF, MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
     MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
 };

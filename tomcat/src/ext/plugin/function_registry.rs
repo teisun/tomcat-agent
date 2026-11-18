@@ -1,4 +1,4 @@
-use super::ManifestFunction;
+use super::{ManifestFunction, PluginSource};
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 pub struct RegisteredFunction {
     pub plugin_id: String,
     pub plugin_root: PathBuf,
+    pub source: PluginSource,
     pub point: String,
     pub function: String,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +39,7 @@ impl FunctionRegistry {
         plugin_id: &str,
         plugin_root: impl AsRef<Path>,
         functions: &[ManifestFunction],
+        source: PluginSource,
     ) {
         let plugin_root = canonicalize_or_keep(plugin_root.as_ref());
         self.remove_by_plugin(plugin_id);
@@ -48,8 +51,10 @@ impl FunctionRegistry {
                 .push(RegisteredFunction {
                     plugin_id: plugin_id.to_string(),
                     plugin_root: plugin_root.clone(),
+                    source,
                     point: function.point.clone(),
                     function: function.function.clone(),
+                    metadata: function.metadata.clone(),
                 });
         }
     }

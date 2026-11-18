@@ -18,11 +18,12 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Immutable manifest used by an existing VM even after its catalog entry changes.
+/// Immutable manifest and source used by an existing VM even after its catalog entry changes.
 #[derive(Clone)]
 pub struct VmBirth {
     pub fingerprint: Option<u64>,
     pub manifest: Arc<crate::ext::PluginManifest>,
+    pub source: crate::ext::plugin::PluginSource,
 }
 
 struct RuntimeEntry {

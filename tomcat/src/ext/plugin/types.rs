@@ -38,6 +38,8 @@ fn default_manifest_tool_parameters() -> Value {
 pub struct ManifestFunction {
     pub point: String,
     pub function: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +85,7 @@ pub enum PluginStatus {
 #[derive(Debug)]
 pub struct PluginInstance {
     pub id: String,
+    pub source: super::PluginSource,
     pub manifest: PluginManifest,
     /// Discovery fingerprint; None for explicitly loaded/non-catalog plugins.
     pub fingerprint: Option<u64>,
@@ -103,6 +106,7 @@ pub struct PluginInstance {
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     pub id: String,
+    pub source: super::PluginSource,
     pub manifest: PluginManifest,
     /// Discovery fingerprint; None for explicitly loaded/non-catalog plugins.
     pub fingerprint: Option<u64>,
@@ -130,6 +134,7 @@ impl PluginInstance {
     pub fn to_info(&self) -> PluginInfo {
         PluginInfo {
             id: self.id.clone(),
+            source: self.source,
             manifest: self.manifest.clone(),
             fingerprint: self.fingerprint,
             status: self.status,

@@ -90,6 +90,23 @@ fn assert_cold_start_management(initialized: bool) {
     child.send_value(&json!({"type": "list_models", "id": "cold-models"}));
     let models = child.recv_until(SERVE_TIMEOUT, |v| v["id"] == "cold-models");
     assert_eq!(models.last().unwrap()["success"], true);
+    let plugin = fx.home_path.join(".tomcat/plugins/web-search-backends");
+    for (name, bytes) in [
+        (
+            "plugin.json",
+            include_bytes!("../assets/plugins/web-search-backends/plugin.json").as_slice(),
+        ),
+        (
+            "main.js",
+            include_bytes!("../assets/plugins/web-search-backends/main.js").as_slice(),
+        ),
+        (
+            "README.md",
+            include_bytes!("../assets/plugins/web-search-backends/README.md").as_slice(),
+        ),
+    ] {
+        assert_eq!(std::fs::read(plugin.join(name)).unwrap(), bytes);
+    }
     // `tomcat init` writes the wizard's explicit choice; without init there is none.
     let written_default = before
         .as_deref()

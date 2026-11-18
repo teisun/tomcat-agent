@@ -1,9 +1,13 @@
-use super::super::{FunctionRegistry, ManifestFunction, RegisteredFunction};
+use super::super::{FunctionRegistry, ManifestFunction, PluginSource, RegisteredFunction};
 
 fn manifest_function(point: &str, function: &str) -> ManifestFunction {
     ManifestFunction {
         point: point.to_string(),
         function: function.to_string(),
+        metadata: Some(serde_json::Map::from_iter([(
+            "fixture".into(),
+            true.into(),
+        )])),
     }
 }
 
@@ -18,6 +22,7 @@ fn function_registry_groups_functions_by_point() {
             manifest_function("test.echo", "echo_host"),
             manifest_function("test.counter", "next_count"),
         ],
+        PluginSource::Agent,
     );
 
     let echo = registry.functions_for_point("test.echo");
@@ -26,6 +31,8 @@ fn function_registry_groups_functions_by_point() {
     assert_eq!(echo.len(), 1);
     assert_eq!(echo[0].plugin_id, "plugin-a");
     assert_eq!(echo[0].function, "echo_host");
+    assert_eq!(echo[0].metadata.as_ref().unwrap()["fixture"], true);
+    assert_eq!(echo[0].source, PluginSource::Agent);
     assert_eq!(counter.len(), 1);
     assert_eq!(counter[0].function, "next_count");
 }
@@ -41,6 +48,7 @@ fn function_registry_supports_same_plugin_multi_point() {
             manifest_function("test.echo", "echo_host"),
             manifest_function("test.echo.secondary", "echo_secondary"),
         ],
+        PluginSource::Agent,
     );
 
     assert_eq!(registry.functions_for_point("test.echo").len(), 1);
@@ -56,11 +64,13 @@ fn function_registry_direct_registration_allows_multiple_candidates_per_point() 
         "plugin-a",
         plugin_a_root.path(),
         &[manifest_function("test.echo", "echo_a")],
+        PluginSource::Project,
     );
     registry.register_plugin_functions(
         "plugin-b",
         plugin_b_root.path(),
         &[manifest_function("test.echo", "echo_b")],
+        PluginSource::Managed,
     );
 
     let functions = registry.functions_for_point("test.echo");
@@ -80,13 +90,16 @@ fn function_registry_replace_all_overwrites_previous_snapshot() {
         "plugin-a",
         plugin_root.path(),
         &[manifest_function("test.echo", "echo_a")],
+        PluginSource::Project,
     );
 
     registry.replace_all([RegisteredFunction {
         plugin_id: "winner-plugin".to_string(),
+        source: PluginSource::Project,
         plugin_root: plugin_root.path().to_path_buf(),
         point: "test.echo".to_string(),
         function: "winner_echo".to_string(),
+        metadata: None,
     }]);
 
     let functions = registry.functions_for_point("test.echo");
@@ -106,6 +119,7 @@ fn function_registry_remove_by_plugin_cleans_all_points() {
             manifest_function("test.echo", "echo_host"),
             manifest_function("test.counter", "next_count"),
         ],
+        PluginSource::Agent,
     );
 
     let removed = registry.remove_by_plugin("plugin-a");

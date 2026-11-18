@@ -220,14 +220,13 @@ pub(crate) fn read_env_value(env_name: &str) -> Option<String> {
     process_env_value(env_name)
 }
 
-fn process_env_value(env_name: &str) -> Option<String> {
-    if crate::infra::config::saved_configuration_only() {
-        return None;
-    }
-    if managed_credential_state()
-        .read()
-        .preloaded
-        .contains(env_name)
+/// Explicit caller environment; never the shared Serve starter's environment or preloaded .env.
+pub(crate) fn process_env_value(env_name: &str) -> Option<String> {
+    if crate::infra::config::saved_configuration_only()
+        || managed_credential_state()
+            .read()
+            .preloaded
+            .contains(env_name)
     {
         return None;
     }

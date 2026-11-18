@@ -8,7 +8,7 @@ use super::types::{WebSearchFreshness, WebSearchOutput, WebSearchRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    backend: String,
+    backends: Vec<(String, String, u64)>,
     query: String,
     count: usize,
     freshness: Option<String>,
@@ -20,9 +20,9 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
-    pub fn from_request(request: &WebSearchRequest) -> Self {
+    pub fn from_request(request: &WebSearchRequest, backends: Vec<(String, String, u64)>) -> Self {
         Self {
-            backend: request.backend.as_str().to_string(),
+            backends,
             query: request.query.clone(),
             count: request.count,
             freshness: request

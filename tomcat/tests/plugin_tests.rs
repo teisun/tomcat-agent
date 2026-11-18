@@ -253,6 +253,7 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
         .as_millis() as i64;
     let instance = PluginInstance {
         id: "p1".to_string(),
+        source: tomcat::ext::plugin::PluginSource::Project,
         manifest,
         fingerprint: None,
         plugin_vm_instance: None,

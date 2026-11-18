@@ -1,92 +1,18 @@
-# web-search-backends
+# Official web search backends
 
-Official host-function plugin that provides `web_search.backend` providers for Tomcat.
+Tomcat prepares this plugin at startup, including a fresh VS Code installation. `tomcat init` is not required. The managed copy lives at `<work_dir>/plugins/web-search-backends/`; Tomcat replaces changed bundle files there. Put custom copies in the project or agent plugin directory instead. Agent-layer copies can use saved keys; project-layer copies cannot, even if they use the same plugin ID.
 
-## Runtime contract
+## Choose where searches go
 
-- Request: `{ backend, query, count, freshness, country, language, domainFilter }`
-- Response: `{ backend, hits, warnings, unsupported_backend? }`
-- Installed into `~/.tomcat/plugins/web-search-backends/` by `tomcat init` when missing
-- Existing user-edited runtime files are never overwritten by `tomcat init`
+Open **Settings → Tools → Web Search**. Enable the providers you want and put your preferred provider first. Tomcat tries enabled providers in order, skips missing credentials, and stops at the first successful response, even if it has no results. Enable just one to use it exclusively. The default order is OpenAI hosted search (when configured), Tavily, Brave, Serper, MiMo, then DeepSeek. DeepSeek is skipped without a key. An existing saved list is not changed; if DeepSeek is off in that list, turn it on to use it.
 
-## Current backends
+DeepSeek uses the [official Search API](https://api-docs.deepseek.com/zh-cn/guides/search), separate from the active conversation model. Access and charges are governed by the DeepSeek API account, not inferred from a chat subscription. The configuration only stores provider IDs; keys use the same private store as model keys.
 
-- `mimo`: uses `pi.createChatCompletion()` with model `mimo-v2.5-pro`
-- `tavily`: uses `pi.fetch()` against `https://api.tavily.com/search`
-- `brave`: uses `pi.fetch()` against `https://api.search.brave.com/res/v1/web/search`
-- `serper`: uses `pi.fetch()` against `https://google.serper.dev/search`
+## Add or remove a provider
 
-## Auto order
+1. Implement one provider in `src/backends/<id>.js` and register it in `src/index.js`.
+2. Declare it in `plugin.json` at `functions[].metadata.backends` for the `web_search.backend` point. Use `id`, `label`, and either a catalog `model` or a `secret` slot. For REST providers declare `host`, and add the slot and host to `requiredSecrets` and `allowedHosts`. Set `defaultAuto` only if the provider should participate for users without a saved list.
+3. Rebuild `main.js` with `npm run build:web-search-backends` (or `tomcat plugin build assets/plugins/web-search-backends`). Test the bundle and rebuild the CLI to embed it.
+4. To remove a provider, reverse the source and manifest changes and rebuild. Unknown IDs left in users’ saved lists are skipped, not redirected to another plugin.
 
-```json
-["tavily", "brave", "serper", "mimo"]
-```
-
-The plugin owns this order. Host-side `backend=auto` hands control to the plugin slot, and the
-plugin decides which provider is tried first.
-
-## Source layout
-
-`main.js` is a generated runtime artifact. Edit the files under `src/` instead:
-
-```text
-web-search-backends/
-├── plugin.json
-├── README.md
-├── main.js          # generated artifact consumed at runtime
-└── src/
-    ├── config.js
-    ├── shared.js
-    ├── parsers.js
-    ├── index.js
-    └── backends/
-        ├── mimo.js
-        ├── tavily.js
-        ├── brave.js
-        └── serper.js
-```
-
-## Build workflow
-
-For the official builtin plugin in this repository:
-
-- `npm run build:web-search-backends`
-- or `cargo run --bin tomcat -- plugin build assets/plugins/web-search-backends`
-
-For third-party plugins:
-
-- prepare `<plugin-dir>/plugin.json`
-- place authoring sources under `<plugin-dir>/src/`
-- run `tomcat plugin build <plugin-dir>`
-- ship the generated `main.js` together with `plugin.json`
-
-The runtime still only loads `plugin.json.main` (typically `main.js`). It does not load `src/`
-directly and does not resolve relative ES module imports at runtime.
-
-## Authoring notes
-
-- `pi` is injected by the host at runtime as `globalThis.pi`
-- plugin source should **not** import `pi_bridge.js`
-- IDE hints come from `tomcat/assets/types/tomcat-plugin.d.ts`
-- an example TypeScript plugin lives at `tomcat/assets/plugins/examples/hello-plugin.ts`
-
-## Runtime requirements
-
-- manifest `requiredPermissions` includes `net:fetch`
-- manifest `requiredSecrets` includes `TAVILY_API_KEY`, `BRAVE_API_KEY`, `SERPER_API_KEY`
-- manifest `allowedHosts` includes `api.tavily.com`, `api.search.brave.com`, `google.serper.dev`
-
-## `pi.fetch` safety model
-
-- only `headers` and `body` values may contain `{{secret:NAME}}`
-- `url` and query string must not contain secrets
-- host must be in `allowedHosts`
-- only HTTPS is allowed
-- redirects are rejected by default
-- SSRF checks reject private, loopback, link-local, IP-literal, and single-label hosts
-
-## Migration note
-
-- `backend=auto` now hands control to this plugin when hosted search is unavailable
-- `backend=tavily|brave|serper|mimo` all resolve here by default
-- this plugin is now the only supported path for `tavily|brave|serper|mimo`
+The plugin handles one call `{ backend, model?, query, count, freshness, country, language, domainFilter }` and returns `{ hits, warnings, unsupported_backend? }`. Model-based providers use the supplied model, resolved by Tomcat. REST providers use `tomcat.fetch` with `{{secret:NAME}}` in a credential header. The host expands placeholders only in header values and leaves request bodies unchanged. Managed and agent-layer plugins may use saved keys at their declared HTTPS hosts; project or explicitly loaded plugins can only use explicit CLI environment variables. Shared Serve does not use inherited environment variables for credentials. The plugin does not route, retry other providers, or overwrite a user’s choice.

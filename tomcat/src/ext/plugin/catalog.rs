@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginSource {
     Project,
     Agent,
@@ -16,6 +16,11 @@ pub enum PluginSource {
 }
 
 impl PluginSource {
+    /// Project plugins are supplied by the workspace, not installed by the user.
+    pub(crate) fn can_use_saved_keys(self) -> bool {
+        matches!(self, Self::Agent | Self::Managed)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",
@@ -55,6 +60,21 @@ impl PluginCatalog {
         for (source, root) in plugin_roots(cfg, agent_workspace_dir)? {
             scan_root(&root, source, &mut catalog);
         }
+        Ok(catalog)
+    }
+
+    pub(crate) fn discover_without_project(cfg: &AppConfig) -> Result<Self, AppError> {
+        let mut catalog = Self::default();
+        scan_root(
+            &crate::resolve_agent_trail_dir(cfg)?.join("plugins"),
+            PluginSource::Agent,
+            &mut catalog,
+        );
+        scan_root(
+            &host_root_plugin_dir(cfg)?,
+            PluginSource::Managed,
+            &mut catalog,
+        );
         Ok(catalog)
     }
 
@@ -140,7 +160,14 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
 
         match read_catalog_entry(&manifest_path, &plugin_root, source) {
             Ok(catalog_entry) => {
-                if registry_filter.includes(&catalog_entry.manifest.id) {
+                // Bootstrap writes the bundled files, not the package registry.
+                // A valid registry may omit them; an explicit disable still wins.
+                let bundled = source == PluginSource::Managed
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name == super::builtin::DIRECTORY)
+                    && catalog_entry.manifest.id == super::builtin::ID;
+                if registry_filter.includes(&catalog_entry.manifest.id, bundled) {
                     catalog.insert_entry(catalog_entry);
                 }
             }
@@ -177,20 +204,34 @@ fn read_catalog_entry(
     plugin_root: &Path,
     source: PluginSource,
 ) -> Result<CatalogEntry, AppError> {
-    let manifest_json = std::fs::read_to_string(manifest_path).map_err(AppError::Io)?;
+    let normalized_root = crate::infra::platform::canonicalize(plugin_root)?;
+    let manifest_target = crate::infra::platform::canonicalize(manifest_path)?;
+    if !manifest_target.starts_with(&normalized_root) {
+        return Err(AppError::Permission(format!(
+            "Plugin manifest is outside its directory: {}",
+            manifest_target.display()
+        )));
+    }
+    let manifest_json = std::fs::read_to_string(&manifest_target)?;
     let manifest = parse_manifest(&manifest_json)?;
-    let script = std::fs::read(plugin_root.join(&manifest.main)).map_err(AppError::Io)?;
-    let normalized_root =
-        crate::infra::platform::canonicalize(plugin_root).map_err(AppError::Io)?;
+    let entry_target = crate::infra::platform::canonicalize(normalized_root.join(&manifest.main))?;
+    if !entry_target.starts_with(&normalized_root) {
+        return Err(AppError::Permission(tr(
+            "plugin.mainOutside",
+            &[("path", &entry_target.display().to_string())],
+        )));
+    }
+    let script = std::fs::read(&entry_target)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalized_root.hash(&mut hasher);
+    source.hash(&mut hasher);
     manifest_json.as_bytes().hash(&mut hasher);
     script.hash(&mut hasher);
     let fingerprint = hasher.finish();
     Ok(CatalogEntry {
         manifest,
         manifest_path: manifest_path.to_path_buf(),
-        plugin_root: plugin_root.to_path_buf(),
+        plugin_root: normalized_root,
         source,
         fingerprint,
     })
@@ -216,13 +257,15 @@ fn default_registry_plugin_enabled() -> bool {
 enum RegistryFilter {
     Absent,
     Present(BTreeMap<String, bool>),
+    Unreadable,
 }
 
 impl RegistryFilter {
-    fn includes(&self, plugin_id: &str) -> bool {
+    fn includes(&self, plugin_id: &str, bundled: bool) -> bool {
         match self {
             Self::Absent => true,
-            Self::Present(entries) => entries.get(plugin_id).copied().unwrap_or(false),
+            Self::Present(entries) => entries.get(plugin_id).copied().unwrap_or(bundled),
+            Self::Unreadable => false,
         }
     }
 }
@@ -240,7 +283,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
                 path: registry_path,
                 reason: tr("plugin.registryRead", &[("detail", &error.to_string())]),
             });
-            return RegistryFilter::Present(BTreeMap::new());
+            return RegistryFilter::Unreadable;
         }
     };
     let parsed: LayerPluginRegistryFile = match serde_json::from_str(&raw) {
@@ -251,7 +294,7 @@ fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFil
                 path: registry_path,
                 reason: tr("plugin.registryParse", &[("detail", &error.to_string())]),
             });
-            return RegistryFilter::Present(BTreeMap::new());
+            return RegistryFilter::Unreadable;
         }
     };
     let entries = parsed

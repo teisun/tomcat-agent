@@ -1960,6 +1960,34 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
+        ServeCommand::WebSearchSettings { id, context } => {
+            let workspace = connector_context_workspace_root(&context)?;
+            let settings = super::web_search_settings::read(&state, workspace.as_deref())?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                None,
+                Some(serde_json::to_value(settings)?),
+            )))?;
+        }
+        ServeCommand::SetWebSearchRouting {
+            id,
+            context,
+            backends,
+        } => {
+            let workspace = connector_context_workspace_root(&context)?;
+            super::web_search_settings::save_order(&state, workspace.as_deref(), backends)?;
+            state
+                .writer
+                .send(OutFrame::Response(ResponseFrame::ok(id, None, None)))?;
+        }
+        ServeCommand::ClearProviderKey { id, env_name } => {
+            let removed = crate::core::llm::admin::clear_provider_key(&state.cfg, &env_name)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                None,
+                Some(serde_json::json!({"removed": removed})),
+            )))?;
+        }
         ServeCommand::GetProjectTrust { id, path } => {
             let root = match ProjectTrustStore::root_for(std::path::Path::new(&path)) {
                 Ok(root) => root,

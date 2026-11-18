@@ -26,7 +26,7 @@ async function searchWithBrave(req) {
     warnings: warnings,
     request: {
       method: "GET",
-      url: providerBaseUrl(req, "braveBaseUrl", BRAVE_BASE_URL) + "/res/v1/web/search",
+      url: BRAVE_BASE_URL + "/res/v1/web/search",
       headers: {
         Accept: "application/json",
         "X-Subscription-Token": "{{secret:BRAVE_API_KEY}}"

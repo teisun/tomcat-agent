@@ -2,6 +2,7 @@
 //!
 //! PluginManifest、PluginInstance、PluginStatus、加载/启用/禁用/卸载及与 EventBus、ToolRegistry 的清理对接。
 
+pub(crate) mod builtin;
 mod catalog;
 mod function_registry;
 mod manager;

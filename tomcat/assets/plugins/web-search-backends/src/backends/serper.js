@@ -26,7 +26,7 @@ async function searchWithSerper(req) {
     warnings: warnings,
     request: {
       method: "POST",
-      url: providerBaseUrl(req, "serperBaseUrl", SERPER_BASE_URL) + "/search",
+      url: SERPER_BASE_URL + "/search",
       headers: {
         "Content-Type": "application/json",
         "X-API-KEY": "{{secret:SERPER_API_KEY}}"

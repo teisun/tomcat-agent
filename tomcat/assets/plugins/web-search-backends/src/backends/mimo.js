@@ -1,11 +1,14 @@
 async function searchWithMimo(req) {
+  if (typeof req.model !== "string" || !req.model) {
+    return { backend: "mimo", hits: [], warnings: ["mimo_requires_model"], unsupported_backend: true };
+  }
   var warnings = [];
   if (req.language) {
     warnings.push("mimo_ignores_language");
   }
 
-  var response = await pi.createChatCompletion({
-    model: MIMO_MODEL,
+  var response = await tomcat.createChatCompletion({
+    model: req.model,
     messages: [
       {
         role: "user",

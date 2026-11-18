@@ -615,10 +615,11 @@ acme-dev-kit/                      # package 根目录
 }
 ```
 
-如果插件声明了 `requiredPermissions: ["net:fetch"]`，运行时还要满足两条额外约束：
+如果插件声明了 `requiredPermissions: ["net:fetch"]`，运行时还要遵守以下规则：
 
 - `allowedHosts` 不能为空。它是宿主侧出网白名单，插件只能访问这里报备过的 host。
-- `requiredSecrets` 只声明“允许宿主注入哪些密钥名”，不等于把密钥明文发给插件。插件仍然只能在请求 `headers/body` 里通过 `{{secret:NAME}}` 占位符让宿主注入，`url/query` 不允许放 secret。
+- `requiredSecrets` 只声明宿主可以注入哪些密钥，不会把明文交给插件。`{{secret:NAME}}` 只在请求头的值里替换；请求体保留原文，URL 和查询参数拒绝占位符。
+- 内置层和用户层插件可以在其声明的 `allowedHosts` 内使用已保存的 Key；CLI 找不到已保存值时才查显式环境变量。项目层和显式按路径加载的插件只能使用 CLI 调用者显式设置的环境变量，不含从私有 `.env` 预加载的值。共享 Serve 不读取继承的环境变量作为凭据。安装用户层插件前，应核对其 `requiredSecrets` 和 `allowedHosts`。
 
 **说人话**：plugin manifest 现在不只是在描述“我有哪些 tool / function”，也在描述“我最多能连到哪、最多能拿哪些密钥”。这样宿主才能在 `pi.fetch` 这种高风险能力上做运行期闸门。
 

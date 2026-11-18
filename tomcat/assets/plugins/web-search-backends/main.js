@@ -2,27 +2,13 @@
 // Edit files under `src/` and rebuild.
 
 // --- src/config.js ---
-var MIMO_MODEL = "mimo-v2.5-pro";
 var TAVILY_BASE_URL = "https://api.tavily.com";
 var BRAVE_BASE_URL = "https://api.search.brave.com";
 var SERPER_BASE_URL = "https://google.serper.dev";
-var autoOrder = ["tavily", "brave", "serper", "mimo"];
 
 // --- src/shared.js ---
 function toArray(value) {
   return Array.isArray(value) ? value : [];
-}
-
-function cloneReq(req, backend) {
-  return Object.assign({}, req, { backend: backend });
-}
-
-function normalizeBaseUrl(raw, fallback) {
-  return String(raw || fallback).replace(/\/+$/, "");
-}
-
-function providerBaseUrl(req, key, fallback) {
-  return normalizeBaseUrl(req && req[key], fallback);
 }
 
 function normalizeQuery(raw) {
@@ -88,7 +74,7 @@ function parseJsonBody(raw, backend) {
 
 async function fetchJsonBackend(backend, req, options) {
   try {
-    var response = await pi.fetch(options.request);
+    var response = await tomcat.fetch(options.request);
     if (response && response.data && typeof response.data.status === "number") {
       response = response.data;
     }
@@ -97,12 +83,12 @@ async function fetchJsonBackend(backend, req, options) {
     }
     if (!response || typeof response.status !== "number") {
       throw new Error(
-        "web_search backend `" + backend + "` returned an invalid HTTP envelope: " +
-        JSON.stringify(response)
+        "web_search backend `" + backend + "` returned an invalid HTTP envelope"
       );
     }
     if (response.status < 200 || response.status >= 300) {
       throw new Error(
+        (options.statusMessages && options.statusMessages[response.status]) ||
         "web_search backend `" + backend + "` returned HTTP status " + response.status
       );
     }
@@ -292,7 +278,7 @@ async function searchWithBrave(req) {
     warnings: warnings,
     request: {
       method: "GET",
-      url: providerBaseUrl(req, "braveBaseUrl", BRAVE_BASE_URL) + "/res/v1/web/search",
+      url: BRAVE_BASE_URL + "/res/v1/web/search",
       headers: {
         Accept: "application/json",
         "X-Subscription-Token": "{{secret:BRAVE_API_KEY}}"
@@ -303,15 +289,77 @@ async function searchWithBrave(req) {
   });
 }
 
+// --- src/backends/deepseek.js ---
+function deepseekAfterDate(freshness) {
+  var days = { day: 1, week: 7, month: 30, year: 365 }[freshness];
+  if (!days) return null;
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
+
+function parseDeepSeekResponse(body) {
+  if (!body || !Array.isArray(body.results)) {
+    throw new Error("DeepSeek search response is missing a results array");
+  }
+  return body.results.filter(function (item) {
+    return item && typeof item.url === "string" && item.url.trim();
+  }).map(function (item) {
+    var snippet = typeof item.snippet === "string" ? item.snippet : "";
+    var summary = typeof item.summary === "string" ? item.summary : "";
+    return {
+      title: typeof item.title === "string" && item.title.trim() ? item.title : item.url,
+      url: item.url,
+      snippet: snippet || summary || null,
+      published_at: typeof item.date === "string" ? item.date : null
+    };
+  });
+}
+
+async function searchWithDeepSeek(req) {
+  var warnings = req.country ? ["deepseek_ignores_country"] : [];
+  var query = normalizeQuery(req.query).trim();
+  if (query) {
+    query = rewriteQueryWithDomainFilter(query, req.domainFilter);
+    if (req.language) query += " lang:" + req.language;
+    var after = deepseekAfterDate(req.freshness);
+    if (after) query += " after:" + after;
+  }
+  if (!query || Array.from(query).length > 128) {
+    return {
+      backend: "deepseek",
+      hits: [],
+      warnings: warnings.concat([query ? "deepseek_query_too_long" : "deepseek_query_empty"]),
+      unsupported_backend: true
+    };
+  }
+  return fetchJsonBackend("deepseek", req, {
+    secretName: "DEEPSEEK_API_KEY",
+    warnings: warnings,
+    statusMessages: { 402: "DeepSeek search: insufficient balance (HTTP 402)" },
+    request: {
+      method: "POST",
+      url: "https://api.deepseek.com/v1/tools/search",
+      headers: {
+        Authorization: "Bearer {{secret:DEEPSEEK_API_KEY}}",
+        "Content-Type": "application/json"
+      },
+      body: { query: query, count: normalizeCount(req.count), need_content: false }
+    },
+    parse: parseDeepSeekResponse
+  });
+}
+
 // --- src/backends/mimo.js ---
 async function searchWithMimo(req) {
+  if (typeof req.model !== "string" || !req.model) {
+    return { backend: "mimo", hits: [], warnings: ["mimo_requires_model"], unsupported_backend: true };
+  }
   var warnings = [];
   if (req.language) {
     warnings.push("mimo_ignores_language");
   }
 
-  var response = await pi.createChatCompletion({
-    model: MIMO_MODEL,
+  var response = await tomcat.createChatCompletion({
+    model: req.model,
     messages: [
       {
         role: "user",
@@ -369,7 +417,7 @@ async function searchWithSerper(req) {
     warnings: warnings,
     request: {
       method: "POST",
-      url: providerBaseUrl(req, "serperBaseUrl", SERPER_BASE_URL) + "/search",
+      url: SERPER_BASE_URL + "/search",
       headers: {
         "Content-Type": "application/json",
         "X-API-KEY": "{{secret:SERPER_API_KEY}}"
@@ -401,7 +449,7 @@ async function searchWithTavily(req) {
     warnings: warnings,
     request: {
       method: "POST",
-      url: providerBaseUrl(req, "tavilyBaseUrl", TAVILY_BASE_URL) + "/search",
+      url: TAVILY_BASE_URL + "/search",
       headers: {
         Authorization: "Bearer {{secret:TAVILY_API_KEY}}",
         "Content-Type": "application/json"
@@ -413,122 +461,22 @@ async function searchWithTavily(req) {
 }
 
 // --- src/index.js ---
-var backends = {
+var backends = Object.assign(Object.create(null), {
   mimo: searchWithMimo,
   tavily: searchWithTavily,
   brave: searchWithBrave,
-  serper: searchWithSerper
-};
-
-function nextAutoBackend(startIndex) {
-  for (var i = startIndex + 1; i < autoOrder.length; i += 1) {
-    if (typeof backends[autoOrder[i]] === "function") {
-      return autoOrder[i];
-    }
-  }
-  return null;
-}
-
-function isAutoRetryWarning(warning) {
-  return typeof warning === "string" &&
-    (warning.indexOf("__missing_key__:") === 0 || warning.indexOf("__unauthorized__:") === 0);
-}
-
-function translateAutoWarning(backend, warning) {
-  if (typeof warning !== "string") {
-    return "backend_unavailable:" + backend;
-  }
-  if (warning.indexOf("__missing_key__:") === 0) {
-    var secretName = warning.slice("__missing_key__:".length);
-    return "missing_key (backend=" + backend + ",secret=" + secretName + ")";
-  }
-  if (warning.indexOf("__unauthorized__:") === 0) {
-    var status = warning.slice("__unauthorized__:".length) || "401";
-    return "unauthorized (backend=" + backend + ",status=" + status + ")";
-  }
-  return warning;
-}
-
-function fallbackWarning(backend, nextBackend) {
-  if (nextBackend) {
-    return "backend_unavailable:" + backend + ", fallback=" + nextBackend;
-  }
-  return "backend_unavailable:" + backend;
-}
-
-function buildAutoFallbackWarnings(backend, nextBackend, responseWarnings, err) {
-  var warnings = [fallbackWarning(backend, nextBackend)];
-  var sourceWarnings = Array.isArray(responseWarnings) ? responseWarnings : [];
-  for (var i = 0; i < sourceWarnings.length; i += 1) {
-    warnings.push(translateAutoWarning(backend, sourceWarnings[i]));
-  }
-  if (err) {
-    warnings.push("plugin_backend_error (backend=" + backend + "): " + String(err));
-  }
-  return warnings;
-}
-
-function shouldRetryAutoResponse(response) {
-  if (!response || !Array.isArray(response.warnings)) {
-    return false;
-  }
-  for (var i = 0; i < response.warnings.length; i += 1) {
-    if (isAutoRetryWarning(response.warnings[i])) {
-      return true;
-    }
-  }
-  return false;
-}
+  serper: searchWithSerper,
+  deepseek: searchWithDeepSeek
+});
 
 async function dispatchBackend(req) {
-  var backend = req.backend || "auto";
-  if (backend === "auto") {
-    var warnings = [];
-    for (var i = 0; i < autoOrder.length; i += 1) {
-      var name = autoOrder[i];
-      if (typeof backends[name] === "function") {
-        var nextBackend = nextAutoBackend(i);
-        try {
-          var response = await backends[name](cloneReq(req, name));
-          if (shouldRetryAutoResponse(response)) {
-            warnings = warnings.concat(
-              buildAutoFallbackWarnings(name, nextBackend, response.warnings, null)
-            );
-            continue;
-          }
-          response = response || {};
-          response.warnings = warnings.concat(
-            Array.isArray(response.warnings) ? response.warnings : []
-          );
-          return response;
-        } catch (err) {
-          warnings = warnings.concat(
-            buildAutoFallbackWarnings(name, nextBackend, null, err)
-          );
-        }
-      }
-    }
-    return {
-      backend: "auto",
-      hits: [],
-      warnings: warnings,
-      unsupported_backend: true
-    };
-  }
-
+  var backend = req.backend;
   if (typeof backends[backend] !== "function") {
-    return {
-      backend: backend,
-      hits: [],
-      warnings: [],
-      unsupported_backend: true
-    };
+    return { backend: backend, hits: [], warnings: [], unsupported_backend: true };
   }
-
   return backends[backend](req);
 }
 
-pi.registerFunction("webSearchBackend", async function (params) {
-  params = params || {};
-  return dispatchBackend(params);
+tomcat.registerFunction("webSearchBackend", async function (params) {
+  return dispatchBackend(params || {});
 });

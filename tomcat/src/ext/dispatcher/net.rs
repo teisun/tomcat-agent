@@ -26,10 +26,9 @@ impl HostApiDispatcher {
         instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let plugin = self
-            .plugin_manager
+        let manager = self.plugin_manager.as_ref().and_then(|weak| weak.upgrade());
+        let plugin = manager
             .as_ref()
-            .and_then(|weak| weak.upgrade())
             .and_then(|manager| manager.instance_manifest(instance_id))
             .ok_or_else(|| {
                 fetch_error("dispatcher_unavailable", "pi.fetch runtime is unavailable")
@@ -45,9 +44,11 @@ impl HostApiDispatcher {
             ));
         }
 
-        let spec = parse_fetch_spec(params, &plugin.required_secrets)?;
+        let saved_keys =
+            manager.is_some_and(|manager| manager.instance_can_use_saved_keys(instance_id));
+        let spec = parse_fetch_spec(params, &plugin.required_secrets, saved_keys)?;
         let validated = validate_http_url(
-            &spec.url,
+            spec.url,
             UrlValidationOptions {
                 max_url_length: MAX_URL_LENGTH,
                 error_prefix: FETCH_ERROR_PREFIX,
@@ -130,15 +131,20 @@ impl HostApiDispatcher {
     }
 }
 
-struct FetchSpec {
+#[derive(Debug)]
+struct FetchSpec<'a> {
+    url: &'a str,
     method: Method,
-    url: String,
     headers: HeaderMap,
     query: Vec<(String, String)>,
     body: Option<String>,
 }
 
-fn parse_fetch_spec(params: &Value, required_secrets: &[String]) -> Result<FetchSpec, AppError> {
+fn parse_fetch_spec<'a>(
+    params: &'a Value,
+    required_secrets: &[String],
+    saved_keys: bool,
+) -> Result<FetchSpec<'a>, AppError> {
     let url = params
         .get("url")
         .and_then(Value::as_str)
@@ -146,10 +152,11 @@ fn parse_fetch_spec(params: &Value, required_secrets: &[String]) -> Result<Fetch
     if contains_secret_placeholder(url) {
         return Err(fetch_error(
             "forbidden_secret",
-            "pi.fetch only allows secret placeholders in headers/body",
+            "pi.fetch only expands secret placeholders in header values",
         ));
     }
 
+    let query = resolve_query(params.get("query"))?;
     let method_raw = params
         .get("method")
         .and_then(Value::as_str)
@@ -169,13 +176,17 @@ fn parse_fetch_spec(params: &Value, required_secrets: &[String]) -> Result<Fetch
         .filter(|name| !name.is_empty())
         .collect::<Vec<_>>();
 
-    let headers = resolve_headers(params.get("headers"), &required_secrets)?;
-    let query = resolve_query(params.get("query"))?;
-    let body = resolve_body(params.get("body"), &required_secrets)?;
+    let lookup = if saved_keys {
+        crate::core::llm::auth::read_env_value
+    } else {
+        crate::core::llm::auth::process_env_value
+    };
+    let headers = resolve_headers(params.get("headers"), &required_secrets, &lookup)?;
+    let body = resolve_body(params.get("body"))?;
 
     Ok(FetchSpec {
+        url,
         method,
-        url: url.to_string(),
         headers,
         query,
         body,
@@ -185,6 +196,7 @@ fn parse_fetch_spec(params: &Value, required_secrets: &[String]) -> Result<Fetch
 fn resolve_headers(
     raw: Option<&Value>,
     required_secrets: &[String],
+    lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<HeaderMap, AppError> {
     let Some(headers) = raw else {
         return Ok(HeaderMap::new());
@@ -203,19 +215,20 @@ fn resolve_headers(
                 format!("pi.fetch received invalid header name `{name}`"),
             )
         })?;
-        let resolved = resolve_secret_value(value, required_secrets)?;
-        let header_value = stringify_scalar(&resolved).ok_or_else(|| {
+        let raw = stringify_scalar(value).ok_or_else(|| {
             fetch_error(
                 "invalid_request",
                 format!("pi.fetch header `{name}` must be a string/number/bool/null"),
             )
         })?;
-        let header_value = HeaderValue::from_str(&header_value).map_err(|_| {
+        let expanded = resolve_secret_text(&raw, required_secrets, lookup)?;
+        let mut header_value = HeaderValue::from_str(&expanded).map_err(|_| {
             fetch_error(
                 "invalid_request",
                 format!("pi.fetch header `{name}` contains invalid bytes"),
             )
         })?;
+        header_value.set_sensitive(contains_secret_placeholder(&raw));
         out.insert(header_name, header_value);
     }
     Ok(out)
@@ -230,10 +243,10 @@ fn resolve_query(raw: Option<&Value>) -> Result<Vec<(String, String)>, AppError>
         .ok_or_else(|| fetch_error("invalid_request", "pi.fetch `query` must be a JSON object"))?;
     let mut out = Vec::new();
     for (name, value) in object {
-        if contains_secret_placeholder_in_value(value) {
+        if contains_secret_placeholder(name) || contains_secret_placeholder_in_value(value) {
             return Err(fetch_error(
                 "forbidden_secret",
-                "pi.fetch only allows secret placeholders in headers/body",
+                "pi.fetch only expands secret placeholders in header values",
             ));
         }
         match value {
@@ -264,18 +277,12 @@ fn resolve_query(raw: Option<&Value>) -> Result<Vec<(String, String)>, AppError>
     Ok(out)
 }
 
-fn resolve_body(
-    raw: Option<&Value>,
-    required_secrets: &[String],
-) -> Result<Option<String>, AppError> {
-    let Some(body) = raw else {
-        return Ok(None);
-    };
-    let resolved = resolve_secret_value(body, required_secrets)?;
-    match resolved {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text)),
-        other => serde_json::to_string(&other).map(Some).map_err(|err| {
+// Bodies may include untrusted query text. Leave placeholders literal for every source.
+fn resolve_body(raw: Option<&Value>) -> Result<Option<String>, AppError> {
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(other) => serde_json::to_string(other).map(Some).map_err(|err| {
             fetch_error(
                 "invalid_request",
                 format!("pi.fetch body serialize failed: {err}"),
@@ -284,26 +291,11 @@ fn resolve_body(
     }
 }
 
-fn resolve_secret_value(value: &Value, required_secrets: &[String]) -> Result<Value, AppError> {
-    match value {
-        Value::String(text) => resolve_secret_text(text, required_secrets).map(Value::String),
-        Value::Array(items) => items
-            .iter()
-            .map(|item| resolve_secret_value(item, required_secrets))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (key, item) in map {
-                out.insert(key.clone(), resolve_secret_value(item, required_secrets)?);
-            }
-            Ok(Value::Object(out))
-        }
-        _ => Ok(value.clone()),
-    }
-}
-
-fn resolve_secret_text(text: &str, required_secrets: &[String]) -> Result<String, AppError> {
+fn resolve_secret_text(
+    text: &str,
+    required_secrets: &[String],
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<String, AppError> {
     let mut result = String::new();
     let mut last = 0usize;
     for capture in SECRET_PLACEHOLDER_RE.captures_iter(text) {
@@ -319,10 +311,10 @@ fn resolve_secret_text(text: &str, required_secrets: &[String]) -> Result<String
                 serde_json::json!({ "secretName": secret_name }),
             ));
         }
-        let secret_value = read_env_value(secret_name).ok_or_else(|| {
+        let secret_value = lookup(secret_name).ok_or_else(|| {
             fetch_error_with_details(
                 "missing_secret",
-                format!("pi.fetch secret `{secret_name}` is not set in the environment"),
+                format!("pi.fetch secret `{secret_name}` is not available for this request"),
                 serde_json::json!({ "secretName": secret_name }),
             )
         })?;
@@ -332,13 +324,6 @@ fn resolve_secret_text(text: &str, required_secrets: &[String]) -> Result<String
     }
     result.push_str(&text[last..]);
     Ok(result)
-}
-
-fn read_env_value(env_name: &str) -> Option<String> {
-    std::env::var(env_name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn is_allowed_host(host: &str, allowed_hosts: &[String]) -> bool {

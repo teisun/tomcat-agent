@@ -141,6 +141,7 @@ type InstalledScenarioOptions = {
   runnerHome?: string;
   cliInstallFailure?: boolean;
   playwrightSmoke?: boolean;
+  webSearchSmoke?: boolean;
   upgradeFixture?: string;
   production?: { source: ProductionSource; bundle?: Awaited<ReturnType<typeof inspectReleaseVsix>> };
   artifactsDir: string;
@@ -255,6 +256,7 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
       testEnv.TOMCAT_ONBOARDING_BASE_URL = server.baseUrl;
       if (newUser) testEnv.TOMCAT_RELEASE_NEW_USER = "1";
       if (options.playwrightSmoke) testEnv.TOMCAT_RELEASE_MCP_SMOKE = "1";
+      if (options.webSearchSmoke) testEnv.TOMCAT_RELEASE_WEB_SEARCH = "1";
       if (upgrade) Object.assign(testEnv, { TOMCAT_RELEASE_UPGRADE_SESSION: upgrade.sessionId, TOMCAT_RELEASE_UPGRADE_PLAN: upgrade.planId, TOMCAT_SESSION_MODE: "claw", TOMCAT__LLM__TITLE_MODEL: "gpt-5.4", TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4" });
       for (const key of Object.keys(testEnv)) if (key.startsWith("TOMCAT_VSCODE_TEST_") || key.startsWith("TOMCAT_E2E_")) testEnv[key] = undefined;
       Object.assign(testEnv, { TOMCAT_VSCODE_TEST_DEFAULT_CWD: fixture.workspacePath, TOMCAT_EXPECT_RELEASE_BINARY: binary, TOMCAT_EXPECT_RELEASE_HOST_ARCH: process.arch, TOMCAT_EXPECT_RELEASE_CLI_SHA256: cliSha256, TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1" });
@@ -277,7 +279,7 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     }
 
     await fs.access(options.harnessTestsPath);
-    if (newUser && !options.playwrightSmoke && !cliDiscovery) {
+    if (newUser && !options.playwrightSmoke && !options.webSearchSmoke && !cliDiscovery) {
       // Phase A has neither a workspace argument nor the harness's fallback cwd.
       // Phase B below reuses this exact HOME and profile with a real folder.
       await runVsCodeGuiTests(runTests, {
@@ -303,8 +305,8 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     });
     if (server) {
       const requests = server.capturedNonTitleRequests();
-      if (cliDiscovery) {
-        if (server.capturedRequests().length !== 0) throw new Error("Discovery acceptance must not make any model request");
+      if (cliDiscovery || options.webSearchSmoke) {
+        if (server.capturedRequests().length !== 0) throw new Error("This acceptance scenario must not make model requests");
         await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: 0 }));
       } else {
       const expectedCount = mcpSmoke ? 1 + mcpSmoke.responses.length : options.upgradeFixture ? 5 : 7;
@@ -362,6 +364,7 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
 
 async function main(): Promise<void> {
   const playwrightSmoke = process.env.TOMCAT_RELEASE_MCP_SMOKE === "1";
+  const webSearchSmoke = process.env.TOMCAT_RELEASE_WEB_SEARCH === "1";
   const extensionRoot = path.resolve(__dirname, "..");
   const harnessRoot = path.resolve(extensionRoot, "e2e-harness");
   const cliDiscovery = process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1";
@@ -370,6 +373,7 @@ async function main(): Promise<void> {
   const productionSource = parseProductionSource(process.argv.slice(2).filter(arg => arg !== "--allow-runner-path"));
   if (cliDiscovery && (productionSource?.kind !== "bundle" || playwrightSmoke)) throw new Error("CLI discovery requires its own --release-bundle scenario");
   if (playwrightSmoke && productionSource?.kind !== "bundle") throw new Error("MCP smoke requires --release-bundle <current VSIX>");
+  if (webSearchSmoke && (productionSource?.kind !== "bundle" || playwrightSmoke || cliDiscovery)) throw new Error("Web Search smoke requires its own --release-bundle scenario");
   if (productionSource) {
     const bundle = productionSource.kind === "bundle" ? await inspectReleaseVsix(path.resolve(productionSource.value)) : undefined;
     if (productionSource.kind === "marketplace" && productionSource.value.split("@")[1] !== expectedRelease().version) throw new Error("Marketplace version must match this release");
@@ -383,7 +387,7 @@ async function main(): Promise<void> {
     const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR ?? path.join(extensionRoot, "../.agents/marketplace", expectedRelease().version, currentVsCodeTarget());
     await fs.mkdir(artifactsDir, { recursive: true });
     runCommand("npx", ["--no-install", "tsc", "-p", "e2e-harness/tsconfig.json"], { cwd: extensionRoot });
-    const options = { playwrightSmoke, extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
+    const options = { playwrightSmoke, webSearchSmoke, extensionRoot, harnessRoot, artifactsDir, harnessTestsPath: path.join(harnessRoot, "out/test/release-bundle.index.js"), testEnv: {}, workspacePath: os.tmpdir(), vsixPath: productionSource.kind === "bundle" ? path.resolve(productionSource.value) : productionSource.value, production: { source: productionSource, bundle } };
     if (cliDiscovery) {
       const runDiscovery = async (scenario: InstalledScenarioOptions) => {
         await runInstalledScenario(scenario);
@@ -404,7 +408,7 @@ async function main(): Promise<void> {
       return;
     }
     await runInstalledScenario(options);
-    if (playwrightSmoke) { console.log(`Real Playwright MCP evidence: ${artifactsDir}`); return; }
+    if (playwrightSmoke || webSearchSmoke) { console.log(`Native smoke evidence: ${artifactsDir}`); return; }
     // 0.1.90 never shipped for Windows, so there is no Windows data to upgrade.
     if (process.platform !== "win32") {
       const upgradeArtifacts = path.join(artifactsDir, "upgrade-v0.1.90");

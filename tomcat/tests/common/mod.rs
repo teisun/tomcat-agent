@@ -902,6 +902,7 @@ pub fn write_fake_executable(dir: &Path, name: &str, script: &str) -> std::path:
 
 pub struct HttpsTestServer {
     addr: std::net::SocketAddr,
+    request_headers: Arc<Mutex<Vec<String>>>,
     max_concurrency: Arc<AtomicUsize>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
@@ -935,6 +936,8 @@ impl HttpsTestServer {
         let max_concurrency = Arc::new(AtomicUsize::new(0));
         let task_current = Arc::clone(&current_concurrency);
         let task_max = Arc::clone(&max_concurrency);
+        let request_headers = Arc::new(Mutex::new(Vec::new()));
+        let task_headers = Arc::clone(&request_headers);
         let status_line = status_line.to_string();
         let task = tokio::spawn(async move {
             loop {
@@ -948,12 +951,22 @@ impl HttpsTestServer {
                         let status_line = status_line.clone();
                         let task_current = Arc::clone(&task_current);
                         let task_max = Arc::clone(&task_max);
+                        let task_headers = Arc::clone(&task_headers);
                         tokio::spawn(async move {
                             let Ok(mut tls_stream) = acceptor.accept(stream).await else {
                                 return;
                             };
-                            let mut request_buf = vec![0u8; 4096];
-                            let _ = tls_stream.read(&mut request_buf).await;
+                            let mut request = Vec::new();
+                            let mut buffer = [0; 1024];
+                            loop {
+                                let Ok(n) = tls_stream.read(&mut buffer).await else { return; };
+                                if n == 0 || request.len() + n > 16 * 1024 { return; }
+                                request.extend_from_slice(&buffer[..n]);
+                                if let Some(end) = request.windows(4).position(|chunk| chunk == b"\r\n\r\n") {
+                                    task_headers.lock().unwrap().push(String::from_utf8_lossy(&request[..end]).into_owned());
+                                    break;
+                                }
+                            }
                             let in_flight = task_current.fetch_add(1, Ordering::SeqCst) + 1;
                             task_max.fetch_max(in_flight, Ordering::SeqCst);
                             if !delay.is_zero() {
@@ -980,6 +993,7 @@ impl HttpsTestServer {
         });
         Self {
             addr,
+            request_headers,
             max_concurrency,
             shutdown_tx: Some(shutdown_tx),
             task,
@@ -995,6 +1009,10 @@ impl HttpsTestServer {
             .resolve(hostname, self.addr)
             .build()
             .expect("build https test client")
+    }
+
+    pub fn request_headers(&self) -> Vec<String> {
+        self.request_headers.lock().unwrap().clone()
     }
 
     pub fn max_concurrency(&self) -> usize {

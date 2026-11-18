@@ -442,7 +442,9 @@ fn web_search_registered() {
     assert!(entry.read_only);
     assert!(!entry.destructive);
     assert!(entry.description.contains("web_fetch"));
-    assert!(entry.description.contains("automatic fallback"));
+    assert!(entry
+        .description
+        .contains("enabled search backends in settings order"));
     assert!(entry.description.contains("source attribution"));
 
     let schema = (entry.parameters)();

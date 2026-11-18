@@ -44,6 +44,8 @@ describe("General language settings", () => {
     expect(screen.getByTestId("settings-language")).toBe(language);
     expect((screen.getByTestId("settings-nav-sessions") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("settings-nav-tools") as HTMLButtonElement).disabled).toBe(true);
+    await emit(ready({ capabilities: { ...ready().capabilities, webSearchSettings: true } }));
+    expect(screen.getByTestId("settings-nav-tools")).toHaveProperty("disabled", false);
   });
   it("keeps model forms mounted when the surrounding locale changes", async () => {
     const api = { postMessage: vi.fn() };

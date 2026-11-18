@@ -71,8 +71,10 @@ fn registered_function(
     RegisteredFunction {
         plugin_id: plugin_id.to_string(),
         plugin_root: plugin_dir.path().to_path_buf(),
+        source: crate::ext::plugin::PluginSource::Project,
         point: point.to_string(),
         function: function.to_string(),
+        metadata: None,
     }
 }
 
@@ -80,6 +82,7 @@ fn manifest_function(point: &str, function: &str) -> ManifestFunction {
     ManifestFunction {
         point: point.to_string(),
         function: function.to_string(),
+        metadata: None,
     }
 }
 
@@ -264,7 +267,11 @@ async fn net_fetch_uses_one_configured_client_across_session_bindings() {
     )
     .unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest)
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest,
+            crate::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     let sessions = Arc::new(crate::core::SessionManager::new(
         fixture.path().join("sessions"),
@@ -315,7 +322,11 @@ async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
     )
     .unwrap();
     manager
-        .register_catalog_plugin(fixture.path(), manifest.clone())
+        .register_catalog_plugin(
+            fixture.path(),
+            manifest.clone(),
+            crate::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("birth-fetch", 1);
     let old_handle = manager
@@ -339,7 +350,11 @@ async fn net_fetch_hostcall_uses_vm_birth_manifest_after_retire_and_update() {
     let mut updated = manifest;
     updated.required_permissions.clear();
     manager
-        .register_catalog_plugin(fixture.path(), updated)
+        .register_catalog_plugin(
+            fixture.path(),
+            updated,
+            crate::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     manager.set_catalog_fingerprint("birth-fetch", 2);
     let new_handle = manager
@@ -650,8 +665,10 @@ async fn plugin_function_invoker_requires_session_id() {
             &RegisteredFunction {
                 plugin_id: "plugin-a".to_string(),
                 plugin_root: plugin_dir.path().to_path_buf(),
+                source: crate::ext::plugin::PluginSource::Project,
                 point: "test.echo".to_string(),
                 function: "echo_host".to_string(),
+                metadata: None,
             },
             json!({}),
             None,
@@ -679,8 +696,10 @@ async fn plugin_function_invoker_errors_when_dispatcher_dropped() {
             &RegisteredFunction {
                 plugin_id: "plugin-a".to_string(),
                 plugin_root: plugin_dir.path().to_path_buf(),
+                source: crate::ext::plugin::PluginSource::Project,
                 point: "test.echo".to_string(),
                 function: "echo_host".to_string(),
+                metadata: None,
             },
             json!({}),
             Some("s1"),
@@ -809,6 +828,7 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
         "tomcat.web-search-backends",
         plugin_dir.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(plugin_dir.path())
@@ -824,6 +844,7 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
             ),
             json!({
                 "backend": "mimo",
+                "model": "mimo/mimo-v2.6-pro",
                 "query": "reqwest rust",
                 "count": 3,
                 "country": "us",
@@ -848,7 +869,7 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
     {
         let seen = calls.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, "mimo-v2.5-pro");
+        assert_eq!(seen[0].0, "mimo/mimo-v2.6-pro");
         assert_eq!(seen[0].1[0]["type"], json!("web_search"));
         assert_eq!(
             seen[0].1[0]["filters"]["allowed_domains"],
@@ -861,7 +882,7 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn official_web_search_backend_function_auto_uses_first_backend_from_config_order() {
+async fn official_web_search_backend_function_rejects_auto_dispatch() {
     let plugin_dir = builtin_web_search_backends_fixture_with_main_suffix(
         r#"
 searchWithMimo = async function (req) {
@@ -893,6 +914,7 @@ backends.tavily = searchWithTavily;
         "tomcat.web-search-backends",
         plugin_dir.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(plugin_dir.path())
@@ -916,18 +938,10 @@ backends.tavily = searchWithTavily;
         .await
         .expect("builtin web_search function call");
 
-    assert_eq!(result["backend"], "tavily");
-    assert_eq!(
-        result["hits"][0]["url"],
-        json!("https://tavily.example.com")
-    );
-    assert!(result["warnings"]
-        .as_array()
-        .expect("warnings array")
-        .iter()
-        .any(|warning| warning == "auto_prefers_tavily"));
-
     manager.end_session("s1").await.expect("end session");
+    assert_eq!(result["backend"], "auto");
+    assert_eq!(result["unsupported_backend"], true);
+    assert_eq!(result["hits"], json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -946,6 +960,7 @@ async fn official_web_search_backend_function_returns_missing_key_sentinel_for_t
         "tomcat.web-search-backends",
         plugin_dir.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(plugin_dir.path())
@@ -1056,6 +1071,7 @@ pi.fetch = async function () {
         "tomcat.web-search-backends",
         plugin_dir.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(plugin_dir.path())
@@ -1117,6 +1133,7 @@ pi.fetch = async function () {
         "tomcat.web-search-backends",
         plugin_dir.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager
         .load_plugin(plugin_dir.path())
@@ -1577,11 +1594,13 @@ pi.registerFunction("webSearchBackend", function (params) {
         "plugin-a",
         plugin_a.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     function_registry.register_plugin_functions(
         "plugin-b",
         plugin_b.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager.load_plugin(plugin_a.path()).expect("load plugin-a");
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
@@ -1638,11 +1657,13 @@ pi.registerFunction("webSearchBackend", function (params) {
         "plugin-a",
         plugin_a.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     function_registry.register_plugin_functions(
         "plugin-b",
         plugin_b.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager.load_plugin(plugin_a.path()).expect("load plugin-a");
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
@@ -1685,6 +1706,7 @@ pi.registerFunction("webSearchBackend", function () {
         "plugin-a",
         plugin_a.path(),
         &[manifest_function("web_search.backend", "webSearchBackend")],
+        crate::ext::plugin::PluginSource::Project,
     );
     manager.load_plugin(plugin_a.path()).expect("load plugin-a");
 

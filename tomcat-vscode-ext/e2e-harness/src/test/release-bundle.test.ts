@@ -228,7 +228,9 @@ async function assertCliInstallationAndLogs(api: Api, artifacts: string, failed:
 suite("Native installed release bundle", () => {
   test(process.env.TOMCAT_CLI_DISCOVERY_ACCEPTANCE === "1"
     ? "checks automatic user CLI installation and settings log access"
-    : "installs and runs the user CLI through real Serve, model, policy gates, stop and reload", async function () {
+    : process.env.TOMCAT_RELEASE_WEB_SEARCH === "1"
+      ? "prepares web search without init and persists settings in the installed VSIX"
+      : "installs and runs the user CLI through real Serve, model, policy gates, stop and reload", async function () {
     this.timeout(process.env.TOMCAT_RELEASE_MCP_SMOKE === "1" ? 600_000 : 240_000);
     const artifacts = required("TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR");
     const events: Event[] = [];
@@ -277,6 +279,80 @@ suite("Native installed release bundle", () => {
       }
       const firstPid = api.__testing.getServeProcessId();
       assert.ok(firstPid, "real Serve must be running before model configuration");
+      if (process.env.TOMCAT_RELEASE_WEB_SEARCH === "1") {
+        const pluginDir = path.join(path.dirname(configPath), "plugins", "web-search-backends");
+        for (const file of ["main.js", "plugin.json", "README.md"]) assert.ok((await fs.stat(path.join(pluginDir, file))).size > 0);
+        assert.equal(vscode.window.terminals.length, 0, "cold start must not launch init in a terminal");
+        const selector = '[data-testid="web-search-row-brave"]';
+        const fixtureKey = "isolated-search-fixture";
+        const open = async () => {
+          await vscode.commands.executeCommand("tomcat.openSettings", "tools");
+          return capture.SettingsFrameDriver.connectFromEnvironment(".tc-search-settings__rows");
+        };
+        const settings = await open();
+        try {
+          await settings.setViewport(1440, 900);
+          await settings.waitForSnapshot(s => s.text.includes("DeepSeek"), "Cold start exposes the bundled backends");
+          assert.equal(await settings.evaluate<string>(`document.querySelector('[data-testid="web-search-toggle-deepseek"]').getAttribute('aria-checked')`), "true");
+          await settings.capture(path.join(artifacts, "web-search-default.png"));
+          await settings.click("web-search-key-brave");
+          await settings.fill(`${selector} input[type=password]`, fixtureKey);
+          await settings.click("web-search-key-submit");
+          const saved = await settings.waitForSnapshot(s => s.text.includes("Key saved"), "Saved Key becomes visible without plaintext");
+          assert.ok(!saved.text.includes(fixtureKey));
+          await settings.click("web-search-toggle-tavily");
+          await settings.waitForSnapshot(s => s.text.includes("Tavily disabled"), "The new selection saves immediately");
+          await settings.evaluate(`document.querySelector('${selector} button[aria-label="Move Brave up"]').click()`);
+          await settings.waitForSnapshot(s => s.text.includes("Brave is now number 1"), "The new order saves immediately");
+          assert.equal(api.__testing.getServeProcessId(), firstPid);
+          await vscode.commands.executeCommand("workbench.action.closeSidebar");
+          await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+          await settings.setViewport(540, 900);
+          await settings.waitForSnapshot(s => s.viewport.width >= 320 && s.viewport.width <= 640,
+            "The settings iframe—not just the workbench—must be narrow and visible");
+          await settings.capture(path.join(artifacts, "web-search-configured-narrow.png"));
+          assert.equal(await settings.evaluate<boolean>("document.documentElement.scrollWidth <= innerWidth"), true, "Narrow settings must not scroll horizontally");
+        } finally { settings.close(); }
+        await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+        await api.__testing.restartServe();
+        const reopened = await open();
+        try {
+          await reopened.waitForSnapshot(s => s.text.includes("Key saved"), "Key status survives service restart");
+          assert.equal(await reopened.evaluate<string>(`document.querySelector('[data-testid="web-search-toggle-tavily"]').getAttribute('aria-checked')`), "false");
+          assert.equal(await reopened.evaluate<string>(`document.querySelector('${selector} .tc-search-settings__rank span').textContent`), "1");
+          await reopened.click("settings-nav-general");
+          await reopened.waitForSnapshot(s => s.text.includes("Interface language"), "General language setting appears");
+          await reopened.evaluate(`(() => {
+            const select = document.querySelector('[data-testid="settings-language"]');
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, 'zh-CN');
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+          })()`);
+          await reopened.waitForSnapshot(s => s.text.includes("已保存"), "Tomcat switches to Chinese on receipt");
+          await vscode.workspace.getConfiguration("workbench").update("colorTheme", "Default Light Modern", vscode.ConfigurationTarget.Global);
+          await reopened.click("settings-nav-tools");
+          await reopened.waitForSnapshot(s => s.text.includes("网页搜索") && s.text.includes("已保存 Key"), "The real search settings show Chinese labels and saved state");
+          await reopened.evaluate(`new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Missing VS Code light theme')); }, 5000);
+            const check = () => { if (document.body.classList.contains('vscode-light')) { clearTimeout(timer); observer.disconnect(); resolve(true); } };
+            const observer = new MutationObserver(check);
+            observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+            check();
+          })`);
+          await reopened.setViewport(1440, 980);
+          await reopened.capture(path.join(artifacts, "web-search-zh-light.png"));
+        } finally { reopened.close(); }
+        const config = await fs.readFile(configPath, "utf8");
+        assert.match(config, /backends\s*=/);
+        assert.ok(!config.includes(fixtureKey));
+        const credentialPath = path.join(path.dirname(configPath), "assets", ".env");
+        assert.ok((await fs.readFile(credentialPath, "utf8")).includes(`BRAVE_API_KEY=${fixtureKey}`));
+        if (process.platform !== "win32") assert.equal((await fs.stat(credentialPath)).mode & 0o077, 0);
+        const serviceLog = path.join(path.dirname(configPath), "agents", "main", "serve", "serve.log");
+        assert.ok(!(await fs.readFile(serviceLog, "utf8")).includes(fixtureKey));
+        assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
+        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", firstPid, coldStart: true }, null, 2));
+        return;
+      }
       assert.equal((await api.__testing.getSessionState(sessionId)).modelReady, false);
       assert.ok(!api.__testing.getPromptHistory().some(prompt => prompt.actions.includes("Start Setup")));
       assert.equal(vscode.window.terminals.length, 0, "cold start must not launch init in a terminal");

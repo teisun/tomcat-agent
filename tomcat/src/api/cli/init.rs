@@ -170,14 +170,15 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         }
     }
 
-    match crate::api::cli::builtin_plugins::ensure_builtin_plugins(&cfg)? {
-        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::Created => {
+    use crate::ext::plugin::builtin::{materialize_builtin_plugins, BuiltinPluginsStatus};
+    match materialize_builtin_plugins(&cfg)? {
+        BuiltinPluginsStatus::Created => {
             println!("{}", tr("cli.init.pluginInstalled", &[]))
         }
-        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::UpdatedExistingPlugin => {
+        BuiltinPluginsStatus::UpdatedExistingPlugin => {
             println!("{}", tr("cli.init.pluginUpdated", &[]))
         }
-        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::AlreadyPresent => {
+        BuiltinPluginsStatus::AlreadyPresent => {
             println!("{}", tr("cli.init.pluginPresent", &[]))
         }
     }

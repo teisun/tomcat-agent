@@ -663,6 +663,31 @@ pub fn set_provider_key(
     })
 }
 
+pub(crate) fn clear_provider_key(cfg: &AppConfig, env_name: &str) -> Result<bool, AppError> {
+    validate_api_key_env_name(env_name)?;
+    with_current_model_catalog(cfg, |catalog| {
+        if catalog
+            .entries_in_merge_order()
+            .iter()
+            .any(|entry| inferred_api_key_env(entry) == env_name)
+        {
+            return Err(AppError::Config(format!(
+                "{env_name} is used by a model; manage it in Settings → Models"
+            )));
+        }
+        let env_path = runtime_env_path(cfg)?;
+        with_file_lock(&env_lock_path(&env_path), || {
+            let mut vars = read_env_entries(&env_path)?;
+            let removed = vars.remove(env_name).is_some();
+            if removed {
+                write_env_entries(&env_path, &vars)?;
+            }
+            super::auth::refresh_managed_credentials_from_entries(&vars);
+            Ok(removed)
+        })
+    })
+}
+
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|raw| raw.trim().to_string())
@@ -684,7 +709,7 @@ fn validate_mutable_model_entry(entry: &ModelEntry) -> Result<(), AppError> {
     Ok(())
 }
 
-fn inferred_api_key_env(entry: &ModelEntry) -> String {
+pub(crate) fn inferred_api_key_env(entry: &ModelEntry) -> String {
     entry
         .api_key_env
         .clone()
@@ -838,7 +863,7 @@ fn validate_api_key_env_name(env_name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn is_valid_api_key_env_name(candidate: &str) -> bool {
+pub(crate) fn is_valid_api_key_env_name(candidate: &str) -> bool {
     let mut chars = candidate.chars();
     matches!(chars.next(), Some(ch) if ch.is_ascii_uppercase() || ch == '_')
         && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')

@@ -108,6 +108,7 @@ pub struct ChatContextOverrides {
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
     pub shared_model_prefs: Option<Arc<ModelPrefsStore>>,
+    pub(crate) search_order: Option<crate::core::tools::web_search::SearchOrder>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
@@ -650,10 +651,10 @@ impl ChatContext {
             Some(store) => store,
             None => build_model_prefs_store(&config)?,
         };
-        let web_search_runtime = Arc::new(crate::core::tools::web_search::WebSearchRuntime::new(
-            &config,
-            model_catalog.clone(),
-        )?);
+        let web_search_runtime = Arc::new(
+            crate::core::tools::web_search::WebSearchRuntime::new(&config, model_catalog.clone())?
+                .with_search_order(overrides.search_order.clone()),
+        );
         let web_fetch_runtime = Arc::new(crate::core::tools::web_fetch::WebFetchRuntime::new(
             &config,
             agent_trail_dir.join("tool-results"),
@@ -1524,7 +1525,7 @@ pub(super) fn materialize_host_functions_from_catalog(
     warnings
 }
 
-pub(super) fn collect_host_functions_from_catalog(
+pub(crate) fn collect_host_functions_from_catalog(
     catalog: &PluginCatalog,
 ) -> (Vec<RegisteredFunction>, Vec<String>) {
     #[derive(Debug)]
@@ -1535,6 +1536,7 @@ pub(super) fn collect_host_functions_from_catalog(
         plugin_root: std::path::PathBuf,
         point: String,
         function: String,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
     }
 
     let mut candidates = Vec::<HostFunctionCandidate>::new();
@@ -1547,6 +1549,7 @@ pub(super) fn collect_host_functions_from_catalog(
                 plugin_root: canonicalize_or_keep(&entry.plugin_root),
                 point: function.point.clone(),
                 function: function.function.clone(),
+                metadata: function.metadata.clone(),
             });
         }
     }
@@ -1557,17 +1560,18 @@ pub(super) fn collect_host_functions_from_catalog(
     });
 
     let mut warnings = Vec::new();
-    let mut winners =
-        std::collections::BTreeMap::<String, (PluginSource, RegisteredFunction)>::new();
+    let mut winners = std::collections::BTreeMap::<String, RegisteredFunction>::new();
     for candidate in candidates {
         let registered = RegisteredFunction {
             plugin_id: candidate.plugin_id.clone(),
             plugin_root: candidate.plugin_root.clone(),
+            source: candidate.source,
             point: candidate.point.clone(),
             function: candidate.function.clone(),
+            metadata: candidate.metadata,
         };
-        if let Some((winner_source, winner)) = winners.get(&candidate.point) {
-            let warning = if *winner_source == candidate.source {
+        if let Some(winner) = winners.get(&candidate.point) {
+            let warning = if winner.source == candidate.source {
                 format!(
                     "function_point_conflict:{}:{} shadowed_by {} (source={}, policy=first_wins)",
                     candidate.point,
@@ -1581,30 +1585,24 @@ pub(super) fn collect_host_functions_from_catalog(
                     candidate.point,
                     candidate.source.as_str(),
                     candidate.plugin_id,
-                    winner_source.as_str(),
+                    winner.source.as_str(),
                     winner.plugin_id
                 )
             };
             warnings.push(warning);
             continue;
         }
-        winners.insert(candidate.point.clone(), (candidate.source, registered));
+        winners.insert(candidate.point, registered);
     }
 
-    (
-        winners
-            .into_values()
-            .map(|(_, function)| function)
-            .collect(),
-        warnings,
-    )
+    (winners.into_values().collect(), warnings)
 }
 
 pub(super) fn register_catalog_entry(
     manager: &PluginManager,
     entry: &crate::ext::plugin::CatalogEntry,
 ) -> Result<Vec<Tool>, AppError> {
-    manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
+    manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone(), entry.source)?;
     manager.set_catalog_fingerprint(&entry.manifest.id, entry.fingerprint);
     Ok(entry
         .manifest
@@ -1638,7 +1636,10 @@ pub(super) async fn activate_session_plugins(
             worked = true;
             let pm = manager.clone();
             let root = info.plugin_root.clone();
-            match tokio::task::spawn_blocking(move || pm.load_plugin(&root)).await {
+            let source = info.source;
+            match tokio::task::spawn_blocking(move || pm.load_plugin_from_layer(&root, source))
+                .await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     warnings.push(format!("scope activation failed for {id}: {error}"))
@@ -1819,14 +1820,14 @@ fn build_plugin_runtime(
     let plugins_dir = resolve_plugins_dir(config)?;
     for entry in &config.plugin.auto_load {
         let configured = std::path::PathBuf::from(entry);
-        let load_path = if let Some(catalog_entry) = catalog.get(entry) {
-            catalog_entry.plugin_root.clone()
+        let (load_path, source) = if let Some(catalog_entry) = catalog.get(entry) {
+            (catalog_entry.plugin_root.clone(), catalog_entry.source)
         } else if configured.is_absolute() || configured.exists() {
-            configured
+            (configured, PluginSource::Project)
         } else {
-            plugins_dir.join(entry)
+            (plugins_dir.join(entry), PluginSource::Project)
         };
-        if let Err(err) = plugin_manager.load_plugin(&load_path) {
+        if let Err(err) = plugin_manager.load_plugin_from_layer(&load_path, source) {
             warn!(
                 plugin = %entry,
                 path = %load_path.display(),

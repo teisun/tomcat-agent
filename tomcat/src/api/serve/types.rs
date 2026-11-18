@@ -632,6 +632,27 @@ pub enum ServeCommand {
         id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    WebSearchSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default)]
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetWebSearchRouting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default)]
+        context: ConnectorContext,
+        backends: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClearProviderKey {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        env_name: String,
+    },
+    #[serde(rename_all = "camelCase")]
     GetProjectTrust {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -1009,6 +1030,9 @@ impl ServeCommand {
             | Self::SetDefaultModel { id, .. }
             | Self::SetUtilityModel { id, .. }
             | Self::ListProviderKeys { id, .. }
+            | Self::WebSearchSettings { id, .. }
+            | Self::SetWebSearchRouting { id, .. }
+            | Self::ClearProviderKey { id, .. }
             | Self::GetProjectTrust { id, .. }
             | Self::TrustProject { id, .. }
             | Self::ListConnectors { id, .. }
@@ -1090,6 +1114,9 @@ impl ServeCommand {
             | Self::SetDefaultModel { .. }
             | Self::SetUtilityModel { .. }
             | Self::ListProviderKeys { .. }
+            | Self::WebSearchSettings { .. }
+            | Self::SetWebSearchRouting { .. }
+            | Self::ClearProviderKey { .. }
             | Self::GetProjectTrust { .. }
             | Self::TrustProject { .. }
             | Self::ListConnectors { .. }
@@ -1161,6 +1188,9 @@ impl ServeCommand {
             Self::SetDefaultModel { .. } => "set_default_model",
             Self::SetUtilityModel { .. } => "set_utility_model",
             Self::ListProviderKeys { .. } => "list_provider_keys",
+            Self::WebSearchSettings { .. } => "web_search_settings",
+            Self::SetWebSearchRouting { .. } => "set_web_search_routing",
+            Self::ClearProviderKey { .. } => "clear_provider_key",
             Self::GetProjectTrust { .. } => "get_project_trust",
             Self::TrustProject { .. } => "trust_project",
             Self::ListConnectors { .. } => "list_connectors",

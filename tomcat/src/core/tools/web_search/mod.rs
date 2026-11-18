@@ -1,5 +1,6 @@
 pub(crate) mod backend;
 mod cache;
+pub mod declarations;
 pub mod openai_server;
 pub mod plugin_backend;
 pub mod types;
@@ -10,8 +11,13 @@ mod tests;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use parking_lot::RwLock;
+
+use crate::core::llm::auth::{
+    credential_generation, key_present_for_env, process_env_value, read_env_value,
+};
 use crate::core::llm::catalog::infer_default_base_url;
-use crate::core::llm::{env_name_for_provider, AuthStore, SharedModelCatalog};
+use crate::core::llm::{ModelCatalog, SharedModelCatalog};
 use crate::infra::http_client::{
     build_outbound_client, default_connect_timeout_for, OutboundClientErrorKind,
     OutboundClientOptions,
@@ -19,21 +25,81 @@ use crate::infra::http_client::{
 use crate::infra::{AppConfig, AppError, ToolsWebSearchConfig};
 
 use self::backend::{
-    discover_hosted_candidate, pick_backend, BackendFailure, BackendName, BackendPlan,
-    BackendSearchResponse, HostedCandidateModel, WebSearchBackend,
+    discover_hosted_candidate, BackendFailure, BackendSearchResponse, HostedCandidateModel,
+    WebSearchBackend,
 };
 use self::cache::{CacheKey, WebSearchCache};
+use self::declarations::{effective_order, BackendDeclaration, OPENAI};
 use self::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
 use self::types::{normalize_hits, Stats, WebSearchArgs, WebSearchOutput, WebSearchRequest};
+
+pub type SearchOrder = Arc<RwLock<Option<Vec<String>>>>;
 
 #[derive(Clone)]
 pub struct WebSearchRuntime {
     client: reqwest::Client,
     config: ToolsWebSearchConfig,
     model_catalog: SharedModelCatalog,
-    auth: AuthStore,
     cache: WebSearchCache,
     plugin_invoker: OnceLock<Arc<dyn PluginSearchInvoker>>,
+    order: SearchOrder,
+}
+
+enum SearchTarget<'a> {
+    Hosted(&'a HostedCandidateModel),
+    Plugin(&'a BackendDeclaration, String),
+}
+
+fn target_for<'a>(
+    id: &str,
+    hosted: Option<&'a HostedCandidateModel>,
+    declarations: &'a [BackendDeclaration],
+    catalog: &ModelCatalog,
+    saved_keys: bool,
+) -> Result<SearchTarget<'a>, BackendFailure> {
+    if id == OPENAI {
+        let candidate = hosted.ok_or_else(|| BackendFailure::Incompatible {
+            detail: "No hosted web_search model configured. Choose a model that supports hosted search in Settings → Models.".into(),
+        })?;
+        if candidate.api != "openai-responses" {
+            return Err(BackendFailure::Incompatible {
+                detail: format!(
+                    "Hosted web_search model {} is misconfigured or unavailable",
+                    candidate.id
+                ),
+            });
+        }
+        return if key_present_for_env(&candidate.key_env) {
+            Ok(SearchTarget::Hosted(candidate))
+        } else {
+            Err(BackendFailure::MissingKey {
+                env_name: candidate.key_env.clone(),
+            })
+        };
+    }
+    let declaration = declarations
+        .iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| BackendFailure::Incompatible {
+            detail: format!("backend_unknown:{id}. Check Settings → Tools → Web Search."),
+        })?;
+    let slot = declaration
+        .key_slot(catalog)
+        .ok_or_else(|| BackendFailure::Incompatible {
+            detail: format!(
+                "Search backend {id} requires model {}",
+                declaration.model.as_deref().unwrap_or_default()
+            ),
+        })?;
+    let present = if saved_keys || declaration.model.is_some() {
+        key_present_for_env(&slot)
+    } else {
+        process_env_value(&slot).is_some()
+    };
+    if !present {
+        return Err(BackendFailure::MissingKey { env_name: slot });
+    }
+    Ok(SearchTarget::Plugin(declaration, slot))
 }
 
 impl WebSearchRuntime {
@@ -46,11 +112,18 @@ impl WebSearchRuntime {
         Ok(Self {
             cache: WebSearchCache::new(&web_cfg),
             client,
+            order: Arc::new(RwLock::new(web_cfg.configured_backends())),
             config: web_cfg,
             model_catalog: model_catalog.into(),
-            auth: AuthStore,
             plugin_invoker: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn with_search_order(mut self, order: Option<SearchOrder>) -> Self {
+        if let Some(order) = order {
+            self.order = order;
+        }
+        self
     }
 
     pub fn set_plugin_invoker(&self, invoker: Arc<dyn PluginSearchInvoker>) {
@@ -63,36 +136,88 @@ impl WebSearchRuntime {
         session_id: &str,
     ) -> Result<WebSearchOutput, AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
-        let cache_key = CacheKey::from_request(&request);
-        if let Some(mut cached) = self.cache.get(&cache_key) {
-            cached.stats.cached = true;
-            return Ok(cached);
-        }
-
         let catalog = self.model_catalog.snapshot();
-        let hosted_candidate = discover_hosted_candidate(&catalog);
-        let plan = pick_backend(request.backend.clone(), hosted_candidate)?;
-        let output = match plan {
-            BackendPlan::Auto {
-                hosted_candidate,
-                plugin_slot,
-            } => {
-                self.execute_auto(&request, hosted_candidate, plugin_slot, session_id)
-                    .await?
-            }
-            BackendPlan::ExplicitPlugin(backend) => {
-                self.execute_explicit_plugin(&request, &backend, session_id)
-                    .await?
-            }
-            BackendPlan::HostedOnly(candidate) => {
-                self.execute_explicit_openai(&request, &candidate).await?
-            }
-        };
-
-        if should_cache(&output) {
-            self.cache.insert(cache_key, output.clone());
+        let invoker = self.plugin_invoker.get();
+        let declarations = invoker
+            .map(|invoker| invoker.backend_declarations())
+            .unwrap_or_default();
+        let order = effective_order(self.order.read().as_deref(), &declarations);
+        let hosted = order
+            .iter()
+            .any(|id| id == OPENAI)
+            .then(|| discover_hosted_candidate(&catalog))
+            .flatten();
+        let saved_keys = invoker.is_some_and(|invoker| invoker.winner_can_use_saved_keys());
+        let targets: Vec<_> = order
+            .iter()
+            .map(|id| target_for(id, hosted.as_ref(), &declarations, &catalog, saved_keys))
+            .collect();
+        let available = order
+            .iter()
+            .zip(&targets)
+            .filter_map(|(id, target)| {
+                let slot = match target.as_ref().ok()? {
+                    SearchTarget::Hosted(model) => &model.key_env,
+                    SearchTarget::Plugin(_, slot) => slot,
+                };
+                Some((id.clone(), slot.clone(), credential_generation(slot)))
+            })
+            .collect();
+        let cache_key = CacheKey::from_request(&request, available);
+        if let Some(mut output) = self.cache.get(&cache_key) {
+            output.stats.cached = true;
+            return Ok(output);
         }
-        Ok(output)
+        let mut failures = Vec::new();
+        let start = Instant::now();
+        let timeout = Duration::from_millis(self.config.timeout_ms);
+        for (id, target) in order.iter().zip(targets) {
+            let result = match target {
+                Err(failure) => Err(failure),
+                Ok(target) => tokio::time::timeout(timeout, async {
+                    match target {
+                        SearchTarget::Hosted(candidate) => {
+                            self.execute_hosted(&request, candidate).await
+                        }
+                        SearchTarget::Plugin(declaration, _) => {
+                            let invoker = invoker.expect("declarations require a plugin invoker");
+                            PluginWebSearchBackend::new(invoker.clone(), id.as_str(), session_id)
+                                .with_model(declaration.model.clone())
+                                .search(&request)
+                                .await
+                        }
+                    }
+                })
+                .await
+                .unwrap_or(Err(BackendFailure::Timeout)),
+            };
+            match result {
+                Ok(response) => {
+                    let mut output = build_output(&request, id, response, start);
+                    for warning in output.warnings.drain(..) {
+                        if !failures.contains(&warning) {
+                            failures.push(warning);
+                        }
+                    }
+                    output.warnings = failures;
+                    if !output.hits.is_empty() || !output.truncated {
+                        self.cache.insert(cache_key, output.clone());
+                    }
+                    return Ok(output);
+                }
+                Err(failure) => {
+                    let error = failure.to_tool_error(id);
+                    if order.len() == 1 {
+                        return Err(error);
+                    }
+                    failures.push(format!("backend_unavailable:{id} ({error})"));
+                }
+            }
+        }
+        Err(AppError::Tool(crate::infra::i18n::tr(
+            "search.allUnavailableDetails",
+            &[("query", &request.query), ("details", &failures.join("; "))],
+        )))
     }
 
     #[cfg(test)]
@@ -102,142 +227,29 @@ impl WebSearchRuntime {
         value: WebSearchOutput,
     ) -> Result<(), AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
-        self.cache.insert(CacheKey::from_request(&request), value);
+        self.cache
+            .insert(CacheKey::from_request(&request, Vec::new()), value);
         Ok(())
     }
 
-    async fn execute_auto(
-        &self,
-        request: &WebSearchRequest,
-        hosted_candidate: Option<HostedCandidateModel>,
-        plugin_slot: bool,
-        session_id: &str,
-    ) -> Result<WebSearchOutput, AppError> {
-        let mut warnings = Vec::new();
-        let hosted_present = hosted_candidate.is_some();
-        let first_fallback = if plugin_slot { Some("auto") } else { None };
-
-        if let Some(candidate) = hosted_candidate {
-            match self.execute_openai_hosted(request, &candidate).await {
-                Ok(output) => return Ok(output),
-                Err(failure) => {
-                    // Auto means "try every configured backend". A malformed hosted request
-                    // must be visible in warnings, but must not prevent a configured plugin
-                    // fallback from answering the user.
-                    extend_unique(
-                        &mut warnings,
-                        failure
-                            .auto_fallback_warnings(BackendName::Openai.as_str(), first_fallback),
-                    );
-                }
-            }
-        }
-
-        if plugin_slot {
-            if self.plugin_invoker.get().is_none() {
-                warnings.push("backend_unavailable:auto (plugin invoker not configured)".into());
-            } else {
-                match self
-                    .execute_plugin_backend(request, "auto", session_id)
-                    .await
-                {
-                    Ok(mut output) => {
-                        prepend_unique(&mut output.warnings, warnings);
-                        return Ok(output);
-                    }
-                    Err(failure @ BackendFailure::PluginRuntime { .. }) => {
-                        // `auto` here is the plugin's own provider-selection slot. A runtime
-                        // failure means the plugin host itself is broken, not that a particular
-                        // provider is unavailable; flattening it into "all unavailable" hides
-                        // an actionable integration defect.
-                        return Err(log_hard_failure("auto", failure.to_tool_error("auto")));
-                    }
-                    Err(failure) => {
-                        extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
-                    }
-                }
-            }
-        }
-
-        if !hosted_present && !plugin_slot {
-            return Err(AppError::Tool(
-                "no web_search backend configured".to_string(),
-            ));
-        }
-        warnings.push("all_backends_unavailable".to_string());
-        Err(all_backends_unavailable_error(&request.query, &warnings))
-    }
-
-    async fn execute_explicit_plugin(
-        &self,
-        request: &WebSearchRequest,
-        backend: &str,
-        session_id: &str,
-    ) -> Result<WebSearchOutput, AppError> {
-        if self.plugin_invoker.get().is_none() {
-            return Err(plugin_invoker_missing_error());
-        }
-        match self
-            .execute_plugin_backend(request, backend, session_id)
-            .await
-        {
-            Ok(output) => Ok(output),
-            Err(failure) => Err(log_hard_failure(backend, failure.to_tool_error(backend))),
-        }
-    }
-
-    async fn execute_explicit_openai(
+    async fn execute_hosted(
         &self,
         request: &WebSearchRequest,
         candidate: &HostedCandidateModel,
-    ) -> Result<WebSearchOutput, AppError> {
-        match self.execute_openai_hosted(request, candidate).await {
-            Ok(output) => Ok(output),
-            Err(BackendFailure::Incompatible { .. }) => Err(log_hard_failure(
-                BackendName::Openai.as_str(),
-                AppError::Tool(format!(
-                    "hosted web_search model {} is misconfigured or unavailable",
-                    candidate.id
-                )),
-            )),
-            Err(failure) => Err(log_hard_failure(
-                BackendName::Openai.as_str(),
-                failure.to_tool_error(BackendName::Openai.as_str()),
-            )),
-        }
-    }
-
-    async fn execute_openai_hosted(
-        &self,
-        request: &WebSearchRequest,
-        candidate: &HostedCandidateModel,
-    ) -> Result<WebSearchOutput, BackendFailure> {
-        if candidate.api.trim() != "openai-responses" {
-            return Err(BackendFailure::Incompatible {
-                detail: format!(
-                    "hosted web_search model {} is misconfigured or unavailable",
-                    candidate.id
-                ),
-            });
-        }
-
-        let credential = self
-            .auth
-            .get_for_provider(&candidate.provider, None, None)
-            .map_err(|_| BackendFailure::MissingKey {
-                env_name: env_name_for_provider(&candidate.provider),
+    ) -> Result<BackendSearchResponse, BackendFailure> {
+        let credential =
+            read_env_value(&candidate.key_env).ok_or_else(|| BackendFailure::MissingKey {
+                env_name: candidate.key_env.clone(),
             })?;
         let base_url = candidate
             .base_url
             .clone()
             .or_else(|| infer_default_base_url(Some(candidate.provider.as_str())))
-            .unwrap_or_else(|| "https://api.openai.com".to_string());
-
-        let start = Instant::now();
-        let raw = match openai_server::search_openai_hosted(
+            .unwrap_or_else(|| "https://api.openai.com".into());
+        match openai_server::search_openai_hosted(
             &self.client,
             &base_url,
-            &credential.value,
+            &credential,
             &candidate.model_name,
             request,
         )
@@ -246,74 +258,48 @@ impl WebSearchRuntime {
             Err(BackendFailure::InvalidRequest { detail, .. })
                 if looks_like_unsupported_hosted_tool(&detail) =>
             {
-                return Err(BackendFailure::Incompatible {
+                Err(BackendFailure::Incompatible {
                     detail: format!(
-                        "hosted web_search model {} is misconfigured or unavailable",
+                        "Hosted web_search model {} is misconfigured or unavailable",
                         candidate.id
                     ),
-                });
+                })
             }
-            other => other?,
-        };
-        Ok(self.build_output(request, BackendName::Openai.as_str(), raw, start))
-    }
-
-    async fn execute_plugin_backend(
-        &self,
-        request: &WebSearchRequest,
-        backend: &str,
-        session_id: &str,
-    ) -> Result<WebSearchOutput, BackendFailure> {
-        let invoker =
-            self.plugin_invoker
-                .get()
-                .cloned()
-                .ok_or_else(|| BackendFailure::Incompatible {
-                    detail: crate::infra::i18n::tr("search.invokerMissing", &[]),
-                })?;
-        let start = Instant::now();
-        let raw = PluginWebSearchBackend::new(invoker, backend, session_id)
-            .search(request)
-            .await?;
-        Ok(self.build_output(request, backend, raw, start))
-    }
-
-    fn build_output(
-        &self,
-        request: &WebSearchRequest,
-        default_backend: &str,
-        backend_response: BackendSearchResponse,
-        start: Instant,
-    ) -> WebSearchOutput {
-        let BackendSearchResponse {
-            backend_label,
-            raw_hits,
-            warnings,
-        } = backend_response;
-        let mut normalized = normalize_hits(
-            raw_hits,
-            request.count,
-            &request.allowed_domains,
-            &request.blocked_domains,
-        );
-        prepend_unique(&mut normalized.warnings, warnings);
-        WebSearchOutput {
-            query: request.query.clone(),
-            hits: normalized.hits,
-            backend: backend_label.unwrap_or_else(|| default_backend.to_string()),
-            stats: Stats {
-                elapsed_ms: elapsed_ms(start),
-                cached: false,
-                total_before_filter: normalized.total_before_filter,
-            },
-            truncated: normalized.truncated,
-            warnings: normalized.warnings,
+            result => result,
         }
     }
 }
 
-fn plugin_invoker_missing_error() -> AppError {
-    AppError::Tool(crate::infra::i18n::tr("search.invokerMissing", &[]))
+fn build_output(
+    request: &WebSearchRequest,
+    id: &str,
+    response: BackendSearchResponse,
+    start: Instant,
+) -> WebSearchOutput {
+    let normalized = normalize_hits(
+        response.raw_hits,
+        request.count,
+        &request.allowed_domains,
+        &request.blocked_domains,
+    );
+    let mut warnings = response.warnings;
+    for warning in normalized.warnings {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
+    WebSearchOutput {
+        query: request.query.clone(),
+        hits: normalized.hits,
+        backend: id.to_owned(),
+        stats: Stats {
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            cached: false,
+            total_before_filter: normalized.total_before_filter,
+        },
+        truncated: normalized.truncated,
+        warnings,
+    }
 }
 
 fn build_web_search_http_client(
@@ -329,50 +315,6 @@ fn build_web_search_http_client(
         OutboundClientErrorKind::Llm,
         &crate::infra::i18n::tr("search.client", &[]),
     )
-}
-
-fn elapsed_ms(start: Instant) -> u64 {
-    start.elapsed().as_millis() as u64
-}
-
-fn should_cache(output: &WebSearchOutput) -> bool {
-    !(output
-        .warnings
-        .iter()
-        .any(|warning| warning == "all_backends_unavailable")
-        || (output.hits.is_empty() && output.truncated))
-}
-
-fn log_hard_failure(backend: &str, error: AppError) -> AppError {
-    tracing::error!(backend, detail = %error, "web_search backend hard failure");
-    error
-}
-
-fn all_backends_unavailable_error(query: &str, warnings: &[String]) -> AppError {
-    if warnings.is_empty() {
-        return AppError::Tool(crate::infra::i18n::tr(
-            "search.allUnavailable",
-            &[("query", query)],
-        ));
-    }
-    AppError::Tool(crate::infra::i18n::tr(
-        "search.allUnavailableDetails",
-        &[("query", query), ("details", &warnings.join("; "))],
-    ))
-}
-
-fn prepend_unique(target: &mut Vec<String>, prefix: Vec<String>) {
-    let mut merged = prefix;
-    extend_unique(&mut merged, target.clone());
-    *target = merged;
-}
-
-fn extend_unique(target: &mut Vec<String>, extra: Vec<String>) {
-    for warning in extra {
-        if !target.iter().any(|existing| existing == &warning) {
-            target.push(warning);
-        }
-    }
 }
 
 fn looks_like_unsupported_hosted_tool(detail: &str) -> bool {

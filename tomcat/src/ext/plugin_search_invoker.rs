@@ -5,6 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::tools::web_search::backend::BackendFailure;
+use crate::core::tools::web_search::declarations::{
+    parse_declarations, BackendDeclaration, SEARCH_POINT,
+};
 use crate::core::tools::web_search::plugin_backend::PluginSearchInvoker;
 use crate::ext::{FunctionRegistry, PluginFunctionInvoker};
 
@@ -27,6 +30,22 @@ impl ExtPluginSearchInvoker {
 
 #[async_trait]
 impl PluginSearchInvoker for ExtPluginSearchInvoker {
+    fn backend_declarations(&self) -> Vec<BackendDeclaration> {
+        let winner = self
+            .functions
+            .functions_for_point(SEARCH_POINT)
+            .into_iter()
+            .next();
+        parse_declarations(winner.as_ref().and_then(|entry| entry.metadata.as_ref()))
+    }
+
+    fn winner_can_use_saved_keys(&self) -> bool {
+        self.functions
+            .functions_for_point(SEARCH_POINT)
+            .first()
+            .is_some_and(|winner| winner.source.can_use_saved_keys())
+    }
+
     async fn search(
         &self,
         backend: &str,
@@ -35,7 +54,7 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
     ) -> Result<serde_json::Value, BackendFailure> {
         let Some(provider) = self
             .functions
-            .functions_for_point("web_search.backend")
+            .functions_for_point(SEARCH_POINT)
             .into_iter()
             .next()
         else {

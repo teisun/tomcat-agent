@@ -12,11 +12,9 @@ use crate::ext::PluginEngine;
 use crate::infra::i18n::{tr_in, Locale};
 use crate::infra::AppConfig;
 
-use super::super::backend::{
-    discover_hosted_candidate, pick_backend, BackendFailure, BackendMode, BackendPlan,
-    WebSearchBackend,
-};
+use super::super::backend::{discover_hosted_candidate, BackendFailure, WebSearchBackend};
 use super::super::cache::CacheKey;
+use super::super::declarations::{parse_declarations, BackendDeclaration};
 use super::super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
 use super::super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
 use super::super::types::{normalize_hits, RawHit, WebSearchArgs};
@@ -42,6 +40,20 @@ impl RecordingPluginInvoker {
 
 #[async_trait]
 impl PluginSearchInvoker for RecordingPluginInvoker {
+    fn backend_declarations(&self) -> Vec<BackendDeclaration> {
+        ["tavily", "brave", "mimo"]
+            .into_iter()
+            .map(|id| BackendDeclaration {
+                id: id.into(),
+                label: id.into(),
+                secret: Some("TEST_WEB_SEARCH_KEY".into()),
+                model: None,
+                host: None,
+                default_auto: true,
+            })
+            .collect()
+    }
+
     async fn search(
         &self,
         backend: &str,
@@ -217,52 +229,79 @@ fn plugin_js_normalize_count_allows_twenty_results() {
 }
 
 #[test]
-fn plugin_js_auto_backend_falls_through_after_retryable_warning() {
+fn deepseek_request_maps_filters_and_counts_unicode_points() {
     let actual = eval_plugin_script_value(
         r#"
 var calls = [];
-backends.mimo = async function (req) {
-  calls.push(req.backend);
-  return {
-    backend: "mimo",
-    hits: [],
-    warnings: ["__missing_key__:MIMO_API_KEY"]
-  };
+Date.now = function () { return Date.parse('2026-11-18T03:25:00Z'); };
+tomcat.fetch = async function (request) {
+  calls.push(request);
+  return { status: 200, body: '{"results":[]}' };
 };
-backends.tavily = async function (req) {
-  calls.push(req.backend);
-  return {
-    backend: "tavily",
-    hits: [{ title: "Reqwest", url: "https://docs.rs/reqwest", snippet: "HTTP client" }],
-    warnings: []
-  };
-};
-backends.brave = async function (req) {
-  calls.push(req.backend);
-  return { backend: "brave", hits: [], warnings: [] };
-};
-backends.serper = async function (req) {
-  calls.push(req.backend);
-  return { backend: "serper", hits: [], warnings: [] };
-};
-return {
-  calls: calls,
-  result: await dispatchBackend({ backend: "auto", query: "reqwest", count: 20 })
-};
+var empty = await dispatchBackend({backend: 'deepseek', query: 'Rust', domainFilter: ['docs.rs'], language: 'en', country: 'US', freshness: 'week'});
+await dispatchBackend({backend: 'deepseek', query: '🌱'.repeat(128)});
+var tooLong = await dispatchBackend({backend: 'deepseek', query: '🌱'.repeat(129)});
+return {calls: calls, empty: empty, tooLong: tooLong};
 "#,
     );
-    assert_eq!(actual["calls"], json!(["tavily"]));
-    assert_eq!(actual["result"]["backend"], json!("tavily"));
+    assert_eq!(actual["calls"].as_array().unwrap().len(), 2);
+    let request = &actual["calls"][0];
+    assert_eq!(request["url"], "https://api.deepseek.com/v1/tools/search");
     assert_eq!(
-        actual["result"]["hits"][0]["url"],
-        json!("https://docs.rs/reqwest")
+        request["headers"]["Authorization"],
+        "Bearer {{secret:DEEPSEEK_API_KEY}}"
     );
-    assert!(
-        actual["result"]["warnings"]
-            .as_array()
-            .expect("warnings array")
-            .is_empty(),
-        "tavily is first in autoOrder, so auto should not fall through first: {actual}"
+    assert_eq!(
+        request["body"],
+        json!({"query": "(Rust) (site:docs.rs) lang:en after:2026-11-11", "count": 5, "need_content": false})
+    );
+    assert_eq!(actual["empty"]["hits"], json!([]));
+    assert_eq!(
+        actual["empty"]["warnings"],
+        json!(["deepseek_ignores_country"])
+    );
+    assert_eq!(
+        actual["tooLong"]["warnings"],
+        json!(["deepseek_query_too_long"])
+    );
+}
+
+#[test]
+fn deepseek_maps_hits_and_rejects_billing_and_malformed_responses() {
+    let actual = eval_plugin_script_value(
+        r#"
+var replies = [
+  { status: 200, body: JSON.stringify({results: [null, {title:'no url'}, {url:17}, {url:'  '},
+    {title:42, url:'https://rust-lang.org', snippet:'', summary:'Language', date:false},
+    {title:'Cargo', url:'https://doc.rust-lang.org/cargo/', snippet:'Manual', date:'2026-11-18'},
+    {url:'https://docs.rs'}]}) },
+  { status: 402, body: '{}' },
+  { status: 200, body: '{}' }
+];
+tomcat.fetch = async function () { return replies.shift(); };
+var req = {backend:'deepseek', query:'rust'};
+var found = await dispatchBackend(req);
+var errors = [];
+for (var i = 0; i < 2; i++) {
+  try { await dispatchBackend(req); } catch (err) { errors.push(err.message); }
+}
+return {hits:found.hits, errors:errors};
+"#,
+    );
+    assert_eq!(
+        actual["hits"],
+        json!([
+            { "title": "https://rust-lang.org", "url": "https://rust-lang.org", "snippet": "Language", "published_at": null },
+            { "title": "Cargo", "url": "https://doc.rust-lang.org/cargo/", "snippet": "Manual", "published_at": "2026-11-18" },
+            { "title": "https://docs.rs", "url": "https://docs.rs", "snippet": null, "published_at": null }
+        ])
+    );
+    assert_eq!(
+        actual["errors"],
+        json!([
+            "DeepSeek search: insufficient balance (HTTP 402)",
+            "DeepSeek search response is missing a results array"
+        ])
     );
 }
 
@@ -319,18 +358,10 @@ async fn plugin_backend_maps_plugin_backend_error_to_plugin_runtime_failure() {
 }
 
 #[test]
-fn plugin_runtime_failure_is_non_retryable_and_formats_tool_error() {
+fn plugin_runtime_failure_formats_tool_error() {
     let failure = BackendFailure::PluginRuntime {
         detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
     };
-    assert!(
-        !failure.is_retryable_unavailable(),
-        "PluginRuntime should never enter auto fallback"
-    );
-    assert!(
-        !failure.is_explicit_degraded(),
-        "PluginRuntime should stay hard-fail even on explicit backends"
-    );
     let err = failure.to_tool_error("auto");
     let text = err.to_string();
     assert!(text.contains(&tr_in(
@@ -559,8 +590,8 @@ fn cache_key_tracks_allowed_and_blocked_domains() {
     .expect("request b");
 
     assert_ne!(
-        CacheKey::from_request(&req_a),
-        CacheKey::from_request(&req_b),
+        CacheKey::from_request(&req_a, Vec::new()),
+        CacheKey::from_request(&req_b, Vec::new()),
         "cache key must change when config-level allow/block filters change"
     );
 }
@@ -644,38 +675,27 @@ fn parse_server_tool_blocks_handles_openai_and_server_tool_shapes() {
 }
 
 #[test]
-fn backend_mode_parse_supports_builtin_and_plugin_names() {
-    assert_eq!(BackendMode::parse("auto").unwrap(), BackendMode::Auto);
-    assert_eq!(BackendMode::parse("openai").unwrap(), BackendMode::Openai);
-    assert_eq!(BackendMode::parse("tavily").unwrap(), BackendMode::Tavily);
-    assert_eq!(BackendMode::parse("brave").unwrap(), BackendMode::Brave);
-    assert_eq!(BackendMode::parse("serper").unwrap(), BackendMode::Serper);
+fn declarations_ignore_invalid_and_duplicate_entries() {
+    let metadata = json!({"backends": [
+        {"id":"bespoke","label":"Bespoke","secret":"SEARCH_TEST_KEY","defaultAuto":true},
+        {"id":"bespoke","label":"Duplicate","model":"id"},
+        {"id":"openai","label":"Reserved","model":"id"},
+        {"id":"bad","label":"Bad","secret":"lowercase"},
+        {"id":"conflict","label":"Conflict","secret":"KEY","model":"id"},
+        {"id":"no-key","label":"Missing dependency"}
+    ]});
+    let declarations = parse_declarations(metadata.as_object());
+    assert_eq!(declarations.len(), 1);
     assert_eq!(
-        BackendMode::parse("MiMo").unwrap(),
-        BackendMode::Plugin("mimo".to_string())
+        super::super::declarations::effective_order(None, &declarations),
+        ["openai", "bespoke"]
     );
-    assert_eq!(
-        BackendMode::Plugin("mimo".to_string()).clone().as_str(),
-        "mimo"
-    );
-}
-
-#[test]
-fn auto_backend_plan_contains_single_plugin_slot() {
-    match pick_backend(BackendMode::Auto, None).expect("auto backend plan") {
-        BackendPlan::Auto {
-            hosted_candidate,
-            plugin_slot,
-        } => {
-            assert!(hosted_candidate.is_none());
-            assert!(plugin_slot, "auto path should end with one plugin slot");
-        }
-        other => panic!("unexpected backend plan: {other:?}"),
-    }
 }
 
 #[tokio::test]
+#[serial]
 async fn explicit_plugin_backend_roundtrips_and_normalizes_hits() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
         "backend": "mimo",
         "hits": [
@@ -735,68 +755,63 @@ async fn explicit_plugin_backend_roundtrips_and_normalizes_hits() {
 }
 
 #[tokio::test]
-async fn explicit_builtin_aliases_route_to_plugin_by_default() {
+#[serial]
+async fn ordered_route_skips_missing_and_stops_on_empty_with_hot_updates() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker = RecordingPluginInvoker::with_responses(vec![
-        Ok(json!({
-            "backend": "tavily",
-            "hits": [{ "title": "Tokio", "url": "https://tokio.rs" }],
-            "warnings": []
-        })),
-        Ok(json!({
-            "backend": "brave",
-            "hits": [{ "title": "Reqwest", "url": "https://docs.rs/reqwest" }],
-            "warnings": []
-        })),
-        Ok(json!({
-            "backend": "serper",
-            "hits": [{ "title": "Rust", "url": "https://www.rust-lang.org" }],
-            "warnings": []
-        })),
+        Err(BackendFailure::RateLimited { status: 429 }),
+        Ok(json!({"hits": []})),
+        Ok(json!({"hits": []})),
     ]);
-
-    for backend in ["tavily", "brave", "serper"] {
-        let mut cfg = AppConfig::default();
-        cfg.tools.web_search.backend = backend.to_string();
-        cfg.tools.web_search.tavily_base_url = "https://tavily.example.test".to_string();
-        cfg.tools.web_search.brave_base_url = "https://brave.example.test".to_string();
-        cfg.tools.web_search.serper_base_url = "https://serper.example.test".to_string();
-        let runtime = runtime_with_catalog(cfg, None);
-        runtime.set_plugin_invoker(invoker.clone());
-
-        let output = runtime
-            .search(
-                WebSearchArgs {
-                    query: "rust".into(),
-                    count: Some(3),
-                    freshness: None,
-                    country: None,
-                    language: None,
-                    domain_filter: Vec::new(),
-                },
-                "session-plugin-alias",
-            )
+    let order = Arc::new(parking_lot::RwLock::new(Some(vec![
+        "tavily".into(),
+        "unknown".into(),
+        "brave".into(),
+        "mimo".into(),
+    ])));
+    let runtime =
+        runtime_with_catalog(AppConfig::default(), None).with_search_order(Some(order.clone()));
+    runtime.set_plugin_invoker(invoker.clone());
+    let args = WebSearchArgs {
+        query: "rust".into(),
+        count: None,
+        freshness: None,
+        country: None,
+        language: None,
+        domain_filter: Vec::new(),
+    };
+    let first = runtime.search(args.clone(), "same").await.unwrap();
+    assert_eq!(first.backend, "brave");
+    assert!(first.hits.is_empty());
+    assert!(first.warnings.iter().any(|w| w.contains("429")));
+    assert!(first
+        .warnings
+        .iter()
+        .any(|w| w.contains("backend_unknown:unknown")));
+    assert!(
+        runtime
+            .search(args.clone(), "same")
             .await
-            .expect("plugin alias search");
-        assert_eq!(output.backend, backend);
-        assert_eq!(output.hits.len(), 1);
-    }
-
-    let calls = invoker.calls();
-    assert_eq!(
-        calls.iter().map(|call| call.0.as_str()).collect::<Vec<_>>(),
-        vec!["tavily", "brave", "serper"]
+            .unwrap()
+            .stats
+            .cached
     );
-    for (_, payload, _) in &calls {
-        assert_eq!(
-            payload["tavilyBaseUrl"],
-            json!("https://tavily.example.test")
-        );
-        assert_eq!(payload["braveBaseUrl"], json!("https://brave.example.test"));
-        assert_eq!(
-            payload["serperBaseUrl"],
-            json!("https://serper.example.test")
-        );
-    }
+    *order.write() = Some(vec!["mimo".into()]);
+    let updated = runtime.search(args, "same").await.unwrap();
+    assert_eq!(updated.backend, "mimo");
+    assert!(!updated.stats.cached);
+    assert_eq!(
+        invoker
+            .calls()
+            .iter()
+            .map(|call| call.0.as_str())
+            .collect::<Vec<_>>(),
+        ["tavily", "brave", "mimo"]
+    );
+    assert!(invoker
+        .calls()
+        .iter()
+        .all(|call| call.1.get("tavilyBaseUrl").is_none()));
 }
 
 #[tokio::test]
@@ -943,13 +958,13 @@ async fn explicit_plugin_backend_without_invoker_returns_clear_error() {
         .await
         .expect_err("missing plugin invoker should fail");
 
-    assert!(err
-        .to_string()
-        .contains("web_search plugin backend invoker not configured"));
+    assert!(err.to_string().contains("backend_unknown:mimo"));
 }
 
 #[tokio::test]
+#[serial]
 async fn explicit_plugin_backend_timeout_returns_tool_error() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Timeout)]);
 
     let mut cfg = AppConfig::default();
@@ -977,7 +992,9 @@ async fn explicit_plugin_backend_timeout_returns_tool_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn explicit_plugin_backend_runtime_error_returns_original_detail() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker =
         RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::PluginRuntime {
             detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
@@ -1012,7 +1029,9 @@ async fn explicit_plugin_backend_runtime_error_returns_original_detail() {
 }
 
 #[tokio::test]
+#[serial]
 async fn explicit_plugin_backend_unsupported_error_is_preserved() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let detail = "未找到名为 `mimo` 的 web_search 插件后端";
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Incompatible {
         detail: detail.to_string(),
@@ -1043,75 +1062,8 @@ async fn explicit_plugin_backend_unsupported_error_is_preserved() {
 
 #[tokio::test]
 #[serial]
-async fn auto_plugin_slot_calls_invoker_once_and_then_hits_cache() {
-    let _env = EnvGuard::set_many(&[
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", None),
-    ]);
-    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
-        "backend": "mimo",
-        "hits": [
-            {
-                "title": "Tokio",
-                "url": "https://tokio.rs",
-                "snippet": "Async runtime"
-            }
-        ],
-        "warnings": ["plugin_auto_used"]
-    }))]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
-    cfg.tools.web_search.cache_capacity = 8;
-    cfg.tools.web_search.cache_ttl_secs = 60;
-    let runtime = runtime_with_catalog(cfg, None);
-    runtime.set_plugin_invoker(invoker.clone());
-
-    let first = runtime
-        .search(
-            WebSearchArgs {
-                query: "tokio rust".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["tokio.rs".into()],
-            },
-            "session-plugin-auto-1",
-        )
-        .await
-        .expect("first auto plugin search");
-    let second = runtime
-        .search(
-            WebSearchArgs {
-                query: "tokio rust".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["tokio.rs".into()],
-            },
-            "session-plugin-auto-2",
-        )
-        .await
-        .expect("second auto plugin search");
-
-    assert_eq!(first.backend, "mimo");
-    assert!(!first.stats.cached);
-    assert_eq!(second.backend, "mimo");
-    assert!(second.stats.cached);
-    assert_eq!(
-        invoker.calls().len(),
-        1,
-        "cache hit should skip plugin invoker"
-    );
-}
-
-#[tokio::test]
-#[serial]
 async fn explicit_plugin_backend_rate_limit_returns_tool_error() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::RateLimited {
         status: 429,
     })]);
@@ -1145,13 +1097,10 @@ async fn explicit_plugin_backend_rate_limit_returns_tool_error() {
 #[tokio::test]
 #[serial]
 async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
-    let invoker = RecordingPluginInvoker::with_responses(vec![
-        Err(BackendFailure::Timeout),
-        Err(BackendFailure::Timeout),
-    ]);
-
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
+    let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Timeout); 4]);
     let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.backends = Some(vec!["tavily".into(), "brave".into()]);
     cfg.tools.web_search.cache_capacity = 8;
     cfg.tools.web_search.cache_ttl_secs = 60;
     let runtime = runtime_with_catalog(cfg, None);
@@ -1181,71 +1130,13 @@ async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
             "search.allUnavailableDetails",
             &[("query", "rust"), ("details", "")]
         )));
-        assert!(text.contains("backend_unavailable:auto"));
-        assert!(text.contains("timeout (backend=auto)"));
+        assert!(text.contains("backend_unavailable:tavily"));
+        assert!(text.contains("backend_unavailable:brave"));
     }
     assert_eq!(
         invoker.calls().len(),
-        2,
+        4,
         "exhausted auto errors should not be cached"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn auto_plugin_runtime_failure_fails_loud_without_all_backends_unavailable() {
-    let _env = EnvGuard::set_many(&[
-        ("OPENAI_API_KEY", None),
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-    ]);
-    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
-        "backend": "mimo",
-        "hits": [],
-        "warnings": [
-            "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
-        ],
-        "unsupported_backend": true
-    }))]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
-    let runtime = runtime_with_catalog(cfg, None);
-    runtime.set_plugin_invoker(invoker);
-
-    let err = runtime
-        .search(
-            WebSearchArgs {
-                query: "rust".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: Vec::new(),
-            },
-            "auto-pluginruntime-1",
-        )
-        .await
-        .expect_err("plugin runtime warnings should fail loud");
-    let text = err.to_string();
-    assert!(text.contains(&tr_in(
-        Locale::En,
-        "search.runtime",
-        &[("backend", "auto"), ("detail", "")]
-    )));
-    assert!(text.contains("async hostcall requires a Tokio runtime handle"));
-    assert!(
-        !text.contains(&tr_in(
-            Locale::En,
-            "search.allUnavailable",
-            &[("query", "rust")]
-        )) && !text.contains(&tr_in(
-            Locale::En,
-            "search.allUnavailableDetails",
-            &[("query", "rust"), ("details", "")]
-        )),
-        "plugin runtime failures should not be flattened into exhausted auto: {text}"
     );
 }
 
@@ -1338,6 +1229,7 @@ web_search = true
 #[tokio::test]
 #[serial]
 async fn incompatible_hosted_candidate_falls_back_to_plugin_slot() {
+    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
     let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
         "backend": "tavily",
         "hits": [
@@ -1387,7 +1279,7 @@ web_search = true
     assert!(output
         .warnings
         .iter()
-        .any(|w| w == "backend_unavailable:openai, fallback=auto"));
+        .any(|w| w.starts_with("backend_unavailable:openai")));
 }
 
 #[tokio::test]
@@ -1424,6 +1316,7 @@ async fn explicit_openai_requires_project_candidate() {
         .unwrap_err();
     assert!(error
         .to_string()
+        .to_lowercase()
         .contains("no hosted web_search model configured"));
 }
 

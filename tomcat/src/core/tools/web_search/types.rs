@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::infra::i18n::tr;
 use crate::infra::{AppError, ToolsWebSearchConfig};
 
-use super::backend::BackendMode;
-
 pub const MAX_QUERY_LEN: usize = 512;
 pub const MAX_HIT_SNIPPET_CHARS: usize = 4_096;
 pub const MAX_RESULT_SIZE_CHARS: usize = 60_000;
@@ -54,29 +52,10 @@ impl WebSearchFreshness {
             Self::Year => "year",
         }
     }
-
-    pub fn as_brave_query(self) -> &'static str {
-        match self {
-            Self::Day => "pd",
-            Self::Week => "pw",
-            Self::Month => "pm",
-            Self::Year => "py",
-        }
-    }
-
-    pub fn as_serper_query(self) -> &'static str {
-        match self {
-            Self::Day => "qdr:d",
-            Self::Week => "qdr:w",
-            Self::Month => "qdr:m",
-            Self::Year => "qdr:y",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct WebSearchRequest {
-    pub backend: BackendMode,
     pub query: String,
     pub count: usize,
     pub freshness: Option<WebSearchFreshness>,
@@ -88,10 +67,6 @@ pub struct WebSearchRequest {
     pub allowed_domains: Vec<String>,
     /// Result-side denylist, applied during hit normalization.
     pub blocked_domains: Vec<String>,
-    /// Optional per-provider base URL overrides that plugins can consume.
-    pub tavily_base_url: Option<String>,
-    pub brave_base_url: Option<String>,
-    pub serper_base_url: Option<String>,
 }
 
 impl WebSearchRequest {
@@ -110,7 +85,6 @@ impl WebSearchRequest {
             )));
         }
 
-        let backend = BackendMode::parse(&cfg.backend)?;
         let count = args.count.unwrap_or(cfg.count) as usize;
         if !(1..=20).contains(&count) {
             return Err(AppError::Tool(tr(
@@ -156,7 +130,6 @@ impl WebSearchRequest {
         )?;
 
         Ok(Self {
-            backend,
             query: query.to_string(),
             count,
             freshness,
@@ -165,9 +138,6 @@ impl WebSearchRequest {
             domain_filter,
             allowed_domains,
             blocked_domains,
-            tavily_base_url: Some(cfg.tavily_base_url.clone()),
-            brave_base_url: Some(cfg.brave_base_url.clone()),
-            serper_base_url: Some(cfg.serper_base_url.clone()),
         })
     }
 }

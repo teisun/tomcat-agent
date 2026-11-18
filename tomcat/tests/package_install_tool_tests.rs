@@ -289,9 +289,18 @@ async fn package_install_supports_all_layers_and_loaded_plugin_executes_in_quick
     let manifest =
         tomcat::parse_manifest(&std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap())
             .unwrap();
-    function_registry.register_plugin_functions(&manifest.id, &plugin_dir, &manifest.functions);
+    function_registry.register_plugin_functions(
+        &manifest.id,
+        &plugin_dir,
+        &manifest.functions,
+        tomcat::ext::plugin::PluginSource::Project,
+    );
     manager
-        .register_catalog_plugin(&plugin_dir, manifest)
+        .register_catalog_plugin(
+            &plugin_dir,
+            manifest,
+            tomcat::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
     manager.load_plugin(&plugin_dir).unwrap();
 

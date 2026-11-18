@@ -137,6 +137,16 @@ export interface RewindMessage {
   text: string;
   userMessageId?: null | string;
 }
+export interface SearchBackendView {
+  canSaveKey: boolean;
+  host?: null | string;
+  id: string;
+  keyEnv?: null | string;
+  keySource?: KeySource | null;
+  label: string;
+  model?: null | string;
+  sharedModelIds: string[];
+}
 export interface ServeAttachment {
   blobSha?: null | string;
   fileId?: null | string;
@@ -583,6 +593,11 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "ingest_attachment";
 } | {
+  backends: string[];
+  context?: ConnectorContext;
+  id?: null | string;
+  type: "set_web_search_routing";
+} | {
   checkpointId: string;
   dryRun?: boolean | null;
   id?: null | string;
@@ -643,11 +658,19 @@ export type ServeCommand = {
   id?: null | string;
   type: "list_connectors";
 } | {
+  context?: ConnectorContext;
+  id?: null | string;
+  type: "web_search_settings";
+} | {
   contextWindow: number;
   id?: null | string;
   model: string;
   sessionId?: null | string;
   type: "set_context_window";
+} | {
+  envName: string;
+  id?: null | string;
+  type: "clear_provider_key";
 } | {
   envName: string;
   id?: null | string;
@@ -908,6 +931,11 @@ export interface UpsertModelResponse {
 export interface UpsertModelsResponse {
   models: ModelView[];
   warnings?: string[];
+}
+export interface WebSearchSettingsPayload {
+  backends: SearchBackendView[];
+  order: string[];
+  usingDefaults: boolean;
 }
 export type WireEvent = ({
   args: any;

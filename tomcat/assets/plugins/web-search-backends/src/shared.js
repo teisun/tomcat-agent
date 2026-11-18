@@ -2,18 +2,6 @@ function toArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function cloneReq(req, backend) {
-  return Object.assign({}, req, { backend: backend });
-}
-
-function normalizeBaseUrl(raw, fallback) {
-  return String(raw || fallback).replace(/\/+$/, "");
-}
-
-function providerBaseUrl(req, key, fallback) {
-  return normalizeBaseUrl(req && req[key], fallback);
-}
-
 function normalizeQuery(raw) {
   return String(raw || "");
 }
@@ -77,7 +65,7 @@ function parseJsonBody(raw, backend) {
 
 async function fetchJsonBackend(backend, req, options) {
   try {
-    var response = await pi.fetch(options.request);
+    var response = await tomcat.fetch(options.request);
     if (response && response.data && typeof response.data.status === "number") {
       response = response.data;
     }
@@ -86,12 +74,12 @@ async function fetchJsonBackend(backend, req, options) {
     }
     if (!response || typeof response.status !== "number") {
       throw new Error(
-        "web_search backend `" + backend + "` returned an invalid HTTP envelope: " +
-        JSON.stringify(response)
+        "web_search backend `" + backend + "` returned an invalid HTTP envelope"
       );
     }
     if (response.status < 200 || response.status >= 300) {
       throw new Error(
+        (options.statusMessages && options.statusMessages[response.status]) ||
         "web_search backend `" + backend + "` returned HTTP status " + response.status
       );
     }

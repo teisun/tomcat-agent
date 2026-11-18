@@ -139,6 +139,9 @@ fn connection_command(command: &ServeCommand) -> bool {
             | ServeCommand::SetDefaultModel { .. }
             | ServeCommand::SetUtilityModel { .. }
             | ServeCommand::ListProviderKeys { .. }
+            | ServeCommand::WebSearchSettings { .. }
+            | ServeCommand::SetWebSearchRouting { .. }
+            | ServeCommand::ClearProviderKey { .. }
             | ServeCommand::GetProjectTrust { .. }
             | ServeCommand::TrustProject { .. }
             | ServeCommand::ListConnectors { .. }

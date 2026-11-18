@@ -20,6 +20,7 @@ import type {
   ModelEntryInput,
   ModelView as WireModelView,
   ProviderKeyView as WireProviderKeyView,
+  WebSearchSettingsPayload,
 } from "../../serveClient/wire";
 import type {
   SettingsCapabilities,
@@ -330,6 +331,7 @@ export class SettingsPanel implements vscode.Disposable {
   private connectorContextValue?: { workspaceRoot?: string | null };
   private connectorContextSelection?: Promise<{ workspaceRoot?: string | null }>;
   private viewEpoch = 0;
+  private savingSearchSettings = false;
   private state: SettingsStateSnapshot = {
     capabilities: {
       listModels: false,
@@ -376,14 +378,14 @@ export class SettingsPanel implements vscode.Disposable {
         };
       }
       this.connectorToolToggleLocks.clear();
-      this.state = { ...this.state, ready: false, error: t("settings.host.connectionLost"), connectorTools: [], connectorToolsIdentity: null, connectorReloads: this.connectorReloads.snapshot(), connectorToolToggles };
+      this.state = { ...this.state, ready: false, webSearch: undefined, webSearchReceipt: undefined, error: t("settings.host.connectionLost"), connectorTools: [], connectorToolsIdentity: null, connectorReloads: this.connectorReloads.snapshot(), connectorToolToggles };
       this.postState();
       this.updateConnectorPoller();
     });
     if (exit) this.subscriptions.push(exit);
     const workspace = vscode.workspace.onDidChangeWorkspaceFolders?.(() => {
       this.resetConnectorViewLifecycle();
-      if (this.route === "connectors" && this.webviewReady) void this.refreshState();
+      if ((this.route === "connectors" || this.route === "tools") && this.webviewReady) void this.refreshState();
     });
     if (workspace) this.subscriptions.push(workspace);
   }
@@ -473,7 +475,7 @@ export class SettingsPanel implements vscode.Disposable {
     this.connectorReloads.clear();
     this.connectorToolToggleLocks.clear();
     this.projectTrustPending = false;
-    this.state = { ...this.state, connectors: [], connectorProject: null, connectorTrustPending: false, connectorConfigPaths: undefined, connectorTools: [], connectorToolsIdentity: null, selectedConnector: null, connectorReloads: {}, connectorToolToggles: {}, connectorReceipt: null };
+    this.state = { ...this.state, webSearch: undefined, webSearchReceipt: undefined, connectors: [], connectorProject: null, connectorTrustPending: false, connectorConfigPaths: undefined, connectorTools: [], connectorToolsIdentity: null, selectedConnector: null, connectorReloads: {}, connectorToolToggles: {}, connectorReceipt: null };
   }
 
   dispose(): void {
@@ -559,7 +561,7 @@ export class SettingsPanel implements vscode.Disposable {
       const initialized = await this.deps.ensureInitialized();
       if (epoch !== this.viewEpoch) return;
       this.state = { ...this.state,
-        capabilities: { ...this.state.capabilities, setUiLanguage: hasServeCapability(initialized, "set_ui_language") },
+        capabilities: this.buildCapabilities(initialized),
         uiPreferences: this.state.uiPreferences ?? initialized.uiPreferences ?? null,
         hostLocale: normalizeLocale(vscode.env.language ?? "en"),
         expectedCliVersion: this.deps.expectedCliVersion,
@@ -693,6 +695,11 @@ export class SettingsPanel implements vscode.Disposable {
         return;
       case "setProviderKey":
         await this.handleSetProviderKey(intent.data.envName, intent.data.value, intent.data.defaultModelId);
+        return;
+      case "setWebSearchRouting":
+      case "saveSearchKey":
+      case "clearSearchKey":
+        await this.handleWebSearchChange(intent);
         return;
       case "listConnectors":
       case "reloadConnectors":
@@ -1545,6 +1552,67 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
+  private async handleWebSearchChange(intent: Extract<SettingsIntent, { type: "setWebSearchRouting" | "saveSearchKey" | "clearSearchKey" }>): Promise<void> {
+    if (this.route !== "tools" || this.savingSearchSettings) return;
+    this.savingSearchSettings = true;
+    const epoch = this.connectorEpoch;
+    const requestId = intent.messageId;
+    this.state = { ...this.state, webSearchReceipt: { requestId, phase: "saving" }, error: null, status: null };
+    this.postState();
+    let error: string | null = null;
+    try {
+      const initialized = await this.deps.ensureInitialized();
+      if (epoch !== this.connectorEpoch) return;
+      const context = await this.connectorContext();
+      if (epoch !== this.connectorEpoch) return;
+      if (!this.buildCapabilities(initialized).webSearchSettings) throw new Error(t("searchSettings.unsupported"));
+      const response = await (async () => {
+        if (intent.type === "setWebSearchRouting") {
+          return this.deps.messenger.request({ type: "set_web_search_routing", context, backends: intent.data.backends });
+        }
+        const backend = this.state.webSearch?.backends.find(row => row.id === intent.data.backendId);
+        if (!backend?.keyEnv) throw new Error(t("searchSettings.saveFailed"));
+        if (!backend.canSaveKey) throw new Error(t("searchSettings.keyUnavailable"));
+        if (intent.type === "saveSearchKey") {
+          return this.deps.messenger.sendSetProviderKey(backend.keyEnv, intent.data.value);
+        }
+        if (backend.keySource !== "saved" || backend.sharedModelIds.length > 0) throw new Error(t("searchSettings.clearUnavailable"));
+        return this.deps.messenger.request({ type: "clear_provider_key", envName: backend.keyEnv });
+      })();
+      if (!response.success) error = response.error ?? t("searchSettings.saveFailed");
+    } catch (cause) {
+      error = (cause instanceof Error && cause.message.trim()) || t("searchSettings.saveFailed");
+    } finally {
+      this.savingSearchSettings = false;
+      if (epoch === this.connectorEpoch) {
+        await this.refreshWebSearch(error, { requestId, phase: error ? "failed" : "saved" });
+      }
+    }
+  }
+
+  private async refreshWebSearch(error: string | null = null, receipt?: SettingsStateSnapshot["webSearchReceipt"]): Promise<void> {
+    const epoch = ++this.viewEpoch;
+    try {
+      const initialized = await this.deps.ensureInitialized();
+      const capabilities = this.buildCapabilities(initialized);
+      let webSearch: WebSearchSettingsPayload | undefined;
+      if (capabilities.webSearchSettings) {
+        const context = await this.connectorContext();
+        if (epoch !== this.viewEpoch) return;
+        const response = await this.deps.messenger.request({ type: "web_search_settings", context });
+        if (response.success && response.payload) webSearch = response.payload as WebSearchSettingsPayload;
+        else error ??= response.error ?? t("searchSettings.loadFailed");
+      }
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state, capabilities, webSearch, webSearchReceipt: receipt ?? this.state.webSearchReceipt,
+        error, status: receipt?.phase === "saved" ? t("searchSettings.saved") : null, ready: true, serverVersion: initialized.serverVersion };
+    } catch {
+      if (epoch !== this.viewEpoch) return;
+      this.state = { ...this.state, webSearch: undefined, webSearchReceipt: receipt, error: error ?? t("searchSettings.loadFailed") };
+    }
+    this.postState();
+  }
+
   private async refreshState(
     error: string | null = null,
     status: string | null = null,
@@ -1552,6 +1620,10 @@ export class SettingsPanel implements vscode.Disposable {
     connectorReceipt: SettingsConnectorReceipt | null = null,
     modelRemovalReceipt: SettingsModelRemovalReceipt | null = null,
   ): Promise<void> {
+    if (this.route === "tools") {
+      await this.refreshWebSearch(error);
+      return;
+    }
     if (this.route === "general") {
       await this.refreshGeneral();
       return;
@@ -1824,6 +1896,8 @@ export class SettingsPanel implements vscode.Disposable {
     initializeResult: InitializeResult,
   ): SettingsCapabilities {
     return {
+      webSearchSettings: ["web_search_settings", "set_web_search_routing", "clear_provider_key", "set_provider_key"].every(capability => hasServeCapability(initializeResult, capability)),
+      setUiLanguage: hasServeCapability(initializeResult, "set_ui_language"),
       setDefaultModel: hasServeCapability(initializeResult, "set_default_model"),
       setDefaultModelIfUnset: hasServeCapability(initializeResult, "set_default_model_if_unset"),
       setUtilityModel: hasServeCapability(initializeResult, "set_utility_model"),
