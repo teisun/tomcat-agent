@@ -7153,14 +7153,18 @@ async fn serve_get_state_contains_plan_and_session_todos() {
     // 注入一条 session scratchpad todo，使 get_state 的 sessionTodos 非空。
     slot.ctx
         .session_runtime
-        .plan_runtime
-        .replace_session_todos(vec![TodoItem {
-            id: "st-1".to_string(),
-            content: "wire session todos".to_string(),
-            status: TodoStatus::InProgress,
-            evidence: Vec::new(),
-            kind: Default::default(),
-        }]);
+        .todos_runtime
+        .commit(false, |file| {
+            file.items.push(TodoItem {
+                id: "st-1".to_string(),
+                content: "wire session todos".to_string(),
+                status: TodoStatus::InProgress,
+                evidence: Vec::new(),
+                kind: Default::default(),
+            });
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
 
     tracing::info!(target: "test", phase = "act", test = "serve_get_state_contains_plan_and_session_todos");
     handle_command(
@@ -8585,7 +8589,11 @@ async fn serve_compact_persists_boundary_and_rehydrates_runtime_context() {
     slot.ctx
         .session_runtime
         .plan_runtime
-        .build_plan(&plan_path.to_string_lossy(), Some(slot.session_id.clone()))
+        .build_plan(
+            &plan_path.to_string_lossy(),
+            Some(slot.session_id.clone()),
+            false,
+        )
         .unwrap();
     let large_history = format!("historical detail {}", "x".repeat(32_000));
     append_history_message(&slot, "user", &large_history);

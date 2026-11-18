@@ -49,6 +49,12 @@ pub enum ToolError {
     Internal(String),
 }
 
+impl From<crate::infra::error::AppError> for ToolError {
+    fn from(error: crate::infra::error::AppError) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 impl ToolError {
     /// 序列化为 ToolResult.content；带 `is_error: true` 标识由 tool_exec 决定。
     pub fn to_tool_content(&self) -> String {

@@ -167,6 +167,57 @@ impl PrimitiveExecutor for EditOkPrimitive {
 }
 
 #[tokio::test]
+async fn todos_dispatch_requires_only_its_own_runtime_and_keeps_role_guards() {
+    use crate::core::plan_runtime::todo_runtime::TodosRuntime;
+    let dir = tempfile::tempdir().unwrap();
+    let todos = Arc::new(TodosRuntime::open(dir.path().into(), "child", None));
+    let plan = crate::core::plan_runtime::PlanRuntime::new("parent");
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let call = ToolCallInfo {
+        id: "todos-call".into(),
+        name: "todos".into(),
+        arguments: serde_json::json!({"draft":"child document"}).to_string(),
+    };
+    for (todo_runtime, plan_runtime, role, success) in [
+        (None, Some(&plan), SubagentType::User, false),
+        (Some(&todos), None, SubagentType::User, true),
+        (Some(&todos), Some(&plan), SubagentType::PlanReviewer, true),
+        (Some(&todos), Some(&plan), SubagentType::CodeReviewer, false),
+        (Some(&todos), None, SubagentType::Explorer, false),
+    ] {
+        let result = execute_tool_full_with_policy(
+            &primitive,
+            "child",
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            None,
+            todo_runtime,
+            plan_runtime,
+            None,
+            role,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            &call,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            !result.is_error, success,
+            "{:?}: {}",
+            role, result.model_text
+        );
+        if success {
+            let value: serde_json::Value = serde_json::from_str(&result.model_text).unwrap();
+            assert_eq!(value["todos_path"], todos.path().to_str().unwrap());
+        }
+    }
+}
+
+#[tokio::test]
 async fn reviewer_blocks_non_whitelisted_tool() {
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
     let tc = ToolCallInfo {

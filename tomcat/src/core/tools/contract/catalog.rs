@@ -498,8 +498,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most three independent todos may be `in_progress`.\n",
-        display_summary: Some("Maintain a session todo scratchpad (up to three in_progress; returns full snapshot)."),
+        description: "Manage this Agent session's private working document, never the active PlanFile. Optional `draft` replaces the complete Markdown body verbatim; omitted draft/title preserves it, and an empty string clears it. Item `ops` are optional for body/title-only changes. `set_status.evidence` appends deduplicated completion evidence and is valid only with completed. `new_todos=true` resets the entire document; `replace=true` rebuilds only items from nonempty upserts and discards their old evidence. At most three independent items may be in_progress. Every successful call saves first and returns full `items`, document identity/title and absolute `todos_path`; use `read` on that path for the full body and evidence. Save/load failures are errors, never memory-only success. One v2 file per Agent session at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Main-session updates refresh its panel; reviewer documents are isolated.\n",
+        display_summary: Some("Maintain this Agent's saved Todos document; returns items and todos_path."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
         category: None,
@@ -1385,7 +1385,7 @@ fn update_plan_parameters() -> Value {
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Session-local todo scratchpad (visible in CHAT, PLAN, and EXEC). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
+        "description": "Agent-local Todos document (CHAT / PLAN / EXEC). Every successful call saves the file and returns todos_path plus the full items snapshot, not the Markdown draft; read todos_path for full content. Never writes Plan todos. Omitted draft/title are preserved. new_todos=true resets the entire document; replace=true rebuilds only items and discards their prior evidence. Saving failure rejects the update.",
         "properties": {
             "new_todos": {
                 "type": "boolean",
@@ -1393,7 +1393,11 @@ fn todos_parameters() -> Value {
             },
             "title": {
                 "type": "string",
-                "description": "Optional title stored in the new .todo.md frontmatter when `new_todos=true`."
+                "description": "Optional title. Omit to preserve it; an empty string clears it."
+            },
+            "draft": {
+                "type": "string",
+                "description": "Complete Markdown body, preserved verbatim. Omit to keep it; an empty string clears it. Can be updated without ops."
             },
             "replace": {
                 "type": "boolean",
@@ -1401,16 +1405,14 @@ fn todos_parameters() -> Value {
             },
             "ops": {
                 "type": "array",
-                "description": "Ordered list of mutations applied in order.",
-                "minItems": 1,
+                "description": "Optional ordered mutations. Supply ops, draft, title or new_todos=true. replace=true requires non-empty upsert-only ops; it preserves the body, title and document identity, but rebuilds items without old evidence.",
                 "items": shared_todo_op_item_schema(
                     "For `upsert` (optional) and `set_status` (required).",
-                    false,
+                    true,
                     false,
                 )
             }
-        },
-        "required": ["ops"]
+        }
     })
 }
 

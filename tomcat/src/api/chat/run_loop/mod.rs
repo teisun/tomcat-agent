@@ -942,10 +942,10 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         compaction_output_limit,
         &context_config,
         Arc::clone(&root_event_emitter),
-        Some(
-            ctx.session_runtime
-                .plan_runtime
-                .control_snapshot(Some(main_call.wire_model())),
+        crate::core::plan_runtime::ControlSnapshot::capture(
+            Some(&ctx.session_runtime.plan_runtime),
+            Some(&ctx.session_runtime.todos_runtime),
+            Some(main_call.wire_model()),
         ),
     );
     let boundary_env = BoundaryEnv {

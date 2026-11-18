@@ -18,7 +18,7 @@
 |------|------|
 | `agents/<agentId>/agent/` | 该 agent 的身份与凭据目录（可配置覆盖） |
 | `agents/<agentId>/sessions/` | 该 agent 的会话与 transcript（sessions.json、JSONL 等） |
-| `agents/<agentId>/todos/` | 轻量待办文件 `<session_id>.todo.md`；每个 session 固定一份，不再依赖 `sessions.json.activeTodosId` |
+| `agents/<agentId>/todos/` | 每个 Agent 会话一份 `<session_id>.todo.md`：v2 frontmatter 保存条目/证据，正文保存 draft；plan reviewer 使用自己的 child ID，删除父会话连带清理其子孙文档 |
 | `agents/<agentId>/logs/` | 该 agent 的日志（per-agent，若写文件则用此路径） |
 | `agents/<agentId>/audit/` | 该 agent 的审计日志（JSONL） |
 | `agents/<agentId>/checkpoints/` | 该 agent 的 checkpoint 影子 Git 根目录；按 `sha256(agent_workspace_dir)` 分桶存放元数据与 git 对象库 |

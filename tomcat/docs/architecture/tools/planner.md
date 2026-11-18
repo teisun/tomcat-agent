@@ -20,6 +20,8 @@
 
 Build 不再“进入 EXEC”。它是从 Plan 回到 Chat、并开始推进一份执行中计划。执行提醒的判据是 `executing_plan_id()`，不是会话模式；planner reminder 的判据才是 `mode() == AgentMode::Plan`。两份 reminder 已在每次请求的 ephemeral tail 中生成，既不写入 system prompt，也不写入持久历史。
 
+Todos 独立由当前 Agent 的 `TodosRuntime` 持有，不再放在 PlanRuntime。CLI `/plan build`、Serve 与 `start_plan` 先查询本会话 `has_unfinished()`，再传给 `build_plan` 发原有预警；清单未完成不是开工门禁。调用 `todos` 不改正式 Plan、不启动或结束 Plan 的评审/验收流程。详见 [`todos.md`](./todos.md)。
+
 CLI 显示 `u[Chat]>` 或 `u[Plan]>`，Chat 绑定 executing/pending 计划时显示 `u[Chat·plan:executing]>` / `u[Chat·plan:pending]>`。
 
 ## ACP 启动、策略与跨会话交接

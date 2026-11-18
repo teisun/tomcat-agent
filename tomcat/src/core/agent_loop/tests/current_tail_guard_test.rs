@@ -215,22 +215,32 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     let plan_runtime = PlanRuntime::new("sess-plan");
     plan_runtime.enter_plan().unwrap();
     plan_runtime.seed_active_plan_for_test("plan_123".to_string(), PlanFileState::Planning);
-    plan_runtime.replace_session_todos(vec![
-        TodoItem {
-            id: "t1".to_string(),
-            content: "step pending".to_string(),
-            status: TodoStatus::Pending,
-            evidence: Vec::new(),
-            kind: Default::default(),
-        },
-        TodoItem {
-            id: "t2".to_string(),
-            content: "step active".to_string(),
-            status: TodoStatus::InProgress,
-            evidence: Vec::new(),
-            kind: Default::default(),
-        },
-    ]);
+    let todos_runtime = Arc::new(crate::core::plan_runtime::todo_runtime::TodosRuntime::open(
+        dir.path().into(),
+        "sess-plan",
+        None,
+    ));
+    todos_runtime
+        .commit(false, |file| {
+            file.items = vec![
+                TodoItem {
+                    id: "t1".to_string(),
+                    content: "step pending".to_string(),
+                    status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
+                },
+                TodoItem {
+                    id: "t2".to_string(),
+                    content: "step active".to_string(),
+                    status: TodoStatus::InProgress,
+                    evidence: Vec::new(),
+                    kind: Default::default(),
+                },
+            ];
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
 
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
@@ -282,7 +292,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         Arc::new(DefaultEventBus::new()),
         config,
         CancellationToken::new(),
-    );
+    )
+    .with_todos_runtime(todos_runtime.clone());
     agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
@@ -347,6 +358,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assert!(text.contains("## Progress"));
     assert!(text.contains("Rendered from the session todo scratchpad"));
     assert!(text.contains("t2: step active"));
+    assert!(text.contains(&format!("todos_path: {}", todos_runtime.path().display())));
+    assert!(!text.contains("plan_path:"));
 
     let entries = read_entries_tail(&transcript, 10).unwrap();
     let last = entries.last().unwrap();
@@ -371,6 +384,25 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
 
 #[tokio::test]
 async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
+    let dir = tempfile::tempdir().unwrap();
+    let todos_runtime = Arc::new(crate::core::plan_runtime::todo_runtime::TodosRuntime::open(
+        dir.path().into(),
+        "sess-midturn-preheat",
+        None,
+    ));
+    todos_runtime
+        .commit(false, |file| {
+            file.draft = "private body must not enter summary".into();
+            file.items.push(TodoItem {
+                id: "step".into(),
+                content: "captured step".into(),
+                status: TodoStatus::Pending,
+                evidence: vec![],
+                kind: Default::default(),
+            });
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
     let mut user = ChatMessage::user("u".repeat(100));
     user.msg_id = Some("u1".to_string());
     let mut messages = vec![user];
@@ -389,7 +421,8 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
         Arc::new(DefaultEventBus::new()),
         config,
         CancellationToken::new(),
-    );
+    )
+    .with_todos_runtime(todos_runtime.clone());
     agent.start_idx = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
@@ -416,7 +449,33 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
         preheat.is_running() || preheat.is_finished(),
         "the guard's Fits path must start a preheat once the build reaches 50%"
     );
-    agent.context_state.as_mut().unwrap().preheat.abort();
+    todos_runtime
+        .commit(false, |file| {
+            file.items[0].status = TodoStatus::Completed;
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
+    let result = agent
+        .context_state
+        .as_mut()
+        .unwrap()
+        .preheat
+        .await_result(std::time::Duration::from_secs(5))
+        .await;
+    let crate::core::compaction::preheat::PreheatOutcome::Completed(result) = result else {
+        panic!("preheat must finish")
+    };
+    assert!(result
+        .summary_text
+        .contains(&format!("todos_path: {}", todos_runtime.path().display())));
+    assert!(
+        result
+            .summary_text
+            .contains("[pending] step: captured step"),
+        "preheat uses its start-time snapshot"
+    );
+    assert!(!result.summary_text.contains("private body"));
+    assert!(!result.summary_text.contains("plan_path:"));
 }
 
 #[tokio::test]

@@ -30,7 +30,9 @@ impl LlmProvider for CompactOnlyProvider {
             id: Some("compact-cli-summary".to_string()),
             choices: vec![ChatResponseChoice {
                 index: 0,
-                message: ChatMessage::assistant("CLI compacted summary."),
+                message: ChatMessage::assistant(
+                    "CLI compacted summary.\n\n## Progress\nMODEL CLAIM: everything completed",
+                ),
                 finish_reason: Some("stop".to_string()),
             }],
             usage: None,
@@ -78,6 +80,164 @@ impl LlmResolver for FixedResolver {
             model.request_model_name().to_string(),
         ))
     }
+}
+
+fn install_compactor(ctx: &mut ChatContext) {
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver {
+        catalog: ctx.global_services.model_catalog.snapshot(),
+        provider: Arc::new(CompactOnlyProvider),
+    });
+}
+
+fn latest_summary(ctx: &ChatContext) -> String {
+    ctx.session_runtime
+        .session
+        .get_entries(100)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|entry| match entry {
+            TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true) => {
+                summary.summary
+            }
+            _ => None,
+        })
+        .expect("durable summary")
+}
+
+#[tokio::test]
+#[serial]
+async fn compact_restores_todos_before_first_turn_survives_recompaction_and_switches_to_plan() {
+    use crate::core::plan_runtime::file_store::{self, PlanFile};
+    use crate::core::tools::plan_tool::todos;
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let ctx = fixture.ctx();
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    let body = "# 工作笔记\n\n```text\n---\n```\n  原样保留  \n";
+    let proof = "long-evidence-".repeat(2000);
+    let initial = todos::execute(
+        &ctx.session_runtime.todos_runtime,
+        todos::TodosArgs::from_json(
+            &serde_json::json!({"title":"cold restore", "draft":body, "ops":[
+                {"kind":"upsert", "id":"saved", "content":"unfinished work"},
+                {"kind":"upsert", "id":"done", "content":"done work"},
+                {"kind":"set_status", "id":"done", "status":"completed", "evidence":[proof]}
+            ]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        initial.to_string().len() > 10_000,
+        "exercise Layer1 oversized result replacement"
+    );
+    let saved = ctx.session_runtime.todos_runtime.snapshot().unwrap();
+    let path = ctx.session_runtime.todos_runtime.path().to_path_buf();
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user", "content":"continue this work"}))
+        .unwrap();
+    ctx.session_runtime.session.append_message(serde_json::json!({"role":"assistant", "tool_calls":[{"id":"seed", "type":"function", "function":{"name":"todos", "arguments":"{}"}}]})).unwrap();
+    ctx.session_runtime.session.append_message(serde_json::json!({"role":"tool", "tool_call_id":"seed", "content":initial.to_string()})).unwrap();
+    drop(ctx);
+
+    // A real new ChatContext opens the v2 file; no turn or old TodosRuntime is reused.
+    let mut cold = fixture.ctx();
+    install_compactor(&mut cold);
+    assert_eq!(
+        cold.session_runtime
+            .session
+            .current_session_id()
+            .unwrap()
+            .unwrap(),
+        session_id
+    );
+    assert_eq!(
+        cold.session_runtime.todos_runtime.snapshot().unwrap(),
+        saved
+    );
+    let history =
+        init_context_state(&cold.session_runtime.session, &cold.config.context, "").unwrap();
+    assert!(history.messages.iter().any(|message| message
+        .text_content()
+        .is_some_and(|text| text.contains("todos_path") && text.contains(path.to_str().unwrap()))));
+    compact_session(&cold).await.unwrap();
+    let first = latest_summary(&cold);
+    assert!(first.contains(&format!("todos_path: {}", path.display())));
+    assert!(!first.contains("plan_path:"));
+    assert!(first.contains("saved: unfinished work"));
+    assert!(!first.contains("MODEL CLAIM"));
+    assert!(!first.contains(body));
+    let restored_context =
+        init_context_state(&cold.session_runtime.session, &cold.config.context, "").unwrap();
+    assert!(restored_context.messages.iter().any(|message| message
+        .text_content()
+        .is_some_and(|text| text.contains(path.to_str().unwrap()))));
+    drop(cold);
+    let mut cold = fixture.ctx();
+    install_compactor(&mut cold);
+    assert_eq!(
+        cold.session_runtime.todos_runtime.snapshot().unwrap(),
+        saved
+    );
+    todos::execute(
+        &cold.session_runtime.todos_runtime,
+        todos::TodosArgs::from_json(&serde_json::json!({"ops":[
+            {"kind":"set_status", "id":"saved", "status":"completed", "evidence":["test:cold"]}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let updated = cold.session_runtime.todos_runtime.snapshot().unwrap();
+    assert_eq!(updated.draft, body);
+    assert_eq!(updated.title, saved.title);
+    assert_eq!(updated.created_at, saved.created_at);
+    assert_eq!(updated.todos_id, saved.todos_id);
+    assert_eq!(updated.items[1].evidence, saved.items[1].evidence);
+    compact_session(&cold).await.unwrap();
+    let second = latest_summary(&cold);
+    assert!(second.contains(&format!("todos_path: {}", path.display())));
+    assert_eq!(second.matches("## Progress").count(), 1);
+    assert!(second.contains("[completed] saved: unfinished work"));
+    assert!(!second.contains("MODEL CLAIM"));
+
+    let plan_path = fixture.workspace.path().join("bound.plan.md");
+    let plan = PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id":"bound", "goal":"formal work", "state":"planning", "created_at":"now", "schema_version":1,
+            "todos":[{"id":"formal", "content":"formal plan work", "status":"pending"}]
+        })).unwrap(),
+        body: "formal document".into(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2000).unwrap();
+    cold.session_runtime
+        .plan_runtime
+        .attach_from_resume_state(crate::core::session::manager::ResumeControlState {
+            mode: Some(crate::core::session::AgentMode::Chat),
+            plan_path: Some(plan_path.clone()),
+            plan_id: Some("bound".into()),
+        })
+        .unwrap();
+    let plan_before = std::fs::read(&plan_path).unwrap();
+    todos::execute(
+        &cold.session_runtime.todos_runtime,
+        todos::TodosArgs::from_json(&serde_json::json!({"title":"still independent"})).unwrap(),
+    )
+    .unwrap();
+    compact_session(&cold).await.unwrap();
+    let third = latest_summary(&cold);
+    assert!(third.contains(&format!("plan_path: {}", plan_path.display())));
+    assert!(!third.contains("todos_path:"));
+    assert!(third.contains("formal: formal plan work"));
+    assert!(!third.contains("saved: unfinished work"));
+    assert_eq!(std::fs::read(&plan_path).unwrap(), plan_before);
+    assert!(std::fs::read_to_string(path).unwrap().ends_with(body));
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ pub use deletion::DeleteSessionOutcome;
 pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
+pub(crate) use session_impl::uuid_for_session;
 pub use session_impl::SessionManager;
 pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use types::{

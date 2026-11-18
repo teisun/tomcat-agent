@@ -354,6 +354,11 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                             &transcript_root,
                             &child_session_id,
                         );
+                    let todos_runtime = Arc::new(super::todo_runtime::TodosRuntime::open(
+                        std::path::PathBuf::from(&transcript_root),
+                        child_session_id.clone(),
+                        None,
+                    ));
                     plan_runtime.write_plan_review_started_transcript(
                         &plan_id_for_closure,
                         Some(&child_session_id),
@@ -401,7 +406,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         ephemeral_tail_provider: None,
                     };
                     let mut agent_loop =
-                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone());
+                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_todos_runtime(todos_runtime);
                     // PlanReviewer tool whitelist does not include `bash`, so it does not need
                     // a dedicated BashTaskRegistry.
                     let initial_messages = [

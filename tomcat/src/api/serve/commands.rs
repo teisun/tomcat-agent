@@ -1090,11 +1090,7 @@ pub(crate) async fn handle_command(
             let active_plan_path_raw = active_plan.as_ref().map(|plan| plan.path.clone());
             let context_utilization_ratio = *slot.last_context_ratio.lock();
             let session_todos = crate::core::tools::plan_tool::shared_todo_ops::items_json(
-                &slot
-                    .ctx
-                    .session_runtime
-                    .plan_runtime
-                    .snapshot_session_todos(),
+                &slot.ctx.session_runtime.todos_runtime.snapshot_items(),
             );
             let plan_todos = active_plan_path_raw
                 .as_ref()
@@ -1325,12 +1321,11 @@ pub(crate) async fn handle_command(
                             }
                         }
                     };
-                    match slot
-                        .ctx
-                        .session_runtime
-                        .plan_runtime
-                        .build_plan(&build_target, Some(slot.session_id.clone()))
-                    {
+                    match slot.ctx.session_runtime.plan_runtime.build_plan(
+                        &build_target,
+                        Some(slot.session_id.clone()),
+                        slot.ctx.session_runtime.todos_runtime.has_unfinished(),
+                    ) {
                         Ok(outcome) => {
                             let response_payload = plan_state_payload(
                                 &slot,

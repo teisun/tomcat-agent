@@ -327,6 +327,8 @@ parentSessionId / childSessionId 继续留在 payload，表达“父是谁 / 子
   - **GlobalServices（进程级，1 份）**：`llm`（+并发准入 D17）/ `tool_registry` / `event_bus`（事件带 sessionId D15）/ `SessionManager`（RMW 持锁 D10）/ `gate`（经评审保留 Global——用户授权代表全局意图）/ `audit` / `web_*`。
   - **ScopeServices（按 work_tree/项目缓存，同项目多会话共用 1 份）**：`checkpoint_store`（每 work_tree 一个实例 D18）/ project skill 层。
   - **SessionRuntime（每会话 1 份）**：`context_state` / `cancel_token` / `plan_runtime` / `todos_runtime` / `follow_up_queue` / `completion_routes` / `openai_files_runtime` / `read_file_state`（"先读后写"指纹表，不可共享 D16）/ per-session bash 任务。
+
+  - **Todos 归属**：`plan_runtime` 只管正式计划；`todos_runtime` 完整持有当前 Agent 会话的标题、正文、条目、证据和存储路径，打开时读回，保存成功才提交。Plan reviewer 即使借用主会话 PlanRuntime，也必须挂自己的 TodosRuntime；主会话 `GetState`、开工预警只读主会话 Todos。详见 [`tools/todos.md`](./tools/todos.md)。
   - `agent_workspace_dir` 也不再取全局 cwd，而是从会话自己的 `cwd` 来。
 - **`session_impl.rs` 写锁（D10）**：
   - `sessions.json`：把 `load → mutate → save` **整段 read-modify-write 都圈进 `write_mutex`**（或改 per-key 原子更新），不再只罩 `save_store`——否则两会话各读各写会丢更新

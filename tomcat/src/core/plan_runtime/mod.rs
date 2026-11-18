@@ -1,8 +1,6 @@
 //! # PlanRuntime — per-session PLAN 模式编排器（T2-P1-002/003/004）
 //!
-//! `PlanRuntime` 与 `TodosRuntime` 是 PLAN/CHAT 相关的两条 per-session 运行态：前者持有当前
-//! 会话模式、active plan 缓存、reviewer 派发逻辑，以及 session-local todos 的内存态；
-//! 后者只负责把这份 session-local todos 持久化到 agent 级 `.todo.md`。
+//! 会话模式与正式 Plan 由本模块编排；独立的 TodosRuntime 持有每个 Agent 的工作文档。
 //! 它们都挂在 `ChatContext` 上，与 chat session 同生命周期（**不**每轮重建，否则 `mode`
 //! 会被重置回 Chat，丢失 PLAN 的持续语义）。
 //!
@@ -133,16 +131,17 @@ impl NextAction {
     }
 }
 
-/// The single authoritative todo source preserved in a compaction summary.
-///
-/// A readable active PlanFile wins even when it has no todos: that empty list is
-/// still meaningful and must not silently fall back to an unrelated session
-/// scratchpad. Only when no readable plan exists may non-empty scratchpad todos
-/// provide Progress.
+/// A readable Plan wins, including an empty Plan. Otherwise use this Agent's saved Todos.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressSource {
-    PlanFile { todos: Vec<file_store::TodoItem> },
-    SessionScratchpad { todos: Vec<file_store::TodoItem> },
+    PlanFile {
+        path: PathBuf,
+        todos: Vec<file_store::TodoItem>,
+    },
+    SessionScratchpad {
+        path: PathBuf,
+        todos: Vec<file_store::TodoItem>,
+    },
 }
 
 /// 会话控制态快照。摘要的 `<control_state>` 机器区块（第 3 章）与恢复日志共用这一份取数，
@@ -151,7 +150,6 @@ pub enum ProgressSource {
 pub struct ControlSnapshot {
     /// chat | plan
     pub mode: AgentMode,
-    pub plan_path: Option<PathBuf>,
     /// 计划文件 frontmatter 里的 state；读不到计划文件时为 None。
     pub plan_file_state: Option<String>,
     pub plan_id: Option<String>,
@@ -159,6 +157,44 @@ pub struct ControlSnapshot {
     /// Runtime-selected Progress source. See [`ProgressSource`] for the
     /// PlanFile-first, scratchpad-fallback invariant.
     pub progress: Option<ProgressSource>,
+}
+
+impl ControlSnapshot {
+    pub fn capture(
+        runtime: Option<&PlanRuntime>,
+        todos_runtime: Option<&todo_runtime::TodosRuntime>,
+        model: Option<&str>,
+    ) -> Option<Self> {
+        if runtime.is_none() && todos_runtime.is_none() {
+            return None;
+        }
+        let active = runtime.and_then(PlanRuntime::active_plan);
+        let plan = active.as_ref().and_then(|active| {
+            file_store::read_plan(&active.path)
+                .ok()
+                .map(|plan| (active.path.clone(), plan))
+        });
+        let plan_file_state = plan
+            .as_ref()
+            .map(|(_, plan)| plan.frontmatter.state.as_str().to_string());
+        let progress = plan
+            .map(|(path, plan)| ProgressSource::PlanFile {
+                path,
+                todos: plan.frontmatter.todos,
+            })
+            .or_else(|| {
+                todos_runtime
+                    .and_then(|todos| todos.progress())
+                    .map(|(path, todos)| ProgressSource::SessionScratchpad { path, todos })
+            });
+        Some(Self {
+            mode: runtime.map(PlanRuntime::mode).unwrap_or(AgentMode::Chat),
+            plan_file_state,
+            plan_id: active.map(|active| active.id),
+            model: model.map(str::to_string),
+            progress,
+        })
+    }
 }
 
 /// 恢复时只读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
@@ -222,10 +258,6 @@ pub struct PlanRuntime {
     /// 失效 → cancel→pending 不工作（D2 防御）。
     #[allow(dead_code)] // P7 接入
     cancel_token: Mutex<Option<CancellationToken>>,
-    /// `todos` 工具的 session-local scratchpad，适用于所有模式（含 EXEC）；
-    /// **绝不**写入 `PlanFile.frontmatter.todos[]`。plan 文件推进统一由 `update_plan`
-    /// 负责；`.todo.md` 的持久化由独立的 `TodosRuntime` 接管。
-    session_todos: Mutex<Vec<file_store::TodoItem>>,
     /// 当前绑定计划的文件状态缓存。计划文件是唯一权威；写盘后和每回合开始前刷新。
     active_plan: RwLock<Option<ActivePlan>>,
     /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
@@ -267,10 +299,6 @@ pub struct PlanRuntime {
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
     interaction_policy: RwLock<InteractionPolicy>,
-    /// 当前 active todos scratchpad 的逻辑 id（不再参与磁盘文件命名）。
-    /// `todos.new_todos=true` 时通过 [`Self::rotate_active_todos_id`] 切换，便于 tool result
-    /// / panel 在内存层感知“新白板”。
-    active_todos_id: Mutex<Option<String>>,
     /// E：UI 刷新广播——todos / update_plan 成功后，runtime 把 snapshot fanout 给所有
     /// 注册的 panel。生产由 `ChatContext::from_config` 注入 CLI/IDE 适配；测试可空。
     refresh_notifier: Arc<RefreshNotifier>,
@@ -402,7 +430,6 @@ impl PlanRuntime {
             session_key: session_key.into(),
             current_session_id: Mutex::new(current_session_id),
             cancel_token: Mutex::new(None),
-            session_todos: Mutex::new(Vec::new()),
             active_plan: RwLock::new(None),
             lock_timeout_ms,
             plan_reviewer: Mutex::new(None),
@@ -421,7 +448,6 @@ impl PlanRuntime {
             session_model: parking_lot::Mutex::new(None),
             ask_question_panel: Mutex::new(None),
             interaction_policy: RwLock::new(InteractionPolicy::default()),
-            active_todos_id: Mutex::new(None),
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
             auto_checkpoint_on_build: AtomicBool::new(false),
@@ -577,39 +603,6 @@ impl PlanRuntime {
         self.refresh_notifier.clone()
     }
 
-    /// 当前 active todos scratchpad id（mirrors 历史上的 `activeTodosId` 语义，但不再是文件名）。
-    pub fn active_todos_id(&self) -> Option<String> {
-        self.active_todos_id.lock().clone()
-    }
-
-    /// 获取或派生当前 active todos scratchpad id；首次调用时按"session_key + ms 时间戳"派生。
-    pub fn ensure_active_todos_id(&self) -> String {
-        let mut g = self.active_todos_id.lock();
-        if let Some(id) = g.as_ref() {
-            return id.clone();
-        }
-        let id = self.fresh_todos_id();
-        *g = Some(id.clone());
-        id
-    }
-
-    /// 强制切到一个新的 active todos scratchpad id；供 `todos.new_todos=true` 使用。
-    pub fn rotate_active_todos_id(&self) -> String {
-        let mut g = self.active_todos_id.lock();
-        let id = self.fresh_todos_id();
-        *g = Some(id.clone());
-        id
-    }
-
-    /// 生成一个新的内存逻辑 scratchpad id；**不**参与 `.todo.md` 文件命名。
-    fn fresh_todos_id(&self) -> String {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        format!("td_{}_{now_ms}", self.session_key)
-    }
-
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session_id.lock().clone()
     }
@@ -689,36 +682,6 @@ impl PlanRuntime {
         self.session_model.lock().clone()
     }
 
-    /// 当前控制态快照。`model` 由调用方注入（PlanRuntime 不持有模型信息）。
-    pub fn control_snapshot(&self, model: Option<&str>) -> ControlSnapshot {
-        let mode = self.mode();
-        let active_plan = self.active_plan();
-        let plan_path = active_plan.as_ref().map(|plan| plan.path.clone());
-        let plan = plan_path
-            .as_deref()
-            .and_then(|path| file_store::read_plan(path).ok());
-        let plan_file_state = plan
-            .as_ref()
-            .map(|plan| plan.frontmatter.state.as_str().to_string());
-        let progress = if let Some(plan) = plan {
-            Some(ProgressSource::PlanFile {
-                todos: plan.frontmatter.todos,
-            })
-        } else {
-            let todos = self.snapshot_session_todos();
-            (!todos.is_empty()).then_some(ProgressSource::SessionScratchpad { todos })
-        };
-        let plan_id = active_plan.map(|plan| plan.id);
-        ControlSnapshot {
-            mode,
-            plan_path,
-            plan_file_state,
-            plan_id,
-            model: model.map(str::to_string),
-            progress,
-        }
-    }
-
     /// 兼容旧调用口：v4-g 起 recover 不再扫盘，仅保持默认 Chat。
     pub fn recover(&self) -> Result<(), PlanRuntimeError> {
         self.attach_from_resume_state(ResumeControlState::default())
@@ -779,16 +742,6 @@ impl PlanRuntime {
     /// 当前 `[plan] lock_timeout_ms`。
     pub fn lock_timeout_ms(&self) -> u64 {
         self.lock_timeout_ms
-    }
-
-    /// session_todos 的快照（克隆，供 `todos` CHAT 路径使用）。
-    pub fn snapshot_session_todos(&self) -> Vec<file_store::TodoItem> {
-        self.session_todos.lock().clone()
-    }
-
-    /// 整体替换 session_todos（不暴露细粒度 API，避免 ops 引擎语义被绕过）。
-    pub fn replace_session_todos(&self, todos: Vec<file_store::TodoItem>) {
-        *self.session_todos.lock() = todos;
     }
 
     /// After a successful plan-file write, synchronize the cache with the exact file that was
@@ -1527,7 +1480,7 @@ impl PlanRuntime {
     /// **闸门**（任一不通过 → `BuildBlocked`）：
     /// - 当前内存 mode 不能是 `Executing`；`Chat` / `Planning` / `Pending` / `Completed`
     ///   允许继续检查目标盘
-    /// - 当前 session 的 active scratchpad todos（`session_todos` 中 pending/in_progress）
+    /// - 调用方传入 `has_active_session_todos`（本会话 Todos 有 pending/in_progress）时
     ///   仅 warning，不阻塞 build
     /// - `/plan build` 无参时仍由 `default_build_target()` 优先命中当前 `Pending { id }`；
     ///   显式 target 则可切到另一份 `planning/pending` plan
@@ -1549,18 +1502,9 @@ impl PlanRuntime {
         &self,
         plan_id_or_path: &str,
         session_id: Option<String>,
+        has_active_session_todos: bool,
     ) -> Result<BuildPlanOutcome, PlanRuntimeError> {
         let (path, requested_plan_id) = self.resolve_build_target(plan_id_or_path)?;
-        // ─── 预检：active scratchpad todos（仅 warning，不阻塞 build） ───────
-        let has_active_session_todos = {
-            let session_todos = self.session_todos.lock();
-            session_todos.iter().any(|t| {
-                matches!(
-                    t.status,
-                    file_store::TodoStatus::Pending | file_store::TodoStatus::InProgress
-                )
-            })
-        };
 
         struct BuildCommit {
             plan_id: String,

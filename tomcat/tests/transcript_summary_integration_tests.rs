@@ -897,14 +897,25 @@ async fn todos_tool_emits_session_todos_event() {
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
     let captured = attach_transcript_spy(&rt);
+    let events = captured.clone();
+    let todos_runtime = tomcat::core::plan_runtime::todo_runtime::TodosRuntime::open(
+        home.join(".tomcat/agents/main"),
+        "session-a",
+        Some(Arc::new(move |items| {
+            events
+                .lock()
+                .unwrap()
+                .push(serde_json::json!({"event": wire::WIRE_SESSION_TODOS, "todos": items}));
+        })),
+    );
 
     info!(target: "test", phase = "act", "调用 todos::execute upsert 一条 session scratchpad todo");
     todos::execute(
-        &rt,
-        None,
+        &todos_runtime,
         todos::TodosArgs {
             new_todos: false,
             title: None,
+            draft: Some("body must not enter the event".into()),
             replace: false,
             ops: vec![todos::TodoOpArg::Upsert {
                 id: "t1".into(),

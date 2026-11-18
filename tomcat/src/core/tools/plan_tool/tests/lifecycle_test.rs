@@ -1,7 +1,7 @@
 use fs2::FileExt;
 
 use super::common::*;
-use crate::core::plan_runtime::ProgressSource;
+use crate::core::plan_runtime::{ControlSnapshot, ProgressSource};
 
 #[tokio::test]
 async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner() {
@@ -23,7 +23,7 @@ async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner()
     )
     .unwrap();
     assert_eq!(target, path);
-    let started = start_plan::execute_at_path(&coder, target, Default::default(), None)
+    let started = start_plan::execute_at_path(&coder, target, Default::default(), None, false)
         .await
         .unwrap();
     assert_eq!(started["started"], true);
@@ -78,7 +78,7 @@ async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner()
     );
     let next = PlanRuntime::new_with_session_id("shared-project", "next-coder");
     next.set_max_code_review_rounds(0);
-    start_plan::execute_at_path(&next, path.clone(), Default::default(), None)
+    start_plan::execute_at_path(&next, path.clone(), Default::default(), None, false)
         .await
         .unwrap();
     assert_eq!(
@@ -120,7 +120,7 @@ fn cancel_token_demotes_executing_to_pending() {
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("cancellable", PlanFileState::Planning);
-    rt.build_plan("cancellable", None).unwrap();
+    rt.build_plan("cancellable", None, false).unwrap();
     assert_eq!(rt.mode(), AgentMode::Chat);
 
     let demoted = rt.park_executing_plan().unwrap();
@@ -269,12 +269,12 @@ fn cancel_token_releases_plan_lock() {
     let home = setup_isolated_home();
     let rt = PlanRuntime::with_lock_timeout("session-a", 200);
     write_disk_plan("lockable", PlanFileState::Planning);
-    rt.build_plan("lockable", None).unwrap();
+    rt.build_plan("lockable", None, false).unwrap();
     rt.park_executing_plan().unwrap();
 
     let rt2 = PlanRuntime::with_lock_timeout("session-b", 200);
     let outcome = rt2
-        .build_plan("lockable", None)
+        .build_plan("lockable", None, false)
         .expect("demote 后 lock 应已释放，再 build 应成功");
     assert!(matches!(outcome.prev_disk_state, PlanFileState::Pending));
     cleanup_home(&home);
@@ -286,7 +286,7 @@ fn completed_plan_keeps_chat_session_mode_and_active_path() {
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("done_path", PlanFileState::Planning);
-    rt.build_plan("done_path", None).unwrap();
+    rt.build_plan("done_path", None, false).unwrap();
     let path = plan_path_for_id("done_path").unwrap();
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.state = PlanFileState::Completed;
@@ -315,7 +315,7 @@ fn plan_mode_raw_edit_blocked_for_plan_files_in_planning_and_executing() {
     assert!(!rt.allow_raw_edit_to_path(&plan_path));
 
     rt.exit_plan().unwrap();
-    rt.build_plan("guarded", None).unwrap();
+    rt.build_plan("guarded", None, false).unwrap();
     assert!(!rt.allow_raw_edit_to_path(&plan_path));
 
     let other = home.join(".tomcat").join("notes.md");
@@ -347,7 +347,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
     f.try_lock_exclusive().unwrap();
 
     let rt = PlanRuntime::with_lock_timeout("session-a", 50);
-    let err = rt.build_plan("rollback", None).unwrap_err();
+    let err = rt.build_plan("rollback", None, false).unwrap_err();
     assert_eq!(rt.mode(), AgentMode::Chat);
     match err {
         PlanRuntimeError::Io(s) => {
@@ -360,7 +360,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
     drop(f);
     let rt = PlanRuntime::with_lock_timeout("session-a", 1000);
     let _ok = rt
-        .build_plan("rollback", None)
+        .build_plan("rollback", None, false)
         .expect("放锁后 build 应成功");
     assert_eq!(rt.mode(), AgentMode::Chat);
     cleanup_home(&home);
@@ -499,16 +499,15 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     })
     .unwrap();
 
-    let snap = rt.control_snapshot(Some("gpt-5.6-sol"));
+    let snap = ControlSnapshot::capture(Some(&rt), None, Some("gpt-5.6-sol")).unwrap();
     assert_eq!(snap.mode, AgentMode::Chat);
     assert_eq!(snap.plan_file_state.as_deref(), Some("executing"));
-    assert_eq!(snap.plan_path, Some(path));
     assert_eq!(snap.plan_id.as_deref(), Some(plan_id));
     assert_eq!(snap.model.as_deref(), Some("gpt-5.6-sol"));
     assert!(matches!(
         snap.progress,
-        Some(ProgressSource::PlanFile { ref todos })
-            if todos.len() == 1
+        Some(ProgressSource::PlanFile { ref todos, path: ref selected_path })
+            if selected_path == &path && todos.len() == 1
                 && todos[0].id == "step1"
     ));
     cleanup_home(&home);
@@ -525,36 +524,88 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
     let mut empty_plan = read_plan(&plan_path).unwrap();
     empty_plan.frontmatter.todos.clear();
     write_plan(&plan_path, &empty_plan, 2000).unwrap();
-    with_plan.bind_plan_file_for_test(plan_path);
-    with_plan.replace_session_todos(vec![TodoItem {
-        id: "scratch".into(),
-        content: "must not leak over a readable empty plan".into(),
-        status: TodoStatus::Pending,
-        evidence: Vec::new(),
-        kind: Default::default(),
-    }]);
+    with_plan.bind_plan_file_for_test(plan_path.clone());
+    let todos_runtime = TodosRuntime::open(home.join(".tomcat/agents/main"), "session-a", None);
+    todos_runtime
+        .commit(false, |file| {
+            file.items.push(TodoItem {
+                id: "scratch".into(),
+                content: "keep investigating".into(),
+                status: TodoStatus::InProgress,
+                evidence: Vec::new(),
+                kind: Default::default(),
+            });
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
     assert!(matches!(
-        with_plan.control_snapshot(None).progress,
-        Some(ProgressSource::PlanFile { ref todos }) if todos.is_empty()
+        ControlSnapshot::capture(Some(&with_plan), Some(&todos_runtime), None).unwrap().progress,
+        Some(ProgressSource::PlanFile { ref path, ref todos }) if path == &plan_path && todos.is_empty()
     ));
 
-    let scratchpad_only = PlanRuntime::new("session-b");
-    scratchpad_only.seed_active_plan_for_test("missing-plan".into(), PlanFileState::Planning);
-    scratchpad_only.replace_session_todos(vec![TodoItem {
-        id: "scratch".into(),
-        content: "keep investigating".into(),
-        status: TodoStatus::InProgress,
-        evidence: Vec::new(),
-        kind: Default::default(),
-    }]);
+    empty_plan.frontmatter.state = PlanFileState::Completed;
+    write_plan(&plan_path, &empty_plan, 2000).unwrap();
+    let completed = ControlSnapshot::capture(Some(&with_plan), Some(&todos_runtime), None).unwrap();
+    assert_eq!(completed.plan_file_state.as_deref(), Some("completed"));
     assert!(matches!(
-        scratchpad_only.control_snapshot(None).progress,
-        Some(ProgressSource::SessionScratchpad { ref todos })
-            if todos.len() == 1 && todos[0].id == "scratch"
+        completed.progress,
+        Some(ProgressSource::PlanFile { .. })
     ));
 
-    let none = PlanRuntime::new("session-c");
-    assert!(none.control_snapshot(None).progress.is_none());
+    std::fs::remove_file(&plan_path).unwrap();
+    assert!(matches!(
+        ControlSnapshot::capture(Some(&with_plan), Some(&todos_runtime), None).unwrap().progress,
+        Some(ProgressSource::SessionScratchpad { ref path, ref todos })
+            if path == todos_runtime.path() && todos.len() == 1 && todos[0].id == "scratch"
+    ));
+    assert!(matches!(
+        ControlSnapshot::capture(None, Some(&todos_runtime), None)
+            .unwrap()
+            .progress,
+        Some(ProgressSource::SessionScratchpad { .. })
+    ));
+    assert!(ControlSnapshot::capture(Some(&with_plan), None, None)
+        .unwrap()
+        .progress
+        .is_none());
+    let child = TodosRuntime::open(
+        home.join(".tomcat/agents/main"),
+        "session-a-child-plan_reviewer-unique",
+        None,
+    );
+    child
+        .commit(false, |file| {
+            file.draft = "private Markdown".repeat(10_000);
+            Ok::<_, crate::infra::error::AppError>(())
+        })
+        .unwrap();
+    let worker = ControlSnapshot::capture(None, Some(&child), Some("model")).unwrap();
+    assert_eq!(worker.mode, AgentMode::Chat);
+    assert_eq!(worker.model.as_deref(), Some("model"));
+    assert!(
+        matches!(&worker.progress, Some(ProgressSource::SessionScratchpad { path, todos }) if path == child.path() && todos.is_empty())
+    );
+    let rendered = crate::core::compaction::machine_block::render(Some(&worker), &[]);
+    assert!(rendered.contains(child.path().to_str().unwrap()));
+    assert!(!rendered.contains(todos_runtime.path().to_str().unwrap()));
+    assert!(!rendered.contains("private Markdown"));
+    let reviewer = ControlSnapshot::capture(Some(&with_plan), Some(&child), None).unwrap();
+    assert!(
+        matches!(reviewer.progress, Some(ProgressSource::SessionScratchpad { ref path, .. }) if path == child.path())
+    );
+    std::fs::write(child.path(), "corrupt").unwrap();
+    let broken = TodosRuntime::open(
+        home.join(".tomcat/agents/main"),
+        "session-a-child-plan_reviewer-unique",
+        None,
+    );
+    assert!(
+        ControlSnapshot::capture(Some(&with_plan), Some(&broken), None)
+            .unwrap()
+            .progress
+            .is_none()
+    );
+    assert!(ControlSnapshot::capture(None, None, None).is_none());
     cleanup_home(&home);
 }
 

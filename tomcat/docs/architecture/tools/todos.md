@@ -1,327 +1,126 @@
-# `todos` 工具：会话级 TodoFile 与 TodosPanel
-
-本文档是内置工具 **`todos`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 的运行时编排，描述 `todos` 在 D 方案下的最终职责：**它只管理 session-local 的 TodoFile scratchpad，不再写 PlanFile**。**实现以仓库代码为准**；本文只保留当前代码已经采用的行为与契约。
-
-> **重要**：`todos` **仅**写 `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`。要改 plan 文件 frontmatter 里的 `todos[]`，请用 [`update_plan`](./update-plan.md)；要整盘重写计划，请用 [`create_plan`](./create-plan.md)。
-
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
-
-**说人话**：`todos` 是给当前会话用的本地小白板。任何模式都能用，适合模型把多步工作拆成一份 scratchpad 清单；它不会碰 `plan.md`，也不会影响 `/plan build` 的状态机。
-
----
-
-## 目录
-
-- [1. 术语统一](#1-术语统一)
-- [2. 与 `update_plan` / `create_plan` 的分工](#2-与-update_plan--create_plan-的分工)
-- [3. 目标与设计原则](#3-目标与设计原则)
-- [4. 运行时行为](#4-运行时行为)
-- [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
-- [6. 状态机与并发约束](#6-状态机与并发约束)
-- [7. TodosPanel：UI 投影协议](#7-todospanelui-投影协议)
-- [8. 配置与环境变量](#8-配置与环境变量)
-- [9. 测试矩阵（验收）](#9-测试矩阵验收)
-- [10. 历史决策](#10-历史决策)
-- [11. 关联文档](#11-关联文档)
-
----
-
-## 1. 术语统一
-
-| 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
-|------|--------------|----------|----------|--------|
-| **TodoItem** | 单个最小执行步骤 | `TodoItem { id, content, status }` | `id` 在同一份 TodoFile 内唯一；`status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多三个互不依赖的 `in_progress` | 一条待办；互不依赖时可并行最多三条。 |
-| **TodoFile** | 一份 session-local scratchpad 文件 | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md` | frontmatter 记录 `todos_id` / `session_id` / `title?` / `created_at` / `schema_version`；正文固定 `## Todos` 列表 | 一份清单一个文件。 |
-| **`active_todos_id`** | 当前 session 正在使用的 scratchpad 逻辑 id | `PlanRuntime.active_todos_id`（仅内存） | 首次调用时自动生成；`new_todos=true` 时显式切换到新 id；**不参与文件命名** | 当前会话“正在用哪块白板”的内存指针。 |
-| **`new_todos`** | 清空当前 scratchpad 并重新开始 | `todos` 顶层布尔入参 | 以空列表作为初始状态，再应用本次 `ops`；同一 `session_id` 文件被覆盖写 | 换一块新白板，但文件路径不变。 |
-| **`replace`** | 用一批 `upsert` 重写整表 | `todos` 顶层布尔入参 | 仅接受 `upsert`；`ops` 为空或含 `set_status` / `remove` 直接报错 | 整表重写模式。 |
-| **`title`** | TodoFile 的可选标题 | `.todo.md` frontmatter `title` | 仅在持久化路径启用时写盘；通常与 `new_todos` 一起用 | 给这块白板起个名字。 |
-| **TodosPanel** | UI 上的 todo 投影 | `TodosPanelSnapshot { panel_snapshot_id, scope, items, warnings }` | 只读快照，不是 source of truth；`scope` 对 `todos` 固定为 `session` | 侧边栏 / CLI 面板看到的是投影，不是另一份状态。 |
-
----
-
-## 2. 与 `update_plan` / `create_plan` 的分工
-
-| 工具 | 写什么 | 模式可见性 | 用来做什么 | 说人话 |
-|------|--------|-----------|-----------|--------|
-| **`todos`** | `TodoFile`（session 路径） | **任何模式** | 会话级 scratchpad、多步执行清单、调研步骤记录 | 给当前会话自己记事。 |
-| **`update_plan`** | `PlanFile.frontmatter.todos[]` | **任何模式** | 推进或修订某个 plan 的待办 | 改计划文件里的待办。 |
-| **`create_plan`** | `PlanFile` 整盘（frontmatter 初稿 + 正文） | **仅 PLAN 模式** | 起草或重写一整份计划 | 重写整盘计划。 |
+# `todos`：每个 Agent 会话一本工作本
 
 ```text
-要改什么？
-  │
-  ├─ 会话里的个人 scratchpad / 调研步骤 / 多步任务清单 ──▶ todos
-  │
-  ├─ plan.md frontmatter 里的 todos[] ──▶ update_plan
-  │
-  └─ 整个 plan 的 goal / draft / todos 结构大改 ──▶ create_plan
+主 Agent ── TodosRuntime ── todos/<session_id>.todo.md ── 主侧边栏
+
+plan reviewer ── 自己的 TodosRuntime ── todos/<child_session_id>.todo.md
+                 不改主清单，也不通知主侧边栏
+
+正式计划：PlanRuntime + update_plan → .plan.md（与 Todos 独立）
 ```
 
-**说人话**：同样都是“待办”，但载体不同。`todos` 写自己的 `.todo.md`；`update_plan` 写计划文件；`create_plan` 则是整盘重写。
+`todos` 管理标题、Markdown 正文、待办与完成证据。它不推进正式 Plan，不触发评审或验收；所有模式均可使用，角色白名单仍生效。完整工具 Schema 以 [生成目录](../../tool-catalog.md) 和 `src/core/tools/contract/catalog.rs` 为准。
 
----
-
-## 3. 目标与设计原则
-
-| ID | 目标 | 说人话 |
-|----|------|--------|
-| G1 | `todos` 在所有模式都可见 | 任何时候都可以先给自己列个执行清单。 |
-| G2 | `todos` 永远只写 session TodoFile，不写 PlanFile | 工具职责单一，不和 `update_plan` 重叠。 |
-| G3 | 与 `update_plan` 共享同一套 todo-op 语义（`upsert` / `set_status` / `remove`） | LLM 在两个工具间切换时不用重新学习一套 op。 |
-| G4 | `new_todos` / `title` / `replace` 只影响 session scratchpad | 新建白板、命名白板、整表替换都只发生在本地清单。 |
-| G5 | 同一份 TodoFile 最多三个互不依赖的 `in_progress` | 允许有限并行，同时避免面板失焦。 |
-| G6 | 成功调用总是返回完整 `items` 快照 | LLM 无需再 `read` `.todo.md` 才知道当前状态。 |
-| G7 | 持久化是增强项，不是主流程前提 | 即使磁盘异常，内存态也能继续推进。 |
-| G8 | TodosPanel 只消费 `panel_snapshot_id + items` 快照 | UI 不额外保留第二份“真相”。 |
-
-**说人话（§3 总览）**：D 方案把 `todos` 收敛成一个轻量、稳定、全模式可见的 session 工具。它既能帮模型做多步工作管理，又不会和 plan 状态机互相污染。
-
----
-
-## 4. 运行时行为
-
-### 4.1 持久化路径与文件格式
-
-当 `ChatContext` 注入 `TodosRuntime` 时，`todos` 会把当前 session 清单持久化到：
-
-```text
-~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md
-```
-
-磁盘格式由 [`todo_runtime.rs`](../../../src/api/chat/plan_runtime/todo_runtime.rs) 定义：
-
-```yaml
----
-todos_id: td_12345678
-session_id: 1747656000000_abcd1234
-title: research-notes        # 可选
-created_at: 2026-05-19T20:00:00+08:00
-schema_version: 1
----
-
-## Todos
-
-- [ ] t1: inspect API surface
-- [~] t2: run focused regression
-- [x] t3: update docs
-- [-] t4: drop abandoned idea
-```
-
-checkbox 与状态的映射：
-
-- `[ ]` = `pending`
-- `[~]` = `in_progress`
-- `[x]` = `completed`
-- `[-]` = `cancelled`
-
-### 4.2 `new_todos` 与 `active_todos_id`
-
-`todos` 每次执行都走 session 路径：
-
-1. `new_todos=false`：读取当前 in-memory session todos，再应用 `ops`。
-2. `new_todos=true`：从空列表开始应用 `ops`，并调用 `rotate_active_todos_id()` 切到一块新的内存白板。
-3. 若当前 session 尚无 active id，则调用 `ensure_active_todos_id()` 生成 stable id。
-
-换句话说，`new_todos` 的语义不是“新建另一个磁盘文件”，而是“清空当前 scratchpad 并覆盖写同一个 `<session_id>.todo.md`”。
-
-### 4.3 `replace=true`
-
-`replace=true` 表示整表替换，但它仍然走共享的 todo-op 引擎，约束如下：
-
-- `ops` 必须全部是 `kind = "upsert"`；
-- `ops` 不能为空；
-- 替换后的整表仍要满足“最多三个互不依赖的 `in_progress`”。
-
-这保证 `todos` 和 `update_plan` 在“重写一组待办”这件事上的协议一致。
-
-### 4.4 单文件覆盖语义
-
-`todos` 已经改成“**每个 session 只有一个磁盘文件**”模型，因此不存在旧文件清理：
-
-- `new_todos=false`：覆盖写 `todos/<session_id>.todo.md` 的最新内容；
-- `new_todos=true`：仍然覆盖写**同一个** `todos/<session_id>.todo.md`，只是内存 scratchpad 先清空再应用本次 `ops`；
-- 不再有 `purge_inactive()` / 多文件枚举 / 按 `session_key` 过滤删除。
-
-**说人话**：现在磁盘上天然只有这一份文件，不需要再“切新文件再删旧文件”。
-
----
-
-## 5. 协议（入参 / 出参 / Schema）
-
-### 5.1 工具 JSON Schema
+## 1. 怎么用
 
 ```json
 {
-  "name": "todos",
-  "description": "Track a session-local todo list (a personal scratchpad you can keep across tool calls).\n\nWhen to use: any multi-step work (3+ distinct steps), multiple user tasks, or whenever you want a checklist to keep yourself organized across turns. Mark an item in_progress before starting it; mark it completed as soon as it's done. At most three independent todos may be in_progress.\n\nWhen NOT to use: single trivial step or pure Q&A.\n\nReturn value: every successful call returns a full items snapshot under `items` (id/content/status). You do NOT need to re-read the file to know the current state.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most three independent in_progress at any time; use ops (upsert/set_status/remove) or replace=true for full list replacement. new_todos=true clears the current scratchpad and overwrites the same `todos/<session_id>.todo.md` file.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "new_todos": {
-        "type": "boolean",
-        "description": "If true, clear the current scratchpad before applying ops. The same `todos/<session_id>.todo.md` file is overwritten; no extra file is created. Default false."
-      },
-      "title": {
-        "type": "string",
-        "description": "Optional title for new_todos (stored in .todo.md frontmatter)."
-      },
-      "ops": {
-        "type": "array",
-        "description": "Sequence of mutations applied in order under a single file lock.",
-        "items": {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": ["upsert", "set_status", "remove"],
-              "description": "upsert = create or update by id; set_status = mutate status only; remove = delete by id"
-            },
-            "id":      { "type": "string" },
-            "content": { "type": "string" },
-            "status":  { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] }
-          },
-          "required": ["kind", "id"]
-        }
-      },
-      "replace": {
-        "type": "boolean",
-        "description": "If true, the entire todos array is replaced by `ops` upsert results. Default false."
-      }
-    },
-    "required": ["ops"]
-  }
+  "title": "修复登录",
+  "draft": "## 处理记录\n问题出在旧令牌缓存。",
+  "ops": [{"kind": "upsert", "id": "fix-login", "content": "修复并回归"}]
 }
 ```
 
-### 5.2 出参
-
-实现层当前返回以下字段（其中部分为可选）：
-
-```jsonc
+```json
 {
-  "scope": "session",
-  "mode": "chat|planning|executing|completed|pending",
-  "applied": 2,
-  "replace": false,
-  "new_todos": false,
-  "active_in_progress": "t2",
-  "items": [
-    { "id": "t1", "content": "inspect API surface", "status": "completed" },
-    { "id": "t2", "content": "run focused regression", "status": "in_progress" }
-  ],
-  "title": "research-notes",                   // 可选
-  "active_todos_id": "td_12345678",            // 始终是当前内存 scratchpad id
-  "persisted_path": ".../sid-a.todo.md",       // 持久化成功时出现
-  "panel_snapshot_id": 1747656000000000
+  "ops": [{
+    "kind": "set_status", "id": "fix-login", "status": "completed",
+    "evidence": ["file:src/login.rs", "test:login_regression"]
+  }]
 }
 ```
 
-返回约束：
+| 参数 | 行为 |
+|---|---|
+| `draft` | 不传则保留；传字符串整体替换；`""` 清空。Markdown 原样保存，不剥标题或代码块。 |
+| `title` | 不传则保留；传字符串改名；`""` 清除标题。不限于新建时使用。 |
+| `ops` | 顺序应用 `upsert` / `set_status` / `remove`。只改正文或标题时可以省略。 |
+| `new_todos=true` | 重建文档身份与创建时间，清空标题、正文、条目和证据，再应用本次参数；文件路径不变。 |
+| `replace=true` | 仅重建条目，不改正文、标题、身份或创建时间。必须提供非空且全为 `upsert` 的列表；旧证据不继承。 |
 
-- `items` 始终是**完整快照**；
-- `active_in_progress` 为列表中**第一条** `in_progress` 的 `id`（允许多个时仍只投影一条给面板），否则为 `null`；
-- `panel_snapshot_id` 来自 `TodosPanelSnapshot`，UI 用它做去重 / 防回退；
-- `scope` 对 `todos` 固定为 `"session"`。
+`{}`、`{"ops":[]}` 与空 `replace` 会报错；清空整本使用 `new_todos=true`。最多三个独立条目同时 `in_progress`；未知 ID 或非法操作导致整批拒绝。
 
-**说人话**：模型拿到这一条 ToolResult 就知道“当前白板长什么样”，不需要再读文件。
+**证据规则与 `update_plan` 共用同一段操作代码，不调用 Plan 工具：**仅 `set_status(status="completed")` 可以带 `evidence`；追加、去重、忽略空白项；空数组不清除已有证据。普通更新保留证据，删除条目、整表重建和新建工作本会清除对应旧证据。
 
----
+## 2. 每次成功都返回文件地址
 
-## 6. 状态机与并发约束
-
-### 6.1 单文件状态约束
-
-| 约束 | 处理 | 说人话 |
-|------|------|--------|
-| 超过三条 todo 同时 `in_progress` | tool error，整批回滚 | 最多三个互不依赖并行；第四个硬拒。 |
-| `set_status` / `remove` 指向未知 `id` | tool error | 不能瞎编 id。 |
-| `replace=true` 但 `ops` 含非 `upsert` | tool error | 整表替换只能给最终态。 |
-| `replace=true` 且 `ops` 为空 | tool error | 不允许靠空替换清空表。 |
-
-### 6.2 并发与锁
-
-- in-memory：先对 session todos 做替换，再决定是否持久化；
-- 持久化：`TodosRuntime::persist()` 采用 `tmp -> rename` 原子写；
-- 当前实现里 `todos` 的持久化失败只记 warning，不阻塞主流程；
-- `new_todos` 不再触发任何 purge，因为磁盘上天然只有 `todos/<session_id>.todo.md` 这一份文件。
-
-**说人话**：这块白板首先保证当前回合可用，其次才尽量把磁盘状态追上来。
-
----
-
-## 7. TodosPanel：UI 投影协议
-
-`todos` 成功后会立刻构造：
-
-```rust
-TodosPanelSnapshot::new_session(items)
+```json
+{
+  "scope": "session", "applied": 1, "replace": false, "new_todos": false,
+  "active_in_progress": null, "active_todos_id": "td_...", "title": "修复登录",
+  "items": [{"id": "fix-login", "content": "修复并回归", "status": "completed", "evidence": ["test:login_regression"]}],
+  "todos_path": "/.../.tomcat/agents/main/todos/<session_id>.todo.md"
+}
 ```
 
-并通过 `RefreshNotifier` fanout 给注册的 panel。快照字段：
+- `items` 是完整当前清单，包含已有证据；标题已清除时不返回 `title`。
+- `todos_path` 是绝对路径，每次成功保存后都返回。正文不自动回传，按需 `read(todos_path)`。
+- `active_todos_id` 对应文档内的 `todos_id`，不再由 PlanRuntime 持有。
+- 旧字段 `persisted_path` 改为 `todos_path`；移除依赖 Plan 的 `mode` 和与面板重复的 `panel_snapshot_id`。面板仍使用其自带的快照 ID。
 
-| 字段 | 含义 | 说人话 |
-|------|------|--------|
-| `panel_snapshot_id` | 单调递增快照 id | UI 用它防止旧数据回刷。 |
-| `scope` | 固定为 `session` | 这是会话白板，不是 plan 白板。 |
-| `items` | 当前完整 todo 列表 | 面板拿来直接渲染。 |
-| `warnings` | 额外警告 | 当前 `todos` 路径通常为空。 |
+## 3. 文件格式 v2 与冷恢复
 
-CLI 默认渲染形态：
+固定地址：`~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`。普通更新与 `new_todos` 都覆盖这一份，不保留版本历史，不放进项目或 worktree。
 
 ```text
-[panel#1747656000000000] session 1 of 2 Done in_progress=t2
-  [x] t1 ▸ inspect API surface
-  [~] t2 ▸ run focused regression
+---
+schema_version: 2
+session_id: ...
+todos_id: td_...
+title: 修复登录
+created_at: ...
+items:
+- id: fix-login
+  content: 修复并回归
+  status: completed
+  evidence: ["test:login_regression"]
+  kind: work
+---
+<draft 原文>
 ```
 
-**说人话**：面板只是“播报器”。真正状态仍然来自 in-memory todos / TodoFile。
+YAML 存结构化条目与元数据；正文只放 `draft`，不再自动附加 `## Todos` 勾选清单。`TodosRuntime` 是完整文档及路径的唯一持有者，`open()` 直接读盘，不依赖历史事件或压缩摘要。`GetState` 从它查询条目；三个 Plan 开工入口把 `has_unfinished()` 传给 `build_plan`，仍只是提醒，不阻止开工。
 
----
+| 打开时遇到什么 | 怎么处理 |
+|---|---|
+| 无文件 | 暂无文档，不为闲置会话创建空文件。 |
+| v2 且 session_id 匹配 | 恢复标题、正文、条目、证据与创建信息。 |
+| v1 | 不迁移、不恢复；下一次成功更新才覆盖为 v2。旧版原本就是只写不读的投影。 |
+| 损坏、未知版本、归属不符、IO 错误 | 告警，聊天继续；Todos 更新（包括 new）拒绝，原件不动，也不提供恢复入口；每次更新前重试读取，修复后可继续。 |
 
-## 8. 配置与环境变量
+```text
+commit：锁内克隆 → 应用并校验 → 原子保存 → 替换内存 → 解锁 → 发布
+                     失败：文件、内存、通知均不提交
+```
 
-| 名称 | 默认 | 语义 | 说人话 |
-|------|------|------|--------|
-| `TOMCAT_TODOS_PANEL_THROTTLE_MS` | `250` | TodosPanel snapshot 节流窗口 | 面板别刷太勤。 |
-| `TOMCAT_TODOS_BASH_TAIL_LINES` | `3` | panel bash 摘要保留尾行数 | 如果面板关联网 shell 任务，默认只看最后 3 行。 |
-| `TOMCAT_TODOS_FILE_LOCK_TIMEOUT_MS` | `2000` | `.todo.md` 原子写入等待上限 | 等锁最多 2 秒。 |
+**保存失败就是失败，不再降级成“内存成功、磁盘没跟上”。**沿用 `write_file_atomic` 的唯一临时名、同步与改名流程。同一 AgentLoop 顺序写自己的工作本，不加第二把更新门闩或事件队列。发布回调在锁外运行，可安全查询已提交快照。
 
----
+## 4. Agent 隔离与界面
 
-## 9. 测试矩阵（验收）
+- 主 Agent：由 ChatContext 注入运行时；保存后通知现有 TodosPanel 并写 `session.todos` 条目事件。正文不进入事件或进度投影。
+- Plan reviewer：可以借用正式 PlanRuntime，但挂载自己的 TodosRuntime，发布回调为空；工具结果留在它自己的子会话记录中。
+- Explorer、verifier、code reviewer 不提供 `todos`。工具执行只依赖本 Agent 的 TodosRuntime，未挂载时报不可用错误。
+- 子会话 ID：`<parent>-child-<role>-<16位唯一后缀>`；后缀复用主会话生成器，不再用随 Registry 重建归零的序号。
+- 关闭会话保留文件；删除父会话同时清理其 `.todo.md` 及 `<session_id>-child-*.todo.md` 子孙文档，其他会话不动。
+- 不新增编辑器或改变现有面板协议。未来 worker、子 Agent 压缩和跨重启续接不属于本次交付，见 [多 Agent](../multi-agent.md)。
 
-| 类型 | 测试 | 说人话 |
-|------|------|--------|
-| 单元：全模式可见 | `todos_visible_in_all_modes` | 任何模式都要能调 `todos`。 |
-| 单元：in_progress 上限 | `todos_state_allows_independent_in_progress_items` / `ops_test::allows_three_in_progress_but_rejects_four_after_batch` | 最多三个互不依赖；第四个硬拒。 |
-| 单元：TodoFile round-trip | `todo_file_roundtrips_markdown_with_status_checkboxes` | `.todo.md` 要能稳定序列化。 |
-| 单元：new_todos 覆盖 | `todos_new_todos_overwrites_same_session_file` | 换新白板会覆盖同一个 session 文件。 |
-| 单元：多 session 隔离 | `todos_runtime_isolates_multiple_sessions_without_purge` | 不同 session_id 各写各的文件，互不影响。 |
-| 集成：面板刷新 | `todos_tool_updates_session_panel_snapshot` | 工具成功后 UI 快照要同步。 |
-| 集成：schema 漂移保护 | `tool_catalog_doc` | 文档里的 schema 不能和 catalog 漂移。 |
+## 5. 压缩后怎么继续
 
----
+```text
+ControlSnapshot::capture(本 loop 的 Plan?, 本 loop 的 Todos?)
+    可读 Plan → plan_path
+    否则已保存/恢复的 Todos（空条目也算）→ todos_path
+    否则 → 无工作文件入口
+```
 
-## 10. 历史决策
+只选择一份路径与同源进度，Plan 即使空清单或已完成也优先。正文与完整证据不放进摘要；模型按入口读文件，使用 `todos` 更新工作本。预热快照采用启动时状态，不在后台追随之后的修改；详见 [上下文管理 §7.5](../context-management.md#75-compaction-v2-修订t2-p0-002)。
 
-| 旧方案 / 分歧 | 结论 | 说人话 |
-|---------------|------|--------|
-| ~~`todos.active_scope ∈ {session, plan}`~~ | **下线**：`todos` 永远只写 session；plan 内待办由 [`update_plan`](./update-plan.md) 管。 | 工具职责单一。 |
-| ~~Planning 模式剔除 `todos`~~ | **下线**：D 方案改为所有模式都可见。 | 规划时也允许先给自己列调研步骤。 |
-| ~~`todos` 推进 `plan.md` 并触发 mode 派生~~ | **下线**：mode 派生只由 [`update_plan`](./update-plan.md) 触发。 | 改 plan 的工具负责 plan 状态机。 |
-| ~~旧白板长期归档堆目录~~ | **替代**：每个 session 固定一个 `todos/<session_id>.todo.md`，`new_todos` 直接覆盖写。 | 目录里天然只有当前这一份。 |
-| ~~ToolResult 不带全量 items，靠再次 `read` 文件补状态~~ | **否**：`todos` 总是返回完整 `items`。 | 一次调用就给足上下文。 |
+## 6. 回归覆盖
 
----
-
-## 11. 关联文档
-
-- plan 增量待办编辑：[update-plan.md](./update-plan.md)
-- plan 整盘重写：[create-plan.md](./create-plan.md)
-- PLAN / EXEC 运行时编排：[plan-runtime.md](../plan-runtime.md)
-- reviewer 子 Agent：[reviewer.md](./reviewer.md)
-- transcript / session 存储：[session-storage.md](../session-storage.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
-
-**说人话**：会话本地 scratchpad 看本文；改 `plan.md` 里的待办看 [`update-plan.md`](./update-plan.md)；整盘重写计划看 [`create-plan.md`](./create-plan.md)。
+| 范围 | 测试文件 |
+|---|---|
+| v2 保真、旧版忽略、损坏保护与重试 | `src/core/plan_runtime/tests/todo_runtime_test.rs` |
+| 正文/标题/reset/replace、证据、保存失败与锁外发布 | `src/core/tools/plan_tool/tests/todos_test.rs` |
+| 真实 reviewer 隔离、独立工具分发、ID 唯一、子孙清理 | `subagent_provider_binding_test.rs`、`reviewer_guards_test.rs`、`agent_registry_test.rs`、`usage_guard_test.rs` |
+| 冷恢复、重复 `/compact`、切换 Plan、预热与 Collapse | `cmd_compact_test.rs`、`current_tail_guard_test.rs`、`lifecycle_test.rs`、`machine_block_test.rs` |
+| Schema 与生成目录 | `src/core/tools/contract/tests/catalog_test.rs`、`tests/tool_catalog_doc.rs` |

@@ -683,6 +683,96 @@ fn assert_main_resolve_used_session_model(log: &ResolveLog) {
 }
 
 #[tokio::test]
+async fn real_plan_reviewer_owns_todos_without_publishing_to_parent() {
+    use crate::core::plan_runtime::todo_runtime::TodosRuntime;
+    use crate::core::tools::plan_tool::todos;
+    let _g = home_lock().lock().unwrap();
+    let (provider, requests) = RecordingProvider::success(
+        "fcodex",
+        "<review>\nsummary: ok\nchanges_summary: none\napplied_changes: false\n</review>",
+    );
+    provider.streams.lock().insert(0, RecordingStreamPlan::Immediate(vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0, id: Some("reviewer-todos".into()), name: Some("todos".into()),
+            arguments_delta: Some(serde_json::json!({"new_todos":true,"draft":"reviewer private notes","ops":[
+                {"kind":"upsert","id":"parent-step","content":"reviewer step","status":"completed"}
+            ]}).to_string()),
+        }),
+        Ok(StreamEvent::FinishReason { reason: "tool_calls".into() }),
+    ]));
+    let (other, other_requests) = RecordingProvider::success("deepseek", "unused");
+    let fx = build_fixture(provider, other, requests.clone(), other_requests, false);
+    let notifications = Arc::new(Mutex::new(0));
+    let sink = notifications.clone();
+    let parent = TodosRuntime::open(
+        fx.agent_trail_dir.clone(),
+        "parent-binding",
+        Some(Arc::new(move |_| *sink.lock() += 1)),
+    );
+    todos::execute(
+        &parent,
+        todos::TodosArgs::from_json(
+            &serde_json::json!({"title":"parent", "draft":"parent notes","ops":[
+                {"kind":"upsert","id":"parent-step","content":"parent work"}
+            ]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let before = parent.snapshot().unwrap();
+    let bytes = std::fs::read(parent.path()).unwrap();
+    let parent_events = Arc::new(Mutex::new(Vec::new()));
+    let event_sink = parent_events.clone();
+    fx.plan_runtime
+        .attach_transcript_appender(Arc::new(move |value| {
+            event_sink.lock().push(value);
+            Ok(())
+        }));
+    let dispatcher = ProdPlanReviewerDispatcher::new("todos_isolation", reviewer_deps(&fx, None));
+    let summary = dispatcher
+        .dispatch("binding_plan", "## Goal\nbinding\n", true)
+        .await;
+    assert!(!summary.aborted, "{}", summary.summary);
+    assert_eq!(requests.lock().len(), 2);
+    assert_eq!(parent.snapshot().unwrap(), before);
+    assert_eq!(std::fs::read(parent.path()).unwrap(), bytes);
+    assert_eq!(*notifications.lock(), 1);
+    assert!(parent_events
+        .lock()
+        .iter()
+        .all(|event| event["event"] != crate::infra::wire::WIRE_SESSION_TODOS));
+    let child = TodosRuntime::open(
+        fx.agent_trail_dir.clone(),
+        summary.child_session_id.clone(),
+        None,
+    );
+    let child_doc = child
+        .snapshot()
+        .expect("reviewer must have its own saved document");
+    assert_eq!(child_doc.draft, "reviewer private notes");
+    assert_eq!(child_doc.items[0].content, "reviewer step");
+    assert_ne!(child.path(), parent.path());
+    let transcript = fx
+        .agent_trail_dir
+        .join("subagent-sessions")
+        .join(format!("{}.jsonl", summary.child_session_id));
+    assert!(std::fs::read_to_string(transcript)
+        .unwrap()
+        .contains("todos_path"));
+    todos::execute(
+        &parent,
+        todos::TodosArgs::from_json(&serde_json::json!({"ops":[
+            {"kind":"set_status","id":"parent-step","status":"in_progress"}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(parent.snapshot().unwrap().draft, "parent notes");
+    assert_eq!(parent.snapshot_items()[0].status, TodoStatus::InProgress);
+    assert_eq!(*notifications.lock(), 2);
+}
+
+#[tokio::test]
 async fn subagent_uses_provider_matching_session_model_not_startup_default() {
     let _g = home_lock().lock().unwrap();
     let (fcodex, fcodex_requests) = RecordingProvider::success(

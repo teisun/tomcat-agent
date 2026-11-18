@@ -78,6 +78,8 @@ pub(in super::super) async fn dispatch_plan_tool(
                                     path,
                                     termination,
                                     Some(ctx.tool_call_id),
+                                    ctx.todos_runtime
+                                        .is_some_and(|runtime| runtime.has_unfinished()),
                                 )
                                 .await;
                                 bridge.abort();
@@ -123,12 +125,6 @@ pub(in super::super) async fn dispatch_plan_tool(
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
-        "todos" => match serde_json::from_value::<plan_tools::todos::TodosArgs>(args.clone()) {
-            Ok(a) => {
-                plan_tools::todos::execute(rt, ctx.todos_runtime.map(|runtime| runtime.as_ref()), a)
-            }
-            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
-        },
         "ask_question" => {
             let Some(panel) = rt.ask_question_panel() else {
                 return ToolExecOutcome::err(

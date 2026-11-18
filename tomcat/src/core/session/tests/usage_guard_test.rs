@@ -120,6 +120,50 @@ fn deletion_cleans_only_owned_trail_data_and_reports_partial_io_failure() {
 }
 
 #[test]
+fn deletion_cleans_parent_and_descendant_todos_without_touching_neighbours() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(temp.path().join("sessions"));
+    let target = manager.new_current_session(None).unwrap();
+    let trail = temp.path().join("trail");
+    let todos_dir = trail.join("todos");
+    std::fs::create_dir_all(&todos_dir).unwrap();
+    let owned = [
+        format!("{}.todo.md", target.session_id),
+        format!("{}-child-plan_reviewer-a.todo.md", target.session_id),
+        format!(
+            "{}-child-plan_reviewer-a-child-explorer-b.todo.md",
+            target.session_id
+        ),
+    ];
+    let neighbours = [
+        "unrelated.todo.md".to_string(),
+        format!(
+            "{}-neighbour-child-plan_reviewer-a.todo.md",
+            target.session_id
+        ),
+        format!("{}-child-plan_reviewer-a.txt", target.session_id),
+    ];
+    for name in owned.iter().chain(&neighbours) {
+        std::fs::write(todos_dir.join(name), "document").unwrap();
+    }
+    let outcome = manager
+        .begin_delete_session(&target.session_id)
+        .unwrap()
+        .commit(Some(&trail))
+        .unwrap();
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    for name in owned {
+        assert!(!todos_dir.join(name).exists());
+    }
+    for name in neighbours {
+        assert_eq!(
+            std::fs::read_to_string(todos_dir.join(name)).unwrap(),
+            "document"
+        );
+    }
+}
+
+#[test]
 fn deletion_reports_target_lease_cleanup_failure_without_erasing_shared_data() {
     let temp = tempfile::tempdir().unwrap();
     let manager = SessionManager::new(temp.path().into());

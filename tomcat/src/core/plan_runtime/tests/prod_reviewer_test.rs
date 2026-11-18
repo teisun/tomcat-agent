@@ -181,7 +181,11 @@ fn review_prompt_uses_active_external_plan_path() {
 
     let runtime = PlanRuntime::new("sess");
     runtime
-        .build_plan(&external_path.to_string_lossy(), Some("uuid-path".into()))
+        .build_plan(
+            &external_path.to_string_lossy(),
+            Some("uuid-path".into()),
+            false,
+        )
         .unwrap();
     let resolved = runtime.resolved_plan_path("external_path_plan").unwrap();
     let resolved_display = crate::infra::platform::format_home_path(&resolved);

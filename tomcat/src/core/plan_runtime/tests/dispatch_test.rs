@@ -73,7 +73,11 @@ fn resolved_plan_path_prefers_active_external_path() {
 
     let runtime = PlanRuntime::new("sess");
     runtime
-        .build_plan(&external_path.to_string_lossy(), Some("uuid-path".into()))
+        .build_plan(
+            &external_path.to_string_lossy(),
+            Some("uuid-path".into()),
+            false,
+        )
         .unwrap();
 
     assert_eq!(
@@ -145,7 +149,7 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
         let plan_path = plan_path.to_string_lossy().to_string();
         std::thread::spawn(move || {
             barrier.wait();
-            runtime.build_plan(&plan_path, Some("session-id".into()))
+            runtime.build_plan(&plan_path, Some("session-id".into()), false)
         })
     };
 

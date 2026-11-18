@@ -207,10 +207,10 @@ fn todo_set_status_schema_accepts_evidence() {
         .expect("todos catalog entry");
     let todos_schema = (todos.parameters)();
     let todos_set_status = &todos_schema["properties"]["ops"]["items"]["oneOf"][1];
-    assert!(
-        todos_set_status["properties"].get("evidence").is_none(),
-        "plan completion evidence must not leak into the session-local todos contract"
-    );
+    assert_eq!(todos_set_status["properties"]["evidence"]["type"], "array");
+    assert!(todos_schema.get("required").is_none());
+    assert_eq!(todos_schema["properties"]["draft"]["type"], "string");
+    assert_eq!(todos_schema["properties"]["title"]["type"], "string");
 }
 
 /// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。

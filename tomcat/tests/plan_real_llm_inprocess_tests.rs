@@ -727,7 +727,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         // 4) /plan build <plan_id/path> → Chat + executing plan file
         ctx.session_runtime
             .plan_runtime
-            .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
+            .build_plan(&plan_id, Some(fresh_session.session_id.clone()), ctx.session_runtime.todos_runtime.has_unfinished())
             .expect("build_plan 失败");
         assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
         assert_eq!(

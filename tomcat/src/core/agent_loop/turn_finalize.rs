@@ -180,11 +180,11 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     // its covered end to be the durable transcript tail.
     let compaction_provider = agent.compaction_provider();
     let compaction_emitter = Arc::new(agent.emitter.clone());
-    let control_snapshot = agent
-        .config
-        .plan_runtime
-        .as_ref()
-        .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
+    let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
+        agent.config.plan_runtime.as_deref(),
+        agent.todos_runtime.as_deref(),
+        Some(agent.wire_model()),
+    );
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
     if agent.context_state.is_some() {

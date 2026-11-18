@@ -360,11 +360,11 @@ fn start_midturn_preheat_if_needed(
     let transcript_path = ctx_state.transcript_path.clone();
     let compaction_provider = agent.compaction_provider();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
-    let control_snapshot = agent
-        .config
-        .plan_runtime
-        .as_ref()
-        .map(|runtime| runtime.control_snapshot(Some(agent.wire_model())));
+    let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
+        agent.config.plan_runtime.as_deref(),
+        agent.todos_runtime.as_deref(),
+        Some(agent.wire_model()),
+    );
     let emitter = std::sync::Arc::new(agent.emitter.clone());
     let covered_count = snapshot.len();
 
@@ -672,6 +672,7 @@ pub(super) async fn collapse_to_branch_summary(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
     let plan_runtime = agent.config.plan_runtime.clone();
+    let todos_runtime = agent.todos_runtime.clone();
     let session_model = agent.wire_model().to_string();
     ensure_working_message_ids(agent, messages)?;
     let transcript_path = agent
@@ -684,6 +685,7 @@ pub(super) async fn collapse_to_branch_summary(
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let request = CollapseSummaryRequest {
         plan_runtime: plan_runtime.as_deref(),
+        todos_runtime: todos_runtime.as_deref(),
         session_model: Some(session_model.as_str()),
         cache_key: cache_key.as_deref(),
         resolved_output_limit: agent.config.compaction_output_limit,
@@ -769,6 +771,7 @@ pub(super) async fn collapse_to_branch_summary(
 #[derive(Clone, Copy)]
 struct CollapseSummaryRequest<'a> {
     plan_runtime: Option<&'a PlanRuntime>,
+    todos_runtime: Option<&'a crate::core::plan_runtime::todo_runtime::TodosRuntime>,
     session_model: Option<&'a str>,
     cache_key: Option<&'a str>,
     resolved_output_limit: Option<u32>,
@@ -789,6 +792,7 @@ pub async fn build_collapse_summary_artifacts_for_test(
         compaction_model,
         CollapseSummaryRequest {
             plan_runtime,
+            todos_runtime: None,
             session_model,
             cache_key: None,
             resolved_output_limit: None,
@@ -808,9 +812,11 @@ async fn build_collapse_summary_artifacts(
         .ok_or_else(|| AppError::Config("collapse is missing a message anchor".to_string()))?;
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
-    let control = request
-        .plan_runtime
-        .map(|rt| rt.control_snapshot(request.session_model));
+    let control = crate::core::plan_runtime::ControlSnapshot::capture(
+        request.plan_runtime,
+        request.todos_runtime,
+        request.session_model,
+    );
     let summary_text = generate_summary_with_output_limit(
         messages,
         None,

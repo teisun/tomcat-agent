@@ -41,7 +41,9 @@ async fn repeated_real_plan_updates_reach_registered_panel_as_full_snapshots() {
     )
     .unwrap();
     let runtime = PlanRuntime::new("panel-session");
-    runtime.build_plan(&path.to_string_lossy(), None).unwrap();
+    runtime
+        .build_plan(&path.to_string_lossy(), None, false)
+        .unwrap();
     let panel = Arc::new(CapturePanel::default());
     runtime.register_todos_panel(panel.clone());
     let mut results = Vec::new();

@@ -42,6 +42,7 @@ pub async fn execute_at_path(
     path: PathBuf,
     termination: AskQuestionTermination,
     tool_call_id: Option<&str>,
+    has_active_session_todos: bool,
 ) -> Result<Value, ToolError> {
     if termination.reason().is_some() {
         return Ok(json!({"started": false, "reason": "interrupted"}));
@@ -102,7 +103,11 @@ pub async fn execute_at_path(
     }
     // Synchronous after the last await: no nested turn and no partially awaited commit.
     let outcome = runtime
-        .build_plan(&path.to_string_lossy(), runtime.current_session_id())
+        .build_plan(
+            &path.to_string_lossy(),
+            runtime.current_session_id(),
+            has_active_session_todos,
+        )
         .map_err(|error| ToolError::Internal(error.to_string()))?;
     Ok(json!({
         "started": true,

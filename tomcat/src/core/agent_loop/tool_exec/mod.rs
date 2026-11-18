@@ -517,10 +517,29 @@ async fn execute_tool_tuple_full(
         }
     }
 
+    // Todos belongs to this Agent, not to a possibly borrowed PlanRuntime.
+    if tc.name == "todos" {
+        let result = match ctx.todos_runtime {
+            Some(runtime) => crate::core::tools::plan_tool::todos::TodosArgs::from_json(&args)
+                .and_then(|args| crate::core::tools::plan_tool::todos::execute(runtime, args)),
+            None => {
+                return (
+                    "todos is unavailable: this AgentLoop has no TodosRuntime".into(),
+                    true,
+                    Vec::new(),
+                )
+            }
+        };
+        return match result {
+            Ok(value) => (value.to_string(), false, Vec::new()),
+            Err(error) => (format!("todos failed: {error}"), true, Vec::new()),
+        };
+    }
+
     // B1：plan 工具分发（优先于 primitive，因为这些工具不走 primitive）。
     if matches!(
         tc.name.as_str(),
-        "create_plan" | "start_plan" | "update_plan" | "todos" | "ask_question"
+        "create_plan" | "start_plan" | "update_plan" | "ask_question"
     ) {
         return branches::dispatch_plan_tool(ctx, &tc.name, &args, display_out)
             .await

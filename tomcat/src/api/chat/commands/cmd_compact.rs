@@ -99,16 +99,17 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
         .session
         .get_session(ctx.session_runtime.session.current_session_key())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
-    let control = ctx
-        .session_runtime
-        .plan_runtime
-        .control_snapshot(Some(compaction_call.wire_model()));
+    let control = crate::core::plan_runtime::ControlSnapshot::capture(
+        Some(&ctx.session_runtime.plan_runtime),
+        Some(&ctx.session_runtime.todos_runtime),
+        Some(compaction_call.wire_model()),
+    );
     let summary = generate_summary_with_output_limit(
         &messages,
         None,
         compaction_call.provider_impl.as_ref(),
         &compaction_call.model,
-        Some(&control),
+        control.as_ref(),
         SummaryRequestOptions {
             cache_key: PromptCacheKeyFamily::Compaction
                 .key_for(ctx.session_runtime.session.current_session_key())

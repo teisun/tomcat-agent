@@ -15,8 +15,9 @@ fn from_json_helpers_reject_bad_args() {
     let err = update_plan::UpdatePlanArgs::from_json(&serde_json::json!({"ops": "not_array"}))
         .expect_err("ops 必须是数组");
     matches!(err, ToolError::BadArgs(_));
-    let err = todos::TodosArgs::from_json(&serde_json::json!({})).expect_err("缺 ops 字段应被拒");
-    matches!(err, ToolError::BadArgs(_));
+    let args = todos::TodosArgs::from_json(&serde_json::json!({"draft":"body"})).unwrap();
+    assert!(args.ops.is_empty());
+    assert_eq!(args.draft.as_deref(), Some("body"));
     cleanup_home(&home);
 }
 

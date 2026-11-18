@@ -35,7 +35,7 @@ async fn start_auto_avoids_panel_but_keeps_cancellation_and_state_gates() {
         if cancelled {
             termination.interrupt();
         }
-        let out = start_plan::execute_at_path(&rt, path.clone(), termination, None)
+        let out = start_plan::execute_at_path(&rt, path.clone(), termination, None, false)
             .await
             .unwrap();
         assert_eq!(out["started"], !cancelled);
@@ -56,11 +56,15 @@ async fn start_auto_avoids_panel_but_keeps_cancellation_and_state_gates() {
             }
         );
         if !cancelled {
-            assert!(
-                start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
-                    .await
-                    .is_err()
-            );
+            assert!(start_plan::execute_at_path(
+                &rt,
+                path.clone(),
+                Default::default(),
+                None,
+                false
+            )
+            .await
+            .is_err());
         }
     }
     cleanup_home(&home);
@@ -84,7 +88,7 @@ async fn recommended_questions_do_not_authorize_starting_a_plan() {
         false,
     )]));
     rt.attach_ask_question_panel(panel.clone());
-    let out = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+    let out = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None, false)
         .await
         .unwrap();
     assert_eq!(out["started"], false);
@@ -170,10 +174,15 @@ async fn start_plan_requires_explicit_consent_and_commits_only_once() {
             Ok(())
         }));
         let before = std::fs::read(&path).unwrap();
-        let result =
-            start_plan::execute_at_path(&rt, path.clone(), Default::default(), Some("start-call"))
-                .await
-                .unwrap();
+        let result = start_plan::execute_at_path(
+            &rt,
+            path.clone(),
+            Default::default(),
+            Some("start-call"),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result["started"], started, "case {index}");
         let builds = events
             .lock()
@@ -192,11 +201,15 @@ async fn start_plan_requires_explicit_consent_and_commits_only_once() {
             );
             assert_eq!(saved.frontmatter.code_review_rounds, 0);
             let committed = std::fs::read(&path).unwrap();
-            assert!(
-                start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
-                    .await
-                    .is_err()
-            );
+            assert!(start_plan::execute_at_path(
+                &rt,
+                path.clone(),
+                Default::default(),
+                None,
+                false
+            )
+            .await
+            .is_err());
             assert_eq!(std::fs::read(&path).unwrap(), committed);
             assert_eq!(
                 events
@@ -263,9 +276,15 @@ async fn start_plan_confirmation_carries_identity_and_holds_no_plan_lock() {
     rt.enter_plan().unwrap();
     let path = write_disk_plan("identity", PlanFileState::Planning);
     rt.attach_ask_question_panel(Arc::new(InspectPanel { path: path.clone() }));
-    start_plan::execute_at_path(&rt, path.clone(), Default::default(), Some("start-call"))
-        .await
-        .unwrap();
+    start_plan::execute_at_path(
+        &rt,
+        path.clone(),
+        Default::default(),
+        Some("start-call"),
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         read_plan(&path).unwrap().frontmatter.session_id.as_deref(),
         Some("session-id")
@@ -291,7 +310,7 @@ async fn start_plan_chat_skips_confirmation_and_plan_without_panel_fails_closed(
         false,
     )]));
     rt.attach_ask_question_panel(panel.clone());
-    let result = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+    let result = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None, false)
         .await
         .unwrap();
     assert_eq!(result["started"], true);
@@ -306,7 +325,7 @@ async fn start_plan_chat_skips_confirmation_and_plan_without_panel_fails_closed(
     rt.enter_plan().unwrap();
     let path = write_disk_plan("no_panel", PlanFileState::Planning);
     let before = std::fs::read(&path).unwrap();
-    let error = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+    let error = start_plan::execute_at_path(&rt, path.clone(), Default::default(), None, false)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("/plan build"));
@@ -324,7 +343,7 @@ async fn start_plan_preserves_existing_state_gates_and_interruption() {
         let path = write_disk_plan("blocked", state);
         let before = std::fs::read(&path).unwrap();
         assert!(
-            start_plan::execute_at_path(&rt, path.clone(), Default::default(), None)
+            start_plan::execute_at_path(&rt, path.clone(), Default::default(), None, false)
                 .await
                 .is_err()
         );
@@ -340,7 +359,7 @@ async fn start_plan_preserves_existing_state_gates_and_interruption() {
     let before = std::fs::read(&path).unwrap();
     let termination = AskQuestionTermination::default();
     termination.interrupt();
-    let result = start_plan::execute_at_path(&rt, path.clone(), termination, None)
+    let result = start_plan::execute_at_path(&rt, path.clone(), termination, None, false)
         .await
         .unwrap();
     assert_eq!(result, json!({"started": false, "reason": "interrupted"}));
@@ -364,7 +383,7 @@ async fn editing_or_creating_other_plans_cannot_replace_executing_binding() {
     let rt = PlanRuntime::new("active-session");
     let a = write_disk_plan("active_a", PlanFileState::Planning);
     let b = write_disk_plan("other_b", PlanFileState::Planning);
-    rt.build_plan("active_a", None).unwrap();
+    rt.build_plan("active_a", None, false).unwrap();
     update_plan::execute(
         &rt,
         serde_json::from_value(json!({
@@ -379,12 +398,12 @@ async fn editing_or_creating_other_plans_cannot_replace_executing_binding() {
         read_plan(&b).unwrap().frontmatter.todos[0].content,
         "edited B"
     );
-    assert!(rt.build_plan("other_b", None).is_err());
+    assert!(rt.build_plan("other_b", None, false).is_err());
     rt.enter_plan().unwrap();
     let created = create_plan::execute(&rt, good_args_with_todo()).unwrap();
     assert_eq!(rt.executing_plan_id().as_deref(), Some("active_a"));
     assert!(rt
-        .build_plan(created["plan_id"].as_str().unwrap(), None)
+        .build_plan(created["plan_id"].as_str().unwrap(), None, false)
         .is_err());
     assert_eq!(
         read_plan(&a).unwrap().frontmatter.state,

@@ -2131,7 +2131,7 @@ impl MessageAppendSink for SessionManager {
     }
 }
 
-fn uuid_for_session() -> String {
+pub(crate) fn uuid_for_session() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 

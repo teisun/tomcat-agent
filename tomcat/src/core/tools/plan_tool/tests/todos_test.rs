@@ -1,271 +1,156 @@
+use crate::core::plan_runtime::todo_runtime::TodosRuntime;
+use crate::core::tools::plan_tool::{todos, ToolError};
+use parking_lot::Mutex;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::common::*;
-
-#[test]
-fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    let out = todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![
-                todos::TodoOpArg::Upsert {
-                    id: "x1".into(),
-                    content: Some("scratchpad 1".into()),
-                    status: Some(TodoStatus::Pending),
-                    todo_kind: None,
-                },
-                todos::TodoOpArg::Upsert {
-                    id: "x2".into(),
-                    content: Some("scratchpad 2".into()),
-                    status: Some(TodoStatus::Pending),
-                    todo_kind: None,
-                },
-                todos::TodoOpArg::SetStatus {
-                    id: "x1".into(),
-                    content: None,
-                    status: TodoStatus::InProgress,
-                },
-            ],
-        },
-    )
-    .unwrap();
-    assert_eq!(out["scope"], "session");
-    assert_eq!(out["mode"], "chat");
-    assert_eq!(out["active_in_progress"], "x1");
-    assert!(out["active_todos_id"].as_str().is_some());
-    assert!(out.get("persisted_path").is_none());
-    let items = out["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(rt.snapshot_session_todos().len(), 2);
-    cleanup_home(&home);
+fn call(runtime: &TodosRuntime, args: Value) -> Result<Value, ToolError> {
+    todos::execute(runtime, todos::TodosArgs::from_json(&args)?)
 }
 
 #[test]
-fn todos_persists_to_disk_when_todos_runtime_is_injected() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    let base = home.join(".tomcat").join("agents").join("main");
-    let todos_runtime = Arc::new(TodosRuntime::new(base.clone(), "sid-a"));
-    let out = todos::execute(
-        &rt,
-        Some(todos_runtime.as_ref()),
-        todos::TodosArgs {
-            new_todos: false,
-            title: Some("scratch".into()),
-            replace: false,
-            ops: vec![todos::TodoOpArg::Upsert {
-                id: "p1".into(),
-                content: Some("persist me".into()),
-                status: Some(TodoStatus::Pending),
-                todo_kind: None,
-            }],
-        },
+fn todos_body_title_identity_replace_and_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = TodosRuntime::open(dir.path().into(), "session-a", None);
+    let initial = call(
+        &runtime,
+        json!({"title":"work", "draft":"# body\n", "ops":[
+            {"kind":"upsert","id":"a","content":"A"},
+            {"kind":"upsert","id":"b","content":"B"}
+        ]}),
     )
     .unwrap();
-    let expected = base.join("todos").join("sid-a.todo.md");
-    assert_eq!(
-        out["persisted_path"].as_str(),
-        Some(expected.to_string_lossy().as_ref())
+    let before = runtime.snapshot().unwrap();
+    assert_eq!(initial["todos_path"], runtime.path().to_str().unwrap());
+    for absent in ["draft", "persisted_path", "mode", "panel_snapshot_id"] {
+        assert!(initial.get(absent).is_none());
+    }
+    let changed = call(
+        &runtime,
+        json!({"ops":[{"kind":"set_status","id":"a","status":"in_progress"}]}),
+    )
+    .unwrap();
+    assert_eq!(changed["items"].as_array().unwrap().len(), 2);
+    assert_eq!(changed["title"], "work");
+    assert_eq!(runtime.snapshot().unwrap().draft, before.draft);
+    assert_eq!(runtime.snapshot().unwrap().created_at, before.created_at);
+    call(&runtime, json!({"draft":"new body"})).unwrap();
+    call(
+        &runtime,
+        json!({"replace":true,"ops":[{"kind":"upsert","id":"c","content":"C"}]}),
+    )
+    .unwrap();
+    let replaced = runtime.snapshot().unwrap();
+    assert_eq!(replaced.todos_id, before.todos_id);
+    assert_eq!(replaced.created_at, before.created_at);
+    assert_eq!(replaced.title, before.title);
+    assert_eq!(replaced.draft, "new body");
+    assert_eq!(replaced.items.len(), 1);
+    call(&runtime, json!({"draft":"", "title":""})).unwrap();
+    assert!(runtime.snapshot().unwrap().draft.is_empty());
+    assert!(runtime.snapshot().unwrap().title.is_none());
+    let reset = call(&runtime, json!({"new_todos":true})).unwrap();
+    assert_ne!(reset["active_todos_id"], initial["active_todos_id"]);
+    assert_eq!(reset["todos_path"], initial["todos_path"]);
+    assert!(runtime.snapshot().unwrap().items.is_empty());
+}
+
+#[test]
+fn todos_completion_evidence_roundtrips_and_replace_discards_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let runtime = TodosRuntime::open(
+        dir.path().into(),
+        "session-a",
+        Some(Arc::new(move |items| sink.lock().push(items.to_vec()))),
     );
-    assert!(expected.exists(), "落盘文件应存在: {expected:?}");
-    let body = std::fs::read_to_string(&expected).unwrap();
-    assert!(body.contains("session_id: sid-a"));
-    assert!(body.contains("title: scratch"));
-    assert!(body.contains("p1: persist me"));
-    cleanup_home(&home);
+    call(
+        &runtime,
+        json!({"draft":"kept", "ops":[{"kind":"upsert","id":"a","content":"A"}]}),
+    )
+    .unwrap();
+    for proofs in [
+        json!(["file:a", " "]),
+        json!(["file:a", "task:1"]),
+        json!([]),
+    ] {
+        let out = call(
+            &runtime,
+            json!({"ops":[{"kind":"set_status","id":"a","status":"completed","evidence":proofs}]}),
+        )
+        .unwrap();
+        assert_eq!(out["todos_path"], runtime.path().to_str().unwrap());
+    }
+    call(&runtime, json!({"draft":"updated"})).unwrap();
+    let before = runtime.snapshot().unwrap();
+    assert_eq!(before.items[0].evidence, ["file:a", "task:1"]);
+    assert_eq!(events.lock().last().unwrap(), &before.items);
+    let restored = TodosRuntime::open(dir.path().into(), "session-a", None);
+    assert_eq!(restored.snapshot().unwrap(), before);
+    call(&restored, json!({"title":"restored"})).unwrap();
+    assert_eq!(restored.snapshot().unwrap().items, before.items);
+    call(
+        &restored,
+        json!({"replace":true,"ops":[{"kind":"upsert","id":"a","content":"A"}]}),
+    )
+    .unwrap();
+    assert!(restored.snapshot().unwrap().items[0].evidence.is_empty());
 }
 
 #[test]
-fn todos_new_todos_overwrites_same_session_file() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    let base = home.join(".tomcat").join("agents").join("main");
-    let todos_runtime = Arc::new(TodosRuntime::new(base.clone(), "sid-overwrite"));
-
-    todos::execute(
-        &rt,
-        Some(todos_runtime.as_ref()),
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![todos::TodoOpArg::Upsert {
-                id: "old".into(),
-                content: Some("old item".into()),
-                status: Some(TodoStatus::Pending),
-                todo_kind: None,
-            }],
-        },
-    )
-    .unwrap();
-
-    let out = todos::execute(
-        &rt,
-        Some(todos_runtime.as_ref()),
-        todos::TodosArgs {
-            new_todos: true,
-            title: Some("fresh".into()),
-            replace: false,
-            ops: vec![todos::TodoOpArg::Upsert {
-                id: "new".into(),
-                content: Some("new item".into()),
-                status: Some(TodoStatus::InProgress),
-                todo_kind: None,
-            }],
-        },
-    )
-    .unwrap();
-
-    let expected = base.join("todos").join("sid-overwrite.todo.md");
-    assert_eq!(
-        out["persisted_path"].as_str(),
-        Some(expected.to_string_lossy().as_ref())
+fn todos_invalid_batch_preserves_memory_disk_and_notifications() {
+    let dir = tempfile::tempdir().unwrap();
+    let notifications = Arc::new(Mutex::new(0));
+    let count = notifications.clone();
+    let runtime = TodosRuntime::open(
+        dir.path().into(),
+        "session-a",
+        Some(Arc::new(move |_| *count.lock() += 1)),
     );
-    let body = std::fs::read_to_string(&expected).unwrap();
-    assert!(body.contains("new: new item"));
-    assert!(!body.contains("old: old item"));
-    cleanup_home(&home);
+    call(
+        &runtime,
+        json!({"draft":"kept","ops":[{"kind":"upsert","id":"a","content":"A"}]}),
+    )
+    .unwrap();
+    let before = runtime.snapshot().unwrap();
+    let bytes = std::fs::read(runtime.path()).unwrap();
+    for invalid in [
+        json!({}),
+        json!({"ops":[]}),
+        json!({"replace":true}),
+        json!({"replace":true,"draft":"wrong"}),
+        json!({"replace":true,"ops":[{"kind":"remove","id":"a"}]}),
+        json!({"draft":"wrong","ops":[{"kind":"upsert","id":"b","content":"B"},{"kind":"set_status","id":"missing","status":"completed"}]}),
+        json!({"ops":[{"kind":"set_status","id":"a","status":"in_progress","evidence":["bad"]}]}),
+    ] {
+        assert!(call(&runtime, invalid).is_err());
+        assert_eq!(runtime.snapshot().unwrap(), before);
+        assert_eq!(std::fs::read(runtime.path()).unwrap(), bytes);
+        assert_eq!(*notifications.lock(), 1);
+    }
+    // Rename cannot replace a directory. No successful state or notification is published.
+    std::fs::remove_file(runtime.path()).unwrap();
+    std::fs::create_dir(runtime.path()).unwrap();
+    assert!(call(&runtime, json!({"new_todos":true,"draft":"not committed"})).is_err());
+    assert_eq!(runtime.snapshot().unwrap(), before);
+    assert!(runtime.path().is_dir());
+    assert_eq!(*notifications.lock(), 1);
 }
 
 #[test]
-fn todos_never_writes_plan_file_in_chat() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![todos::TodoOpArg::Upsert {
-                id: "x1".into(),
-                content: Some("should not touch plan".into()),
-                status: Some(TodoStatus::Pending),
-                todo_kind: None,
-            }],
-        },
-    )
-    .unwrap();
-    let plans_dir = home.join(".tomcat").join("plans");
-    let entries: Vec<_> = std::fs::read_dir(&plans_dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-        .filter(|s| s.ends_with(".plan.md"))
-        .collect();
-    assert!(
-        entries.is_empty(),
-        "CHAT 下 todos 不应写 plan，发现：{entries:?}"
-    );
-    cleanup_home(&home);
-}
-
-#[test]
-fn todos_state_allows_independent_in_progress_items() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![
-                todos::TodoOpArg::Upsert {
-                    id: "x1".into(),
-                    content: Some("1".into()),
-                    status: Some(TodoStatus::InProgress),
-                    todo_kind: None,
-                },
-                todos::TodoOpArg::Upsert {
-                    id: "x2".into(),
-                    content: Some("2".into()),
-                    status: Some(TodoStatus::Pending),
-                    todo_kind: None,
-                },
-            ],
-        },
-    )
-    .unwrap();
-    let out = todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![todos::TodoOpArg::SetStatus {
-                id: "x2".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        },
-    )
-    .expect("第二个独立 todo 可并行推进");
-    assert_eq!(out["items"][0]["status"], "in_progress");
-    assert_eq!(out["items"][1]["status"], "in_progress");
-    cleanup_home(&home);
-}
-
-#[test]
-fn todos_in_exec_writes_session_not_plan_file() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    let plan_id = fresh_planning_plan(&rt);
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.state = PlanFileState::Executing;
-    plan.frontmatter.session_key = Some("session-a".into());
-    plan.frontmatter.session_id = Some("sid-a".into());
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.bind_plan_file_for_test(path.clone());
-
-    todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![todos::TodoOpArg::Upsert {
-                id: "sub-1".into(),
-                content: Some("debug step".into()),
-                status: Some(TodoStatus::Pending),
-                todo_kind: None,
-            }],
-        },
-    )
-    .unwrap();
-    let out = todos::execute(
-        &rt,
-        None,
-        todos::TodosArgs {
-            new_todos: false,
-            title: None,
-            replace: false,
-            ops: vec![todos::TodoOpArg::SetStatus {
-                id: "sub-1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        },
-    )
-    .unwrap();
-    assert_eq!(out["scope"], "session");
-    let parsed = read_plan(&path).unwrap();
-    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::Pending);
-    cleanup_home(&home);
+fn todos_publisher_runs_outside_document_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot: Arc<Mutex<Option<std::sync::Weak<TodosRuntime>>>> = Arc::new(Mutex::new(None));
+    let callback_slot = slot.clone();
+    let runtime = Arc::new(TodosRuntime::open(
+        dir.path().into(),
+        "session-a",
+        Some(Arc::new(move |items| {
+            let runtime = callback_slot.lock().as_ref().unwrap().upgrade().unwrap();
+            assert_eq!(runtime.snapshot_items(), items);
+        })),
+    ));
+    *slot.lock() = Some(Arc::downgrade(&runtime));
+    call(&runtime, json!({"draft":"safe to query"})).unwrap();
 }

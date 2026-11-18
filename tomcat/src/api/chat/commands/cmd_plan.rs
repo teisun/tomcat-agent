@@ -105,7 +105,11 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                     }
                 },
             };
-            match rt.build_plan(&build_target, session_id_for_plan) {
+            match rt.build_plan(
+                &build_target,
+                session_id_for_plan,
+                ctx.session_runtime.todos_runtime.has_unfinished(),
+            ) {
                 Ok(outcome) => {
                     for w in &outcome.warnings {
                         eprintln!("[plan] warning: {w}");

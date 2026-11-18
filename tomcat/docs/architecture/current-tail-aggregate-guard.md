@@ -20,6 +20,8 @@ full Collapse 另附 `<recent_files>`（read 的最后 20 个唯一路径，全�
 覆盖边界找不到或前台落盘失败，就保留原始上下文并走现有兜底；若该 stale 比例持续偏高，取消这个
 mid-turn 预热优化而保留 L0–L3。
 
+当前机器区块入口与常规压缩一致：`ControlSnapshot::capture` 只接收当前 loop 的 Plan/Todos 句柄，按“可读 Plan → 本 Agent Todos”二选一。预热在启动时拍快照，之后的 Todos 修改由下次压缩体现，不后台刷新旧摘要。完整契约见 [`context-management.md` §7.5](./context-management.md#75-compaction-v2-修订t2-p0-002)。
+
 本文档用于说明阶段二 `current-tail aggregate guard` 的**现行实现**与交付边界，对齐 [`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md) 之间的 mid-turn current-tail guard 主链。仓库当前已落地 `current_tail_guard.rs`、mid-turn history apply/recompact orchestration、single-branch-summary collapse + keepalive、steering 正规注入与对应测试矩阵；本文保留行为边界、协议与交付口径，避免再回到“开发前目标态”的旧描述。
 
 本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。上位与相邻方案：[`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md)、[`tools/read.md`](./tools/read.md)。
@@ -288,7 +290,7 @@ still overweight?
   - 同一条摘要文本末尾拼接 `Execution Keepalive` 区块；
   - 压缩模型生成摘要失败、且线上模型名不是当前会话模型时，发一次 `llm_notice(compaction_model_fallback)`，提示模型及截断到 200 字符的原因，再改用当前模型重做一次；同模型不重复请求，兜底仍失败则返回当前模型的错误。复用同一请求与既有摘要应用流程，不更改配置或记住故障状态；后台预压缩与手动 `/compact` 不加兜底。
     <small style="color:gray">参考 `codex/codex-rs/core/src/compact_model_fallback.rs::should_retry_with_current_model`；本仓 `current_tail_guard.rs::collapse_to_branch_summary`。代价是前台等待一次当前模型全量摘要请求；若等待频繁，再考虑将兜底下沉到 preheat。</small>
-  - `KeepaliveSnapshot` 来源固定为：`PlanRuntime.mode()`、`active_plan_path()`、`mode().active_plan_id()`、plan file frontmatter.todos（EXEC / Pending 取 `in_progress` 或第一个 `pending`；Planning 取 `active_planning_plan_id + session_todos`）、`ContextState.latest_plan_event`。
+  - 机器区块与 Progress 统一来自 `ControlSnapshot::capture(本 loop 的 PlanRuntime?, 本 loop 的 TodosRuntime?, model)`；可读当前 Plan（含空清单、已完成）优先，否则本 Agent 已保存/恢复的 Todos。`ProgressSource` 同时携带所选路径与条目，最多输出一个 `plan_path` / `todos_path`，不再读取 PlanRuntime 的 session_todos。
 - **持久化与应用**：
   - 不新增 `current_tail.split_turn` 自定义事件；
   - 直接复用既有 `BranchSummaryEntry` + `apply_boundary` 语义；
@@ -441,7 +443,7 @@ C 不新增 `CustomEntry`；它直接复用 [`context-management.md`](./context-
 约束：
 
 - `Structured Summary` 复用既有 structured summary 家族；
-- `Execution Keepalive` 的数据来源固定为 `PlanRuntime.mode()`、`active_plan_path()`、`mode().active_plan_id()`、plan file frontmatter.todos（EXEC / Pending 取 `in_progress` 或第一个 `pending`；Planning 取 `active_planning_plan_id + session_todos`）、`ContextState.latest_plan_event`；
+- 控制态与 Progress 由同一个 `ControlSnapshot::capture` 选择来源：可读 Plan > 本 Agent 的 Todos > 无入口；正文与完整证据按文件路径读取，不复制进机器区块。Todos 由独立的 TodosRuntime 持有，不从主会话 PlanRuntime 借用；
 - `Execution Keepalive` 可沿 `Execution_Keepalive_SUMMARIZATION_PROMPT` 的格式口径渲染，但**数据真相只来自本地状态**；
 - 任何 C 成功路径都要调用 `ctx_state.invalidate_api_usage()`。
 

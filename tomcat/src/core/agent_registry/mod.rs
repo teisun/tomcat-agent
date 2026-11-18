@@ -207,8 +207,6 @@ pub struct AgentRegistry {
     /// 全局并发计数（O(1) 累计，避免每次 spawn 都 lock handles）。
     active: AtomicU32,
     config: AgentRegistryConfig,
-    /// session_id 唯一性辅助（uuid v4 简化版；测试用确定性 prefix）。
-    next_seq: AtomicU32,
     /// 事件总线；用于 `SubAgentStart` / `SubAgentEnd`。`None` 表示禁用事件（单元测试默认）。
     event_bus: Option<Arc<dyn EventBus>>,
 }
@@ -243,7 +241,6 @@ impl AgentRegistry {
             handles: RwLock::new(HashMap::new()),
             active: AtomicU32::new(0),
             config,
-            next_seq: AtomicU32::new(0),
             event_bus: None,
         })
     }
@@ -255,7 +252,6 @@ impl AgentRegistry {
             handles: RwLock::new(std::mem::take(&mut *self.handles.write())),
             active: AtomicU32::new(self.active.load(Ordering::Relaxed)),
             config: self.config,
-            next_seq: AtomicU32::new(self.next_seq.load(Ordering::Relaxed)),
             event_bus: Some(bus),
         })
     }
@@ -463,12 +459,11 @@ impl AgentRegistry {
         }
 
         // 注册子 handle（child_token 与父 token 形成层级树，父 cancel 一次后代全可见）
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let child_session_id = format!(
             "{}-child-{}-{}",
             parent_session_id,
             subagent_type.as_str(),
-            seq
+            crate::core::session::manager::uuid_for_session()
         );
         let child = Arc::new(AgentHandle {
             session_id: child_session_id.clone(),

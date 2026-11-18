@@ -2,6 +2,22 @@
 
 本文为 [Architecture](../openspec/specs/Architecture.md) 中「11. 多 Agent 与扩展子系统」的详细设计，总览见主文档。
 
+## 当前 Todos 归属与子会话 ID
+
+```text
+主 Agent        → 主 TodosRuntime       → <session_id>.todo.md → 主侧边栏
+plan reviewer   → 子 TodosRuntime       → <child_id>.todo.md   → 不发布到主侧边栏
+                         ↑
+             可以借用正式 PlanRuntime，但不借用主 Todos
+```
+
+- 子会话 ID 保留 `<parent>-child-<type>-` 前缀，后缀复用主会话唯一值生成器（纳秒、进程号与进程内序号哈希为 16 位十六进制），不再随 AgentRegistry 重建从 0 编号，避免重启后串写记录和 Todos。
+- 现有带 `todos` 权限的子 Agent 只有 plan reviewer；派生时按自己的子会话 ID `TodosRuntime::open`，无发布回调。正式 Plan 可以共享，工作本必须按实例隔离。工具分发只依赖本 loop 的 TodosRuntime。
+- 工作本统一保存到 `agents/<agentId>/todos/`，不进入项目/worktree。删除父会话按 `<session_id>-child-` 前缀清理子孙 `.todo.md`。
+- 本次不新增 worker 或子 Agent 上下文压缩/续接。将来 planner-worker 还需为 worker 配工具白名单、ContextState、结果中的工作本入口，并以原子会话 ID 恢复对话；现有 Todos 读回机制可以直接复用。
+
+详见 [`tools/todos.md`](./tools/todos.md)。下文通用多 Agent 规划不表示上述未实现能力已交付。
+
 ---
 
 ## 14.0 设计参考与竞品对比

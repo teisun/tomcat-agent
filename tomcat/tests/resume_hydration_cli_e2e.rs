@@ -598,7 +598,11 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
             Ok(())
         }));
         runtime
-            .build_plan(&plan_path.to_string_lossy(), Some(session_id.clone()))
+            .build_plan(
+                &plan_path.to_string_lossy(),
+                Some(session_id.clone()),
+                false,
+            )
             .unwrap();
         runtime.park_executing_plan().unwrap();
     }

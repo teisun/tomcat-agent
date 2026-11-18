@@ -54,6 +54,35 @@ fn register_duplicate_session_id_rejected() {
 }
 
 #[tokio::test]
+async fn child_ids_do_not_repeat_after_registry_recreation() {
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let registry = fresh_registry();
+        let _root = registry.register_root_for_test("root").unwrap();
+        for _ in 0..3 {
+            let outcome = registry
+                .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
+                    SubagentOutcome {
+                        child_session_id: ctx.child_session_id,
+                        subagent_type: ctx.subagent_type,
+                        outcome_label: SubagentOutcomeLabel::Completed,
+                        error_message: None,
+                    }
+                })
+                .await
+                .unwrap();
+            let suffix = outcome
+                .child_session_id
+                .strip_prefix("root-child-plan_reviewer-")
+                .unwrap();
+            assert_eq!(suffix.len(), 16);
+            assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(ids.insert(outcome.child_session_id));
+        }
+    }
+}
+
+#[tokio::test]
 async fn spawn_subagent_internal_is_only_child_construction_point() {
     // grep 仓库 `AgentLoop::new` 的真正唯一性由 P4 集成测断言；
     // 这里只断言 `spawn_subagent_internal` 在 register + unregister 计数上是收支平衡的。

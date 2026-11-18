@@ -404,8 +404,12 @@ async fn update_plan_plan_id_prefers_active_external_path() {
     write_plan(&external_path, &plan, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
-    rt.build_plan(&external_path.to_string_lossy(), Some("sid-a".into()))
-        .unwrap();
+    rt.build_plan(
+        &external_path.to_string_lossy(),
+        Some("sid-a".into()),
+        false,
+    )
+    .unwrap();
 
     let out = update_plan::execute(
         &rt,

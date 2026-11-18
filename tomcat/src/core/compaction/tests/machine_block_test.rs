@@ -6,7 +6,6 @@ use crate::core::session::AgentMode;
 fn snapshot() -> ControlSnapshot {
     ControlSnapshot {
         mode: AgentMode::Chat,
-        plan_path: Some(std::path::PathBuf::from("/tmp/demo.plan.md")),
         plan_file_state: Some("executing".to_string()),
         plan_id: Some("demo".to_string()),
         model: Some("gpt-5.6-sol".to_string()),
@@ -19,11 +18,17 @@ fn snapshot() -> ControlSnapshot {
 }
 
 fn plan_progress(todos: Vec<TodoItem>) -> ProgressSource {
-    ProgressSource::PlanFile { todos }
+    ProgressSource::PlanFile {
+        path: "/tmp/demo.plan.md".into(),
+        todos,
+    }
 }
 
 fn scratchpad_progress(todos: Vec<TodoItem>) -> ProgressSource {
-    ProgressSource::SessionScratchpad { todos }
+    ProgressSource::SessionScratchpad {
+        path: "/tmp/session.todo.md".into(),
+        todos,
+    }
 }
 
 fn todo(id: &str, content: &str, status: TodoStatus) -> TodoItem {
@@ -49,6 +54,23 @@ fn machine_blocks_lead_the_summary_and_carry_runtime_truth() {
         out.find("<verbatim_user_messages>").unwrap() < out.find("## Goal").unwrap(),
         "机器区块必须在模型文本之前"
     );
+}
+
+#[test]
+fn recovery_path_is_exactly_one_runtime_selected_document() {
+    let mut snap = snapshot();
+    let plan = render(Some(&snap), &[]);
+    assert!(plan.contains("plan_path: /tmp/demo.plan.md"));
+    assert!(!plan.contains("todos_path:"));
+    snap.progress = Some(scratchpad_progress(vec![]));
+    let todos = render(Some(&snap), &[]);
+    assert!(todos.contains("todos_path: /tmp/session.todo.md"));
+    assert!(!todos.contains("plan_path:"));
+    assert!(todos.contains("Use `read`"));
+    snap.progress = None;
+    let none = render(Some(&snap), &[]);
+    assert!(none.contains("plan_path: (none)"));
+    assert!(!none.contains("todos_path:"));
 }
 
 #[test]

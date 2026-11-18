@@ -826,14 +826,25 @@ impl ChatContext {
 
         let initial_thinking_display = resolve_initial_thinking_display(&config.llm.thinking);
 
-        let todos_runtime = Arc::new(plan_runtime::todo_runtime::TodosRuntime::new(
-            agent_trail_dir.clone(),
-            current_session_entry.session_id.clone(),
-        ));
         let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
             session.current_session_key(),
             current_session_entry.session_id.clone(),
         );
+        let todos_plan_runtime = plan_runtime.clone();
+        let todos_runtime = Arc::new(plan_runtime::todo_runtime::TodosRuntime::open(
+            agent_trail_dir.clone(),
+            current_session_entry.session_id.clone(),
+            Some(Arc::new(move |items| {
+                let snapshot =
+                    plan_runtime::panels::TodosPanelSnapshot::new_session(items.to_vec());
+                todos_plan_runtime.refresh_notifier().notify(&snapshot);
+                todos_plan_runtime.write_transcript_custom(serde_json::json!({
+                    "event": crate::infra::wire::WIRE_SESSION_TODOS,
+                    "todos": crate::core::tools::plan_tool::shared_todo_ops::items_json(items),
+                }));
+            })),
+        ));
+
         let ask_question_panel: Arc<dyn panels::AskQuestionPanel> = overrides
             .ask_question_panel
             .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));

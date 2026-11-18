@@ -112,6 +112,34 @@ impl SessionDeletion<'_> {
             if let Some(root) = trail_dir {
                 let todo = crate::core::plan_runtime::todo_runtime::todo_path_for(root, &self.id);
                 record_cleanup(std::fs::remove_file(&todo), &todo, &mut warnings);
+                let todos_dir = root.join("todos");
+                let child_prefix = format!("{}-child-", self.id);
+                match std::fs::read_dir(&todos_dir) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            match entry {
+                                Ok(entry) => {
+                                    let name = entry.file_name();
+                                    let name = name.to_string_lossy();
+                                    if name.starts_with(&child_prefix) && name.ends_with(".todo.md")
+                                    {
+                                        let path = entry.path();
+                                        record_cleanup(
+                                            std::fs::remove_file(&path),
+                                            &path,
+                                            &mut warnings,
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    warnings.push(format!("{}: {error}", todos_dir.display()))
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => warnings.push(format!("{}: {error}", todos_dir.display())),
+                }
                 let results = root.join("tool-results").join(&self.id);
                 record_cleanup(std::fs::remove_dir_all(&results), &results, &mut warnings);
             }
