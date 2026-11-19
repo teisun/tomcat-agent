@@ -27,7 +27,6 @@ function builtinModel(
       reasoning: true,
       tools: true,
       vision: true,
-      webSearch: false,
     },
     contextWindow: 400000,
     id: "gpt-5.4",
@@ -486,7 +485,7 @@ describe("SettingsApp", () => {
       expect(request.data.models[1]).toMatchObject({ capabilities: { files: true }, thinkingFormat: "anthropic-adaptive" });
       expect(request.data.models[2]).toMatchObject({ thinkingFormat: "gemini" });
       expect(request.data.models[3]).toMatchObject({
-        capabilities: { files: true, reasoning: true, tools: true, vision: true, webSearch: false },
+        capabilities: { files: true, reasoning: true, tools: true, vision: true },
         contextWindow: null,
         maxOutputTokens: null,
         thinkingFormat: "openai",

@@ -3,7 +3,8 @@ var backends = Object.assign(Object.create(null), {
   tavily: searchWithTavily,
   brave: searchWithBrave,
   serper: searchWithSerper,
-  deepseek: searchWithDeepSeek
+  deepseek: searchWithDeepSeek,
+  openai: searchWithOpenAI
 });
 
 async function dispatchBackend(req) {

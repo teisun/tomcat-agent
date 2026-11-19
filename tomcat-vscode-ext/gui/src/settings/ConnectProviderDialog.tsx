@@ -41,7 +41,6 @@ const OPTIMISTIC_CAPABILITIES: SettingsModelCapabilities = {
   reasoning: true,
   tools: true,
   vision: true,
-  webSearch: false,
 };
 
 const NEW_KEY = "\u0000new";

@@ -93,7 +93,6 @@ fn render(messages: Vec<ChatMessage>, target: &ProviderCompatProfile, continuity
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         },
     )
 }

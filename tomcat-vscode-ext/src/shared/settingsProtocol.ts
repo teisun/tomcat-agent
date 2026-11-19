@@ -18,7 +18,6 @@ export interface SettingsModelCapabilities {
   reasoning: boolean;
   tools: boolean;
   vision: boolean;
-  webSearch: boolean;
 }
 
 export type SettingsModelSource = "builtin" | "user";
@@ -336,8 +335,7 @@ function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapa
     typeof value.files === "boolean" &&
     typeof value.reasoning === "boolean" &&
     typeof value.tools === "boolean" &&
-    typeof value.vision === "boolean" &&
-    typeof value.webSearch === "boolean"
+    typeof value.vision === "boolean"
   );
 }
 

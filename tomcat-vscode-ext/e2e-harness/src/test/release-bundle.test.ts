@@ -294,11 +294,13 @@ suite("Native installed release bundle", () => {
           await settings.setViewport(1440, 900);
           await settings.waitForSnapshot(s => s.text.includes("DeepSeek"), "Cold start exposes the bundled backends");
           assert.equal(await settings.evaluate<string>(`document.querySelector('[data-testid="web-search-toggle-deepseek"]').getAttribute('aria-checked')`), "true");
+          assert.equal(await settings.evaluate<string>(`document.querySelector('[data-testid="web-search-row-deepseek"] .tc-search-settings__rank span').textContent`), "1");
+          assert.equal(await settings.evaluate<string>(`document.querySelector('[data-testid="web-search-row-openai"] .tc-search-settings__rank span').textContent`), "6");
           await settings.capture(path.join(artifacts, "web-search-default.png"));
           await settings.click("web-search-key-brave");
           await settings.fill(`${selector} input[type=password]`, fixtureKey);
           await settings.click("web-search-key-submit");
-          const saved = await settings.waitForSnapshot(s => s.text.includes("Key saved"), "Saved Key becomes visible without plaintext");
+          const saved = await settings.waitForSnapshot(s => s.text.includes("Configured"), "Saved Key becomes visible without plaintext");
           assert.ok(!saved.text.includes(fixtureKey));
           await settings.click("web-search-toggle-tavily");
           await settings.waitForSnapshot(s => s.text.includes("Tavily disabled"), "The new selection saves immediately");
@@ -317,7 +319,7 @@ suite("Native installed release bundle", () => {
         await api.__testing.restartServe();
         const reopened = await open();
         try {
-          await reopened.waitForSnapshot(s => s.text.includes("Key saved"), "Key status survives service restart");
+          await reopened.waitForSnapshot(s => s.text.includes("Configured"), "Key status survives service restart");
           assert.equal(await reopened.evaluate<string>(`document.querySelector('[data-testid="web-search-toggle-tavily"]').getAttribute('aria-checked')`), "false");
           assert.equal(await reopened.evaluate<string>(`document.querySelector('${selector} .tc-search-settings__rank span').textContent`), "1");
           await reopened.click("settings-nav-general");
@@ -330,7 +332,9 @@ suite("Native installed release bundle", () => {
           await reopened.waitForSnapshot(s => s.text.includes("已保存"), "Tomcat switches to Chinese on receipt");
           await vscode.workspace.getConfiguration("workbench").update("colorTheme", "Default Light Modern", vscode.ConfigurationTarget.Global);
           await reopened.click("settings-nav-tools");
-          await reopened.waitForSnapshot(s => s.text.includes("网页搜索") && s.text.includes("已保存 Key"), "The real search settings show Chinese labels and saved state");
+          await reopened.waitForSnapshot(s => s.text.includes("网页搜索") && s.text.includes("已配置"), "The real search settings show Chinese labels and saved state");
+          await reopened.click("web-search-key-brave");
+          await reopened.waitForSnapshot(s => s.text.includes("已保存 Key"), "The configured menu identifies the saved Key");
           await reopened.evaluate(`new Promise((resolve, reject) => {
             const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Missing VS Code light theme')); }, 5000);
             const check = () => { if (document.body.classList.contains('vscode-light')) { clearTimeout(timer); observer.disconnect(); resolve(true); } };

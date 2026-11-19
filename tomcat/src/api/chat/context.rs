@@ -108,6 +108,7 @@ pub struct ChatContextOverrides {
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
     pub shared_model_prefs: Option<Arc<ModelPrefsStore>>,
+    pub(crate) shared_model_catalog: Option<crate::core::llm::SharedModelCatalog>,
     pub(crate) search_order: Option<crate::core::tools::web_search::SearchOrder>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
@@ -646,7 +647,10 @@ impl ChatContext {
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
-        let model_catalog = crate::core::llm::SharedModelCatalog::load(&config)?;
+        let model_catalog = match &overrides.shared_model_catalog {
+            Some(catalog) => catalog.clone(),
+            None => crate::core::llm::SharedModelCatalog::load(&config)?,
+        };
         let model_prefs = match overrides.shared_model_prefs.clone() {
             Some(store) => store,
             None => build_model_prefs_store(&config)?,
@@ -786,6 +790,7 @@ impl ChatContext {
             Arc::downgrade(&session_arc),
             Some(Arc::downgrade(&primitive)),
             Some(Arc::downgrade(&bash_task_registry)),
+            Some(model_catalog.clone()),
         );
         let event_bus = shared_scope_runtime.event_bus.clone();
         let tool_registry = shared_scope_runtime.tool_registry.clone();

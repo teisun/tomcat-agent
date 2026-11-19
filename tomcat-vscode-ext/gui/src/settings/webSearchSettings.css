@@ -1,3 +1,16 @@
+.tc-search-settings__tabs { margin-block-start: 8px; }
+.tc-search-settings__tab[aria-selected="true"] {
+  background: var(--vscode-button-secondaryBackground, var(--vscode-editor-selectionBackground));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+.tc-search-settings__key-source {
+  color: var(--vscode-descriptionForeground);
+  margin: 0;
+  max-width: 32ch;
+  overflow-wrap: anywhere;
+  padding: 8px;
+}
+
 .tc-search-settings__rows {
   display: grid;
   gap: 8px;
@@ -37,7 +50,10 @@
   position-area: block-end span-inline-start;
   position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
 }
-.tc-search-settings__key-actions .tc-session-item { padding-block: 8px; }
+.tc-search-settings__key-actions .tc-session-item {
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground, CanvasText));
+  padding-block: 8px;
+}
 .tc-search-settings__line .tc-search-settings__switch { padding: 4px; width: auto; border: 0; }
 .tc-search-settings__track { display: block; width: 30px; height: 16px; padding: 2px; border: 1px solid var(--vscode-input-border, #818181); border-radius: 999px; }
 .tc-search-settings__track::before { content: ""; display: block; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-descriptionForeground, #666); }

@@ -34,8 +34,6 @@ pub struct Capabilities {
     pub tools: bool,
     #[serde(default)]
     pub reasoning: bool,
-    #[serde(default)]
-    pub web_search: bool,
 }
 
 impl Default for Capabilities {
@@ -45,7 +43,6 @@ impl Default for Capabilities {
             files: false,
             tools: true,
             reasoning: false,
-            web_search: false,
         }
     }
 }
@@ -277,10 +274,11 @@ impl ModelCatalog {
     }
 
     pub fn entries_in_merge_order(&self) -> Vec<ModelEntry> {
-        self.ordered_ids
-            .iter()
-            .filter_map(|id| self.by_id.get(id).cloned())
-            .collect()
+        self.iter_in_merge_order().cloned().collect()
+    }
+
+    pub(crate) fn iter_in_merge_order(&self) -> impl Iterator<Item = &ModelEntry> {
+        self.ordered_ids.iter().filter_map(|id| self.by_id.get(id))
     }
 
     pub fn is_user_model(&self, model_id: &str) -> bool {
@@ -462,9 +460,6 @@ pub(crate) struct PartialCapabilities {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning: Option<bool>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) web_search: Option<bool>,
 }
 
 pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppError> {
@@ -657,9 +652,6 @@ fn apply_partial_capabilities(target: &mut Capabilities, partial: PartialCapabil
     }
     if let Some(reasoning) = partial.reasoning {
         target.reasoning = reasoning;
-    }
-    if let Some(web_search) = partial.web_search {
-        target.web_search = web_search;
     }
 }
 

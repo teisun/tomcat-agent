@@ -7,6 +7,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::types::HostApiDispatcher;
+use crate::core::llm::admin::{credential_host, resolve_host_key};
+use crate::core::llm::auth::read_env_value;
 use crate::core::tools::web_fetch::types::MAX_URL_LENGTH;
 use crate::ext::host_binding::HostResponse;
 use crate::infra::net_guard::{
@@ -15,7 +17,8 @@ use crate::infra::net_guard::{
 use crate::infra::AppError;
 
 static SECRET_PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\{\{secret:([A-Za-z0-9_]+)\}\}").expect("valid secret placeholder regex")
+    Regex::new(r"\{\{(?:secret:([A-Za-z0-9_]+)|host_key)\}\}")
+        .expect("valid secret placeholder regex")
 });
 
 pub(super) const FETCH_ERROR_PREFIX: &str = "pi.fetch";
@@ -46,9 +49,9 @@ impl HostApiDispatcher {
 
         let saved_keys =
             manager.is_some_and(|manager| manager.instance_can_use_saved_keys(instance_id));
-        let spec = parse_fetch_spec(params, &plugin.required_secrets, saved_keys)?;
+        let url = fetch_url(params)?;
         let validated = validate_http_url(
-            spec.url,
+            url,
             UrlValidationOptions {
                 max_url_length: MAX_URL_LENGTH,
                 error_prefix: FETCH_ERROR_PREFIX,
@@ -69,6 +72,33 @@ impl HostApiDispatcher {
                 format!("pi.fetch target host `{host}` is not in manifest.allowedHosts"),
             ));
         }
+
+        let spec =
+            parse_fetch_spec_with_host(params, &plugin.required_secrets, saved_keys, &|| {
+                if !saved_keys {
+                    return Err(fetch_error(
+                        "forbidden_secret",
+                        "pi.fetch host credentials require a current user-installed plugin",
+                    ));
+                }
+                let resolution = credential_host(&validated.url)
+                    .zip(self.model_catalog_for_instance(instance_id))
+                    .and_then(|(host, catalog)| {
+                        resolve_host_key(&catalog.snapshot(), &host, read_env_value)
+                    });
+                match resolution {
+                    Some((_, Some(key))) => Ok(key),
+                    Some((slot, None)) => Err(fetch_error_with_details(
+                        "missing_secret",
+                        "pi.fetch has no key for this destination",
+                        serde_json::json!({ "secretName": slot }),
+                    )),
+                    None => Err(fetch_error(
+                        "missing_secret",
+                        "pi.fetch has no eligible credential for this HTTPS destination",
+                    )),
+                }
+            })?;
 
         let _permit = self.fetch_semaphore.acquire().await.map_err(|_| {
             fetch_error(
@@ -132,19 +162,14 @@ impl HostApiDispatcher {
 }
 
 #[derive(Debug)]
-struct FetchSpec<'a> {
-    url: &'a str,
+struct FetchSpec {
     method: Method,
     headers: HeaderMap,
     query: Vec<(String, String)>,
     body: Option<String>,
 }
 
-fn parse_fetch_spec<'a>(
-    params: &'a Value,
-    required_secrets: &[String],
-    saved_keys: bool,
-) -> Result<FetchSpec<'a>, AppError> {
+fn fetch_url(params: &Value) -> Result<&str, AppError> {
     let url = params
         .get("url")
         .and_then(Value::as_str)
@@ -156,6 +181,27 @@ fn parse_fetch_spec<'a>(
         ));
     }
 
+    Ok(url)
+}
+
+#[cfg(test)]
+fn parse_fetch_spec(
+    params: &Value,
+    required_secrets: &[String],
+    saved_keys: bool,
+) -> Result<FetchSpec, AppError> {
+    fetch_url(params)?;
+    parse_fetch_spec_with_host(params, required_secrets, saved_keys, &|| {
+        Err(fetch_error("missing_secret", "no host key"))
+    })
+}
+
+fn parse_fetch_spec_with_host(
+    params: &Value,
+    required_secrets: &[String],
+    saved_keys: bool,
+    host_key: &impl Fn() -> Result<String, AppError>,
+) -> Result<FetchSpec, AppError> {
     let query = resolve_query(params.get("query"))?;
     let method_raw = params
         .get("method")
@@ -181,11 +227,10 @@ fn parse_fetch_spec<'a>(
     } else {
         crate::core::llm::auth::process_env_value
     };
-    let headers = resolve_headers(params.get("headers"), &required_secrets, &lookup)?;
+    let headers = resolve_headers(params.get("headers"), &required_secrets, &lookup, host_key)?;
     let body = resolve_body(params.get("body"))?;
 
     Ok(FetchSpec {
-        url,
         method,
         headers,
         query,
@@ -197,6 +242,7 @@ fn resolve_headers(
     raw: Option<&Value>,
     required_secrets: &[String],
     lookup: &impl Fn(&str) -> Option<String>,
+    host_key: &impl Fn() -> Result<String, AppError>,
 ) -> Result<HeaderMap, AppError> {
     let Some(headers) = raw else {
         return Ok(HeaderMap::new());
@@ -207,8 +253,20 @@ fn resolve_headers(
             "pi.fetch `headers` must be a JSON object",
         )
     })?;
+    let has_host_key = object.values().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|text| text.contains("{{host_key}}"))
+    });
     let mut out = HeaderMap::new();
     for (name, value) in object {
+        if contains_secret_placeholder(name) || (has_host_key && name.eq_ignore_ascii_case("host"))
+        {
+            return Err(fetch_error(
+                "forbidden_secret",
+                "pi.fetch cannot override the destination of a host credential",
+            ));
+        }
         let header_name = HeaderName::try_from(name.as_str()).map_err(|_| {
             fetch_error(
                 "invalid_request",
@@ -221,7 +279,7 @@ fn resolve_headers(
                 format!("pi.fetch header `{name}` must be a string/number/bool/null"),
             )
         })?;
-        let expanded = resolve_secret_text(&raw, required_secrets, lookup)?;
+        let expanded = resolve_secret_text(&raw, required_secrets, lookup, host_key)?;
         let mut header_value = HeaderValue::from_str(&expanded).map_err(|_| {
             fetch_error(
                 "invalid_request",
@@ -295,12 +353,18 @@ fn resolve_secret_text(
     text: &str,
     required_secrets: &[String],
     lookup: &impl Fn(&str) -> Option<String>,
+    host_key: &impl Fn() -> Result<String, AppError>,
 ) -> Result<String, AppError> {
     let mut result = String::new();
     let mut last = 0usize;
     for capture in SECRET_PLACEHOLDER_RE.captures_iter(text) {
         let whole = capture.get(0).expect("whole match");
-        let secret_name = capture.get(1).expect("secret name").as_str();
+        let Some(secret_name) = capture.get(1).map(|name| name.as_str()) else {
+            result.push_str(&text[last..whole.start()]);
+            result.push_str(&host_key()?);
+            last = whole.end();
+            continue;
+        };
         if !required_secrets
             .iter()
             .any(|allowed| allowed == secret_name)

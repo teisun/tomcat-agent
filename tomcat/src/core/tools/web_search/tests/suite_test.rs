@@ -4,18 +4,15 @@ use serial_test::serial;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::core::llm::ModelCatalog;
 use crate::ext::PluginEngine;
 use crate::infra::i18n::{tr_in, Locale};
 use crate::infra::AppConfig;
 
-use super::super::backend::{discover_hosted_candidate, BackendFailure, WebSearchBackend};
+use super::super::backend::{BackendFailure, WebSearchBackend};
 use super::super::cache::CacheKey;
 use super::super::declarations::{parse_declarations, BackendDeclaration};
-use super::super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
 use super::super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
 use super::super::types::{normalize_hits, RawHit, WebSearchArgs};
 use super::super::WebSearchRuntime;
@@ -439,7 +436,6 @@ async fn plugin_backend_timeout_warning_allows_successful_auto_fallback() {
         .search(&basic_web_search_request())
         .await
         .expect("timeout warnings should not fail a later successful fallback");
-    assert_eq!(output.backend_label.as_deref(), Some("brave"));
     assert_eq!(output.raw_hits.len(), 1);
     assert!(output
         .warnings
@@ -468,36 +464,6 @@ async fn plugin_backend_bare_unsupported_backend_includes_warning_summary() {
         }
         other => panic!("expected Incompatible, got {other:?}"),
     }
-}
-
-#[test]
-fn discover_hosted_candidate_uses_merged_catalog_order() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("models.toml");
-    std::fs::write(
-        &path,
-        r#"
-[[models]]
-id = "custom-hosted"
-api = "openai-responses"
-provider = "openai"
-
-[models.capabilities]
-web_search = true
-
-[[models]]
-id = "gpt-5.6"
-
-[models.capabilities]
-web_search = true
-"#,
-    )
-    .expect("write models.toml");
-
-    let cfg = AppConfig::default();
-    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
-    let candidate = discover_hosted_candidate(&catalog).expect("hosted candidate");
-    assert_eq!(candidate.id, "gpt-5.6");
 }
 
 #[test]
@@ -597,98 +563,20 @@ fn cache_key_tracks_allowed_and_blocked_domains() {
 }
 
 #[test]
-fn build_hosted_request_body_includes_filters_and_location() {
-    let request = super::super::types::WebSearchRequest::from_tool_args(
-        WebSearchArgs {
-            query: "rust async".into(),
-            count: Some(5),
-            freshness: None,
-            country: Some("us".into()),
-            language: None,
-            domain_filter: vec!["docs.rs".into()],
-        },
-        &AppConfig::default().tools.web_search,
-    )
-    .expect("request");
-
-    let body = build_hosted_request_body("gpt-5.4", &request);
-    assert_eq!(body["model"], json!("gpt-5.4"));
-    assert_eq!(body["tool_choice"], json!("required"));
-    assert_eq!(body["tools"][0]["type"], json!("web_search"));
-    assert_eq!(
-        body["tools"][0]["filters"]["allowed_domains"],
-        json!(["docs.rs"])
-    );
-    assert_eq!(body["tools"][0]["user_location"]["country"], json!("US"));
-}
-
-#[test]
-fn parse_server_tool_blocks_handles_openai_and_server_tool_shapes() {
-    let parsed = parse_server_tool_blocks(&json!({
-        "output": [
-            {
-                "type": "web_search_call",
-                "results": [
-                    {
-                        "url": "https://docs.rs/reqwest",
-                        "title": "reqwest",
-                        "snippet": "HTTP client"
-                    }
-                ]
-            },
-            {
-                "type": "message",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "reqwest is an HTTP client",
-                        "annotations": [
-                            {
-                                "type": "url_citation",
-                                "url": "https://docs.rs/reqwest",
-                                "title": "reqwest",
-                                "start_index": 0,
-                                "end_index": 7
-                            }
-                        ]
-                    }
-                ]
-            },
-            {
-                "type": "web_search_tool_result",
-                "content": [
-                    {
-                        "type": "web_search_result",
-                        "url": "https://www.rust-lang.org",
-                        "title": "Rust",
-                        "snippet": "Language homepage"
-                    }
-                ]
-            }
-        ]
-    }))
-    .expect("parse output");
-
-    assert_eq!(parsed.raw_hits.len(), 2);
-    assert_eq!(parsed.raw_hits[0].url, "https://docs.rs/reqwest");
-    assert_eq!(parsed.raw_hits[1].url, "https://www.rust-lang.org");
-}
-
-#[test]
 fn declarations_ignore_invalid_and_duplicate_entries() {
     let metadata = json!({"backends": [
         {"id":"bespoke","label":"Bespoke","secret":"SEARCH_TEST_KEY","defaultAuto":true},
         {"id":"bespoke","label":"Duplicate","model":"id"},
-        {"id":"openai","label":"Reserved","model":"id"},
+        {"id":"openai","label":"OpenAI","host":"api.openai.com","defaultAuto":true},
         {"id":"bad","label":"Bad","secret":"lowercase"},
         {"id":"conflict","label":"Conflict","secret":"KEY","model":"id"},
         {"id":"no-key","label":"Missing dependency"}
     ]});
     let declarations = parse_declarations(metadata.as_object());
-    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations.len(), 2);
     assert_eq!(
         super::super::declarations::effective_order(None, &declarations),
-        ["openai", "bespoke"]
+        ["bespoke", "openai"]
     );
 }
 
@@ -1140,184 +1028,74 @@ async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
     );
 }
 
-#[tokio::test]
+#[test]
 #[serial]
-async fn web_search_sends_request_model_name_not_id() {
-    let hosted = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "output": [
-                {
-                    "type": "web_search_call",
-                    "results": [
-                        {
-                            "url": "https://docs.rs/reqwest",
-                            "title": "reqwest",
-                            "snippet": "HTTP client"
-                        }
-                    ]
-                }
-            ]
-        })))
-        .expect(1)
-        .mount(&hosted)
-        .await;
-
-    let _env = EnvGuard::set_many(&[
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", Some("openai-test-key")),
-        ("HTTPS_PROXY", None),
-        ("HTTP_PROXY", None),
-        ("ALL_PROXY", None),
-        // Local mock traffic must also bypass proxies discovered from OS settings.
-        ("NO_PROXY", Some("127.0.0.1,localhost,::1")),
-        ("no_proxy", Some("127.0.0.1,localhost,::1")),
-    ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
-    let runtime = runtime_with_catalog(
-        cfg,
-        Some(format!(
-            r#"
-[[models]]
-id = "tomcat-catalog-web-search-model"
-model_name = "provider-facing-web-search-model"
-api = "openai-responses"
-provider = "openai"
-base_url = "{}"
-
-[models.capabilities]
-web_search = true
-"#,
-            hosted.uri()
-        )),
+fn openai_bundle_sends_official_request_and_keeps_citations_first() {
+    let actual = eval_plugin_script_value(
+        r#"
+      var request;
+      tomcat.fetch = async function (args) {
+        request = args;
+        return {status: 200, body: JSON.stringify({output: [
+          {type: "web_search_call", action: {sources: [{url: "https://docs.rs/cited"}, {url: "https://docs.rs/source"}]}},
+          {type: "message", content: [{type: "output_text", text: "🦀Reqwest", annotations: [
+            {type: "url_citation", title: "Reqwest", url: "https://docs.rs/cited", start_index: 1, end_index: 8}
+          ]}]}
+        ]})};
+      };
+      var result = await searchWithOpenAI({query: "rust", domainFilter: ["docs.rs"], country: "us"});
+      return {request: request, hits: result.hits};
+    "#,
     );
-
-    let output = runtime
-        .search(
-            WebSearchArgs {
-                query: "reqwest".into(),
-                count: None,
-                freshness: None,
-                country: Some("us".into()),
-                language: None,
-                domain_filter: vec!["docs.rs".into()],
-            },
-            "test-session",
-        )
-        .await
-        .expect("hosted auto search");
-    assert_eq!(output.backend, "openai");
-    assert_eq!(output.hits.len(), 1);
-
-    let requests = hosted.received_requests().await.expect("requests");
-    let request = requests.last().expect("hosted request");
-    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json body");
-    assert_eq!(body["model"], json!("provider-facing-web-search-model"));
-    assert_eq!(body["tools"][0]["type"], json!("web_search"));
     assert_eq!(
-        body["tools"][0]["filters"]["allowed_domains"],
-        json!(["docs.rs"])
+        actual["request"],
+        json!({
+            "url": "https://api.openai.com/v1/responses", "method": "POST",
+            "headers": {"Authorization": "Bearer {{host_key}}", "Content-Type": "application/json"},
+            "body": {"model": "gpt-6.2-sol", "input": "rust", "store": false, "tool_choice": "required",
+                "include": ["web_search_call.action.sources"], "tools": [{"type": "web_search",
+                "search_context_size": "medium", "filters": {"allowed_domains": ["docs.rs"]},
+                "user_location": {"type": "approximate", "country": "US"}}]}
+        })
     );
-    assert_eq!(body["tools"][0]["user_location"]["country"], json!("US"));
+    assert_eq!(actual["hits"][0]["title"], "Reqwest");
+    assert_eq!(actual["hits"][0]["snippet"], "Reqwest");
+    assert_eq!(actual["hits"][1]["url"], "https://docs.rs/source");
+    assert_eq!(actual["hits"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[test]
 #[serial]
-async fn incompatible_hosted_candidate_falls_back_to_plugin_slot() {
-    let _env = EnvGuard::set_many(&[("TEST_WEB_SEARCH_KEY", Some("fixture"))]);
-    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
-        "backend": "tavily",
-        "hits": [
-            {
-                "title": "Rust",
-                "url": "https://www.rust-lang.org",
-                "snippet": "Language homepage"
-            }
-        ],
-        "warnings": []
-    }))]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "auto".into();
-    let runtime = runtime_with_catalog(
-        cfg,
-        Some(
-            r#"
-[[models]]
-id = "hosted-ish"
-api = "openai"
-provider = "openai"
-
-[models.capabilities]
-web_search = true
-"#
-            .to_string(),
-        ),
+fn openai_bundle_keeps_partial_links_and_fails_only_empty_unfinished_output() {
+    let actual = eval_plugin_script_value(
+        r#"
+      async function run(payload) {
+        tomcat.fetch = async function () { return {status: 200, body: JSON.stringify(payload)}; };
+        try {
+          return (await searchWithOpenAI({query: "rust"})).hits.map(function (hit) { return hit.url; });
+        } catch (err) {
+          return "error";
+        }
+      }
+      return {
+        partial: await run({status: "incomplete", output: [
+          {type: "web_search_call", status: "failed", action: {sources: [{url: "https://docs.rs/source"}]}}
+        ]}),
+        unfinished: await run({status: "incomplete", output: []}),
+        failedCall: await run({status: "completed", output: [{type: "web_search_call", status: "failed"}]}),
+        empty: await run({status: "completed", output: []})
+      };
+    "#,
     );
-    runtime.set_plugin_invoker(invoker);
-
-    let output = runtime
-        .search(
-            WebSearchArgs {
-                query: "rust".into(),
-                count: None,
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: Vec::new(),
-            },
-            "test-session",
-        )
-        .await
-        .expect("fallback search");
-    assert_eq!(output.backend, "tavily");
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w.starts_with("backend_unavailable:openai")));
-}
-
-#[tokio::test]
-#[serial]
-async fn explicit_openai_requires_project_candidate() {
-    let _env = EnvGuard::set_many(&[
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", None),
-        ("HTTPS_PROXY", None),
-        ("HTTP_PROXY", None),
-        ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
-    ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "openai".into();
-    let runtime = runtime_with_catalog(cfg, None);
-    let error = runtime
-        .search(
-            WebSearchArgs {
-                query: "rust".into(),
-                count: None,
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: Vec::new(),
-            },
-            "test-session",
-        )
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .to_lowercase()
-        .contains("no hosted web_search model configured"));
+    assert_eq!(
+        actual,
+        json!({
+            "partial": ["https://docs.rs/source"],
+            "unfinished": "error",
+            "failedCall": "error",
+            "empty": []
+        })
+    );
 }
 
 fn runtime_with_catalog(config: AppConfig, models_toml: Option<String>) -> WebSearchRuntime {

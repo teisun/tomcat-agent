@@ -21,8 +21,13 @@ fn rejects_undeclared_and_missing_header_secrets_with_details() {
         (vec![], "forbidden_secret"),
         (vec!["EXAMPLE_KEY".into()], "missing_secret"),
     ] {
-        let err =
-            resolve_secret_text("Bearer {{secret:EXAMPLE_KEY}}", &required, &|_| None).unwrap_err();
+        let err = resolve_secret_text(
+            "Bearer {{secret:EXAMPLE_KEY}}",
+            &required,
+            &|_| None,
+            &|| panic!("not a host key"),
+        )
+        .unwrap_err();
         let error = error_json(err);
         assert_eq!(error["code"], code);
         assert_eq!(error["details"]["secretName"], "EXAMPLE_KEY");
@@ -33,6 +38,8 @@ fn rejects_undeclared_and_missing_header_secrets_with_details() {
 fn rejects_placeholders_in_url_and_query_keys_and_values() {
     for params in [
         json!({"url":"https://example.com/{{secret:EXAMPLE_KEY}}"}),
+        json!({"url":"https://example.com/{{host_key}}"}),
+        json!({"url":"https://example.com/search", "query":{"q":["{{host_key}}"]}}),
         json!({"url":"https://example.com/search", "query":{"q":"{{secret:EXAMPLE_KEY}}"}}),
         json!({"url":"https://example.com/search", "query":{"{{secret:EXAMPLE_KEY}}":"q"}}),
     ] {
@@ -149,6 +156,19 @@ fn shared_serve_only_resolves_saved_secrets_for_user_installed_plugins() {
         "missing_secret"
     );
     println!("SHARED_FETCH_ASSERTIONS_PASSED");
+}
+
+#[test]
+fn host_key_expands_only_in_header_values_without_authority_override() {
+    let mut params = json!({"url":"https://example.com/search", "headers":{"Authorization":"Bearer {{host_key}}"}, "body":{"q":"{{host_key}}"}});
+    let resolve = || Ok("dummy-value".to_owned());
+    let spec = super::parse_fetch_spec_with_host(&params, &[], true, &resolve).unwrap();
+    assert_eq!(spec.headers["authorization"], "Bearer dummy-value");
+    assert!(spec.headers["authorization"].is_sensitive());
+    assert!(spec.body.unwrap().contains("{{host_key}}"));
+    params["headers"]["Host"] = json!("other.example");
+    let failure = super::parse_fetch_spec_with_host(&params, &[], true, &resolve).unwrap_err();
+    assert_eq!(error_json(failure)["code"], "forbidden_secret");
 }
 
 #[test]

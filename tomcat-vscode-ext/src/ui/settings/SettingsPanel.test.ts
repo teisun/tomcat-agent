@@ -246,7 +246,7 @@ describe("settings panel model management flow", () => {
     });
     try {
       await panel.__testingDispatchIntent({ type: "upsertModel", messageId: "save-setup", data: {
-        model: { id: "local", api: "openai", provider: "deepseek", capabilities: { files: false, vision: false, tools: true, reasoning: false, webSearch: false } },
+        model: { id: "local", api: "openai", provider: "deepseek", capabilities: { files: false, vision: false, tools: true, reasoning: false } },
         providerKey: { envName: "LOCAL_KEY", value: "only-a-fixture" }, setAsDefault: true,
       } });
       expect(order).toEqual(failure === "key" ? ["model", "key", "refresh"] : ["model", "key", "default", "refresh"]);
@@ -312,7 +312,7 @@ describe("settings panel model management flow", () => {
     });
     const relayInput = (id: string, api: string) => ({
       api, apiKeyEnv: "FCODEX_API_KEY", baseUrl: "https://api.fcodex.com", id, modelName: id.split("/")[1], provider: "fcodex",
-      capabilities: { files: true, vision: true, tools: true, reasoning: true, webSearch: false },
+      capabilities: { files: true, vision: true, tools: true, reasoning: true },
     });
     const connectModels = [relayInput("fcodex/gpt-6.1-sol", "openai-responses"), relayInput("fcodex/claude-opus-5-5", "anthropic-messages")];
 
@@ -511,7 +511,7 @@ describe("settings panel model management flow", () => {
   });
 
   it("warns when the environment overrides a saved default, and keeps the list when setting fails", async () => {
-    const model = { id: "local", api: "openai", provider: "deepseek", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: false, web_search: false } };
+    const model = { id: "local", api: "openai", provider: "deepseek", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: false } };
     const sendSetDefaultModel = vi.fn()
       .mockResolvedValueOnce({ success: true, payload: { modelId: "local", warnings: [], envOverride: true } })
       .mockResolvedValueOnce({ success: false, error: "disk full" });
@@ -537,7 +537,7 @@ describe("settings panel model management flow", () => {
   });
 
   it("preserves supportedSpeeds in host state and a subsequent full model edit", async () => {
-    const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true, web_search: false }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast"], contextWindowOptions: [] };
+    const model = { id: "relay/model", modelName: "model", api: "openai-responses", apiKeyEnv: "STUB_KEY", baseUrl: "https://relay.example.test", provider: "relay", source: "user", keyPresent: true, capabilities: { files: false, vision: false, tools: true, reasoning: true }, supportedReasoningLevels: ["high", "max"], supportedSpeeds: ["fast"], contextWindowOptions: [] };
     const sendUpsertModel = vi.fn().mockResolvedValue({ success: true });
     const { panel } = createPanel({ messenger: { sendListModels: vi.fn().mockResolvedValue({ success: true, payload: { models: [model] } }), sendUpsertModel } });
     try {
@@ -704,7 +704,6 @@ describe("settings panel model management flow", () => {
             reasoning: true,
             tools: true,
             vision: true,
-            webSearch: false,
           },
           id: "broken-model",
           provider: "openai",
@@ -748,7 +747,6 @@ describe("settings panel model management flow", () => {
             reasoning: true,
             tools: true,
             vision: false,
-            webSearch: false,
           },
           id: "relay-openai",
           provider: "relay",
@@ -795,7 +793,6 @@ describe("settings panel model management flow", () => {
                     reasoning: true,
                     tools: true,
                     vision: true,
-                    web_search: false,
                   },
                   id: "gpt-5.4",
                   keyPresent: true,

@@ -30,7 +30,6 @@ const CAPABILITY_OPTIONS = [
   ["files", "models.capability.files"],
   ["tools", "models.capability.tools"],
   ["reasoning", "models.capability.reasoning"],
-  ["webSearch", "models.capability.webSearch"],
 ] as const;
 
 const PRESET_URL_LIST_ID = "settings-model-preset-urls";

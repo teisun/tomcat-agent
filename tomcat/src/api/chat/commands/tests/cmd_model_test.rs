@@ -58,7 +58,6 @@ fn format_model_list_line_uses_local_id_not_upstream_model_name() {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         },
         context_window: None,
         context_window_options: Vec::new(),

@@ -10,8 +10,7 @@ const WAIT: Duration = Duration::from_secs(20);
 
 #[tokio::test]
 async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
-    let fx = ServiceFixture::new("http://127.0.0.1:1");
-    fx.configure(|cfg| cfg.tools.web_search.backend = "auto".into());
+    let fx = ServiceFixture::cold();
     let managed_plugins = fx.0.home_path.join(".tomcat/plugins");
     std::fs::create_dir_all(&managed_plugins).unwrap();
     std::fs::write(
@@ -37,6 +36,7 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
     let info = output_json(
         fx.command()
             .env("BRAVE_API_KEY", "inherited-not-usable")
+            .env("OPENAI_API_KEY", "inherited-openai-not-usable")
             .args(["serve", "start"])
             .output()
             .unwrap(),
@@ -48,7 +48,7 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
     assert_eq!(initial["success"], true, "{initial}");
     assert_eq!(
         initial["payload"]["order"],
-        json!(["openai", "tavily", "brave", "serper", "mimo", "deepseek"])
+        json!(["deepseek", "tavily", "brave", "serper", "mimo", "openai"])
     );
     let backend = |reply: &Value, id: &str| {
         reply["payload"]["backends"]
@@ -59,6 +59,46 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
             .unwrap()
             .clone()
     };
+    assert_eq!(backend(&initial, "openai")["host"], "api.openai.com");
+    assert_eq!(backend(&initial, "openai")["keyEnv"], "OPENAI_API_KEY");
+    assert_eq!(backend(&initial, "openai")["keySource"], Value::Null);
+    let official = first.request(json!({"type":"set_provider_key","id":"openai-key","envName":"OPENAI_API_KEY","value":"synthetic-official-key"})).await;
+    assert_eq!(official["success"], true, "{official}");
+    let latest = second.request(request(&fx.0.workspace)).await;
+    assert_eq!(backend(&latest, "openai")["keySource"], "saved");
+    assert!(!latest.to_string().contains("synthetic-official-key"));
+    assert!(
+        !fx.0.home_path.join(".tomcat/models.toml").exists(),
+        "saving a search key should not create a chat model"
+    );
+
+    let gateway = first
+        .request(json!({"type":"upsert_model","id":"gateway","model":{
+            "id":"search-fixture-gateway", "api":"openai-responses", "provider":"openai",
+            "baseUrl":"https://gateway.example/v1", "apiKeyEnv":"OPENAI_API_KEY"
+        }}))
+        .await;
+    assert_eq!(gateway["success"], true, "{gateway}");
+    let conflicted = second.request(request(&fx.0.workspace)).await;
+    assert_eq!(backend(&conflicted, "openai")["keyEnv"], Value::Null);
+    assert_eq!(backend(&conflicted, "openai")["keySource"], Value::Null);
+
+    let alternative = first
+        .request(json!({"type":"upsert_model","id":"official-model","model":{
+            "id":"search-fixture-official", "api":"openai-responses", "provider":"openai",
+            "baseUrl":"https://api.openai.com/v1", "apiKeyEnv":"OFFICIAL_FIXTURE_API_KEY"
+        }}))
+        .await;
+    assert_eq!(alternative["success"], true, "{alternative}");
+    let key = first.request(json!({"type":"set_provider_key","id":"alternative-key","envName":"OFFICIAL_FIXTURE_API_KEY","value":"synthetic-alternative-key"})).await;
+    assert_eq!(key["success"], true, "{key}");
+    let rebound = second.request(request(&fx.0.workspace)).await;
+    assert_eq!(
+        backend(&rebound, "openai")["keyEnv"],
+        "OFFICIAL_FIXTURE_API_KEY"
+    );
+    assert_eq!(backend(&rebound, "openai")["keySource"], "saved");
+    assert!(!rebound.to_string().contains("synthetic-alternative-key"));
     assert_eq!(backend(&initial, "brave")["keySource"], Value::Null);
     assert_eq!(backend(&initial, "brave")["canSaveKey"], true);
     assert!(
@@ -68,7 +108,7 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
     let overridden = second.request(request(override_cwd.path())).await;
     assert_eq!(
         overridden["payload"]["order"],
-        json!(["openai", "fixture"]),
+        json!(["fixture"]),
         "{overridden}"
     );
     assert_eq!(backend(&overridden, "fixture")["canSaveKey"], false);

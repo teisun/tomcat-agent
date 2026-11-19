@@ -9,7 +9,7 @@ function model(overrides: Partial<SettingsModelView> & Pick<SettingsModelView, "
     api: "openai",
     apiKeyEnv: "DEEPSEEK_API_KEY",
     baseUrl: "https://api.deepseek.com",
-    capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+    capabilities: { files: false, reasoning: true, tools: true, vision: false },
     keyPresent: false,
     modelName: overrides.id,
     provider: "deepseek",

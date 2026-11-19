@@ -146,7 +146,6 @@ impl FixedResolver {
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
-            web_search: false,
         };
         let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
         call.api = api.to_string();

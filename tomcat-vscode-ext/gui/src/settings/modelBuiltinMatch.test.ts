@@ -12,7 +12,6 @@ function builtinModel(overrides: Partial<SettingsModelView> = {}): SettingsModel
       reasoning: true,
       tools: true,
       vision: false,
-      webSearch: false,
     },
     id: "deepseek-v4-flash",
     keyPresent: false,

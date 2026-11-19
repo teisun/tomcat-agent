@@ -7,12 +7,6 @@ import "./webSearchSettings.css";
 
 type KeyAction = "save" | "clear";
 
-function keyStatus(row: SearchBackendView) {
-  if (row.keySource === "environment") return "searchSettings.keyEnvironment";
-  if (!row.keySource) return "searchSettings.keyMissing";
-  return row.sharedModelIds.length ? "searchSettings.keyShared" : "searchSettings.keySaved";
-}
-
 function BackendRow({ row, index, enabledCount, busy, editor, onMove, onToggle, onEdit, onOpenModels }: {
   row: SearchBackendView;
   index: number;
@@ -31,12 +25,15 @@ function BackendRow({ row, index, enabledCount, busy, editor, onMove, onToggle, 
   const canEditKey = Boolean(row.canSaveKey && row.keyEnv);
   const showModels = Boolean(row.model) || (row.canSaveKey && (!row.keyEnv || shared));
   const enterKey = canEditKey && !row.keySource;
-  const showMenu = Boolean(row.keySource && (canEditKey || showModels));
+  const showMenu = Boolean(row.keySource);
+  const actionable = enterKey || showMenu || showModels;
   const canRemoveKey = canEditKey && !shared && row.keySource === "saved";
   const menuId = useId();
   const keyButton = useRef<HTMLButtonElement>(null);
-  const keyLabel = t(enterKey ? "models.card.fillKey"
-    : !showMenu && showModels ? (row.model ? "searchSettings.models" : "searchSettings.configureModel") : keyStatus(row));
+  const keyLabel = t(showMenu ? "searchSettings.configured"
+    : !actionable ? "searchSettings.keyMissing"
+    : showModels && !enterKey ? "searchSettings.models" : "searchSettings.configure");
+  const source = t(row.keySource === "environment" ? "searchSettings.keyEnvironment" : "searchSettings.keySaved");
   const editKey = (action: KeyAction) => { if (keyButton.current) onEdit(action, keyButton.current); };
   const details = [row.model ?? row.host, enabled && !row.keySource && t("searchSettings.skipped")].filter(Boolean).join(" · ");
   const label = { name: row.label };
@@ -58,10 +55,11 @@ function BackendRow({ row, index, enabledCount, busy, editor, onMove, onToggle, 
       <div className="tc-settings-card__identity">
         <strong>{row.label}</strong>
         {details && <span className="tc-settings-card__hosts">{details}</span>}
+        {row.host && row.canSaveKey && !row.keyEnv && <span className="tc-settings-card__hosts">{t("searchSettings.configureHost", { host: row.host })}</span>}
         {!row.canSaveKey && row.keyEnv && !row.model && <span className="tc-settings-card__hosts">{t("searchSettings.keyUnavailable")}</span>}
       </div>
       <div className="tc-search-settings__actions">
-        {enterKey || showMenu || showModels ? <button ref={keyButton} data-testid={`web-search-key-${row.id}`}
+        {actionable ? <button ref={keyButton} data-testid={`web-search-key-${row.id}`}
           className="tc-button tc-button--secondary tc-search-settings__key" type="button" disabled={busy}
           aria-label={`${keyLabel} · ${row.label}`} popoverTarget={showMenu ? menuId : undefined}
           onClick={enterKey ? () => editKey("save") : showMenu ? undefined : onOpenModels}>
@@ -70,6 +68,7 @@ function BackendRow({ row, index, enabledCount, busy, editor, onMove, onToggle, 
         </button> : <span className="tc-muted">{keyLabel}</span>}
         {showMenu && <div id={menuId} data-testid={`web-search-key-actions-${row.id}`} popover="auto"
           className="tc-session-dropdown tc-search-settings__key-actions">
+          <p className="tc-search-settings__key-source">{source}{shared && <><br />{t("searchSettings.keyShared", { names: row.sharedModelIds.join(", ") })}</>}</p>
           {canEditKey && <button type="button" className="tc-session-item" disabled={busy}
             popoverTarget={menuId} popoverTargetAction="hide" onClick={() => editKey("save")}>{t("models.card.replaceKey")}</button>}
           {canRemoveKey && <button type="button" className="tc-session-item" disabled={busy}
@@ -162,15 +161,19 @@ export function WebSearchSettingsView({ state, vscodeApi }: {
   return <SettingsShell state={state} vscodeApi={vscodeApi}>
     <main className="tc-settings-shell__content">
       <header className="tc-settings-shell__header"><div>
-        <h1>{t("searchSettings.title")}</h1>
+        <h1>{t("settings.tools")}</h1>
+        <div role="tablist" aria-label={t("settings.tools")} className="tc-search-settings__tabs">
+          <button type="button" role="tab" id="web-search-tab" aria-selected="true" aria-controls="web-search-panel" className="tc-chip tc-search-settings__tab">{t("searchSettings.title")}</button>
+        </div>
+      </div></header>
+      <section id="web-search-panel" role="tabpanel" aria-labelledby="web-search-tab">
         <p>{t("searchSettings.description")}</p>
         <p>{t("searchSettings.keyHint")}</p>
-      </div></header>
       {state.error && <div className="tc-banner tc-banner--warning" role="alert">{state.error}</div>}
       <div role="status">{busy ? t("searchSettings.saving") : [state.status, announcement].filter(Boolean).join(" ")}</div>
       {!state.ready && !state.error && <p>{t("settings.waitingForConnection")}</p>}
       {state.ready && !state.capabilities.webSearchSettings && <div className="tc-banner tc-banner--warning">{t("searchSettings.unsupported")}</div>}
-      {settings?.backends.length === 1 && <div className="tc-banner">{t("searchSettings.noPluginBackends")}</div>}
+      {settings?.backends.length === 0 && <div className="tc-banner">{t("searchSettings.noPluginBackends")}</div>}
       {settings && !order.some(id => byId.get(id)?.keySource) && <div className="tc-banner tc-banner--warning">{t("searchSettings.noneAvailable")}</div>}
       {unknown.length > 0 && <div className="tc-banner tc-banner--warning">{t("searchSettings.unknown", { names: unknown.join(", ") })}</div>}
       {settings && <ol className="tc-search-settings__rows" aria-label={t("searchSettings.title")} aria-busy={busy}>
@@ -194,6 +197,7 @@ export function WebSearchSettingsView({ state, vscodeApi }: {
           </Fragment>;
         })}
       </ol>}
+      </section>
     </main>
   </SettingsShell>;
 }

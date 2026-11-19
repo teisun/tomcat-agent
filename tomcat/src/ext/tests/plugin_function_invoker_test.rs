@@ -277,7 +277,7 @@ async fn net_fetch_uses_one_configured_client_across_session_bindings() {
         fixture.path().join("sessions"),
     ));
     for session in ["a", "b"] {
-        dispatcher.bind_session(session, Arc::downgrade(&sessions), None, None);
+        dispatcher.bind_session(session, Arc::downgrade(&sessions), None, None, None);
         let instance = manager
             .start_session_vm(session, "shared-fetch")
             .await

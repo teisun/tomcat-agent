@@ -66,7 +66,13 @@ pub fn isolated_serve_command_with_binary(home: &Path, binary: &Path) -> StdComm
 /// Start like a new installation, or like an interactive init whose key was skipped.
 /// Neither mode installs test credentials or model/configuration overrides.
 pub fn setup_cold_serve_fixture(initialized: bool) -> ServeFixture {
-    let home = tempfile::tempdir().expect("temp home");
+    setup_cold_serve_fixture_with_home(initialized, tempfile::tempdir().expect("temp home"))
+}
+
+pub fn setup_cold_serve_fixture_with_home(
+    initialized: bool,
+    home: tempfile::TempDir,
+) -> ServeFixture {
     let home_path = home.path().to_path_buf();
     let workspace = home_path.join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");

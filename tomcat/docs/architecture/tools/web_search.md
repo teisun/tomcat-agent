@@ -1,4 +1,4 @@
-# `web_search` 工具：多供应商检索、归一化与 OpenAI server-side 注入
+# `web_search` 工具：插件后端、按序回退与结果归一化
 
 **快速理解**：在 VS Code 打开「设置 → 工具 → 网页搜索」，打开你想用的服务、填 Key，再用上下箭头调整顺序。只开一家，就是指定该服务；开多家，才会在失败时按顺序尝试下一家。首次启动不需要手动运行 `tomcat init`。
 
@@ -15,20 +15,13 @@
 >
 > 1. **`tool_exec` 已从单文件升为目录模块**：`src/core/agent_loop/tool_exec/`。中央分发在 [`tool_exec/mod.rs::execute_tool_tuple_full`](../../../src/core/agent_loop/tool_exec/mod.rs) 的 `match tc.name.as_str()`；每个工具的处理函数放在 `tool_exec/branches/<tool>.rs`（形如 `handle_read` / `handle_bash`），并在 [`tool_exec/branches/mod.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs) 注册。**本文凡提「`tool_exec.rs` 加 `match "web_search"`」均指**：新增 `tool_exec/branches/web_search.rs`（`handle_web_search`）→ 在 `branches/mod.rs` 导出 → 在 `tool_exec/mod.rs` 的 match 增一臂。
 > 2. **工具配置类型已移位**：`src/infra/config/types.rs` → [`src/infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs)；聚合结构为 `ToolsConfig { read, write, bash }`（各 `Tools*Config` 子表）。`ToolsWebSearchConfig` 应作为新子表加进 `ToolsConfig`。
-> 3. **PR-WS-O 已落为 sidecar 路径**：hosted 请求不再通过 [`openai_responses/mod.rs`](../../../src/core/llm/openai_responses/mod.rs) / [`openai_responses/payload.rs`](../../../src/core/llm/openai_responses/payload.rs) 注入当前对话请求；实际落点是 [`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs) 负责选 hostedCandidateModel 与凭证，再委托 [`web_search/openai_server.rs::search_openai_hosted`](../../../src/core/tools/web_search/openai_server.rs) 构造并发送独立 `POST /v1/responses`，随后由 `parse_server_tool_blocks` 归一化结果。
+> 3. **PR-WS-O（宿主托管 OpenAI）已移除**：宿主不再挑选模型代搜，也没有 `openai_server.rs`；OpenAI 是插件里的普通后端，见 §0。
 > 4. **`registry.rs` 行号**：`PROVIDERS` 常量现位于 [`registry.rs` L53-56](../../../src/core/llm/registry.rs)（原文 L47-50 已失效）；`("openai", …)` / `("openai-responses", …)` 两条不变。
 > 5. **新依赖**：`Cargo.toml` 当前**无** `moka`（无任何 LRU 工具）——PR-WS-S 的缓存须新增该依赖；`reqwest 0.12` / `xxhash-rust(xxh32)` 已在。
 > 6. **openclaw 门闩已变更**（见 §2.2 / §2.4.3 已就地更新）：`isCodexNativeSearchEligibleModel` 现仅判 `modelApi === "openai-chatgpt-responses"`。
 > 7. **新增的子 Agent 工具白名单门闩**（重构引入）：[`tool_exec/guard.rs`](../../../src/core/agent_loop/tool_exec/guard.rs) 的 `is_reviewer_whitelisted_tool` / `is_verifier_whitelisted_tool` 会**拒绝**白名单外的任何工具。`web_search` 默认**不在**白名单内——PR-WS-A 须显式决定：reviewer/verifier 子 Agent 是否允许联网检索（多数审查场景应**保持禁止**，则无需改 guard；若要放开则在此二函数补名）。`tool_exec_unknown_tool_for_web_search_without_backend` 之外应另加一条「reviewer 调 web_search 被拒」断言。
-> 8. **【重大设计修订】server-side 资格从「看当前模型 wire + capability」改为「看项目级 hosted 候选模型」**——这是本次复核后的新裁决，已就地改写 §1 / §1.1 G2 / §2.2 / §2.3 / §2.4.2 / §2.4.3 / §3 / §4.1 / §7 / §8 / §10 / §11。背景四概念（这次明确拆开）：
->    - **currentModel（当前对话模型）** = 当前会话正在用来推理的模型；**只负责主对话**，**不再参与** `backend=auto` 的 hosted 首选判断。
->    - **hostedCandidateModel（项目级 hosted 候选模型）** = 合并后的 model catalog（`models.toml` + builtin）中首个 `capabilities.web_search == true` 的模型；若有多个，按合并后的顺序取首个；若没有，则 `auto` 没有 hosted 首选。
->    - **wire（管线）= 某个模型自己的 `api` 字段**（`openai` = Chat Completions wire / `openai-responses` = Responses wire）。resolver（[`resolver.rs::build_provider_config` L280](../../../src/core/llm/resolver.rs)）把 `entry.api` 灌进 `LlmConfig.provider`，再由 [`registry.rs`](../../../src/core/llm/registry.rs) 选实现——**现在只关心 hostedCandidateModel 自己的 wire**，不再拿当前对话模型的 wire 做 `auto` 门闩。
->    - **vendor（厂商）= `models.toml` 的 `provider` 字段**：**仅**用于选 `<VENDOR>_API_KEY`（如 `provider="mimo"`→`MIMO_API_KEY`），**与能不能 server-side 检索无关**。
->    - **capability（能力）= 模型是否真支持 hosted `web_search` tool**：**事实源是各厂商官方文档**，登记到 [`models.toml` 的 `capabilities`](../../../src/core/llm/catalog.rs)（新增 `web_search` 位，默认 `false`）。
->
->    **正确规则 = 项目里存在 hostedCandidateModel → `auto` 先尝试 `openai(hosted)`；项目里不存在 hostedCandidateModel → 直接进入官方插件的 `autoOrder`（`tavily → brave → serper → mimo`）**。当前对话模型的 `api` 是否 `openai-responses` **不再参与** `auto` 资格判断。若 hostedCandidateModel 自身配置错误或运行时不可用，`auto` 再回插件 `autoOrder`；显式 `openai` 则报错。**只看当前模型 wire 会错**：用户可能正用 DeepSeek / Chat Completions 对话，但项目里已经单独配置了一个可做 hosted `web_search` 的模型；这时 `auto` 仍应先用那个项目级 hosted 候选，而不是因为当前模型不是 Responses 就放弃 hosted。
-> 9. **插件后端已扩成多后端所有者**：官方插件 `tomcat.web-search-backends` 不再只首发 `mimo`，而是同时拥有 `mimo` / `tavily` / `brave` / `serper` 四个后端；`auto` 默认在 hosted 不可用时交给插件内部 `autoOrder` 决策。当前实现已移除 Rust legacy HTTP 回滚链，`web-search-backends` 插件是唯一现行真相。
+> 8. **「模型搜索能力标记」设计已撤销**：曾计划在模型目录里给模型打搜索能力标记，由宿主挑首个带标记的模型代搜。现已删除；当前聊天模型和模型目录都不决定搜索目标，搜索只按设置页保存的顺序走，见 §0。
+> 9. **插件后端已扩成多后端所有者**：官方插件 `tomcat.web-search-backends` 拥有全部后端（含 DeepSeek、MiMo 和 OpenAI），宿主按保存的顺序逐个调用。当前实现已移除 Rust legacy HTTP 回滚链，`web-search-backends` 插件是唯一现行真相。
 
 ---
 
@@ -44,7 +37,7 @@
   - [2.4.1 PR-WS-A：catalog 注册与 system_prompt](#241-pr-ws-acatalog-注册与-system_prompt)
 - [2.4.2 PR-WS-S：自家 HTTP backends（历史迁移背景）](#242-pr-ws-s自家-http-backendstavily--brave--serper)
   - [2.4.2.1 HTTP 上游字段速查（实现必读）](#2421-http-上游字段速查实现必读)
-  - [2.4.3 PR-WS-O：OpenAI server-side 注入与归一化](#243-pr-ws-oopenai-server-side-注入与归一化)
+  - [2.4.3 PR-WS-O：宿主托管 OpenAI（历史，已移除）](#243-pr-ws-o宿主托管-openai历史已移除)
   - [2.4.4 PR-WS-W：域名守卫与 SSRF 拒接](#244-pr-ws-w域名守卫与-ssrf-拒接)
   - [2.4.5 插件后端扩展槽（MiMo 首发）](#245-插件后端扩展槽mimo-首发)
 - [3. 术语统一](#3-术语统一)
@@ -71,32 +64,33 @@
                                      │ 保存有序名单
                                      ▼
 web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按顺序逐项尝试
-                                     ├─ openai → 独立 Responses 请求
-                                     └─ 其他项 → 插件只执行指定后端
+                                     └─ 插件只执行指定后端（含 OpenAI）
                                                    │
                   第一个正常响应（含空结果）←───────┘
                           └─ 过滤、归一化、缓存
 ```
 
 - **首启即用**：启动会补齐内置搜索插件文件。即使用户已有其他插件的登记簿，内置插件也默认可见；登记簿明确禁用时仍不加载。
-- **谁能收到搜索词**：只有名单里的服务。单项就是指定；多项才会顺序回退。未保存名单（包括旧 `backend = "auto"`）时使用默认顺序：OpenAI 托管 → Tavily → Brave → Serper → MiMo → DeepSeek。DeepSeek 缺 Key 时跳过；已有名单不追加后端，旧的具体名称仍映射为单项名单。
+- **谁能收到搜索词**：只有名单里的服务。单项就是指定；多项才会顺序回退。未保存名单（包括旧 `backend = "auto"`）时使用默认顺序：DeepSeek → Tavily → Brave → Serper → MiMo → OpenAI。缺 Key 的后端跳过；已有名单不追加后端，旧的具体名称仍映射为单项名单。
 - **谁实现服务调用**：插件 `web_search.backend` 声明可用后端和依赖。HTTP 适配器用 `pi.fetch`，模型后端使用宿主传入的模型。当前聊天模型不决定搜索目标。
-- **Key 和顺序各管一件事**：保存 Key 不会启用后端。内置层和用户层插件可在声明的 HTTPS 域名上使用已保存的 Key；项目层和显式按路径加载的插件只能用 CLI 的显式环境变量，共享 Serve 不从继承环境找 Key。`{{secret:NAME}}` 只在请求头替换，搜索词所在的请求体原样发送。模型类后端仍由宿主代为调用模型。缓存区分实际可尝试顺序与凭据变更。
+- **Key 和顺序各管一件事**：进入「工具」默认选中「网页搜索」；「去配置」直接在本行填写，「已配置 ▾」先显示 Key 来源和管理操作。保存 Key 不会启用后端。内置层和用户层插件可在声明的 HTTPS 域名上使用已保存的 Key；项目层和显式按路径加载的插件只能用 CLI 的显式环境变量，共享 Serve 不从继承环境找 Key。`{{secret:NAME}}` 只在请求头替换，搜索词所在的请求体原样发送。模型类后端仍由宿主代为调用模型。缓存区分实际可尝试顺序与凭据变更。
+- **OpenAI 升级变化**：固定由插件用 `gpt-6.2-sol` 直接调用官方 Responses，不再用模型网关，也不再认模型的 `capabilities.web_search`；旧文件里的键会被忽略。工具页可直接填写只被 `api.openai.com` 地址使用的 Key，地址冲突且无安全槽时引导去模型设置。`{{host_key}}` 按实际 HTTPS 目的主机（端口 443）在模型目录中找 Key，排除同时被另一地址使用的槽；项目层插件不可用，明文不回传给插件。
 - **实现入口**：[`builtin.rs`](../../../src/ext/plugin/builtin.rs)、[`declarations.rs`](../../../src/core/tools/web_search/declarations.rs)、[`mod.rs`](../../../src/core/tools/web_search/mod.rs)、[随包插件说明](../../../assets/plugins/web-search-backends/README.md)。
 
-下文保留早期 OpenSpec 方案和调研（其中 `autoOrder`、`backend`、各家 `*_base_url` 等描述是历史设计，不代表当前实现）。
 ---
+
+> **历史方案（§1–§13）**：下文记录早期 OpenSpec 方案和调研。关于宿主托管的 OpenAI、`autoOrder`、模型搜索能力标记及各家 `*_base_url` 的描述已过时；现行行为以 §0 为准。
 
 ## 1. 目标与设计原则
 
-**一句话**：让模型一句 `query` 拿到一组**结构归一**、**可审计**、**可缓存**的网页 hits，**多 backend 透明切换**——只要项目级 model catalog 中存在 `capabilities.web_search == true` 的 hosted 候选模型，就把它作为 `auto` 的首选 backend，发起一笔独立的 hosted search 请求；若项目里不存在该候选，或该候选运行时不可用，则默认把 `auto` 交给官方 `web-search-backends` 插件，由插件内部 `autoOrder` 决定先试 `tavily`、再试 `brave`、`serper`、`mimo`。不抓正文（正文走 [`web_fetch.md`](web_fetch.md)）。**判定跟项目里有没有 hosted 候选走，不跟当前对话模型的 `api` / vendor 名走**——详见文首校准块第 8 条。
+**一句话**：让模型一句 `query` 拿到一组**结构归一**、**可审计**、**可缓存**的网页 hits，**多 backend 透明切换**——按设置页保存的顺序逐个尝试官方 `web-search-backends` 插件里的后端，单项即指定；未保存时用 §0 的默认顺序。不抓正文（正文走 [`web_fetch.md`](web_fetch.md)）。**搜索目标只由保存的顺序决定，不跟当前对话模型走**。
 
 ### 1.1 观察指标表（与 §10 验收一一对应）
 
 | 目标 | 观察指标（落地后可核对） | 说人话 |
 |------|--------------------------|--------|
 | G1 query→hits 闭环 | catalog 注册 `web_search`；同一 `query` 经任一 backend 都返回相同形状的 `hits[]`（含 `title/url/snippet/position`，可选 `published_at`） | 不管换哪个 backend，模型读到的都是同一份字段。 |
-| G2 多 backend 透明切换 | `backend=auto`：若项目里存在 `capabilities.web_search == true` 的 hosted 候选模型 → `openai(hosted)` 为首选；否则默认进入插件 `autoOrder`（`tavily → brave → serper → mimo`）；若 hosted / plugin 当前候选缺 key、401/403、429/5xx、timeout、transport fail 则继续下一家；显式 `backend=…` 不降级。 | hosted 首选看项目里有没有可联网模型，不看当前聊天模型；自动模式真正的后端顺序现在主要由插件自己决定。 |
+| G2 多 backend 透明切换 | 按保存的顺序尝试；当前候选缺 key 则跳过，401/403、429/5xx、timeout、transport fail 则继续下一家；只保存一项时不降级。 | 开几家就按顺序试几家，只开一家就是指定。 |
 | G3 hits 归一化 | 输出 `{ hits, query, backend, stats, truncated, warnings }` 单一 schema；上游各 provider 的特异字段在 adapter 内吃掉 | 模型不需读三套 JSON，调用方一份解析即可。 |
 | G4 缓存命中 | 进程内 LRU + TTL（默认 5 min / 50 条）；key=`(backend, query, count, freshness, country, language, domain_filter, allowed_domains, blocked_domains)`；命中 → `stats.cached=true` 不再发 HTTP | 同会话短时间内重复检索免账单、免速率限制；配置域约束变化不复用旧缓存。 |
 | G5 SSRF 守卫 | hits.url 归一化阶段解析 + 拒任意 IP literal / loopback / 私网 / 内网保留 hostname / 无 host；`allowed_domains` / `blocked_domains` 在结果集级别过滤 | 别让模型以为 `http://127.0.0.1` 或 `https://metadata.google.internal` 是合法搜索结果。 |
@@ -142,7 +136,7 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 | **openclaw** | `provider-web-search-contract` plugin SDK + Codex native 注入 | Codex native **仅当** `isCodexNativeSearchEligibleModel` 为真——**现仅判** `modelApi === "openai-chatgpt-responses"`（见 [`codex-native-web-search-core.ts` L35-49](../../../../openclaw/src/agents/codex-native-web-search-core.ts)；**2026-06 已简化**，旧版的 `modelProvider === "openai-codex"` / `modelApi === "openai-codex-responses"` 已删）/ 否则 managed `web_search` 工具 | `query` + 上下文 size + freshness + filters | 限速由 OpenAI server 兜底 | 见 [`codex-native-web-search-core.ts`](../../../../openclaw/src/agents/codex-native-web-search-core.ts)（`buildCodexNativeWebSearchTool` 现 L160）；**pi 对齐其「仅特定 API 管线可走 native」思路，但 provider 字符串映射到本仓 `openai` vs `openai-responses`** |
 | **pi-mono** | — | — | — | — | **没做** web 工具；通过 MCP 转接外部检索（如 Tavily MCP server） |
 | **pi_agent_rust** | — | — | — | — | **没做** web 工具；本仓本期补齐 |
-| **本仓库 `web_search`**（路线图） | `trait WebSearchBackend` + 4 适配器 | `backend=auto`：项目里若存在 `capabilities.web_search == true` 的 hosted 候选模型 → `openai(hosted)` 首选；否则 → Tavily→Brave→Serper 降级链 | `query` + `count` + `freshness` + `country` + `language` + `domain_filter` | hits.url 归一化阶段 **本仓（tomcat）增补** SSRF + 限速 → `truncated+warning` | managed schema 对齐 openclaw；**hosted 首选 = 项目级 hosted 候选模型**，不再绑定当前对话模型的 wire，见文首校准块第 8 条 |
+| **本仓库 `web_search`**（路线图） | `trait WebSearchBackend` + 4 适配器 | 按保存的顺序逐个尝试（现行默认见 §0） | `query` + `count` + `freshness` + `country` + `language` + `domain_filter` | hits.url 归一化阶段 **本仓（tomcat）增补** SSRF + 限速 → `truncated+warning` | managed schema 对齐 openclaw；搜索目标不绑定当前对话模型 |
 
 **结论（写入路线图）**：**多 backend 抽象**对齐 **hermes-agent**；**OpenAI server-side 注入路径**对齐 **openclaw**；**字段集**对齐 **openclaw**（query + freshness + country + language + filters）；**统一 hits 归一化**取 **cc-fork-01** 的 `Output { query, results, durationSeconds }` 思路；**默认 backend `auto`** 兼顾两路。
 
@@ -154,24 +148,23 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 | --- | --- | --- | --- | --- | --- | --- |
 | **工具与文档拆分** | `web_search` / `web_fetch` 是否合一 | **采用** `web_search` / `web_fetch` 双工具双文档。 | cc-fork / hermes / openclaw（双工具）+ 本仓库文档惯例 | schema、权限（fetch 按 domain）、缓存键（query vs url）分离；**一工具一 md** 与 read/write/edit/bash 一致 | × 单文件双口吻、PR 互相拖拽 | 一个工具一份文档；找路标 vs 抓正文是两件事。 |
 | **多供应商抽象** | 换 key / 换模型是否丢检索能力 | **采用** `WebSearchBackend` trait + 多 adapter。 | hermes-agent + 本仓库路线图 | `WebSearchBackend` + OpenAI server-side / Tavily / Brave / Serper；OpenAI 系可走注入免自建 HTTP | × 仅单一 HTTP / 仅 server-side | 一套接口、四个 provider；坏一个不影响其他。 |
-| **默认 backend** | 用户无配置时走哪条路 | **采用** `auto`：项目里有 hosted 候选模型 → server-side；否则 → Tavily。 | 用户指定的项目级 hosted backend 取向 + openclaw「eligible 才 native」思路 | **`auto`**：只要合并后的 model catalog 中存在 hostedCandidateModel（首个 `capabilities.web_search == true` 的模型）→ `openai(hosted)` 作为首选；否则 → Tavily；`[tools.web_search] backend` 可强制 | × 把 hosted 资格绑死在当前对话模型；× 没项目级 hosted 候选时还强行走 hosted | hosted 是项目能力，不是当前模型身份。 |
-| **hosted 候选选择** | 项目里多个 `capabilities.web_search == true` 模型时选谁 | **采用** 合并后 catalog 首个匹配项；当前对话模型不参与资格判断。 | model merge 顺序 + 实现可预测性 | 项目自定义条目 / 覆盖后的顺序天然可控；无需新增第二套 selector 配置就能稳定选出一个候选 | × 跟当前模型走；× 多个候选时无规则挑选 | 只要项目里配了可联网 hosted 模型，就按固定顺序挑一个先用。 |
+| **默认 backend** | 用户无配置时走哪条路 | **采用** 固定默认顺序，缺 Key 的跳过（见 §0）。 | 设置页可见、可排序的有序名单 | 用户看得见会把搜索词发给谁；不依赖模型目录或当前模型 | × 按当前对话模型或模型能力标记推断 | 没配过就按默认顺序，配过就按你排的顺序。 |
 | **上游 API 契约来源** | adapter 该按什么 header / body / query 接 | **采用** 各 provider 官方 API 文档 + 工作区参考实现双锚。 | Tavily / Brave / Serper 官方文档 + openclaw / hermes | 认证头、参数名、响应 shape 都有权威来源；工作区实现只做交叉校对 | × 只看社区博客；× 凭经验猜字段 | 接哪家先看官方 docs，再用仓库实现对照。 |
 | **密钥配置位置** | 三家 HTTP backend 的 key 放哪、怎么让用户配 | **采用** per-provider env secrets：运行时读 `~/.tomcat/assets/.env` 或进程 env，本地开发 / 真 API 用例读仓库根 `.env`（由 `.env.example` 提供样板）。 | 本仓 `.env` / `user-guide.md` / 测试现状 / 安全要求 | 多 backend 可同时持有多家 key，适配 `auto` 链；secret 不进 schema、不进共享 `api_key` 字段、不进审计 | × 单个共享 `api_key`；× 把 secret 写进 `tomcat.config.toml` 或 tool args | key 放 `.env` / secret 管理里，别让模型或配置文件看到。 |
-| **优先级与运行时降级** | 一个 backend 不通时怎么办 | **采用** `auto` 下 `openai(hosted, project candidate) → tavily → brave → serper → disabled`；候选若缺 key、401/403、429/5xx、timeout、transport fail 则顺序切下一个；显式 backend 不降级。 | hermes 多 backend 思路 + 用户指定的项目级 hosted 优先级 | 自动模式重可用性，手动模式保用户意图；不把“点名某家”偷偷改成别家 | × `auto` 只试一家就失败；× 显式 backend 静默切别家 | 自动模式先试项目里那台能做 hosted 搜索的模型，不行再试 HTTP。 |
+| **优先级与运行时降级** | 一个 backend 不通时怎么办 | **采用** 按保存的顺序尝试；候选若缺 key、401/403、429/5xx、timeout、transport fail 则顺序切下一个；只保存一项时不降级。 | hermes 多 backend 思路 | 多项重可用性，单项保用户意图；不把“点名某家”偷偷改成别家 | × 多项时只试一家就失败；× 单项时静默切别家 | 前一家不通再试下一家。 |
 | **输入字段集** | LLM 常用约束是否进 schema | **采用** 6 字段 schema（query/count/freshness/country/language/domain_filter）。 | openclaw `web-search.ts` 字段集 | `query`+`count`+`freshness`+`country`+`language`+`domain_filter`；跨 provider 归一化 | × 一锅端塞 `page_token` 等易混字段 | 6 个字段够用；不要让模型猜怎么 query。 |
 | **输出归一化** | 模型是否要学多套 JSON | **采用** 统一 `{ hits, stats, warnings, backend }`。 | cc-fork-01（Output 思路）+ hermes | 单一 `{ hits, stats, warnings, backend }`；`warnings` 透传截断/限速 | × 原样三套 shape；× 仅 title+url 过短 | 模型只学一套字段。 |
 | **缓存策略** | 同会话重复 query 成本 | **采用** 进程内 LRU + TTL（key 含 backend 与全参）。 | cc-fork-01 `utils.ts` LRU 思路 | 进程内 LRU + TTL；key 含 backend 与全参数字段 | × 不缓存烧钱；× 落盘持久化非目标 | 同样的搜索别花两次钱。 |
 
 ### 2.4 实施点（路线图）
 
-**实施顺序（历史迁移背景）**：**① PR-WS-A**（catalog 注册 + system_prompt + tool_exec match）→ **② PR-WS-S**（trait + 自家 HTTP 三 backend + 缓存）→ **③ PR-WS-O**（OpenAI server-side 注入）→ **④ PR-WS-W**（域名守卫 + SSRF）。当前现行实现已完成插件优先切换并移除了 Rust legacy HTTP 路径；以下 PR-WS-S 内容仅保留为迁移背景。
+**实施顺序（历史迁移背景）**：**① PR-WS-A**（catalog 注册 + system_prompt + tool_exec match）→ **② PR-WS-S**（trait + 自家 HTTP 三 backend + 缓存）→ **③ PR-WS-O**（OpenAI server-side 注入）→ **④ PR-WS-W**（域名守卫 + SSRF）。当前现行实现已完成插件优先切换并移除了 Rust legacy HTTP 路径与宿主托管 OpenAI；以下 PR-WS-S / PR-WS-O 内容仅保留为迁移背景。
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 | --- | --- | --- | --- | --- |
 | **PR-WS-A**（命名 + catalog） | **交付物**：6 字段 schema；占位 friendly err。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec/mod.rs`](../../../src/core/agent_loop/tool_exec/mod.rs)（match 增臂）+ 新 [`tool_exec/branches/web_search.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection`（**PASS, 2026-06-04**） | 先把名字 / schema / 占位放好，后面 PR 接 backend 不改字面量。 |
 | **PR-WS-S**（历史：自家 HTTP backends） | **交付物**：trait + 三 HTTP adapter；LRU/TTL；归一化 hits。**落地点**：`core/tools/web_search/*`、`ToolsWebSearchConfig` | 这部分实现已被插件路径替代并移除；现行代码不再保留 Rust Tavily/Brave/Serper HTTP adapter | 保留为迁移背景，不再作为当前验收锚点 | 曾经用于把三个 provider 直接接进宿主；现已由官方插件接管。 |
-| **PR-WS-O**（OpenAI hosted backend 调度与归一化） | **交付物**：project-level hosted 候选模型请求；server_tool 结果→统一 hits。**落地点**：`core/tools/web_search/{mod,openai_server}.rs` | [`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs)（解析 hosted 候选模型、凭证与 fallback）+ [`openai_server.rs`](../../../src/core/tools/web_search/openai_server.rs)（构造 sidecar hosted 请求 + 归一化） | `discover_hosted_candidate_uses_merged_catalog_order`、`auto_backend_uses_project_hosted_candidate`、`explicit_openai_requires_project_candidate`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate`（**PASS, 2026-06-04**） | `auto` 只要项目里有 hosted 候选就优先用它；当前对话模型是不是 Responses 不重要。 |
+| **PR-WS-O**（历史：宿主托管 OpenAI） | **交付物**：宿主挑模型代搜。 | 已移除；OpenAI 改为插件后端 [`openai.js`](../../../assets/plugins/web-search-backends/src/backends/openai.js) | 保留为迁移背景，不再作为当前验收锚点 | 现在由插件直接调用官方接口。 |
 | **PR-WS-W**（域名守卫 + SSRF） | **交付物**：hits 阶段 URL 守卫与域过滤。**落地点**：`web_search/cache.rs`、`types.rs` | `web_search/cache.rs`、`web_search/types.rs` | `normalize_hits_filters_private_hosts_and_domain_rules`（**PASS, 2026-06-04**） | 别让搜出来的 URL 指向 127.0.0.1。 |
 
 下文按实施点展开**技术要点与示意图**；**交付边界与代码落点仍以表为准**。
@@ -202,9 +195,9 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 
 #### 2.4.2 PR-WS-S：自家 HTTP backends（历史迁移背景，已移除）
 
-- **交付**：定义 `trait WebSearchBackend { async fn search(&self, args: &WebSearchArgs) -> Result<WebSearchOutput, AppError> }`；3 个 adapter（Tavily **`POST {base}/search`**、Brave **`GET …/res/v1/web/search`**、Serper **`POST https://google.serper.dev/search`**）经 reqwest 0.12（已存在依赖）调用；`backend.rs` 提供 `discover_hosted_candidate(model_catalog) -> Option<HostedCandidateModel>` + `pick_backend(hosted_candidate, cfg) -> …`（命名可调整，语义不能变）。`hostedCandidateModel` 的规则是：**合并后的 model catalog 中首个 `capabilities.web_search == true` 的模型**，与当前对话模型无关。若 `backend ∈ {auto, openai}` 且存在 hostedCandidateModel → **defer 到 PR-WS-O**（不在此模块起 reqwest）；否则 `auto` 按 **`tavily → brave → serper`** 选第一个可用 HTTP backend。若 `auto` 当前候选出现**缺 key、401/403、429/5xx、timeout、transport fail**，则记 `warnings += "backend_unavailable:<name>, fallback=<next>"` 后继续下一家；**400/422 等请求契约错误直接 `Err`**，避免把实现 bug 伪装成降级成功。显式 `tavily/brave/serper` 恒走 HTTP 且**不降级**。进程内 LRU `MokaCache<CacheKey, WebSearchOutput>` 默认 `5 min TTL / 50 entries`；每次 HTTP backend 调用包 `tokio::time::timeout(default 12s, …)`。
+- **交付**：定义 `trait WebSearchBackend { async fn search(&self, args: &WebSearchArgs) -> Result<WebSearchOutput, AppError> }`；3 个 adapter（Tavily **`POST {base}/search`**、Brave **`GET …/res/v1/web/search`**、Serper **`POST https://google.serper.dev/search`**）经 reqwest 0.12（已存在依赖）调用；`backend.rs` 提供 `pick_backend(cfg) -> …`；`auto` 按 **`tavily → brave → serper`** 选第一个可用 HTTP backend。若 `auto` 当前候选出现**缺 key、401/403、429/5xx、timeout、transport fail**，则记 `warnings += "backend_unavailable:<name>, fallback=<next>"` 后继续下一家；**400/422 等请求契约错误直接 `Err`**，避免把实现 bug 伪装成降级成功。显式 `tavily/brave/serper` 恒走 HTTP 且**不降级**。进程内 LRU `MokaCache<CacheKey, WebSearchOutput>` 默认 `5 min TTL / 50 entries`；每次 HTTP backend 调用包 `tokio::time::timeout(default 12s, …)`。
 - **限速归一化**：在 **显式 backend** 下，429 / 5xx 不抛 `Err`，写入 `warnings += "rate_limited (backend=tavily,status=429)"` + `truncated=true`；在 **`auto`** 下，429 / 5xx 归入「当前候选不可用」并进入下一家，直到链路耗尽才按最终状态返回。
-- **配置承接**：`ToolsWebSearchConfig { backend, count, freshness, country, language, domain_filter, blocked_domains, allowed_domains, cache_ttl_secs, cache_capacity, timeout_ms, tavily_base_url, brave_base_url, serper_base_url }` 作为新子表加到 [`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig`；env 优先级 `TOMCAT__TOOLS__WEB_SEARCH__*`。**credentials 不进 config**：运行时从 `~/.tomcat/assets/.env` / 进程 env 读取 `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY`，本地 real-API / 开发测试可用仓库根 `.env`（由 `.env.example` 提供样板）；OpenAI hosted 路径则复用 **hostedCandidateModel 对应** 的 key source，而不是当前对话模型的 key source。
+- **配置承接**：`ToolsWebSearchConfig { backend, count, freshness, country, language, domain_filter, blocked_domains, allowed_domains, cache_ttl_secs, cache_capacity, timeout_ms, tavily_base_url, brave_base_url, serper_base_url }` 作为新子表加到 [`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig`；env 优先级 `TOMCAT__TOOLS__WEB_SEARCH__*`。**credentials 不进 config**：运行时从 `~/.tomcat/assets/.env` / 进程 env 读取 `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY`，本地 real-API / 开发测试可用仓库根 `.env`（由 `.env.example` 提供样板）。
 
 ```text
   WebSearchArgs
@@ -300,53 +293,11 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 
 **关联源码（工作区内）**：Tavily 以 **openclaw `extensions/tavily/src/tavily-client.ts`** + **hermes `tools/web_tools.py`（`_tavily_request` + `_normalize_tavily_search_results`）** 为双参考；Brave/Serper 以 **官方 API 文档** 为主（本工作区 hermes/openclaw **未**检出独立 Brave/Serper HTTP 客户端，故不硬造「对标某文件」链接）。openclaw 对 **generic `web_search` 工具 schema** 的字段名（`count`/`country`/…）见 [`src/agents/tools/web-search.ts`](../../../../openclaw/src/agents/tools/web-search.ts)（与 pi catalog 对齐用）。
 
-#### 2.4.3 PR-WS-O：OpenAI hosted backend 调度与归一化
+#### 2.4.3 PR-WS-O：宿主托管 OpenAI（历史，已移除）
 
-- **交付**：[`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs) 不再看**当前对话模型**，而是先解析 **hostedCandidateModel**（合并后的 model catalog 中首个 `capabilities.web_search == true` 的模型），再结合候选模型对应凭证与 base URL，委托 [`core/tools/web_search/openai_server.rs::search_openai_hosted`](../../../src/core/tools/web_search/openai_server.rs) 发起一笔**专用** hosted sidecar 请求：`model = hostedCandidateModel.id`，请求体中的 `tools = [{ "type": "web_search", "filters": {...}, "search_context_size": "medium", "user_location": ... }]`（字段形状参考 [openclaw `buildCodexNativeWebSearchTool`:160-200](../../../../openclaw/src/agents/codex-native-web-search-core.ts)）。响应回包含 `server_tool_use` + `web_search_tool_result` 块时，由 `openai_server.rs::parse_server_tool_blocks` 归一化为 `WebSearchOutput { hits, query, backend: "openai", stats: { elapsed_ms, cached:false }, warnings, truncated }`（块遍历与错误分支参考 [cc-fork-01 `WebSearchTool.ts`:86-150](../../../../cc-fork-01/src/tools/WebSearchTool/WebSearchTool.ts)）。`WebSearchOutput` 类型在 PR-WS-S 已定义，本 PR 复用该类型，不修改正常对话的 `openai_responses` 工具注入路径。
-- **关键差异**：自家 HTTP backend 走 `tool_exec` → backend.search → 返回；hosted 路径则在 tool 内部先**选项目级 hosted 候选模型**，再发一笔 sidecar Responses 请求，由该模型代搜，然后解析 `server_tool_use`/`web_search_tool_result` 块。**两条路径在 `tool_exec` 出口处汇合到统一 `WebSearchOutput`**——模型读不到差异。
-- **降级 / 致命错误**：
-  - **候选存在门**：项目里**不存在** hostedCandidateModel → `auto` 直接进入插件 `autoOrder`；显式 `openai` 时 `Err(AppError::Tool("no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry"))`。
-  - **候选有效性门**：hostedCandidateModel 存在，但其 provider / model 配置无法执行 hosted `web_search`（例如 key 缺失、模型声明与厂商能力不符、实现不支持）→ `auto` 记 `warnings += "hosted_candidate_unavailable, fallback=auto"` 后回插件 `autoOrder`；显式 `openai` 时 `Err(AppError::Tool("hosted web_search model <id> is misconfigured or unavailable"))`。
-  - **运行时不可用**：401/403、429/5xx、timeout、transport fail 按 §7 状态机处理：`auto` 回插件 `autoOrder`；显式 `openai` 不切别家，仅返回 degraded warning。
+早期方案由宿主从模型目录挑一个模型、经它的地址代发 OpenAI 搜索。该路径已删除，原因是搜索目标和凭据会随模型配置隐式变化，用户无法从设置页看出搜索词发给了谁。
 
-```text
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ 自家 HTTP 路径（PR-WS-S）                                          │
-  └──────────────────────────────────────────────────────────────────┘
-   tool_exec → web_search.search → tavily/brave/serper.search
-                                      │
-                                      ▼
-                                 reqwest call → normalize
-                                      │
-                                      ▼
-                            WebSearchOutput { hits, ... }
-
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ OpenAI hosted 路径（PR-WS-O）                                      │
-  └──────────────────────────────────────────────────────────────────┘
-  backend.discover_hosted_candidate  ┐
-       -> hostedCandidateModel.id    │
-                                     ▼
-              web_search.mod.execute_openai_hosted
-                   + resolve auth/base_url
-                                     │
-                                     ▼
-                openai_server.search_openai_hosted
-                 POST /v1/responses (sidecar)
-                                     │
-                                     ▼
-                   blocks: [server_tool_use, web_search_tool_result, ...]
-                                     │
-                                     ▼
-               openai_server.parse_server_tool_blocks
-                                     │
-                                     ▼
-                          WebSearchOutput { hits, ... }
-                                     │
-    tool_exec ◀─── 同一形状汇合 ─────┘
-```
-
-**说人话**：OpenAI 这条路不再绑在当前聊天模型上，而是先找项目里那台被声明为 `capabilities.web_search=true` 的 hosted 候选模型，再用它发一笔专用搜索请求；回来我们把结果捏成跟插件路径同形的输出。
+现行做法：OpenAI 是插件后端 [`openai.js`](../../../assets/plugins/web-search-backends/src/backends/openai.js)，固定用 `gpt-6.2-sol` 调官方 `POST https://api.openai.com/v1/responses`，Key 通过 `{{host_key}}` 由宿主按目的主机注入；和其他后端一样参与有序名单，见 §0。
 
 #### 2.4.4 PR-WS-W：域名守卫与 SSRF 拒接
 
@@ -401,9 +352,7 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 | **`query`** | 模型给的检索词字符串 | `WebSearchArgs.query: String` | 必填、长度 ≤512、不空白；与 `count/freshness/...` 一起组成 cache key | 想搜啥就写啥。 |
 | **`hits`** | 归一化的搜索结果列表 | `WebSearchOutput.hits: Vec<Hit>` | `Hit { title, url, snippet, position, published_at? }`；位置从 1 起 | 一组带标题 + 链接 + 摘要的小卡片。 |
 | **`snippet`** | 结果内的文字摘要 | `Hit.snippet: String` | 上游不一定给（Brave 偶尔无）→ 空串；不抓正文 | 搜索结果页那段灰色小字。 |
-| **`backend`** | 实际跑这次检索的 provider | `WebSearchOutput.backend: String`；可能是 `openai` / `tavily` / `brave` / `serper` / `mimo` 等具体标签 | `auto` **不**出现在 output（必落到 hosted / HTTP / plugin 的具体标签），仅出现在 input/config；插件后端可回填自己的 `backend` 标签 | 这条结果是哪家给的；审计里能看到。 |
-| **hostedCandidateModel** | 项目级 hosted 搜索候选模型 | 合并后的 model catalog 中首个 `capabilities.web_search == true` 的 model entry | `auto` 先看它是否存在；若有多个按合并顺序取首个；当前对话模型不参与资格判断 | 项目里只要配了可联网 hosted 模型，auto 就先用它。 |
-| **server-side 注入** | 把 `{type:"web_search",...}` 写进**项目级 hosted 候选模型**的专用 Responses 请求，由该模型代搜 | [`web_search/openai_server.rs`](../../../src/core/tools/web_search/openai_server.rs) | 仅当项目里存在 `hostedCandidateModel` 且 `backend ∈ {auto, openai}` 时启用；返回块由 `parse_server_tool_blocks` 解析 | 当前聊天模型是不是 Responses 不重要；hosted 搜索走的是一笔独立请求。 |
+| **`backend`** | 实际跑这次检索的 provider | `WebSearchOutput.backend: String`；可能是 `openai` / `tavily` / `brave` / `serper` / `mimo` 等具体标签 | output 里总是实际成功的具体后端标签；插件后端可回填自己的 `backend` 标签 | 这条结果是哪家给的；审计里能看到。 |
 | **`cache key`** | 缓存命中判定键 | `(backend, query, count, freshness, country, language, domain_filter, allowed_domains, blocked_domains)` 元组 hash | key 含 backend 与配置域约束 → 切换 backend 或调整 allow/block 不会误命中旧缓存；TTL 默认 5 min | 「同样的 backend + 同样的 query + 同样的过滤 / 域约束」才算同一次。 |
 | **SSRF（Server-Side Request Forgery）** | 模型让工具去连内网 / loopback 的攻击形态 | `web_search/types.rs::normalize_hits` 里的 host 黑名单 | **hits**：归一化阶段拒（loopback / 私网 / 单段 hostname）。**fetch**：`validate.rs` 增补 IP 段拒（cc-fork `validateURL` 客户端无此项，见 [`utils.ts:139-168`](../../../../cc-fork-01/src/tools/WebFetchTool/utils.ts)） | 别让搜来的 URL 指内网。 |
 | **`warnings`** | 一组「不致命但模型应当知道」的标签 | `WebSearchOutput.warnings: Vec<String>` | backend 切换 / 截断 / 限速 / SSRF 过滤 / domain 过滤 都进 | 「这次搜索发生了点小事，但还是给你结果」。 |
@@ -416,7 +365,7 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 
 ### 3.5.1 单一代理语义
 
-- **单一事实源**：所有宿主出网 client（LLM / `web_fetch` / `web_search` hosted / plugin `pi.fetch`）统一经 `build_outbound_client(...)` 构造。
+- **单一事实源**：所有宿主出网 client（LLM / `web_fetch` / plugin `pi.fetch`）统一经 `build_outbound_client(...)` 构造。
 - **优先级**：有 `llm.proxy`（或 `TOMCAT__LLM__PROXY`）时优先使用，并在运行时 `trim`；未配置时**不再强制 `.no_proxy()`**，交由环境 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 生效。
 - **`NO_PROXY`**：显式 `llm.proxy` 场景下仍继承环境 `NO_PROXY` / `no_proxy` 例外列表。
 - **SOCKS**：当前构建未启用 reqwest socks feature，`ALL_PROXY=socks5://...` 不作为 `web_search` 的官方支持路径；推荐 `HTTPS_PROXY=http://...`。
@@ -425,7 +374,7 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 ### 3.5.2 测试分层
 
 - **L1 单测 / JS 语义**：锁定 `BackendFailure` 分类、plugin fallback 顺序、聚合错误语义；不依赖网络。
-- **L2 Runtime 集成**：使用 `HttpsTestServer` + `ProxyTestServer` 验证 `WebSearchRuntime`、hosted `self.client`、plugin `pi.fetch` 的代理 / timeout / fallback 行为。
+- **L2 Runtime 集成**：使用 `HttpsTestServer` + `ProxyTestServer` 验证 `WebSearchRuntime`、plugin `pi.fetch` 的代理 / timeout / fallback 行为。
 - **L3 Chat E2E**：验证 `LLM -> tool call -> web_search -> tool result / tool error -> transcript`，确保上层看到的是工具级错误而不是 VM 硬中断。
 - **L4 生产路径回归**：必须命中 `ChatContext::build_plugin_runtime`，覆盖环境代理、`llm.proxy` 优先级、生产 `pi.fetch` client 超时预算。
 - **L5 真网 smoke**：只验证“当前机器 + 当前代理 + 当前供应商”今天还能通；可缺 key skip，**不能**替代前四层的确定性回归。
@@ -456,10 +405,7 @@ web_search ──→ 宿主预检 Key / 模型 ──→ 缓存未命中则按�
 | `language` | string | 否 | null | ISO 639-1，如 `en`/`zh`；映射 Brave `search_lang` / Serper `hl` / Tavily ignored | 限制语言。 |
 | `domain_filter` | string[] | 否 | `[]` | 白名单域名（含子域 suffix 匹配）；与 `[tools.web_search] blocked_domains` 互补；本字段空时仅 config 生效；本字段非空时**叠加**到 config 之上 | 「只搜这几个站」。 |
 
-`auto` 三态语义（`backend` 字段在 catalog **不暴露给模型**，仅 `[tools.web_search] backend` 配置可写）：
-
-- 缺省 / 显式 `auto`：动态 pick——若合并后的 model catalog 中存在 hostedCandidateModel（首个 `capabilities.web_search == true` 条目）→ 先走 server-side hosted 请求（PR-WS-O）；若项目里不存在该候选，或该候选运行时不可用 → Tavily（若无 key / 不可用 → Brave → Serper 顺序降级）。**当前对话模型的 `api` 是否 `openai-responses` 不参与判断**。
-- 显式 `tavily/brave/serper/openai`：强制对应 backend；**`openai` 但项目里不存在 hostedCandidateModel** → §9「致命错误」（禁止静默改走 HTTP，以免用户以为走了「官方联网」）。
+搜索目标**不暴露给模型**：由设置页保存的有序名单决定（单项即指定，多项按序回退），未保存时用 §0 的默认顺序。
 
 ### 4.2 出参（Rust：`WebSearchOutput`）
 
@@ -565,21 +511,20 @@ Hit {
 │  ├ tavily.rs         • POST /search → normalize                             │
 │  ├ brave.rs          • GET api.search.brave.com/res/v1/web/search → normalize │
 │  ├ serper.rs         • POST google.serper.dev/search → normalize             │
-│  ├ openai_server.rs  • build/request/parse hosted sidecar（PR-WS-O）         │
 │  └ cache.rs          • Moka LRU + TTL；CacheKey 元组                         │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │
-                ┌───────────────┴───────────────┐
-                ▼                               ▼
-┌──────────────────────────────────┐  ┌──────────────────────────────────────┐
-│ src/core/tools/web_search/       │  │  src/infra/config/types/tools.rs     │
-│ {mod,openai_server}.rs           │  │  • ToolsConfig 加 ToolsWebSearchConfig│
-│ • execute_openai_hosted          │  │    { backend, count, freshness,      │
-│ • search_openai_hosted: sidecar  │  │      country, language, domain_filter,│
-│ • parse_server_tool_blocks       │  │      blocked_domains, allowed_domains,│
-│   （不修改正常对话 openai wire）  │  │      cache_ttl_secs, cache_capacity, │
-└──────────────────────────────────┘  │      timeout_ms, *_base_url }        │
-                                      └──────────────────────────────────────┘
+                                │
+                                ▼
+                      ┌──────────────────────────────────────┐
+                      │  src/infra/config/types/tools.rs     │
+                      │  • ToolsConfig 加 ToolsWebSearchConfig│
+                      │    { backend, count, freshness,      │
+                      │      country, language, domain_filter,│
+                      │      blocked_domains, allowed_domains,│
+                      │      cache_ttl_secs, cache_capacity, │
+                      │      timeout_ms, *_base_url }        │
+                      └──────────────────────────────────────┘
 
   + tests:
     src/core/tools/web_search/tests/                  (per-adapter 单元)
@@ -587,7 +532,7 @@ Hit {
     E2E-WEB-SEARCH-001                                (真 Tavily, 配置 TAVILY_API_KEY 即跑)
 ```
 
-**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_search` 名字与 6 字段；调起后 **`tool_exec`** 把 args 解出来，转给 **`web_search/mod`** 的 `search`；`mod` 先查 cache、再让 `backend.rs::pick_backend` 选具体 provider；HTTP adapter 起 reqwest 拿原始 JSON、各自 normalize 进 `Hit`；`types.rs::normalize_hits` 跑一遍 SSRF + 域名过滤；最后 `tool_exec` 把 `WebSearchOutput` 序列化回 LLM。**OpenAI hosted 路径**则由 `openai_server.rs` 走一笔独立 sidecar 请求：挑项目级 hosted 候选模型、把 `type:web_search` 工具挂到该请求上，再把返回的 `web_search_call` / `web_search_tool_result` 归一化到同一份 `WebSearchOutput`。
+**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_search` 名字与 6 字段；调起后 **`tool_exec`** 把 args 解出来，转给 **`web_search/mod`** 的 `search`；`mod` 先查 cache、再让 `backend.rs::pick_backend` 选具体 provider；HTTP adapter 起 reqwest 拿原始 JSON、各自 normalize 进 `Hit`；`types.rs::normalize_hits` 跑一遍 SSRF + 域名过滤；最后 `tool_exec` 把 `WebSearchOutput` 序列化回 LLM。
 
 ---
 
@@ -617,72 +562,23 @@ LLM           tool_exec           web_search/mod        backend(adapter)        
  │◀───────────────│ JSON tool 消息       │                     │                   │            │
 ```
 
-### 6.2 OpenAI hosted 路径（项目级候选模型）
+### 6.2 OpenAI hosted 路径（历史，已移除）
 
-```text
-tool_exec/web_search.mod   backend.rs          web_search/mod         web_search/openai_server
-│                              │                        │                           │
-│ auto/openai                   │ discover hostedCandidate                     │
-│─────────────────────────────▶│───────────────────────▶│ resolve auth/base_url   │
-│                              │                        │ build sidecar request    │
-│                              │                        │──────────────────────────▶│ POST /v1/responses
-│                              │                        │                           │
-│                              │                        │                           ▼
-│                              │                        │                OpenAI Responses API
-│                              │                        │                           │
-│                              │                        │◀──────────────────────────│ parse + normalize
-│◀─────────────────────────────│ return WebSearchOutput（与自家 HTTP 路径同形）          │
-```
-
-**两条路径在 `tool_exec` 出口处汇合到同一 `WebSearchOutput`**——下游 LLM 看到的字段一致。
+见 §2.4.3。OpenAI 现在和其他插件后端走同一条有序名单路径。
 
 ---
 
 ## 7. 状态机（backend 选择）
 
-```text
-                   ┌──────────────────┐
-                   │   入参 backend?   │
-                   └────────┬──────────┘
-                            │
-            ┌───────────────┼─────────────────────┐
-            │               │                     │
-       缺省 / "auto"   "tavily/brave/serper"   "openai"
-            │               │                     │
-            ▼               ▼                     ▼
-  项目里有 hostedCandidate? 候选 backend 可用? 项目里有 hostedCandidate?
-            │               │                     │
-   ┌────────┴───────┐       │              ┌──────┴──────┐
-   │                │       │              │             │
-    yes             no      │              yes            no
-   │                │       │              │             │
-   ▼                ▼       ▼              ▼             ▼
- openai(hosted)  Tavily→Brave→Serper  具体 backend  openai(hosted)  Err 致命
-   │              (auto 链)             │               │          (无候选模型)
-   │                                    │               │
-   └─ hosted 不可用? ───────▶ HTTP 链     └─ 不可用? ───▶ degraded
-          (key/auth/429/5xx/
-           timeout/transport)
-
-> **hostedCandidateModel** = 合并后的 model catalog 中首个 `capabilities.web_search == true` 的条目；
-> 当前对话模型**不参与** `auto` 的 hosted 首选资格判断。
-> `auto` 下有候选就先试 `openai(hosted)`，没有候选再进插件 `autoOrder`；显式 `openai` 下没有候选则致命 Err。
-```
+以下为现行行为（[`web_search/mod.rs::search`](../../../src/core/tools/web_search/mod.rs)）：
 
 | 当前状态 | 事件 | 目标状态 | 副作用 | 说人话 |
 |----------|------|----------|--------|--------|
-| `auto` + 项目里存在 hostedCandidateModel | hosted 候选可用 | `openai` | 发起一笔 hosted sidecar 请求 | 只要项目里配了 hosted 候选，auto 就先用它。 |
-| `auto` + 项目里存在 hostedCandidateModel | hosted 路径缺 key、401/403、429/5xx、timeout 或 transport fail | `auto`（交给插件继续按 `tavily→brave→serper→mimo` 推进） | `warnings += "openai_unavailable, fallback=auto"` | hosted 不通就切回插件路径。 |
-| `auto` + 项目里不存在 hostedCandidateModel | Tavily key / 可用性 ok | `tavily` | 直接用 Tavily | 没有 hosted 候选就默认 HTTP backend。 |
-| `auto` + 当前候选 HTTP backend | 缺 key、401/403、429/5xx、timeout 或 transport fail | 下一个候选（若存在） | `warnings += "backend_unavailable:<current>, fallback=<next>"` | 一家不通就继续找下一家。 |
-| `auto` + 全链无任何已配置候选 | 无 hostedCandidateModel，且 Tavily / Brave / Serper / MiMo 均无 key | `disabled` | `Err(Tool("no web_search backend configured"))` | 一个能用的都没；告诉模型搜不了。 |
-| `auto` + 至少一个候选已尝试 | 所有候选都运行时不可用 | `degraded` | `truncated=true + warnings += "all_backends_unavailable"`；返回空 `hits[]` | 已经都试过了，只能告诉模型这轮没搜成。 |
-| 显式 `openai` | 项目里不存在 hostedCandidateModel | `incompatible` | `Err(Tool("no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry"))` | 你点名要 hosted，就得先在项目里配一个 hosted 候选模型。 |
-| 显式 `openai` | hostedCandidateModel 存在但配置错误 | `incompatible` | `Err(Tool("hosted web_search model <id> is misconfigured or unavailable"))` | 有候选但不能用，也不能假装切别家。 |
-| 显式 `openai` / `tavily` / `brave` / `serper` | 401/403、429/5xx、timeout 或 transport fail | `degraded` | `truncated=true + warnings += "backend_unavailable:<current>"`；不切别家 | 手动点名就不偷偷换别家，但也不把整轮直接打死。 |
-| 任何 backend | 400 / 422 等请求契约错误 | `failed` | `Err(...)` | 这是实现或参数 bug，不能用降级掩盖。 |
-
-**降级顺序**（`auto`）：`openai(hosted, project candidate if any) → plugin autoOrder(tavily → brave → serper → mimo) → disabled`；hosted 与插件内部 `autoOrder` 都只对**可用性 / 认证 / retryable** 问题降级，**不**对 400 / 422 这类契约错误降级。若全链**无候选**则报 `no web_search backend configured`；若全链**都尝试过但都暂不可用**，则返回空 `hits[]` + `truncated/warnings`。显式指定时**不降级**，只返回当前 provider 的归一化 warning/错误。
+| 名单中的当前后端 | 宿主预检缺 Key / 模型 | 下一项 | 不调用插件；记入失败原因 | 没配好的直接跳过。 |
+| 名单中的当前后端 | 正常响应（含空结果） | 结束 | 返回该后端结果，`warnings` 带上此前失败原因 | 第一个正常回来的就用它。 |
+| 名单中的当前后端（名单多于一项） | 任意失败（认证、限速、超时、网络、上游报错） | 下一项 | `warnings += "backend_unavailable:<id> (...)"` | 一家不通就试下一家。 |
+| 名单只有一项 | 任意失败 | `failed` | 直接返回该后端的工具错误 | 只选了一家就不偷偷换别家。 |
+| 名单全部失败 | — | `failed` | `Err(search.allUnavailableDetails)`，列出每家原因 | 都试过了，告诉模型这轮没搜成。 |
 
 ---
 
@@ -692,13 +588,13 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 | 来源 | 键 | 含义 | 备注 | 说人话 |
 |------|-----|------|------|--------|
-| `tomcat.config.toml` | `[tools.web_search] backend` | `auto` / `mimo` / `tavily` / `brave` / `serper` / `openai` | 默认 `auto`；`tavily/brave/serper/mimo` 都走官方插件 | 不写就先看 hosted，没有再交给插件内部顺序。 |
+| `tomcat.config.toml` | `[tools.web_search] backend` | `auto` / `mimo` / `tavily` / `brave` / `serper` / `openai` | 旧键：`auto` 视为未保存名单，具体名称映射为单项名单（见 §0） | 现在用设置页保存的顺序。 |
 | env | `TOMCAT__TOOLS__WEB_SEARCH__BACKEND` | 同上，运行时覆盖 | env > config | 容器里临时换 backend。 |
 | `tomcat.config.toml` | `[tools.web_search] tavily_base_url` / `brave_base_url` / `serper_base_url` | 各 backend 的 base URL override | 默认官方 endpoint；只改 host / base，不放 secret | 兼容自建网关或代理。 |
 | env | `TOMCAT__TOOLS__WEB_SEARCH__TAVILY_BASE_URL` 等 | 同上，运行时覆盖 | env > config | 容器里临时切网关。 |
 | runtime `.env` / process env | `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY` | 插件内 REST backend 的 key | 运行时从 `~/.tomcat/assets/.env` 或进程 env 读取；由 `pi.fetch` 按 manifest `requiredSecrets` 报备名注入 | 插件里三家 REST 搜索可以同时配好。 |
 | repo 根 `.env` | 同上 | 本地开发 / 真 API 测试用 | 由 `.env.example` 提供样板；测试会加载仓库根 `.env` | 开发时复制样板即可。 |
-| runtime `.env` / model env | hostedCandidateModel 对应的 `OPENAI_API_KEY`（或 `<PROVIDER>_API_KEY`） | OpenAI hosted 搜索凭证 | 复用 **hostedCandidateModel** 的 key source；**不**由 `[tools.web_search]` 单独配 | hosted 这条路跟项目级候选模型走，不跟当前聊天模型走。 |
+| 模型目录 / runtime `.env` | 地址为 `api.openai.com` 的模型所用 Key 名 | OpenAI 搜索凭证 | 由 `{{host_key}}` 按目的主机解析，见 §0；**不**由 `[tools.web_search]` 单独配 | 用你给官方 OpenAI 模型配的那把 Key。 |
 | `tomcat.config.toml` | `[tools.web_search] count` | 默认期望 hits 数 | 1..=20，默认 5 | 一次默认搜几条。 |
 | `tomcat.config.toml` | `[tools.web_search] freshness` / `country` / `language` | 缺省筛选 | 入参可覆盖 | 配置层定个默认；模型可改。 |
 | `tomcat.config.toml` | `[tools.web_search] domain_filter` | 默认白名单 | 入参可叠加 | 「这台机只搜这几个站」。 |
@@ -707,8 +603,6 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 | `tomcat.config.toml` | `[tools.web_search] timeout_ms` | 单次 backend 超时 | 默认 12_000 | 等多久还没回来就算超时。 |
 
 **用户在 `tool_exec` 入参里 `count/freshness/country/language/domain_filter` 都可逐次覆盖**——配置只决定缺省。
-
-> **server-side 资格不在 `[tools.web_search]` 里配**：`auto` 是否有 hosted 首选，取决于**合并后的 model catalog** 中是否存在 `capabilities.web_search == true` 的条目；若有多个，按顺序取首个作为 hostedCandidateModel。`capabilities.web_search` 是**新增能力位**（[`catalog.rs` Capabilities](../../../src/core/llm/catalog.rs)，默认 `false`），与现有 `vision/files/tools/reasoning` 并列；**登记前必须先查该厂商/该模型的官方文档**（见 §13），不得仅凭「endpoint 兼容 Responses wire」就置 `true`。`[tools.web_search] backend` 只能在「资格已具备」时把 `auto` 收窄/或强制走 HTTP，**不能**反向赋予一个不支持的模型 server-side 能力。**当前对话模型无论是不是 Responses，都不再影响 `auto` 是否尝试 hosted 首选。**
 
 > **能否「纯配置接入新 backend」**（回应选型期提问）：现在的默认答案更接近“**优先改插件，不优先改宿主**”。Tavily / Brave / Serper 这类已托管后端可以只靠 `[tools.web_search] *_base_url` + 对应 API key 覆盖网关；但如果要接入一套**全新异构搜索供应商**，优先是在 `web-search-backends/src/` + `plugin.json` 里新增后端与权限声明，再通过 `tomcat plugin build` 生成 `main.js`。只有当它需要新的宿主能力时，才需要再改 Rust。
 
@@ -753,7 +647,7 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 **`tool_exec` 视角**：
 
-- `Err(_)` → tool 消息文本为错误描述（「致命」类 4 路：参数非法 / 无可用 backend / hosted 候选缺失或配置错误 / 上游解析致命）。
+- `Err(_)` → tool 消息文本为错误描述（「致命」类：参数非法 / 无可用 backend / 上游解析致命）。
 - `Ok(WebSearchOutput)` → JSON 序列化为 tool 消息文本（含可能为空的 hits + warnings）。
 
 **§1 G1–G6 的「锁死它的测试」**全部位于 §10。
@@ -770,12 +664,10 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 | Tavily 解析 | `tavily_runtime_maps_request_and_normalizes_hits`、`runtime_explicit_tavily_works_from_public_api` | PASS（2026-06-04） | Tavily header/body 映射和公开 API 路径都已跑通。 |
 | Brave 解析 | `auto_backend_falls_back_to_brave_and_then_hits_cache`、`runtime_auto_routes_to_http_fallback_chain` | PASS（2026-06-04） | Brave 既覆盖 auto fallback，也覆盖集成层公共 runtime。 |
 | Serper 解析 | `runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | Serper 请求映射与结果归一化已通过 mock HTTP。 |
-| backend.auto（project hosted 候选） | `auto_backend_uses_project_hosted_candidate`、`incompatible_hosted_candidate_falls_back_to_plugin_slot` | PASS（更新后） | auto 先看项目里的 hosted 候选，候选不可用时再回插件 `autoOrder`。 |
-| hosted 候选选择 | `discover_hosted_candidate_uses_merged_catalog_order`、`merged_catalog_preserves_override_slot_and_web_search_capability`、`explicit_openai_requires_project_candidate` | PASS（2026-06-04） | 多个候选按合并后顺序取首个，没有候选时显式 `openai` 会报错。 |
 | 缓存 | `auto_backend_falls_back_to_brave_and_then_hits_cache`、`cache_key_tracks_allowed_and_blocked_domains` | PASS（2026-06-05） | 同 query 二次命中 cache，不再重复发起上游请求；配置域约束变化不会误复用旧缓存。 |
 | 超时 | `auto_backend_falls_back_after_brave_timeout` | PASS（2026-06-04） | 超时会记 warning，并在 `auto` 链里继续尝试下一个 backend。 |
 | 限速归一化 | `explicit_tavily_rate_limit_returns_degraded_output` | PASS（2026-06-04） | 显式 backend 遇到 429 会返回 degraded output，不会把整轮工具直接打崩。 |
-| OpenAI hosted | `build_hosted_request_body_includes_filters_and_location`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate` | PASS（2026-06-04） | 项目级 hosted 候选模型请求与 server-side block 归一化都已落地。 |
+| OpenAI（插件后端） | `openai_bundle_sends_official_request_and_keeps_citations_first`、`openai_bundle_keeps_partial_links_and_fails_only_empty_unfinished_output`、`host_key_uses_effective_https_address_and_rejects_shared_gateway_slots` | 现行 | 官方请求形状、部分结果、按目的主机找 Key 都有回归。 |
 | SSRF 守卫 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-05） | 任意 IP literal、内网保留 hostname、单段 host 会在 hits 归一化时被剔除。 |
 | 域名过滤 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-05） | `allowed_domains` / `blocked_domains` 已按 host / subdomain 规则过滤。 |
 | 集成（mock HTTP） | `runtime_explicit_tavily_works_from_public_api`、`runtime_auto_routes_to_http_fallback_chain`、`runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | mock Tavily / Brave(auto) / Serper 的 public runtime 集成路径都跑通了。 |
@@ -783,7 +675,7 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 | 配置解析 | `infra::config::tests::tools_cfg_test::tools_web_search_toml_override`、`infra::config::tests::validate_test::validate_config_rejects_invalid_web_search_backend` | PASS（2026-06-04） | `[tools.web_search]` 的默认值、覆写和非法 backend 校验都已覆盖。 |
 | E2E（live） | `live_tavily_search_smoke`（检测到 `TAVILY_API_KEY` 即执行） | PASS（2026-06-04） | 已在本机载入真实 Tavily key 后跑过一次 live smoke。 |
 
-§1 观察指标 **G1–G6** 与本表逐行对应：G1↔catalog/Tavily/Brave/Serper/集成；G2↔backend.auto/openai server-side；G3↔三家解析；G4↔缓存；G5↔SSRF/域名过滤；G6↔超时/限速/集成。
+§1 观察指标 **G1–G6** 与本表逐行对应：G1↔catalog/Tavily/Brave/Serper/集成；G2↔超时 fallback/OpenAI 插件后端；G3↔三家解析；G4↔缓存；G5↔SSRF/域名过滤；G6↔超时/限速/集成。
 
 ---
 
@@ -795,7 +687,7 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 | **SSRF（hits.url 指向 loopback / 私网）** | 模型若顺手喂给 fetch 工具会打内网 | 在 `web_search/types.rs::normalize_hits` 解析 url → 拒 `127.0.0.0/8` / `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` / `::1` / `fc00::/7` / 单段 hostname；参考 [cc-fork-01 `utils.ts:139-169`](../../../../cc-fork-01/src/tools/WebFetchTool/utils.ts) 的 `isPrivateIP`；命中 → 丢 hit + `warnings += "ssrf_filtered"` | 别让搜来的 URL 指内网。 |
 | **限速 / 账号配额耗尽** | 整轮 tool 失败、模型 retry 风暴 | 429 / 5xx → `truncated=true + warnings += "rate_limited (backend=<x>,status=<y>)"`，**不抛 `Err`**；hits 可能为空，模型自行决定下一步 | 限速了别整轮塌；告诉模型「这次没拿到」。 |
 | **上下文 cost 超限** | 一次 20 条 × 长 snippet 占满上下文 | `count` 默认 5、上限 20；**软上限** `max_result_size_chars=60_000`：每条 hit 的 snippet 超 4 KiB → 截断到 4 KiB + `warnings += "snippet_truncated"`；总字符超软上限 → 减少 hits 数 + warning（**永远先减条数再减 snippet 长度**） | 别一次搜搜出 8 万字。 |
-| **把 hosted 资格错误地绑到当前对话模型，或把 capability 误配到不支持 hosted 的模型** | 当前对话模型不是 Responses 时，即便项目里已配 hosted 候选也永远用不到 server-side；或 capability 误配后，hosted 请求会报错 / 静默失败 → 整轮 fail 或模型以为联网了其实没搜 | `auto` 先扫描项目级 hostedCandidateModel（首个 `capabilities.web_search == true`），**当前对话模型不参与 hosted 首选判断**；`capabilities.web_search` 只能在**查证厂商官方文档**后置 `true`；候选不存在或不可用时 `auto` 回插件 `autoOrder`，显式 `openai` 下报致命 Err。**已知事实**：OpenAI 官方 Responses 支持但**按模型分**（见 §13）；Azure / 多数第三方兼容栈未必实现该 hosted 工具 | auto 该看项目里有没有可联网 hosted 模型，不该看当前聊天用的是谁。 |
+| **模型 Key 被发到别的地址** | 网关或第三方地址共用的 Key 被带去 `api.openai.com`，或反过来 | `{{host_key}}` 只在请求头替换，只认 HTTPS 443 的实际目的主机；同一 Key 名还被其他地址使用时不复用；项目层插件不可用（见 §0） | 只用明确给官方地址配的 Key。 |
 
 ---
 
@@ -803,8 +695,8 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 - ~~合并 `web` 工具单 schema：参数二选一（`query` 或 `url`）~~ → **否**：schema 双口（必填字段不同）会让模型频繁参数错；权限粒度（fetch 按 domain）对不上；缓存键不同（query vs url）。**`web_search` 与 `web_fetch` 拆两个工具**（与 cc/hermes/openclaw 三家一致）。
 - ~~`web_search` 与 `web_fetch` 写在同一份 `web.md` 文档~~ → **否**：长文双口吻冲突（[ARCHITECTURE_SPEC §14 No-Stale](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）；与 read/write/edit/bash/search_files **一文件一工具**习惯不一致。**拆为两份独立满额文档**（本文 + [`web_fetch.md`](web_fetch.md)）；共享术语与风险在两篇各自完整书写；**各文仍须具备完整 §4.1 / §4.2**，**不**合并为单稿后省略。
-- ~~默认 backend 单一硬编码（如永远 Tavily）~~ → **否**：项目里只要已经配置了 `capabilities.web_search == true` 的 hosted 候选模型，`auto` 就应先用它；只有项目里**没有** hosted 候选时才直接走插件 `autoOrder`。**默认 `auto`** 跟着**项目里有没有 hosted 候选模型**走，不是跟着当前对话模型是谁走。
-- ~~只看当前对话模型的 wire / capability 判 server-side~~ → **否**（本次设计改写）：当前对话模型可能是 DeepSeek / Completions，但项目里已经额外配置了 hosted 搜索模型。**改项目级选择**：扫描合并后的 model catalog，取首个 `capabilities.web_search == true` 的条目作为 hostedCandidateModel；若不存在，再进插件 `autoOrder`。详见文首校准块第 8 条与 §11。
+- ~~默认 backend 单一硬编码（如永远 Tavily）~~ → **否**：改为设置页可见、可排序的有序名单，未保存时用固定默认顺序（见 §0）。
+- ~~按当前对话模型或模型目录的搜索能力标记选 hosted 搜索~~ → **否**：搜索目标会随模型配置隐式变化，用户看不出搜索词发给了谁。OpenAI 改为插件后端，参与同一有序名单。
 - ~~持久化 search 缓存（落盘）~~ → **否**：检索结果有时效性，跨进程命中反而坑；进程内 LRU + TTL 即可。
 - ~~server-side 默认 + 由 server 代取 fetch~~ → **否**：cc-fork-01 的 server-side 抓取（Anthropic native）只能在 Anthropic 系生效；fetch 单独走自家 reqwest（[`web_fetch.md`](web_fetch.md)），统一行为。
 - ~~hits 不归一化、各 backend 透传~~ → **否**：模型读三套 JSON 形状会频繁出错；归一化是单一事实源（`web_search/types.rs::Hit`）。
@@ -819,11 +711,9 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 ## 13. 关联文档
 
 - **HTTP 字段实现对照**：本文 **[§2.4.2.1](#2421-http-上游字段速查实现必读)**；Tavily 参考实现 [openclaw `tavily-client.ts`](../../../../openclaw/extensions/tavily/src/tavily-client.ts)、[hermes `web_tools.py`](../../../../hermes-agent/tools/web_tools.py)（`_tavily_request`）；openclaw 工具侧 schema [`web-search.ts`](../../../../openclaw/src/agents/tools/web-search.ts)；Tavily 插件参数表 [openclaw `docs/tools/tavily.md`](../../../../openclaw/docs/tools/tavily.md)。
-- **hosted `web_search` 厂商能力事实源**（登记 `capabilities.web_search` 前**必读**，§2.4.3 / §11 双门闩依据）：
-  - OpenAI Responses API · Web search tool：<https://platform.openai.com/docs/guides/tools-web-search>（支持**按模型**而定；返回含 `web_search_call` + 带 `url_citation` annotations 的 message）。
+- **OpenAI 插件后端的官方接口**：
+  - OpenAI Responses API · Web search tool：<https://platform.openai.com/docs/guides/tools-web-search>（返回含 `web_search_call` + 带 `url_citation` annotations 的 message）。
   - OpenAI Responses API 参考（`tools[].type = "web_search"` 字段形状）：<https://platform.openai.com/docs/api-reference/responses/create>。
-  - Azure OpenAI Responses API：<https://learn.microsoft.com/azure/ai-foundry/openai/how-to/responses>（hosted web search 可用性受限、`external_web_access` 等约束随区域/模型变化——**默认按不支持登记**，逐模型查证）。
-  - 自托管 / 第三方「OpenAI 兼容」栈（vLLM / Ollama / Together 等）：通常**仅**实现 Chat/Responses 文本 wire，**不**实现 hosted `web_search` 工具 → `capabilities.web_search` 保持 `false`，走自家 HTTP backend。
 - 兄弟工具：[`web_fetch.md`](web_fetch.md) · [`read.md`](read.md) · [`bash.md`](bash.md) · [`search_files.md`](search_files.md) · [`write.md`](write.md) · [`edit.md`](edit.md)
 - 权限总览：[`../permission-system.md`](../permission-system.md)
 - 看板叙事：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)、[`T2-P1-012.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-012.md)
@@ -834,4 +724,4 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 ---
 
-**一句话总结**：`web_search` 在 **`tool_exec`** 解参数与序列化、在 **`web_search/mod`** 查缓存与挑 backend、在 4 个 adapter 里跑 reqwest 或注入 OpenAI server-side、在 **`types::normalize_hits`** 做 SSRF + 域名过滤；协议以 **`catalog.rs` + `web_search/types.rs`** 为单一事实源，配置走 `[tools.web_search]` 子表，限速 / 超时归 `warnings`，**`auto`** 跟着**项目级 hosted 候选 + HTTP 降级链**走，跟兄弟工具 [`web_fetch.md`](web_fetch.md) 拆开各自负责一件事。
+**一句话总结**：`web_search` 在 **`tool_exec`** 解参数与序列化、在 **`web_search/mod`** 查缓存与挑 backend、由官方插件里的后端执行请求、在 **`types::normalize_hits`** 做 SSRF + 域名过滤；协议以 **`catalog.rs` + `web_search/types.rs`** 为单一事实源，搜索目标按设置页保存的有序名单走，跟兄弟工具 [`web_fetch.md`](web_fetch.md) 拆开各自负责一件事。

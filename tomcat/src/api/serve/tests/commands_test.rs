@@ -5371,7 +5371,6 @@ async fn serve_prompt_failed_turn_retry_does_not_replay_superseded_user_tail() {
                 files: false,
                 tools: true,
                 reasoning: true,
-                web_search: false,
             },
             crate::test_support::TestModelOverride::gpt54_openai_responses(TEST_API_KEY_ENV)
                 .with_base_url("http://127.0.0.1:1"),
@@ -7845,7 +7844,6 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
                     files: true,
                     tools: true,
                     reasoning: true,
-                    web_search: false,
                 },
                 context_window: Some(400_000),
                 context_window_options: None,

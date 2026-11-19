@@ -616,7 +616,6 @@ impl LlmResolver for FixedResolver {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         };
         Ok(call)
     }

@@ -83,7 +83,6 @@ fn blocked_commands() -> Vec<Commands> {
                 files: false,
                 tools: false,
                 reasoning: false,
-                web_search: false,
                 context_window: None,
                 context_window_options: Vec::new(),
                 max_output_tokens: None,

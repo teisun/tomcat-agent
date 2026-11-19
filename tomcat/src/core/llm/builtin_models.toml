@@ -20,7 +20,7 @@ supported_speeds = ["fast"]
 context_window = 400000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-10-14): https://developers.openai.com/api/docs/models/gpt-6-astra
@@ -38,7 +38,7 @@ supported_speeds = ["fast"]
 context_window = 400000
 context_window_options = [400000, 1050000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-10-14): https://developers.openai.com/api/docs/models/gpt-6.1-sol
@@ -54,7 +54,7 @@ supported_speeds = ["fast"]
 context_window = 400000
 context_window_options = [400000, 1050000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-10-14): https://api-docs.deepseek.com/quick_start/pricing
@@ -71,7 +71,7 @@ supported_reasoning_levels = ["low", "high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 384000
-capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
 [[models]]
 # Sources (checked 2026-10-14): https://api-docs.deepseek.com/quick_start/pricing
@@ -88,7 +88,7 @@ supported_reasoning_levels = ["low", "high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 384000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = false, tools = true, reasoning = true }
 
 [[models]]
 # Sources (checked 2026-10-14): https://mimo.mi.com/docs/en-US/quick-start/summary/model
@@ -107,7 +107,7 @@ supported_reasoning_levels = ["high"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = false, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
@@ -125,7 +125,7 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/start-using-kimi-api
@@ -143,7 +143,7 @@ thinking_format = "doubao"
 # K2.7 Code supports thinking mode but does not document tunable effort tiers.
 supported_reasoning_levels = ["high"]
 context_window = 256000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://platform.moonshot.cn/docs/guide/faq
@@ -158,7 +158,7 @@ supported_reasoning_levels = ["low", "high", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 131072
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
@@ -173,7 +173,7 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
@@ -188,7 +188,7 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Source (checked 2026-08-07): https://docs.anthropic.com/en/docs/build-with-claude/context-windows
@@ -203,7 +203,7 @@ supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
 [[models]]
 # Sources (checked 2026-10-14): https://platform.claude.com/docs/en/models/opus-5-5/overview
@@ -221,4 +221,4 @@ supported_speeds = ["fast"]
 context_window = 1000000
 context_window_options = [400000, 1000000]
 max_output_tokens = 128000
-capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true }

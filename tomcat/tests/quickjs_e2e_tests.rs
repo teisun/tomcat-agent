@@ -523,7 +523,6 @@ impl LlmResolver for QuickJsFixedResolver {
             files: false,
             tools: true,
             reasoning: true,
-            web_search: false,
         };
         Ok(call)
     }

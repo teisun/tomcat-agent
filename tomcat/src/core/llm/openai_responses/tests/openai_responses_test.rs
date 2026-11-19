@@ -56,7 +56,6 @@ fn responses_entry() -> ModelEntry {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         },
         context_window: None,
         context_window_options: Vec::new(),

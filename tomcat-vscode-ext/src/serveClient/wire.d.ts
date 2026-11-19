@@ -16,7 +16,6 @@ export interface Capabilities {
   reasoning?: boolean;
   tools?: boolean;
   vision?: boolean;
-  web_search?: boolean;
 }
 export interface ConnectorContext {
   workspaceRoot?: null | string;

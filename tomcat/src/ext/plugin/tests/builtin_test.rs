@@ -94,8 +94,11 @@ fn declarations_match_network_grants_and_catalog() {
             let host = row.host.as_ref().expect("declared REST host");
             assert!(manifest.required_secrets.contains(secret));
             assert!(manifest.allowed_hosts.contains(host));
+        } else if let Some(model) = &row.model {
+            assert!(models.lookup(model).is_some());
         } else {
-            assert!(models.lookup(row.model.as_deref().unwrap()).is_some());
+            assert!(manifest.allowed_hosts.contains(row.host.as_ref().unwrap()));
+            assert_eq!(row.key_status(&models, true).unwrap().0, "OPENAI_API_KEY");
         }
     }
 }

@@ -1,41 +1,12 @@
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
 
-use crate::core::llm::{env_name_for_provider, ModelCatalog};
+use crate::core::llm::env_name_for_provider;
 use crate::infra::AppError;
 
 use super::types::{RawHit, WebSearchRequest};
 
 #[derive(Debug, Clone)]
-pub struct HostedCandidateModel {
-    /// Tomcat catalog identifier, for diagnostics only.
-    pub id: String,
-    /// Provider-facing model name. This is what must be sent in an OpenAI request.
-    pub model_name: String,
-    pub api: String,
-    pub provider: String,
-    pub base_url: Option<String>,
-    pub key_env: String,
-}
-
-pub fn discover_hosted_candidate(catalog: &ModelCatalog) -> Option<HostedCandidateModel> {
-    catalog
-        .entries_in_merge_order()
-        .into_iter()
-        .find(|entry| entry.capabilities.web_search)
-        .map(|entry| HostedCandidateModel {
-            model_name: entry.request_model_name().to_string(),
-            key_env: crate::core::llm::admin::inferred_api_key_env(&entry),
-            id: entry.id,
-            api: entry.api,
-            provider: entry.provider,
-            base_url: entry.base_url,
-        })
-}
-
-#[derive(Debug, Clone)]
 pub struct BackendSearchResponse {
-    pub backend_label: Option<String>,
     pub raw_hits: Vec<RawHit>,
     pub warnings: Vec<String>,
 }
@@ -112,51 +83,4 @@ impl BackendFailure {
             )),
         }
     }
-}
-
-pub(crate) fn map_reqwest_error(err: reqwest::Error) -> BackendFailure {
-    if err.is_timeout() {
-        BackendFailure::Timeout
-    } else {
-        BackendFailure::Transport {
-            detail: err.to_string(),
-        }
-    }
-}
-
-pub(crate) fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BackendFailure {
-    match status.as_u16() {
-        401 | 403 => BackendFailure::Unauthorized {
-            status: status.as_u16(),
-        },
-        429 => BackendFailure::RateLimited {
-            status: status.as_u16(),
-        },
-        400 | 404 | 422 => BackendFailure::InvalidRequest {
-            status: status.as_u16(),
-            detail: body.trim().to_string(),
-        },
-        code if status.is_server_error() => BackendFailure::ServerError { status: code },
-        code if status.is_client_error() => BackendFailure::InvalidRequest {
-            status: code,
-            detail: body.trim().to_string(),
-        },
-        code => BackendFailure::Transport {
-            detail: format!("unexpected http status {code}"),
-        },
-    }
-}
-
-pub(crate) async fn send_json<T: DeserializeOwned>(
-    request: reqwest::RequestBuilder,
-) -> Result<T, BackendFailure> {
-    let response = request.send().await.map_err(map_reqwest_error)?;
-    let status = response.status();
-    let body = response.text().await.map_err(map_reqwest_error)?;
-    if !status.is_success() {
-        return Err(classify_http_status(status, &body));
-    }
-    serde_json::from_str(&body).map_err(|err| BackendFailure::Parse {
-        detail: err.to_string(),
-    })
 }

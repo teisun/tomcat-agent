@@ -174,7 +174,6 @@ fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
             files: true,
             tools: true,
             reasoning: false,
-            web_search: false,
         },
         context_window: None,
         context_window_options: Vec::new(),
@@ -199,7 +198,6 @@ fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         },
         context_window: Some(1_000_000),
         context_window_options: Vec::new(),
@@ -434,7 +432,6 @@ fn normalize_for_completions_keeps_parts_when_supported_image_still_present() {
             files: false,
             tools: true,
             reasoning: false,
-            web_search: false,
         },
     );
     let normalized = normalized.as_ref();
@@ -666,7 +663,6 @@ fn transport_messages_renders_multimodal_user_content_for_standard_openai() {
                 files: true,
                 tools: true,
                 reasoning: false,
-                web_search: false,
             },
         )
         .as_ref(),

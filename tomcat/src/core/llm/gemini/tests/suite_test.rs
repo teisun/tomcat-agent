@@ -22,7 +22,6 @@ fn gemini_entry(base_url: Option<&str>) -> ModelEntry {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         },
         context_window: Some(1_048_576),
         context_window_options: vec![],

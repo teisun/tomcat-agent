@@ -88,6 +88,10 @@ HostApiDispatcher
 | `invoke_host_func_with()` | Rust 侧 hostcall 桥接入口，负责序列化 / 反序列化 | 不承载业务策略 | 它负责把请求送到真正的 dispatcher。 |
 | `HostApiDispatcher` | 把请求分发到 4 原语、LLM、事件、会话等宿主能力 | 不暴露 VM 内部状态给外部直接修改 | 它才是安检口后面的办事大厅。 |
 
+## `tomcat.fetch`：凭据只在请求头展开
+
+`net:fetch` 需要在清单中声明 `allowedHosts`。已有 `{{secret:NAME}}` 使用 `requiredSecrets` 中的命名槽；`{{host_key}}` 则按实际 HTTPS 目的主机（端口 443）在当前模型目录中找 Key，排除与其他地址共用的槽。有多个安全槽时按合并顺序用首个有值的；不会遍历账号重试。只有当前的 Agent 层或托管层插件实例可用 `{{host_key}}`。共享 Serve 只读已保存值，CLI 可以回退到显式环境变量。占位符不允许出现在 URL 或 query，请求体中的占位符不展开；不跟随重定向，明文 Key 不返回给插件。
+
 ## host -> guest：事件如何推回 JS
 
 宿主要触发插件事件时，不是让 JS 主动 poll 一条“有没有事件”，而是：

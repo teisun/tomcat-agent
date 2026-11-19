@@ -78,10 +78,16 @@ async function fetchJsonBackend(backend, req, options) {
       );
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(
-        (options.statusMessages && options.statusMessages[response.status]) ||
-        "web_search backend `" + backend + "` returned HTTP status " + response.status
-      );
+      var detail;
+      try {
+        var payload = JSON.parse(response.body);
+        if (payload && payload.error && typeof payload.error.message === "string") {
+          detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
+        }
+      } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
+      var message = (options.statusMessages && options.statusMessages[response.status]) ||
+        "web_search backend `" + backend + "` returned HTTP status " + response.status;
+      throw new Error(detail ? message + ": " + detail : message);
     }
     return {
       backend: backend,

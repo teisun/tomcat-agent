@@ -97,7 +97,6 @@ function parseCapabilities(value: unknown): SettingsModelCapabilities {
       reasoning: false,
       tools: false,
       vision: false,
-      webSearch: false,
     };
   }
   return {
@@ -105,7 +104,6 @@ function parseCapabilities(value: unknown): SettingsModelCapabilities {
     reasoning: value.reasoning === true,
     tools: value.tools === true,
     vision: value.vision === true,
-    webSearch: value.webSearch === true || value.web_search === true,
   };
 }
 
@@ -217,7 +215,6 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
       reasoning: model.capabilities.reasoning,
       tools: model.capabilities.tools,
       vision: model.capabilities.vision,
-      web_search: model.capabilities.webSearch,
     },
     contextWindow: model.contextWindow ?? null,
     contextWindowOptions: model.contextWindowOptions ?? null,

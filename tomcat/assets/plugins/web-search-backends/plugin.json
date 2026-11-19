@@ -18,7 +18,8 @@
     "api.tavily.com",
     "api.search.brave.com",
     "google.serper.dev",
-    "api.deepseek.com"
+    "api.deepseek.com",
+    "api.openai.com"
   ],
   "requiredApiVersion": "1.0",
   "tags": [
@@ -32,11 +33,12 @@
       "function": "webSearchBackend",
       "metadata": {
         "backends": [
+          { "id": "deepseek", "label": "DeepSeek", "secret": "DEEPSEEK_API_KEY", "host": "api.deepseek.com", "defaultAuto": true },
           { "id": "tavily", "label": "Tavily", "secret": "TAVILY_API_KEY", "host": "api.tavily.com", "defaultAuto": true },
           { "id": "brave", "label": "Brave", "secret": "BRAVE_API_KEY", "host": "api.search.brave.com", "defaultAuto": true },
           { "id": "serper", "label": "Serper", "secret": "SERPER_API_KEY", "host": "google.serper.dev", "defaultAuto": true },
           { "id": "mimo", "label": "MiMo", "model": "mimo/mimo-v2.6-pro", "defaultAuto": true },
-          { "id": "deepseek", "label": "DeepSeek", "secret": "DEEPSEEK_API_KEY", "host": "api.deepseek.com", "defaultAuto": true }
+          { "id": "openai", "label": "OpenAI", "host": "api.openai.com", "defaultAuto": true }
         ]
       }
     }

@@ -70,7 +70,6 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
             files,
             tools,
             reasoning,
-            web_search,
             context_window,
             context_window_options,
             max_output_tokens,
@@ -91,7 +90,6 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                         files,
                         tools,
                         reasoning,
-                        web_search,
                     },
                     context_window,
                     context_window_options: (!context_window_options.is_empty())

@@ -5,10 +5,9 @@ use serde::Serialize;
 
 use crate::api::chat::collect_host_functions_from_catalog;
 use crate::core::llm::admin::inferred_api_key_env;
-use crate::core::llm::auth::{key_source_for_env, process_env_value, KeySource};
-use crate::core::tools::web_search::backend::discover_hosted_candidate;
+use crate::core::llm::auth::KeySource;
 use crate::core::tools::web_search::declarations::{
-    effective_order, parse_declarations, BackendDeclaration, OPENAI, SEARCH_POINT,
+    effective_order, parse_declarations, BackendDeclaration, SEARCH_POINT,
 };
 use crate::ext::plugin::PluginCatalog;
 use crate::infra::config::{validate_search_backend_order, with_config_lock};
@@ -63,56 +62,36 @@ pub(super) fn read(
 ) -> Result<WebSearchSettingsPayload, AppError> {
     let (declarations, saved_keys) = declarations(state, workspace)?;
     let catalog = state.shared_model_catalog.snapshot();
-    let hosted = discover_hosted_candidate(&catalog).filter(|m| m.api == "openai-responses");
     let models = catalog.entries_in_merge_order();
-    let to_view =
-        |id, label, host, model: Option<String>, key_env: Option<String>, can_save_key| {
-            let (key_source, shared_model_ids) = key_env
-                .as_deref()
-                .map(|slot| {
-                    let source = if can_save_key || model.is_some() {
-                        key_source_for_env(slot)
-                    } else {
-                        process_env_value(slot).map(|_| KeySource::Environment)
-                    };
-                    let ids = models
-                        .iter()
-                        .filter(|entry| inferred_api_key_env(entry) == slot)
-                        .map(|entry| entry.id.clone())
-                        .collect();
-                    (source, ids)
-                })
+    let backends = declarations
+        .iter()
+        .map(|entry| {
+            let (key_env, key_source) = entry
+                .key_status(&catalog, saved_keys)
+                .map(|(slot, source)| (Some(slot), source))
                 .unwrap_or_default();
+            let shared_model_ids = models
+                .iter()
+                .filter(|model| {
+                    key_env
+                        .as_ref()
+                        .is_some_and(|slot| &inferred_api_key_env(model) == slot)
+                })
+                .map(|model| model.id.clone())
+                .collect();
             SearchBackendView {
-                id,
-                label,
-                host,
-                model,
+                id: entry.id.clone(),
+                label: entry.label.clone(),
+                host: entry.host.clone(),
+                model: entry.model.clone(),
                 key_env,
                 key_source,
                 shared_model_ids,
-                can_save_key,
+                can_save_key: saved_keys,
             }
-        };
+        })
+        .collect();
     let order = state.search_order.read();
-    let mut backends = vec![to_view(
-        OPENAI.into(),
-        "OpenAI".into(),
-        None,
-        hosted.as_ref().map(|m| m.id.clone()),
-        hosted.map(|m| m.key_env),
-        true,
-    )];
-    for entry in &declarations {
-        backends.push(to_view(
-            entry.id.clone(),
-            entry.label.clone(),
-            entry.host.clone(),
-            entry.model.clone(),
-            entry.key_slot(&catalog),
-            saved_keys,
-        ));
-    }
     Ok(WebSearchSettingsPayload {
         backends,
         order: effective_order(order.as_deref(), &declarations),
@@ -129,7 +108,7 @@ pub(super) fn save_order(
     let (declarations, _) = declarations(state, workspace)?;
     if let Some(id) = backends
         .iter()
-        .find(|id| id.as_str() != OPENAI && !declarations.iter().any(|entry| &entry.id == *id))
+        .find(|id| !declarations.iter().any(|entry| &entry.id == *id))
     {
         return Err(AppError::Config(format!(
             "Unknown web search backend: {id}"

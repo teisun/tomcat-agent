@@ -1985,10 +1985,6 @@
           "vision": {
             "default": false,
             "type": "boolean"
-          },
-          "web_search": {
-            "default": false,
-            "type": "boolean"
           }
         }
       },
@@ -2137,8 +2133,7 @@
               "vision": false,
               "files": false,
               "tools": true,
-              "reasoning": false,
-              "web_search": false
+              "reasoning": false
             },
             "allOf": [
               {
@@ -6979,10 +6974,6 @@
           "vision": {
             "default": false,
             "type": "boolean"
-          },
-          "web_search": {
-            "default": false,
-            "type": "boolean"
           }
         }
       },
@@ -7104,10 +7095,6 @@
             "type": "boolean"
           },
           "vision": {
-            "default": false,
-            "type": "boolean"
-          },
-          "web_search": {
             "default": false,
             "type": "boolean"
           }
@@ -7305,10 +7292,6 @@
             "type": "boolean"
           },
           "vision": {
-            "default": false,
-            "type": "boolean"
-          },
-          "web_search": {
             "default": false,
             "type": "boolean"
           }
@@ -7509,10 +7492,6 @@
             "type": "boolean"
           },
           "vision": {
-            "default": false,
-            "type": "boolean"
-          },
-          "web_search": {
             "default": false,
             "type": "boolean"
           }

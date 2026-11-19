@@ -149,7 +149,7 @@ const BUILTIN_MODELS = [
   {
     api: "openai",
     apiKeyEnv: "OPENAI_API_KEY",
-    capabilities: { files: false, reasoning: false, tools: true, vision: false, webSearch: false },
+    capabilities: { files: false, reasoning: false, tools: true, vision: false },
     id: "fake-model",
     keyPresent: true,
     modelName: "fake-model",
@@ -161,7 +161,7 @@ const BUILTIN_MODELS = [
   {
     api: "openai",
     apiKeyEnv: "OPENAI_API_KEY",
-    capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+    capabilities: { files: false, reasoning: true, tools: true, vision: false },
     id: "gpt-5.4",
     keyPresent: true,
     modelName: "gpt-5.4",
@@ -173,7 +173,7 @@ const BUILTIN_MODELS = [
   {
     api: "anthropic-messages",
     apiKeyEnv: "ANTHROPIC_API_KEY",
-    capabilities: { files: false, reasoning: true, tools: true, vision: true, webSearch: false },
+    capabilities: { files: false, reasoning: true, tools: true, vision: true },
     id: "claude-4.6-sonnet",
     keyPresent: true,
     modelName: "claude-4.6-sonnet",
@@ -486,8 +486,6 @@ function normalizeModelEntry(entry, source) {
       reasoning: entry?.capabilities?.reasoning === true,
       tools: entry?.capabilities?.tools === true,
       vision: entry?.capabilities?.vision === true,
-      webSearch:
-        entry?.capabilities?.webSearch === true || entry?.capabilities?.web_search === true,
     },
     contextWindow,
     contextWindowOptions,

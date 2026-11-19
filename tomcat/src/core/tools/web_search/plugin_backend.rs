@@ -111,8 +111,6 @@ fn is_retryable_timeout_warning(warning: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 struct PluginSearchResponse {
     #[serde(default)]
-    backend: Option<String>,
-    #[serde(default)]
     hits: Vec<PluginSearchHit>,
     #[serde(default)]
     warnings: Vec<String>,
@@ -173,7 +171,6 @@ impl WebSearchBackend for PluginWebSearchBackend {
             return Err(self.unsupported_backend_failure(&parsed.warnings));
         }
         Ok(BackendSearchResponse {
-            backend_label: parsed.backend,
             raw_hits: parsed
                 .hits
                 .into_iter()

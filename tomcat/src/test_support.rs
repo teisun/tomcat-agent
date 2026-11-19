@@ -157,7 +157,6 @@ pub(crate) struct TestModelOverride<'a> {
     pub files: bool,
     pub tools: bool,
     pub reasoning: bool,
-    pub web_search: bool,
 }
 
 impl<'a> TestModelOverride<'a> {
@@ -174,7 +173,6 @@ impl<'a> TestModelOverride<'a> {
             files: true,
             tools: true,
             reasoning: true,
-            web_search: false,
         }
     }
 
@@ -218,8 +216,8 @@ pub(crate) fn write_models_override(work_dir: &Path, entries: &[TestModelOverrid
             text.push_str(&format!("thinking_format = {:?}\n", thinking_format));
         }
         text.push_str(&format!(
-            "capabilities = {{ vision = {}, files = {}, tools = {}, reasoning = {}, web_search = {} }}\n\n",
-            entry.vision, entry.files, entry.tools, entry.reasoning, entry.web_search
+            "capabilities = {{ vision = {}, files = {}, tools = {}, reasoning = {} }}\n\n",
+            entry.vision, entry.files, entry.tools, entry.reasoning
         ));
     }
     std::fs::write(path, text).expect("write test models.toml override");

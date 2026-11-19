@@ -453,9 +453,6 @@ pub enum ModelSub {
         /// 是否支持 reasoning
         #[arg(long, default_value_t = false)]
         reasoning: bool,
-        /// 是否支持 web search
-        #[arg(long, default_value_t = false)]
-        web_search: bool,
         /// context window
         #[arg(long)]
         context_window: Option<u32>,

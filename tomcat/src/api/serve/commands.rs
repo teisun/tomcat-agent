@@ -3000,7 +3000,6 @@ fn refresh_model_runtime(state: &ServeState, config: &AppConfig) -> Result<(), A
     state.shared_model_catalog.reload(config)?;
     for summary in state.registry.list() {
         if let Some(slot) = state.registry.get(&summary.session_id) {
-            slot.ctx.global_services.model_catalog.reload(config)?;
             slot.ctx
                 .global_services
                 .llm_resolver

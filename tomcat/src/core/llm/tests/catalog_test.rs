@@ -466,7 +466,7 @@ fn missing_model_requires_explicit_catalog_entry() {
 }
 
 #[test]
-fn merged_catalog_preserves_override_slot_and_web_search_capability() {
+fn merged_catalog_preserves_override_slot_and_ignores_legacy_web_search_capability() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
@@ -504,20 +504,61 @@ web_search = true
         builtin_override_index < custom_index,
         "builtin override should remain ahead of appended custom entries"
     );
+    let serialized = serde_json::to_value(&ordered[builtin_override_index].capabilities).unwrap();
+    assert!(serialized.get("web_search").is_none());
+}
+
+#[test]
+fn host_key_uses_effective_https_address_and_rejects_shared_gateway_slots() {
+    use crate::core::llm::admin::resolve_host_key;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gateway"
+api = "openai-responses"
+provider = "openai"
+base_url = "https://gateway.example"
+api_key_env = " OPENAI_API_KEY "
+[[models]]
+id = "provider-default"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "PROVIDER_DEFAULT_KEY"
+[[models]]
+id = "port"
+api = "openai-responses"
+provider = "openai"
+base_url = "https://api.openai.com:444/v1"
+api_key_env = "OTHER_PORT_KEY"
+[[models]]
+id = "official"
+api = "openai-responses"
+provider = "openai"
+base_url = "https://API.OPENAI.COM:443/v1"
+api_key_env = "EXPLICIT_KEY"
+"#,
+    )
+    .unwrap();
+    let catalog = ModelCatalog::load_from_path(&AppConfig::default(), path).unwrap();
+    let host = "api.openai.com";
+    // Builtin OPENAI_API_KEY is shared with the gateway; port 444 is another destination.
     assert_eq!(
-        ordered
-            .iter()
-            .find(|entry| entry.id == "custom-hosted")
-            .map(|entry| entry.capabilities.web_search),
-        Some(true)
+        resolve_host_key(&catalog, host, |_| None::<()>),
+        Some(("PROVIDER_DEFAULT_KEY".into(), None))
     );
-    assert!(
-        catalog
-            .lookup("gpt-5.6")
-            .expect("builtin override")
-            .capabilities
-            .web_search
+    assert_eq!(
+        resolve_host_key(&catalog, host, |slot| (slot == "EXPLICIT_KEY")
+            .then_some(())),
+        Some(("EXPLICIT_KEY".into(), Some(())))
     );
+    assert_eq!(
+        resolve_host_key(&catalog, host, |_| Some(())),
+        Some(("PROVIDER_DEFAULT_KEY".into(), Some(())))
+    );
+    assert!(resolve_host_key(&catalog, "other.example", |_| Some(())).is_none());
 }
 
 #[test]

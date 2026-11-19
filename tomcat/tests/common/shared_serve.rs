@@ -1,5 +1,8 @@
 //! Disposable shared-service fixture, used by native IPC and ACP process tests.
-use super::serve::{isolated_serve_command, setup_serve_fixture_with_home, ServeFixture};
+use super::serve::{
+    isolated_serve_command, setup_cold_serve_fixture_with_home, setup_serve_fixture_with_home,
+    ServeFixture,
+};
 use serde_json::{json, Value};
 use std::process::{Command, Output};
 use std::{path::Path, time::Duration};
@@ -7,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 pub struct ServiceFixture(pub ServeFixture);
 impl ServiceFixture {
-    pub fn new(base_url: &str) -> Self {
+    fn disposable_home() -> tempfile::TempDir {
         // macOS's default temp path can exceed sockaddr_un's limit.
         #[cfg(unix)]
         let home = tempfile::Builder::new()
@@ -16,7 +19,21 @@ impl ServiceFixture {
             .unwrap();
         #[cfg(windows)]
         let home = tempfile::tempdir().unwrap();
-        let fixture = Self(setup_serve_fixture_with_home(base_url, home));
+        home
+    }
+
+    pub fn cold() -> Self {
+        Self(setup_cold_serve_fixture_with_home(
+            false,
+            Self::disposable_home(),
+        ))
+    }
+
+    pub fn new(base_url: &str) -> Self {
+        let fixture = Self(setup_serve_fixture_with_home(
+            base_url,
+            Self::disposable_home(),
+        ));
         let output = fixture
             .command()
             .args(["model", "key", "set", "openai", "dummy-key"])

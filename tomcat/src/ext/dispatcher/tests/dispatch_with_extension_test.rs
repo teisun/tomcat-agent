@@ -1073,8 +1073,20 @@ async fn dispatch_session_hostcalls_can_route_across_bound_session_managers() {
         .create_session(&key_b, Some("/workspace/beta".to_string()))
         .unwrap();
     let d = HostApiDispatcher::new(bus).with_session(Arc::clone(&mgr_a));
-    d.bind_session(&session_a.session_id, Arc::downgrade(&mgr_a), None, None);
-    d.bind_session(&session_b.session_id, Arc::downgrade(&mgr_b), None, None);
+    d.bind_session(
+        &session_a.session_id,
+        Arc::downgrade(&mgr_a),
+        None,
+        None,
+        None,
+    );
+    d.bind_session(
+        &session_b.session_id,
+        Arc::downgrade(&mgr_b),
+        None,
+        None,
+        None,
+    );
 
     let cwd = d
         .dispatch_async(

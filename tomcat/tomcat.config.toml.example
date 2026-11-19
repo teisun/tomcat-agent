@@ -99,7 +99,7 @@ max_bytes = 26214400
 
 [tools.web_search]
 # 按顺序尝试名单内的搜索后端，第一个正常返回即停止（包括空结果）。
-# 不写名单时，使用 OpenAI 托管搜索及插件声明的默认后端（含 DeepSeek）；缺 Key 的后端跳过。
+# 不写名单时，按插件声明排序：DeepSeek → Tavily → Brave → Serper → MiMo → OpenAI；缺 Key 跳过。
 # backends = ["deepseek", "brave"]
 # 只用一个后端：backends = ["deepseek"]
 # 旧版 backend = "brave" 等同于只选 Brave；backend = "auto" 保持默认顺序。

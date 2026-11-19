@@ -478,7 +478,6 @@ impl FixedResolver {
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: lower.starts_with("gpt-5."),
-            web_search: false,
         };
         let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
         call.api = "openai-responses".to_string();

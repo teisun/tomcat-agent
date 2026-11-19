@@ -12,7 +12,7 @@ function relayModel(overrides: Partial<SettingsModelView>): SettingsModelView {
     api: "openai",
     apiKeyEnv: "FCODEX_API_KEY",
     baseUrl: "https://fcodex.example.com/v1",
-    capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+    capabilities: { files: false, reasoning: true, tools: true, vision: false },
     id: "fcodex/gpt-6.1-sol",
     keyPresent: true,
     modelName: "gpt-6.1-sol",

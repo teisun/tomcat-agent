@@ -53,7 +53,6 @@ fn default_responses_target_uses_idatatlas_terra_configuration() {
     assert!(entry.capabilities.files);
     assert!(entry.capabilities.tools);
     assert!(entry.capabilities.reasoning);
-    assert!(!entry.capabilities.web_search);
 
     unsafe {
         std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);

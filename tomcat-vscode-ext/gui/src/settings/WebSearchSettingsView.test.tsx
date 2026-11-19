@@ -24,6 +24,8 @@ function setup() {
 
 it("renders arbitrary declared providers and saves routing without guessing the result", () => {
   const { postMessage, update } = setup();
+  const tab = screen.getByRole("tab", { name: "Web Search", selected: true });
+  expect(screen.getByRole("tabpanel", { name: "Web Search" }).id).toBe(tab.getAttribute("aria-controls"));
   const newProvider = screen.getByRole("switch", { name: "Use New provider for web search" });
   fireEvent.click(screen.getByRole("switch", { name: "Use Brave for web search" }));
   expect(postMessage).not.toHaveBeenCalled();
@@ -48,7 +50,7 @@ it("renders arbitrary declared providers and saves routing without guessing the 
 it("keeps a key private and saves it without enrolling its provider", () => {
   const { postMessage } = setup();
   const row = within(screen.getByTestId("web-search-row-example"));
-  fireEvent.click(row.getByRole("button", { name: "Enter key · New provider" }));
+  fireEvent.click(row.getByRole("button", { name: "Configure · New provider" }));
   const input = row.getByLabelText("API key") as HTMLInputElement;
   expect(input.type).toBe("password");
   expect(input.value).toBe("");
@@ -65,7 +67,7 @@ it("keeps a key private and saves it without enrolling its provider", () => {
 it("groups saved key actions and still confirms removal before sending it", () => {
   const { postMessage } = setup();
   const brave = within(screen.getByTestId("web-search-row-brave"));
-  const trigger = brave.getByRole("button", { name: "Key saved · Brave" });
+  const trigger = brave.getByRole("button", { name: "Configured · Brave" });
   const actions = brave.getByTestId("web-search-key-actions-brave");
   expect(trigger.getAttribute("popovertarget")).toBe(actions.id);
   expect(actions.getAttribute("popover")).toBe("auto");
@@ -83,18 +85,32 @@ it("keeps shared keys in Models and offers direct navigation when a model is mis
   const { postMessage, update } = setup();
   update({ webSearch: { ...state.webSearch!, backends: [
     ...state.webSearch!.backends.map(row => row.id === "example" ? { ...row, keySource: "saved" as const } : row),
-    { id: "openai", label: "OpenAI", canSaveKey: true, sharedModelIds: [] },
+    { id: "openai", label: "OpenAI", host: "api.openai.com", canSaveKey: true, sharedModelIds: [] },
   ] } });
   const shared = within(screen.getByTestId("web-search-row-example"));
-  expect(shared.getByRole("button", { name: "Key shared with Models · New provider" })).toBeTruthy();
+  expect(shared.getByRole("button", { name: "Configured · New provider" })).toBeTruthy();
   const actions = within(shared.getByTestId("web-search-key-actions-example"));
   expect(actions.queryByText(/Remove key/)).toBeNull();
+  expect(actions.getByText(/Shared with: example\/chat/)).toBeTruthy();
+  expect(shared.queryByLabelText("API key")).toBeNull();
   fireEvent.click(actions.getByText("Replace key"));
   expect((shared.getByLabelText("API key") as HTMLInputElement).value).toBe("");
   fireEvent.click(actions.getByText("Open Models"));
-  fireEvent.click(screen.getByRole("button", { name: "Configure search model · OpenAI" }));
+  expect(screen.getByText(/Configure a key for api.openai.com in Models/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Open Models · OpenAI" }));
   expect(postMessage.mock.calls.map(([message]) => message)).toEqual([
     expect.objectContaining({ type: "settings.ready", data: { route: "models" } }),
     expect.objectContaining({ type: "settings.ready", data: { route: "models" } }),
   ]);
+});
+
+it("shows a missing key as plain status when this plugin cannot use saved keys", () => {
+  const { update } = setup();
+  update({ webSearch: { ...state.webSearch!, backends: [
+    { id: "brave", label: "Brave", host: "api.search.brave.com", keyEnv: "BRAVE_API_KEY", canSaveKey: false, sharedModelIds: [] },
+  ] } });
+  const row = within(screen.getByTestId("web-search-row-brave"));
+  expect(row.queryByRole("button", { name: /Brave$/ })).toBeNull();
+  expect(row.getByText("Not configured")).toBeTruthy();
+  expect(row.getByText(/Project plugins cannot use saved keys/)).toBeTruthy();
 });

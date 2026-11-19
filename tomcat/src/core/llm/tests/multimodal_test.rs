@@ -39,7 +39,6 @@ fn degrade_unsupported_multimodal_returns_borrowed_when_all_parts_supported() {
         files: true,
         tools: true,
         reasoning: true,
-        web_search: false,
     };
 
     let degraded = degrade_unsupported_multimodal(&messages, &capabilities);
@@ -60,7 +59,6 @@ fn degrade_unsupported_multimodal_replaces_only_missing_capabilities_and_preserv
         files: false,
         tools: true,
         reasoning: true,
-        web_search: false,
     };
 
     let degraded = degrade_unsupported_multimodal(&messages, &capabilities);

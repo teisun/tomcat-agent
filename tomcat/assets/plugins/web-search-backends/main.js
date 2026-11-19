@@ -87,10 +87,16 @@ async function fetchJsonBackend(backend, req, options) {
       );
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(
-        (options.statusMessages && options.statusMessages[response.status]) ||
-        "web_search backend `" + backend + "` returned HTTP status " + response.status
-      );
+      var detail;
+      try {
+        var payload = JSON.parse(response.body);
+        if (payload && payload.error && typeof payload.error.message === "string") {
+          detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
+        }
+      } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
+      var message = (options.statusMessages && options.statusMessages[response.status]) ||
+        "web_search backend `" + backend + "` returned HTTP status " + response.status;
+      throw new Error(detail ? message + ": " + detail : message);
     }
     return {
       backend: backend,
@@ -388,6 +394,73 @@ async function searchWithMimo(req) {
   };
 }
 
+// --- src/backends/openai.js ---
+var OPENAI_SEARCH_MODEL = "gpt-6.2-sol";
+
+function parseOpenAISearch(body) {
+  if (!body || !Array.isArray(body.output) || body.error) {
+    throw new Error((body && body.error && body.error.message) || "OpenAI web search returned no output");
+  }
+  var complete = body.status === undefined || body.status === "completed";
+  var hits = [];
+  var sources = [];
+  for (var item of body.output) {
+    if (!item) continue;
+    if (item.type === "message") {
+      for (var part of toArray(item.content)) {
+        if (!part || part.type !== "output_text") continue;
+        var chars = Array.from(part.text || "");
+        for (var annotation of collectAnnotations(part)) {
+          var hit = annotationToHit(annotation);
+          if (!hit) continue;
+          var start = annotation.start_index;
+          var end = annotation.end_index;
+          if (Number.isInteger(start) && Number.isInteger(end) && start >= 0 && start < end && end <= chars.length) {
+            hit.snippet = chars.slice(start, end).join("");
+          }
+          hits.push(hit);
+        }
+      }
+    } else if (item.type === "web_search_call") {
+      if (item.status === "failed" || item.status === "incomplete") complete = false;
+      for (var source of toArray(item.action && item.action.sources)) {
+        if (source && typeof source.url === "string") {
+          sources.push({ url: source.url, title: source.title || null, snippet: source.snippet || null });
+        }
+      }
+    }
+  }
+  // Partial output still carries usable links; an empty unfinished one must let routing continue.
+  hits = hits.concat(sources);
+  if (!hits.length && !complete) {
+    throw new Error("OpenAI web search did not complete");
+  }
+  return hits;
+}
+
+async function searchWithOpenAI(req) {
+  var tool = { type: "web_search", search_context_size: "medium" };
+  var domains = toArray(req.domainFilter);
+  if (domains.length) tool.filters = { allowed_domains: domains.slice() };
+  if (req.country) tool.user_location = { type: "approximate", country: String(req.country).toUpperCase() };
+  return fetchJsonBackend("openai", req, {
+    request: {
+      url: "https://api.openai.com/v1/responses",
+      method: "POST",
+      headers: { Authorization: "Bearer {{host_key}}", "Content-Type": "application/json" },
+      body: {
+        model: OPENAI_SEARCH_MODEL,
+        input: normalizeQuery(req.query),
+        store: false,
+        tool_choice: "required",
+        include: ["web_search_call.action.sources"],
+        tools: [tool]
+      }
+    },
+    parse: parseOpenAISearch
+  });
+}
+
 // --- src/backends/serper.js ---
 async function searchWithSerper(req) {
   var warnings = [];
@@ -466,7 +539,8 @@ var backends = Object.assign(Object.create(null), {
   tavily: searchWithTavily,
   brave: searchWithBrave,
   serper: searchWithSerper,
-  deepseek: searchWithDeepSeek
+  deepseek: searchWithDeepSeek,
+  openai: searchWithOpenAI
 });
 
 async function dispatchBackend(req) {

@@ -12,8 +12,6 @@ use tomcat::{
     HostApiDispatcher, ModelCatalog, PluginEngine, PluginFunctionInvoker, PluginManager,
     PluginRuntimeManager, SessionMode, TracingAuditRecorder,
 };
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 #[serial]
@@ -548,131 +546,230 @@ async fn runtime_explicit_serper_works_from_public_api() {
 
 #[tokio::test]
 #[serial]
-async fn runtime_explicit_openai_uses_project_hosted_candidate() {
-    let hosted = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "output": [
-                {
-                    "type": "web_search_call",
-                    "results": [
-                        {
-                            "title": "Rust",
-                            "url": "https://www.rust-lang.org",
-                            "snippet": "Language homepage"
-                        }
-                    ]
-                }
-            ]
-        })))
-        .expect(1)
-        .mount(&hosted)
-        .await;
-
+async fn openai_plugin_sends_only_the_official_key_and_invalidates_cache() {
+    use std::time::Duration;
+    use tomcat::api::chat::{ChatContext, ChatContextOverrides};
+    use tomcat::core::llm::auth::refresh_managed_credentials_from_entries;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            refresh_managed_credentials_from_entries(&Default::default());
+        }
+    }
+    let _reset = Reset;
     let _env = EnvGuard::set_many(&[
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("OPENAI_API_KEY", None),
+        ("OPENAI_SEARCH_FIXTURE_KEY", None),
     ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "openai".into();
-    let runtime = build_runtime(
-        cfg,
-        Some(format!(
-            r#"
+    let host = "api.openai.com";
+    let server = common::HttpsTestServer::start(host, "200 OK", vec![("Content-Type".into(), "application/json".into())],
+        serde_json::to_vec(&json!({"output":[{"type":"web_search_call","action":{"sources":[{"url":"https://docs.rs/reqwest"}]}}]})).unwrap(), Duration::ZERO).await;
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    install_builtin_web_search_plugin(work.path());
+    let models_path = work.path().join("models.toml");
+    std::fs::write(
+        &models_path,
+        r#"
 [[models]]
-id = "gpt-5.4-web"
+id = "fixture/official"
+model_name = "not-the-search-model"
 api = "openai-responses"
 provider = "openai"
-base_url = "{}"
-
-[models.capabilities]
-web_search = true
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_SEARCH_FIXTURE_KEY"
+capabilities = { web_search = true }
+[[models]]
+id = "fixture/gateway"
+api = "openai-responses"
+provider = "openai"
+base_url = "https://gateway.example"
+api_key_env = "OPENAI_API_KEY"
 "#,
-            hosted.uri()
-        )),
+    )
+    .unwrap();
+    let mut config = AppConfig::default();
+    config.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+    config.tools.web_search.backends = Some(vec!["openai".into()]);
+    let ctx = ChatContext::from_config_with_mode_and_overrides(
+        config.clone(),
+        SessionMode::Code,
+        ChatContextOverrides::default()
+            .with_session_cwd_override(workspace.path().to_path_buf())
+            .with_fetch_http_client(server.client_for(host, Duration::from_secs(5))),
+    )
+    .unwrap();
+    let sid = current_session_id(&ctx);
+    let runtime = &ctx.global_services.web_search_runtime;
+    let args = WebSearchArgs {
+        query: "rust".into(),
+        count: Some(2),
+        freshness: None,
+        country: None,
+        language: None,
+        domain_filter: vec![],
+    };
+    refresh_managed_credentials_from_entries(
+        &[("OPENAI_API_KEY".into(), "synthetic-company".into())].into(),
     );
-
-    let output = runtime
-        .search(
-            WebSearchArgs {
-                query: "rust language".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["rust-lang.org".into()],
-            },
-            "test-session",
-        )
+    assert!(runtime
+        .search(args.clone(), &sid)
         .await
-        .expect("explicit hosted search");
-
-    assert_eq!(output.backend, "openai");
-    assert_eq!(output.hits.len(), 1);
-
-    let requests = hosted.received_requests().await.expect("requests");
-    let request = requests.last().expect("hosted request");
-    let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json body");
-    assert_eq!(body["model"], json!("gpt-5.4-web"));
-    assert_eq!(body["tools"][0]["type"], json!("web_search"));
+        .unwrap_err()
+        .to_string()
+        .contains("OPENAI_SEARCH_FIXTURE_KEY"));
+    assert!(server.request_headers().is_empty());
+    for key in ["synthetic-first", "synthetic-second"] {
+        refresh_managed_credentials_from_entries(
+            &[
+                ("OPENAI_SEARCH_FIXTURE_KEY".into(), key.into()),
+                ("OPENAI_API_KEY".into(), "synthetic-company".into()),
+            ]
+            .into(),
+        );
+        let result = runtime.search(args.clone(), &sid).await.unwrap();
+        assert_eq!(result.hits[0].url, "https://docs.rs/reqwest");
+        assert!(!result.stats.cached);
+        assert!(
+            runtime
+                .search(args.clone(), &sid)
+                .await
+                .unwrap()
+                .stats
+                .cached
+        );
+    }
+    // The already running session must observe an address conflict immediately,
+    // even though the key value and cached query did not change.
+    let initial_models = std::fs::read_to_string(&models_path).unwrap();
+    std::fs::write(
+        &models_path,
+        format!(
+            r#"{initial_models}
+[[models]]
+id = "fixture/shared-gateway"
+api = "openai-responses"
+provider = "openai"
+base_url = "https://gateway.example"
+api_key_env = "OPENAI_SEARCH_FIXTURE_KEY"
+capabilities = {{ web_search = true }}
+"#
+        ),
+    )
+    .unwrap();
+    ctx.global_services.model_catalog.reload(&config).unwrap();
+    assert!(runtime
+        .search(args.clone(), &sid)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("no eligible key"));
+    assert_eq!(server.request_headers().len(), 2);
+    std::fs::write(&models_path, initial_models).unwrap();
+    ctx.global_services.model_catalog.reload(&config).unwrap();
+    refresh_managed_credentials_from_entries(&Default::default());
+    assert!(runtime.search(args, &sid).await.is_err());
+    end_current_plugin_session(&ctx).await;
+    let headers = server.request_headers();
+    assert_eq!(headers.len(), 2);
+    for (headers, key) in headers.iter().zip(["synthetic-first", "synthetic-second"]) {
+        assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains(&format!("\r\nauthorization: bearer {key}")));
+    }
 }
 
 #[tokio::test]
 #[serial]
-async fn runtime_explicit_openai_uses_llm_proxy_and_trims_whitespace() {
-    let hosted = common::HttpsTestServer::start(
-        "api.openai.com",
-        "200 OK",
-        vec![("Content-Type".to_string(), "application/json".to_string())],
-        hosted_web_search_response(),
-        std::time::Duration::ZERO,
-    )
-    .await;
-    let proxy =
-        common::ProxyTestServer::start(vec![("api.openai.com".to_string(), hosted.addr())]).await;
-    let proxy_url = proxy.url();
+async fn fresh_order_stops_on_deepseek_and_an_explicit_openai_failure_falls_through() {
+    use std::time::Duration;
+    use tomcat::api::chat::{ChatContext, ChatContextOverrides};
 
     let _env = EnvGuard::set_many(&[
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", Some("openai-test-key")),
-        ("HTTPS_PROXY", None),
-        ("HTTP_PROXY", None),
-        ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
+        ("OPENAI_API_KEY", Some("synthetic-official")),
+        ("DEEPSEEK_API_KEY", Some("synthetic-deepseek")),
     ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "openai".into();
-    cfg.llm.proxy = Some(format!("{proxy_url} "));
-    let runtime = build_runtime(
-        cfg,
-        Some(hosted_openai_models_toml("https://api.openai.com")),
-    );
-
-    let err = runtime
-        .search(
-            WebSearchArgs {
-                query: "rust language".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["rust-lang.org".into()],
-            },
-            "hosted-proxy-session",
+    let deepseek = common::HttpsTestServer::start(
+        "api.deepseek.com",
+        "200 OK",
+        vec![],
+        br#"{"results":[]}"#.to_vec(),
+        Duration::ZERO,
+    )
+    .await;
+    for (status, order, expected_calls) in [
+        ("401 Unauthorized", None, 0),
+        (
+            "401 Unauthorized",
+            Some(vec!["openai".into(), "deepseek".into()]),
+            1,
+        ),
+        (
+            "429 Too Many Requests",
+            Some(vec!["openai".into(), "deepseek".into()]),
+            1,
+        ),
+    ] {
+        let openai = common::HttpsTestServer::start(
+            "api.openai.com",
+            status,
+            vec![],
+            br#"{"error":{"message":"synthetic upstream error"}}"#.to_vec(),
+            Duration::ZERO,
         )
-        .await
-        .expect_err("proxy path should be exercised before TLS trust fails");
-
-    assert!(err.to_string().contains("web_search backend `openai`"));
-    assert!(proxy.saw_host("api.openai.com"));
+        .await;
+        let work = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        install_builtin_web_search_plugin(work.path());
+        let mut config = AppConfig::default();
+        config.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
+        config.tools.web_search.backends = order;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("api.openai.com", openai.addr())
+            .resolve("api.deepseek.com", deepseek.addr())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let ctx = ChatContext::from_config_with_mode_and_overrides(
+            config,
+            SessionMode::Code,
+            ChatContextOverrides::default()
+                .with_session_cwd_override(workspace.path().to_path_buf())
+                .with_fetch_http_client(client),
+        )
+        .unwrap();
+        let result = ctx
+            .global_services
+            .web_search_runtime
+            .search(
+                WebSearchArgs {
+                    query: "rust".into(),
+                    count: None,
+                    freshness: None,
+                    country: None,
+                    language: None,
+                    domain_filter: vec![],
+                },
+                &current_session_id(&ctx),
+            )
+            .await;
+        end_current_plugin_session(&ctx).await;
+        let result = result.unwrap();
+        assert_eq!(result.backend, "deepseek");
+        assert!(result.hits.is_empty());
+        assert_eq!(openai.request_headers().len(), expected_calls);
+        if expected_calls > 0 {
+            assert!(result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(status.split_once(' ').unwrap().0)));
+        }
+    }
+    assert_eq!(deepseek.request_headers().len(), 3);
 }
 
 #[tokio::test]
@@ -1265,139 +1362,6 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
 
 #[tokio::test]
 #[serial]
-async fn production_path_explicit_openai_uses_env_https_proxy() {
-    let hosted = common::HttpsTestServer::start(
-        "api.openai.com",
-        "200 OK",
-        vec![("Content-Type".to_string(), "application/json".to_string())],
-        hosted_web_search_response(),
-        std::time::Duration::ZERO,
-    )
-    .await;
-    let proxy =
-        common::ProxyTestServer::start(vec![("api.openai.com".to_string(), hosted.addr())]).await;
-    let proxy_url = proxy.url();
-
-    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_HOSTED_PROXY_KEY";
-    let _env = EnvGuard::set_many(&[
-        (ENV_KEY, Some("stub")),
-        ("OPENAI_API_KEY", Some("openai-test-key")),
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("HTTPS_PROXY", Some(proxy_url.as_str())),
-        ("HTTP_PROXY", None),
-        ("ALL_PROXY", None),
-        ("NO_PROXY", None),
-        ("no_proxy", None),
-    ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "openai".into();
-    let harness = build_production_web_search_harness(
-        cfg,
-        ENV_KEY,
-        Some(hosted_openai_models_toml("https://api.openai.com")),
-    );
-    let session_id = current_session_id(harness.ctx());
-    let err = harness
-        .ctx()
-        .global_services
-        .web_search_runtime
-        .search(
-            WebSearchArgs {
-                query: "rust language".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["rust-lang.org".into()],
-            },
-            &session_id,
-        )
-        .await
-        .expect_err("proxy path should be exercised before TLS trust fails");
-
-    end_current_plugin_session(harness.ctx()).await;
-    assert!(err.to_string().contains("web_search backend `openai`"));
-    assert!(
-        proxy.saw_host("api.openai.com"),
-        "hosted request failed before reaching the local proxy: {err:?}"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn production_path_hosted_openai_direct_without_proxy_succeeds() {
-    let hosted = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "output": [
-                {
-                    "type": "web_search_call",
-                    "results": [
-                        {
-                            "title": "Rust",
-                            "url": "https://www.rust-lang.org",
-                            "snippet": "Language homepage"
-                        }
-                    ]
-                }
-            ]
-        })))
-        .expect(1)
-        .mount(&hosted)
-        .await;
-
-    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_HOSTED_DIRECT_KEY";
-    let _env = EnvGuard::set_many(&[
-        (ENV_KEY, Some("stub")),
-        ("OPENAI_API_KEY", Some("openai-test-key")),
-        ("TAVILY_API_KEY", None),
-        ("BRAVE_API_KEY", None),
-        ("SERPER_API_KEY", None),
-        ("HTTPS_PROXY", None),
-        ("HTTP_PROXY", None),
-        ("ALL_PROXY", None),
-        // Local mock traffic must also bypass proxies discovered from OS settings.
-        ("NO_PROXY", Some("127.0.0.1,localhost,::1")),
-        ("no_proxy", Some("127.0.0.1,localhost,::1")),
-    ]);
-
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "openai".into();
-    let harness = build_production_web_search_harness(
-        cfg,
-        ENV_KEY,
-        Some(hosted_openai_models_toml(&hosted.uri())),
-    );
-    let session_id = current_session_id(harness.ctx());
-    let output = harness
-        .ctx()
-        .global_services
-        .web_search_runtime
-        .search(
-            WebSearchArgs {
-                query: "rust language".into(),
-                count: Some(3),
-                freshness: None,
-                country: None,
-                language: None,
-                domain_filter: vec!["rust-lang.org".into()],
-            },
-            &session_id,
-        )
-        .await
-        .expect("direct hosted search should succeed");
-
-    end_current_plugin_session(harness.ctx()).await;
-    assert_eq!(output.backend, "openai");
-    assert_eq!(output.hits.len(), 1);
-}
-
-#[tokio::test]
-#[serial]
 async fn production_path_explicit_serper_uses_env_https_proxy() {
     let serper = common::HttpsTestServer::start(
         "google.serper.dev",
@@ -1706,17 +1670,6 @@ fn require_env_var(env_key: &str, test_name: &str) {
     );
 }
 
-fn build_runtime(config: AppConfig, models_toml: Option<String>) -> WebSearchRuntime {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("models.toml");
-    if let Some(contents) = models_toml {
-        std::fs::write(&path, contents).expect("write models.toml");
-    }
-    let catalog =
-        Arc::new(ModelCatalog::load_from_path(&config, path).expect("load model catalog"));
-    WebSearchRuntime::new(&config, catalog).expect("build runtime")
-}
-
 struct PluginRuntimeHarness {
     runtime: WebSearchRuntime,
     manager: Arc<PluginManager>,
@@ -1933,39 +1886,6 @@ tools = true
 reasoning = true
 "#
     )
-}
-
-fn hosted_openai_models_toml(base_url: &str) -> String {
-    format!(
-        r#"
-[[models]]
-id = "gpt-5.4-web"
-api = "openai-responses"
-provider = "openai"
-base_url = "{base_url}"
-
-[models.capabilities]
-web_search = true
-"#
-    )
-}
-
-fn hosted_web_search_response() -> Vec<u8> {
-    serde_json::to_vec(&json!({
-        "output": [
-            {
-                "type": "web_search_call",
-                "results": [
-                    {
-                        "title": "Rust",
-                        "url": "https://www.rust-lang.org",
-                        "snippet": "Language homepage"
-                    }
-                ]
-            }
-        ]
-    }))
-    .expect("serialize hosted web_search response")
 }
 
 fn install_builtin_web_search_plugin(dest_root: &Path) -> PathBuf {
