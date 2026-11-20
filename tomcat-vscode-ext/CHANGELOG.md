@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.19
+
+Includes the changes prepared in 0.2.17 and 0.2.18.
+
+- Manage web search providers, order and keys in Tomcat Settings → Tools. Built-in DeepSeek and OpenAI search backends are available alongside the existing providers. The shared service makes built-in search plugins available without a separate `tomcat init`.
+- Save session Todos with a title, Markdown notes and completion evidence. Keep the completed plan attached to its session, and restore the same plan after a restart. Context summaries no longer list a completed plan's checklist; they show the session's Todos only if the Todos file is newer than that plan.
+- Fix blank image thumbnails in the shared service. If a thumbnail cannot be shown, display “Preview unavailable” and still let users open the original when available.
+- Simplify the Tools settings page and remove unwanted scrollbars without breaking keyboard access, scrolling or text wrapping.
+- Bundle CLI 0.2.1 in platform-specific packages. Pure-extension users must update their external CLI to receive the service fixes. Updating the executable does not update a running shared service; check active tasks before explicitly restarting it, because restarting stops all of them.
+
 ## 0.2.16
 
 - Refine built-in plan-writing guidance: favor diagrams with concise, plain-language explanations, keep over-design checks and reasoning internal, and limit each key-decisions section to one six-column table. Optional UI mockups remain supported.

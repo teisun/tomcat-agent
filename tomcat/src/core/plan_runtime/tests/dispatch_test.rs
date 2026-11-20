@@ -190,6 +190,7 @@ fn park_preserves_in_progress_acceptance_without_review_event() {
     let mut frontmatter = super::sample_frontmatter();
     frontmatter.plan_id = "plan-a".into();
     frontmatter.state = PlanFileState::Executing;
+    frontmatter.session_key = Some("session".into());
     frontmatter.todos.push(TodoItem {
         id: "acceptance".into(),
         content: "验收".into(),

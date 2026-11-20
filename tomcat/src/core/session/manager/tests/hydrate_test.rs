@@ -221,9 +221,8 @@ fn base_resume_index(total_entries: usize) -> ResumeIndex {
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
-        agent_mode: None,
-        active_plan_path: None,
-        active_plan_id: None,
+        resume_control: Default::default(),
+        seen_plan_current: false,
     }
 }
 
@@ -1167,6 +1166,75 @@ fn targeted_hydration_no_boundary_loads_min_10_turns() {
     assert!(!texts.iter().any(|text| text.contains("yesterday-q-0")));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restores_executing_binding_from_before_the_hydrated_message_window() {
+    use crate::infra::config::ResumeHydrationMode;
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(temp.path().to_path_buf());
+    mgr.create_session(mgr.current_session_key(), None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+    let plan_a = transcript.with_file_name("a.plan.md");
+    let plan_b = transcript.with_file_name("b.plan.md");
+    mgr.append_custom_entry(
+        serde_json::json!({"event":"plan.current","plan_id":"a","path":plan_a,"state":"executing"}),
+    )
+    .unwrap();
+    // The binding record predates even the legacy capped read, not just the model's recent turns.
+    let mut writer = std::io::BufWriter::new(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+    );
+    let today = Utc::now();
+    for id in 0..6000 {
+        writeln!(writer, "{}", serde_json::json!({"type":"message","id":format!("filler-{id}"),"timestamp":today,"message":{"role":"user","content":"filler"}})).unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    for event in [
+        serde_json::json!({"event":"plan.update","plan_id":"b","path":plan_b,"state":"planning"}),
+        serde_json::json!({"event":"plan.complete","plan_id":"b","path":plan_b}),
+    ] {
+        mgr.append_custom_entry(event).unwrap();
+    }
+    let check = |mode, threshold| {
+        let ctx = init_context_state(
+            &mgr,
+            &ContextConfig {
+                resume_hydration_mode: mode,
+                resume_lazy_threshold: threshold,
+                ..Default::default()
+            },
+            "sys",
+        )
+        .unwrap();
+        let plan = ctx.resume_control.active_plan.unwrap();
+        assert_eq!(plan.id, "a");
+        assert!(plan.is_executing());
+    };
+    check(ResumeHydrationMode::Auto, 100_000); // threshold_full
+    check(ResumeHydrationMode::Full, 1);
+    // Keep the fingerprint valid but corrupt the indexed anchor, triggering full+rebuild.
+    let sidecar = resume_index_path(&transcript);
+    let mut index: ResumeIndex = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    index
+        .latest_day_first_entry
+        .as_mut()
+        .unwrap()
+        .first_entry
+        .entry_id = Some("invalid-anchor".into());
+    std::fs::write(&sidecar, serde_json::to_vec(&index).unwrap()).unwrap();
+    check(ResumeHydrationMode::Tail, 1);
+
+    // An unreadable, unwritable sidecar must not make us pick B from the capped tail.
+    std::fs::remove_file(&sidecar).unwrap();
+    std::fs::create_dir(&sidecar).unwrap();
+    check(ResumeHydrationMode::Auto, 100_000);
+    check(ResumeHydrationMode::Tail, 1);
 }
 
 #[test]

@@ -383,6 +383,14 @@ async fn editing_or_creating_other_plans_cannot_replace_executing_binding() {
     let rt = PlanRuntime::new("active-session");
     let a = write_disk_plan("active_a", PlanFileState::Planning);
     let b = write_disk_plan("other_b", PlanFileState::Planning);
+    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    rt.attach_transcript_appender(Arc::new(move |event| {
+        if event["event"] == crate::infra::wire::WIRE_PLAN_CURRENT {
+            captured.lock().push(event);
+        }
+        Ok(())
+    }));
     rt.build_plan("active_a", None, false).unwrap();
     update_plan::execute(
         &rt,
@@ -409,5 +417,13 @@ async fn editing_or_creating_other_plans_cannot_replace_executing_binding() {
         read_plan(&a).unwrap().frontmatter.state,
         PlanFileState::Executing
     );
+    let events = events.lock();
+    assert_eq!(
+        events.len(),
+        1,
+        "saving other plans must not record a switch"
+    );
+    assert_eq!(events[0]["plan_id"], "active_a");
+    assert_eq!(events[0]["state"], "executing");
     cleanup_home(&home);
 }

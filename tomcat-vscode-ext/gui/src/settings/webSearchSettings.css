@@ -1,3 +1,7 @@
+.tc-search-settings__content {
+  scrollbar-width: none;
+}
+
 .tc-search-settings__tabs { margin-block-start: 8px; }
 .tc-search-settings__tab[aria-selected="true"] {
   background: var(--vscode-button-secondaryBackground, var(--vscode-editor-selectionBackground));

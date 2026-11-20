@@ -180,9 +180,8 @@ pub mod wire {
     pub const WIRE_PLAN_PANEL: &str = "plan.panel";
     /// PlanRuntime `mode → completed` 派生时落痕。
     pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
-    /// 会话恢复时模式判定走了兜底推断（sidecar 无 agent_mode，或记录的计划文件已不可读），
-    /// 记录最终落到哪个模式以及依据，便于用户在 UI 上看见"为什么不是我离开时那个模式"。
-    pub const WIRE_PLAN_RESTORE: &str = "plan.restore";
+    /// Transcript-only event recording a change to the session's current plan.
+    pub const WIRE_PLAN_CURRENT: &str = "plan.current";
     /// code review 轮次预算用尽但仍有未清 finding，交还用户。
     pub const WIRE_PLAN_CODE_REVIEW_EXHAUSTED: &str = "plan.code_review.exhausted";
     /// session 标题异步 LLM 覆盖后推送。

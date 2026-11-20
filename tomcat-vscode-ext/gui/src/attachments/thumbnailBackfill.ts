@@ -1,4 +1,8 @@
+import { createContext } from "react";
 import type { WebviewAttachmentView, WebviewSessionSnapshot } from "../types";
+
+// Temporary failures belong to this Webview, not the persisted attachment.
+export const ThumbnailFailures = createContext<ReadonlySet<string>>(new Set());
 
 export type ThumbnailTarget = { blobSha: string; fullUri: string; mimeType: string };
 

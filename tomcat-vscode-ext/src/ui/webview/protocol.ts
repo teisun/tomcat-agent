@@ -559,6 +559,7 @@ export type HostEventFrameContent =
       attachmentIds?: string[];
       references?: WebviewReference[];
     }
+  | { type: "attachmentThumbnailFailed"; sessionId: string; blobSha: string }
   | (DraftForkResult & { type: "draftForkResult" })
   | {
       operationId: string;

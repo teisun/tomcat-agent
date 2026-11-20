@@ -143,8 +143,8 @@ function parseIngestResponse(value: unknown): IngestAttachmentResponse | null {
  *
  * Used for history images, whose thumbnails cannot be generated at paste time because
  * they were pasted in some earlier session — possibly by an earlier build that had no
- * thumbnails at all. Failure is silent by design: a missing thumbnail costs memory,
- * and complaining about it would be noise the user cannot act on.
+ * thumbnails at all. The caller can report a preview failure without treating the
+ * original attachment as missing.
  */
 export async function cacheAttachmentThumbnail(
   messenger: TomcatMessenger,

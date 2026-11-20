@@ -228,9 +228,9 @@ fn scoped_session_manager(state: &ServeState) -> Option<SessionManager> {
 /// 之前写好才不会引发重载 —— 所以它必须来自 `initialize`，不能等到某个会话的
 /// `get_state`：那时 webview 早就渲染完了，再改资源根就是一次可见的白屏。
 pub(crate) fn attachment_root(state: &ServeState) -> Option<PathBuf> {
+    let sessions_dir = resolve_sessions_dir(&state.cfg).ok()?;
     Some(
-        scoped_session_manager(state)?
-            .attachment_store()
+        crate::core::session::attachments::AttachmentBlobStore::new(&sessions_dir)
             .root()
             .to_path_buf(),
     )

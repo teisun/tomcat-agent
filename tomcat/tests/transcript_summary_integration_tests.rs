@@ -26,7 +26,7 @@ use tomcat::core::llm::{ChatMessage, StreamEvent};
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileState, TodoKind, TodoStatus,
 };
-use tomcat::core::plan_runtime::{PlanRuntime, TranscriptAppender};
+use tomcat::core::plan_runtime::{ActivePlan, PlanRuntime, TranscriptAppender};
 use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::{
@@ -549,8 +549,7 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     write_plan(&path, &plan, 2000).unwrap();
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
-        plan_path: Some(path),
-        plan_id: Some(plan_id.to_string()),
+        active_plan: Some(ActivePlan::from_file(path, &plan)),
     })
     .expect("bind executing plan");
 }

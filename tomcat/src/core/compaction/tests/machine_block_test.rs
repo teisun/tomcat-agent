@@ -20,15 +20,17 @@ fn snapshot() -> ControlSnapshot {
 fn plan_progress(todos: Vec<TodoItem>) -> ProgressSource {
     ProgressSource::PlanFile {
         path: "/tmp/demo.plan.md".into(),
+        modified_at_ms: Some(101),
         todos,
     }
 }
 
 fn scratchpad_progress(todos: Vec<TodoItem>) -> ProgressSource {
-    ProgressSource::SessionScratchpad {
+    ProgressSource::SessionScratchpad(ScratchpadProgress {
         path: "/tmp/session.todo.md".into(),
+        modified_at_ms: Some(102),
         todos,
-    }
+    })
 }
 
 fn todo(id: &str, content: &str, status: TodoStatus) -> TodoItem {
@@ -57,20 +59,67 @@ fn machine_blocks_lead_the_summary_and_carry_runtime_truth() {
 }
 
 #[test]
-fn recovery_path_is_exactly_one_runtime_selected_document() {
+fn path_metadata_matches_the_runtime_selected_document() {
     let mut snap = snapshot();
     let plan = render(Some(&snap), &[]);
-    assert!(plan.contains("plan_path: /tmp/demo.plan.md"));
+    assert!(plan.contains("plan_path: /tmp/demo.plan.md\nplan_updated_at: "));
+    assert!(plan.contains(" (101)\n"));
     assert!(!plan.contains("todos_path:"));
     snap.progress = Some(scratchpad_progress(vec![]));
     let todos = render(Some(&snap), &[]);
-    assert!(todos.contains("todos_path: /tmp/session.todo.md"));
+    assert!(todos.contains("todos_path: /tmp/session.todo.md\ntodos_updated_at: "));
+    assert!(todos.contains(" (102)\n"));
     assert!(!todos.contains("plan_path:"));
     assert!(todos.contains("Use `read`"));
     snap.progress = None;
     let none = render(Some(&snap), &[]);
     assert!(none.contains("plan_path: (none)"));
     assert!(!none.contains("todos_path:"));
+}
+
+#[test]
+fn completed_plan_only_lists_strictly_newer_todos() {
+    let mut snap = snapshot();
+    snap.plan_file_state = Some("completed".into());
+    for (scratchpad, should_list_todos) in [
+        (None, false),
+        (Some(None), false),
+        (Some(Some(99)), false),
+        (Some(Some(100)), false),
+        (Some(Some(101)), true),
+    ] {
+        let progress = ProgressSource::CompletedPlan {
+            path: "/tmp/demo.plan.md".into(),
+            modified_at_ms: Some(100),
+            scratchpad: scratchpad.map(|modified_at_ms| ScratchpadProgress {
+                path: "/tmp/session.todo.md".into(),
+                modified_at_ms,
+                todos: vec![todo("new", "new work", TodoStatus::Pending)],
+            }),
+        };
+        let text = override_progress_section(
+            "## Progress\n- old plan work\n\n## Goal\nKeep me",
+            &progress,
+        );
+        assert_eq!(text.contains("new work"), should_list_todos);
+        assert_eq!(
+            text.contains("## Progress\nThe plan is complete. Rendered by the runtime; this supersedes any prose below.\n"),
+            !should_list_todos
+        );
+        assert!(!text.contains("old plan work"));
+        assert!(text.contains("Keep me"));
+        snap.progress = Some(progress);
+        let control = render(Some(&snap), &[]);
+        assert!(control.contains(" (100)\n"));
+        assert_eq!(control.contains("todos_updated_at:"), scratchpad.is_some());
+        let full = prepend(&control, &text);
+        assert_eq!(full.matches(SNAPSHOT_NOTICE).count(), 1);
+        assert_eq!(
+            full.matches("Rendered by the runtime; this supersedes any prose below.")
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -199,7 +248,11 @@ fn progress_section_is_rewritten_from_the_active_plan_file() {
     let out = override_progress_section(&summary, &progress);
 
     assert!(!out.contains(claimed_completion), "模型的说法必须被覆盖");
-    assert!(out.contains("Use `update_plan` to change it"));
+    assert!(
+        out.contains("## Progress\nRendered by the runtime; this supersedes any prose below.\n")
+    );
+    assert!(!out.contains("update_plan"));
+    assert!(!out.contains(SNAPSHOT_NOTICE));
     assert!(out.contains("3 total / 1 completed / 1 in_progress / 1 pending"));
     assert!(out.contains(&format!("t2: {current_task}")));
     // 其余章节原样保留，且顺序不变。
@@ -224,8 +277,11 @@ fn progress_section_falls_back_to_session_scratchpad_todos() {
     let progress = scratchpad_progress(vec![todo("s1", task, TodoStatus::InProgress)]);
     let out = override_progress_section("## Goal\ng", &progress);
 
-    assert!(out.contains("Rendered from the session todo scratchpad"));
-    assert!(out.contains("Use `todos` to change it"));
+    assert!(
+        out.contains("## Progress\nRendered by the runtime; this supersedes any prose below.\n")
+    );
+    assert!(!out.contains("Use `todos`"));
+    assert!(!out.contains(SNAPSHOT_NOTICE));
     assert!(out.contains(&format!("s1: {task}")));
 }
 

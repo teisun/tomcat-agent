@@ -399,17 +399,18 @@ pub const PENDING_BLOB_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
      → 草稿是 per-workspace 的，不同工作区天然隔离
 ```
 
-**「图片显示成裂图 / 失效附件」**
+**「显示预览不可用」与「原件已不在」**
 
 ```text
-  1. 看 blobs/<blobSha> 是否存在
-     → 不存在：字节被 GC 或用户手删。这是【正常降级路径】，
-                该附件显示为失效且可一键移除，草稿其余部分不受影响
-  2. 存在但仍不显示 → 查 localResourceRoots 与 CSP
-     两个 webview 的 img-src 都必须含 ${webview.cspSource}
-     localResourceRoots 必须含 attachments/blobs、attachments/thumbs
-     ※ 这里【没有】base64 兜底，配错就是裂图 —— 刻意的，见架构文档 §4
+  1. 查 initialize 的 attachmentRoot：共享服务尚未打开项目时也应返回会话存放目录下的 attachments。
+     → 如果仍为空，先核对共享服务是否已升级；新插件配旧服务也可能收到空值。
+  2. 查 blobs/<blobSha>：只有确认原图字节不存在才显示「原件已不在」，仍可移除。
+  3. 原图还在但小图不可见：查 thumbs/<blobSha>、Webview 资源白名单和图片加载结果。
+     两个 Webview 的 img-src 都必须含 ${webview.cspSource}；
+     localResourceRoots 只授予实际用到的 blobs、thumbs 子目录。
 ```
+
+缺少目录、缩略图生成或存储失败、图片加载失败时，附件格显示「预览不可用」而不是一直加载。有可用的原图地址时仍可点开；不拿原图或 base64 替代缩略图，也不扩大资源权限。
 
 **「transcript 里的 `![...](path)` 没显示成图」**
 

@@ -356,7 +356,9 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     );
 
     assert!(text.contains("## Progress"));
-    assert!(text.contains("Rendered from the session todo scratchpad"));
+    assert!(
+        text.contains("## Progress\nRendered by the runtime; this supersedes any prose below.\n")
+    );
     assert!(text.contains("t2: step active"));
     assert!(text.contains(&format!("todos_path: {}", todos_runtime.path().display())));
     assert!(!text.contains("plan_path:"));
@@ -677,6 +679,18 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         }),
     );
 
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("active.plan.md");
+    let plan_runtime = PlanRuntime::new("incident-085-098");
+    let mut plan = crate::core::plan_runtime::file_store::PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id":"active", "goal":"snapshot", "state":"executing", "created_at":"now", "schema_version":1,
+            "todos":[{"id":"task", "content":"still working when preheat started", "status":"in_progress"}]
+        })).unwrap(),
+        body: String::new(),
+    };
+    crate::core::plan_runtime::file_store::write_plan(&path, &plan, 2000).unwrap();
+    plan_runtime.bind_plan_file_for_test(path.clone());
     let mut user = ChatMessage::user("u".repeat(400));
     user.msg_id = Some("u1".to_string());
     let mut first_assistant = ChatMessage::assistant("a".repeat(400));
@@ -693,6 +707,7 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         event_bus,
         AgentLoopConfig {
             session_id: "incident-085-098".to_string(),
+            plan_runtime: Some(plan_runtime.clone()),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -734,9 +749,12 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         outcome => panic!("85% preheat must complete for replay, got {outcome:?}"),
     };
 
-    // Tool work arrives after the snapshot. At 98%, applying that finished preheat must fold the
-    // new tail into the same coordinate system instead of reporting ApplyBoundaryStale.
-    let mut later_tool = tool_message("t1", "call-1", "later tool result must remain raw");
+    // Completion happens after the snapshot but before it is applied at 98%.
+    plan.frontmatter.state = PlanFileState::Completed;
+    plan.frontmatter.todos[0].status = TodoStatus::Completed;
+    crate::core::plan_runtime::file_store::write_plan(&path, &plan, 2000).unwrap();
+    plan_runtime.refresh_active_plan_after_write(path, &plan);
+    let mut later_tool = tool_message("t1", "call-1", "plan completed after snapshot");
     later_tool.timestamp = Some("2026-09-14T00:00:02Z".to_string());
     messages.push(later_tool);
     let state = agent.context_state.as_mut().unwrap();
@@ -754,10 +772,14 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         messages[0].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
+    let summary = messages[0].text_content().unwrap();
+    assert!(summary.contains("plan_file_state: executing"));
+    assert!(summary.contains("[in_progress] task: still working when preheat started"));
+    assert!(summary.contains("This snapshot reflects the state when compaction started. If later messages conflict with it, follow the later messages."));
     assert_eq!(
         messages[agent.start_idx].text_content(),
-        Some("later tool result must remain raw"),
-        "the request payload retains post-snapshot tail work unchanged"
+        Some("plan completed after snapshot"),
+        "the request payload retains post-snapshot completion unchanged"
     );
 }
 

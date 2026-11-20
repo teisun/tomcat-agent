@@ -12,6 +12,7 @@ use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{
     ChatMessage, ChatMessageContent, ChatMessageRole, EffectiveModelLimits, MessageKind,
 };
+use crate::core::plan_runtime::{file_store::PlanFileState, ActivePlan};
 use crate::infra::error::AppError;
 use crate::infra::wire;
 
@@ -239,12 +240,17 @@ impl AgentMode {
     }
 }
 
-/// 一条 transcript 事件对控制态的影响。字段为 `None` 表示该事件不改动这一项。
+/// 一条 transcript 事件对会话模式与计划绑定的影响。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlanModeTransition {
     pub mode: Option<AgentMode>,
-    pub plan_id: Option<String>,
-    pub path: Option<PathBuf>,
+    binding: Option<PlanBindingTransition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanBindingTransition {
+    Legacy(ActivePlan),
+    Current(Option<ActivePlan>),
 }
 
 impl PlanModeTransition {
@@ -254,6 +260,26 @@ impl PlanModeTransition {
     pub fn from_custom_event(extra: &serde_json::Value) -> Option<Self> {
         let obj = extra.as_object()?;
         let event = obj.get("event")?.as_str()?;
+        let parse_plan = |state| {
+            Some(ActivePlan {
+                id: obj.get("plan_id")?.as_str()?.to_string(),
+                path: crate::infra::platform::normalize_path(obj.get("path")?.as_str()?).ok()?,
+                state,
+            })
+        };
+        if event == wire::WIRE_PLAN_CURRENT {
+            let plan = if obj.get("path")?.is_null() {
+                None
+            } else {
+                Some(parse_plan(
+                    serde_json::from_value(obj.get("state")?.clone()).ok()?,
+                )?)
+            };
+            return Some(Self {
+                mode: None,
+                binding: Some(PlanBindingTransition::Current(plan)),
+            });
+        }
         let mode = match event {
             wire::WIRE_PLAN_ENTER => Some(AgentMode::Plan),
             wire::WIRE_PLAN_EXIT => Some(AgentMode::Chat),
@@ -268,41 +294,47 @@ impl PlanModeTransition {
             wire::WIRE_PLAN_CREATE | wire::WIRE_PLAN_UPDATE => None,
             _ => return None,
         };
-        Some(Self {
-            mode,
-            plan_id: obj
-                .get("plan_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            path: obj
-                .get("path")
-                .and_then(|v| v.as_str())
-                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
-        })
+        let state = obj
+            .get("state")
+            .and_then(|state| serde_json::from_value(state.clone()).ok())
+            .unwrap_or(match event {
+                wire::WIRE_PLAN_BUILD => PlanFileState::Executing,
+                wire::WIRE_PLAN_PENDING => PlanFileState::Pending,
+                wire::WIRE_PLAN_COMPLETE => PlanFileState::Completed,
+                // Some old events carry a path but no lifecycle state. The file is
+                // always reread by PlanRuntime; this value is only a legacy hint.
+                _ => PlanFileState::Planning,
+            });
+        let binding = parse_plan(state).map(PlanBindingTransition::Legacy);
+        Some(Self { mode, binding })
     }
 }
 
 /// 会话恢复时交给 `plan_runtime` 的控制态。由 resume-index sidecar 直接提供，
 /// 无需每次遍历 transcript。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeControlState {
     /// `None` 表示 sidecar 里没有这项信息（旧版本 / 全量扫描路径），走推断兜底。
+    #[serde(rename = "agent_mode")]
     pub mode: Option<AgentMode>,
-    pub plan_path: Option<PathBuf>,
-    pub plan_id: Option<String>,
+    pub active_plan: Option<ActivePlan>,
 }
 
 impl ResumeControlState {
     /// 折叠一条事件的影响。
-    pub fn apply(&mut self, transition: PlanModeTransition) {
+    pub(crate) fn apply(&mut self, transition: PlanModeTransition, seen_plan_current: &mut bool) {
         if let Some(mode) = transition.mode {
             self.mode = Some(mode);
         }
-        if transition.plan_id.is_some() {
-            self.plan_id = transition.plan_id;
-        }
-        if transition.path.is_some() {
-            self.plan_path = transition.path;
+        match transition.binding {
+            Some(PlanBindingTransition::Current(plan)) => {
+                *seen_plan_current = true;
+                self.active_plan = plan;
+            }
+            Some(PlanBindingTransition::Legacy(plan)) if !*seen_plan_current => {
+                self.active_plan = Some(plan);
+            }
+            _ => {}
         }
     }
 }

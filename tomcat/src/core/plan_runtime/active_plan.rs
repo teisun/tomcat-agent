@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use super::file_store::{PlanFile, PlanFileState};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActivePlan {
     pub id: String,
     pub path: PathBuf,

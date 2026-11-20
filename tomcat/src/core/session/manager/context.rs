@@ -259,13 +259,14 @@ fn targeted_hydration_entries_with_load(
         .map(|anchor| anchor.ordinal)
         .unwrap_or(0);
     if slice_start_ordinal > index.total_entries {
-        let (_, rebuild_stats) = rebuild_resume_index(path)?;
+        let (rebuilt, rebuild_stats) = rebuild_resume_index(path)?;
         let mut io_stats = load.stats;
         io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
         io_stats.entries_scanned += rebuild_stats.entries_scanned;
         let mut fallback = full_hydration_entries(session, path)?;
         fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
         fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+        fallback.resume_control = rebuilt.resume_control_state();
         fallback.fallback = "full+rebuild";
         return Ok(fallback);
     }
@@ -277,13 +278,14 @@ fn targeted_hydration_entries_with_load(
     if let Some(candidate) = raw_slice_start_candidate.as_ref() {
         let candidate_matches = entries.iter().any(|entry| candidate.matches_entry(entry));
         if !candidate_matches {
-            let (_, rebuild_stats) = rebuild_resume_index(path)?;
+            let (rebuilt, rebuild_stats) = rebuild_resume_index(path)?;
             io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
             io_stats.entries_scanned += rebuild_stats.entries_scanned;
 
             let mut fallback = full_hydration_entries(session, path)?;
             fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
             fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+            fallback.resume_control = rebuilt.resume_control_state();
             fallback.fallback = "full+rebuild";
             return Ok(fallback);
         }
@@ -294,13 +296,14 @@ fn targeted_hydration_entries_with_load(
             .first()
             .is_some_and(|entry| anchor.matches_entry(entry));
         if !edge_matches {
-            let (_, rebuild_stats) = rebuild_resume_index(path)?;
+            let (rebuilt, rebuild_stats) = rebuild_resume_index(path)?;
             io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
             io_stats.entries_scanned += rebuild_stats.entries_scanned;
 
             let mut fallback = full_hydration_entries(session, path)?;
             fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
             fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+            fallback.resume_control = rebuilt.resume_control_state();
             fallback.fallback = "full+rebuild";
             return Ok(fallback);
         }
@@ -675,10 +678,11 @@ fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef
 /// 全量扫描路径（无 sidecar 可用时）折出与 sidecar 等价的控制态。
 fn extract_resume_control(entries: &[TranscriptEntry]) -> ResumeControlState {
     let mut control = ResumeControlState::default();
+    let mut seen_plan_current = false;
     for entry in entries {
         if let TranscriptEntry::Custom(custom) = entry {
             if let Some(transition) = PlanModeTransition::from_custom_event(&custom.extra) {
-                control.apply(transition);
+                control.apply(transition, &mut seen_plan_current);
             }
         }
     }
@@ -918,6 +922,12 @@ pub fn init_context_state(
     let load_outcome = match config.resume_hydration_mode {
         ResumeHydrationMode::Full => {
             let mut outcome = full_hydration_entries(session, &path)?;
+            // Full controls message hydration, not whether we forget older control events.
+            if let Ok(load) = load_or_rebuild_resume_index(&path) {
+                outcome.resume_control = load.index.resume_control_state();
+                outcome.io_stats.bytes_scanned += load.stats.bytes_scanned;
+                outcome.io_stats.entries_scanned += load.stats.entries_scanned;
+            }
             outcome.fallback = "config_full";
             outcome
         }
@@ -930,6 +940,7 @@ pub fn init_context_state(
                 }
                 Ok(load) => {
                     let mut outcome = full_hydration_entries(session, &path)?;
+                    outcome.resume_control = load.index.resume_control_state();
                     if load.source == ResumeIndexSource::Rebuilt {
                         outcome.fallback = "rebuild";
                     } else {

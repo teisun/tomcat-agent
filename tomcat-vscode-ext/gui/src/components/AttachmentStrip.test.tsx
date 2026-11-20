@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { WebviewPendingAttachment } from "../types";
 import { AttachmentStrip } from "./AttachmentStrip";
+import { ThumbnailFailures } from "../attachments/thumbnailBackfill";
 
 function sha(seed: string): string {
   return seed.padEnd(64, "0").slice(0, 64);
@@ -187,12 +188,49 @@ describe("AttachmentStrip", () => {
   // pending long enough to photograph. What matters is the size match, which is what
   // keeps the composer from jumping as images land.
   it("holds a placeholder of the final thumbnail size while one is missing", () => {
-    render(<AttachmentStrip attachments={[{ ...image("pending"), thumbUri: undefined }]} />);
+    render(<AttachmentStrip attachments={[{ ...image("pending"), thumbUri: undefined, hasThumb: false }]} />);
     const skeleton = screen.getByTestId("attachment-skeleton");
     expect(skeleton.getAttribute("aria-label")).toBe("pending.png is loading");
     // No broken image and no misleading file chip in place of a picture.
     expect(screen.queryByRole("img")).toBeNull();
     expect(screen.queryByTestId("attachment-chip")).toBeNull();
+  });
+
+  it("reports unavailable previews when the handshake did not provide a resource root", () => {
+    const onRemove = vi.fn();
+    render(<AttachmentStrip attachments={[{ ...image("no-root"), thumbUri: undefined, fullUri: undefined }]} onRemove={onRemove} />);
+    expect(screen.getByTestId("attachment-preview-unavailable").textContent).toBe("Preview unavailable");
+    expect(screen.queryByTestId("attachment-skeleton")).toBeNull();
+    expect(screen.queryByTestId("attachment-thumb")).toBeNull();
+    fireEvent.click(screen.getByTestId("attachment-remove"));
+    expect(onRemove).toHaveBeenCalledWith("no-root");
+  });
+
+  it("keeps the original openable when generation or image loading fails", () => {
+    const onOpen = vi.fn();
+    const failed = { ...image("failed"), thumbUri: undefined, hasThumb: false };
+    const broken = image("broken");
+    const { rerender } = render(<ThumbnailFailures.Provider value={new Set([failed.blobSha])}>
+      <AttachmentStrip attachments={[failed, broken]} onOpen={onOpen} />
+    </ThumbnailFailures.Provider>);
+    expect(screen.getAllByText("Preview unavailable")).toHaveLength(1);
+    fireEvent.error(screen.getByRole("img"));
+    expect(screen.queryByTestId("attachment-thumb")).toBeNull();
+    const unavailable = screen.getAllByTestId("attachment-preview-unavailable");
+    expect(unavailable).toHaveLength(2);
+    for (const preview of unavailable) fireEvent.click(preview);
+    expect(onOpen.mock.calls.map(([attachment]) => attachment.id)).toEqual(["failed", "broken"]);
+    rerender(<AttachmentStrip attachments={[{ ...broken, thumbUri: "https://webview.local/new-thumb" }]} onOpen={onOpen} />);
+    expect(screen.getByRole("img").getAttribute("src")).toBe("https://webview.local/new-thumb");
+  });
+
+  it("does not count a failed history preview as a rendered thumbnail", () => {
+    const onOpen = vi.fn();
+    render(<AttachmentStrip attachments={[image("history")]} readonly onOpen={onOpen} />);
+    fireEvent.error(screen.getByRole("img"));
+    expect(screen.queryByTestId("history-attachment-thumb")).toBeNull();
+    fireEvent.click(screen.getByTestId("history-attachment-preview-unavailable"));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: "history" }));
   });
 
   it("removes a focused attachment on Delete, since clicking one opens the preview", () => {

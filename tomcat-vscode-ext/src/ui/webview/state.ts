@@ -3212,6 +3212,7 @@ export class WebviewStateStore {
       frame.type === "insertReference" ||
       frame.type === "attachFilesResult" ||
       frame.type === "attachmentFeedback" ||
+      frame.type === "attachmentThumbnailFailed" ||
       frame.type === "composerWorkResult" ||
       frame.type === "draftForkResult" ||
       frame.type === "captureDraftForFork" ||

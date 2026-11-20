@@ -1,7 +1,7 @@
 use fs2::FileExt;
 
 use super::common::*;
-use crate::core::plan_runtime::{ControlSnapshot, ProgressSource};
+use crate::core::plan_runtime::{ActivePlan, ControlSnapshot, ProgressSource};
 
 #[tokio::test]
 async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner() {
@@ -46,20 +46,55 @@ async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner()
         Err(ToolError::CrossSessionDenied(_))
     ));
     let resumed_planner = PlanRuntime::new_with_session_id("shared-project", "planner");
+    let resume_events = capture_plan_current(&resumed_planner);
     resumed_planner
         .attach_from_resume_state(ResumeControlState {
             mode: Some(AgentMode::Plan),
-            plan_path: Some(path.clone()),
-            plan_id: Some(plan_id.clone()),
+            active_plan: Some(ActivePlan::from_file(path.clone(), &approved)),
         })
         .unwrap();
     assert_eq!(resumed_planner.mode(), AgentMode::Plan);
     assert!(resumed_planner.active_plan().is_none());
     assert!(resumed_planner.park_executing_plan().unwrap().is_none());
+    assert_eq!(
+        resume_events.lock().as_slice(),
+        &[serde_json::json!({
+            "event": "plan.current", "path": null, "reason": "resume_plan_owned_elsewhere"
+        })]
+    );
     // /restore on the still-live planner is another cache entry point.
+    let restore_events = capture_plan_current(&planner);
     assert!(planner.sync_active_plan_from_disk().unwrap().is_none());
+    assert_eq!(
+        restore_events.lock().as_slice(),
+        &[serde_json::json!({
+            "event": "plan.current", "path": null, "reason": "restore_plan_owned_elsewhere"
+        })]
+    );
     assert!(planner.park_executing_plan().unwrap().is_none());
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    // After the clear, a successful save binds B and records the replacement.
+    let replacement = write_disk_plan("replacement-b", PlanFileState::Planning);
+    update_plan::execute(
+        &resumed_planner,
+        serde_json::from_value(serde_json::json!({
+            "plan_id": "replacement-b",
+            "ops": [{"kind":"upsert", "id":"step1", "content":"edited B"}]
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed_planner.active_plan_path().as_ref(),
+        Some(&replacement)
+    );
+    {
+        let events = resume_events.lock();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["plan_id"], "replacement-b");
+        assert_eq!(events[1]["state"], "planning");
+    }
     let mut legacy = read_plan(&path).unwrap();
     let unidentified = PlanRuntime::new("shared-project");
     assert!(
@@ -147,8 +182,10 @@ fn restore_preserves_in_progress_unknown_legacy_todos() {
     let rt = PlanRuntime::new("session-a");
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
-        plan_path: Some(path.clone()),
-        plan_id: Some("legacy_review".into()),
+        active_plan: Some(ActivePlan::from_file(
+            path.clone(),
+            &read_plan(&path).unwrap(),
+        )),
     })
     .unwrap();
 
@@ -163,6 +200,38 @@ fn restore_preserves_in_progress_unknown_legacy_todos() {
         .todos
         .iter()
         .all(|todo| todo.kind == TodoKind::Unknown));
+    cleanup_home(&home);
+}
+
+#[test]
+fn stopping_does_not_rewrite_a_completed_plan() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("stop-late", PlanFileState::Planning);
+    rt.build_plan("stop-late", None, false).unwrap();
+    let path = plan_path_for_id("stop-late").unwrap();
+    let mut completed = read_plan(&path).unwrap();
+    completed.frontmatter.state = PlanFileState::Completed;
+    write_plan(&path, &completed, 2000).unwrap();
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let copy = events.clone();
+    rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
+        copy.lock().push(event);
+        Ok(())
+    }));
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(rt.park_executing_plan().unwrap(), None);
+    assert_eq!(rt.active_plan().unwrap().state, PlanFileState::Completed);
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.state,
+        PlanFileState::Completed
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before
+    );
+    assert!(events.lock().is_empty());
     cleanup_home(&home);
 }
 
@@ -366,19 +435,46 @@ fn plan_build_atomic_rollback_on_write_failure() {
     cleanup_home(&home);
 }
 
+fn capture_plan_current(
+    rt: &PlanRuntime,
+) -> std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> {
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
+        if event["event"] == crate::infra::wire::WIRE_PLAN_CURRENT {
+            captured.lock().push(event);
+        }
+        Ok(())
+    }));
+    events
+}
+
 #[test]
 fn attach_exec_with_missing_plan_file_falls_back_to_chat() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new_with_session_id("session-a", "run-new");
+    let events = capture_plan_current(&rt);
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
-        plan_path: Some(plan_path_for_id("orphan-plan").unwrap()),
-        plan_id: Some("orphan-plan".into()),
+        active_plan: Some(ActivePlan {
+            id: "orphan-plan".into(),
+            path: plan_path_for_id("orphan-plan").unwrap(),
+            state: PlanFileState::Executing,
+        }),
     })
     .unwrap();
 
     assert_eq!(rt.mode(), AgentMode::Chat);
+    assert!(rt.active_plan().is_none());
+    rt.attach_from_resume_state(ResumeControlState::default())
+        .unwrap();
+    assert_eq!(
+        events.lock().as_slice(),
+        &[serde_json::json!({
+            "event": "plan.current", "path": null, "reason": "resume_plan_file_unreadable"
+        })]
+    );
     cleanup_home(&home);
 }
 
@@ -390,8 +486,7 @@ fn attach_plan_mode_survives_without_plan_file() {
     // 进 PLAN 时计划文件往往还不存在，这正是旧实现会静默掉回 CHAT 的场景。
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Plan),
-        plan_path: None,
-        plan_id: None,
+        active_plan: None,
     })
     .unwrap();
 
@@ -406,8 +501,7 @@ fn attach_plan_mode_without_path_does_not_invent_an_active_plan() {
     let rt = PlanRuntime::new("session-a");
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Plan),
-        plan_path: None,
-        plan_id: Some("draft-plan".into()),
+        active_plan: None,
     })
     .unwrap();
 
@@ -431,8 +525,10 @@ fn restart_after_plan_build_restores_chat_mode_and_executing_plan() {
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
-        plan_path: Some(path.clone()),
-        plan_id: Some(plan_id.into()),
+        active_plan: Some(ActivePlan::from_file(
+            path.clone(),
+            &read_plan(&path).unwrap(),
+        )),
     })
     .unwrap();
 
@@ -450,16 +546,25 @@ fn restart_after_plan_completion_restores_chat_mode() {
     write_disk_plan(plan_id, PlanFileState::Completed);
     let path = plan_path_for_id(plan_id).unwrap();
 
-    // 旧 sidecar 缺少 agent_mode 时按新契约降级为 Chat；计划文件仍恢复为 active plan。
+    // A binding record can still say executing when the same file has since completed.
     let rt = PlanRuntime::new("session-a");
+    let events = capture_plan_current(&rt);
     rt.attach_from_resume_state(ResumeControlState {
         mode: None,
-        plan_path: Some(path.clone()),
-        plan_id: Some(plan_id.into()),
+        active_plan: Some(ActivePlan {
+            id: plan_id.into(),
+            path: path.clone(),
+            state: PlanFileState::Executing,
+        }),
     })
     .unwrap();
 
     assert_eq!(rt.mode(), AgentMode::Chat);
+    assert_eq!(rt.active_plan().unwrap().state, PlanFileState::Completed);
+    assert!(
+        events.lock().is_empty(),
+        "state change on the same path is not a switch"
+    );
     assert_eq!(rt.active_plan().unwrap().id, plan_id);
     assert_eq!(rt.active_plan_path(), Some(path));
     cleanup_home(&home);
@@ -494,8 +599,10 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     let rt = PlanRuntime::new_with_session_id("session-a", "snapshot-session");
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
-        plan_path: Some(path.clone()),
-        plan_id: Some(plan_id.into()),
+        active_plan: Some(ActivePlan::from_file(
+            path.clone(),
+            &read_plan(&path).unwrap(),
+        )),
     })
     .unwrap();
 
@@ -506,7 +613,7 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     assert_eq!(snap.model.as_deref(), Some("gpt-5.6-sol"));
     assert!(matches!(
         snap.progress,
-        Some(ProgressSource::PlanFile { ref todos, path: ref selected_path })
+        Some(ProgressSource::PlanFile { ref todos, path: ref selected_path, .. })
             if selected_path == &path && todos.len() == 1
                 && todos[0].id == "step1"
     ));
@@ -540,7 +647,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
         .unwrap();
     assert!(matches!(
         ControlSnapshot::capture(Some(&with_plan), Some(&todos_runtime), None).unwrap().progress,
-        Some(ProgressSource::PlanFile { ref path, ref todos }) if path == &plan_path && todos.is_empty()
+        Some(ProgressSource::PlanFile { ref path, ref todos, .. }) if path == &plan_path && todos.is_empty()
     ));
 
     empty_plan.frontmatter.state = PlanFileState::Completed;
@@ -549,20 +656,23 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
     assert_eq!(completed.plan_file_state.as_deref(), Some("completed"));
     assert!(matches!(
         completed.progress,
-        Some(ProgressSource::PlanFile { .. })
+        Some(ProgressSource::CompletedPlan {
+            scratchpad: Some(_),
+            ..
+        })
     ));
 
     std::fs::remove_file(&plan_path).unwrap();
     assert!(matches!(
         ControlSnapshot::capture(Some(&with_plan), Some(&todos_runtime), None).unwrap().progress,
-        Some(ProgressSource::SessionScratchpad { ref path, ref todos })
-            if path == todos_runtime.path() && todos.len() == 1 && todos[0].id == "scratch"
+        Some(ProgressSource::SessionScratchpad(ref progress))
+            if progress.path == todos_runtime.path() && progress.todos.len() == 1 && progress.todos[0].id == "scratch"
     ));
     assert!(matches!(
         ControlSnapshot::capture(None, Some(&todos_runtime), None)
             .unwrap()
             .progress,
-        Some(ProgressSource::SessionScratchpad { .. })
+        Some(ProgressSource::SessionScratchpad(_))
     ));
     assert!(ControlSnapshot::capture(Some(&with_plan), None, None)
         .unwrap()
@@ -583,7 +693,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
     assert_eq!(worker.mode, AgentMode::Chat);
     assert_eq!(worker.model.as_deref(), Some("model"));
     assert!(
-        matches!(&worker.progress, Some(ProgressSource::SessionScratchpad { path, todos }) if path == child.path() && todos.is_empty())
+        matches!(&worker.progress, Some(ProgressSource::SessionScratchpad(progress)) if progress.path == child.path() && progress.todos.is_empty())
     );
     let rendered = crate::core::compaction::machine_block::render(Some(&worker), &[]);
     assert!(rendered.contains(child.path().to_str().unwrap()));
@@ -591,7 +701,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
     assert!(!rendered.contains("private Markdown"));
     let reviewer = ControlSnapshot::capture(Some(&with_plan), Some(&child), None).unwrap();
     assert!(
-        matches!(reviewer.progress, Some(ProgressSource::SessionScratchpad { ref path, .. }) if path == child.path())
+        matches!(reviewer.progress, Some(ProgressSource::SessionScratchpad(ref progress)) if progress.path == child.path())
     );
     std::fs::write(child.path(), "corrupt").unwrap();
     let broken = TodosRuntime::open(
@@ -622,11 +732,17 @@ fn e7_reload_active_plan_from_disk_picks_up_session_owned_executing() {
     write_plan(&path, &p, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
+    let events = capture_plan_current(&rt);
     assert_eq!(rt.mode(), AgentMode::Chat);
 
     let restored = rt.sync_active_plan_from_disk().unwrap();
     assert_eq!(restored.as_deref(), Some(plan_id));
     assert_eq!(rt.mode(), AgentMode::Chat);
     assert_eq!(rt.executing_plan_id().as_deref(), Some(plan_id));
+    rt.sync_active_plan_from_disk().unwrap();
+    let events = events.lock();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["plan_id"], plan_id);
+    assert_eq!(events[0]["state"], "executing");
     cleanup_home(&home);
 }

@@ -249,7 +249,7 @@ fn sidecar_records_plan_mode_without_plan_file() {
     let load = load_or_rebuild_resume_index(&transcript_path).unwrap();
     let control = load.index.resume_control_state();
     assert_eq!(control.mode, Some(AgentMode::Plan));
-    assert!(control.plan_path.is_none());
+    assert!(control.active_plan.is_none());
 }
 
 #[test]
@@ -285,8 +285,105 @@ fn sidecar_mode_follows_latest_transition_across_rebuild() {
     assert_eq!(incremental.mode, Some(AgentMode::Plan));
     assert_eq!(incremental, rebuilt);
     // 模式已回到 PLAN，但上次绑定过的计划路径仍保留，供恢复时读取文件状态。
-    assert_eq!(incremental.plan_id.as_deref(), Some("plan_x"));
-    assert!(incremental.plan_path.is_some());
+    let plan = incremental.active_plan.unwrap();
+    assert_eq!(plan.id, "plan_x");
+    assert_eq!(plan.path, plan_path);
+    assert!(plan.is_executing());
+}
+
+#[test]
+fn executing_plan_survives_later_events_for_other_plans() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+    let a = transcript.with_file_name("a.plan.md");
+    let b = transcript.with_file_name("b.plan.md");
+    for event in [
+        serde_json::json!({"event":"plan.current", "plan_id":"a", "path": a, "state":"executing"}),
+        serde_json::json!({"event":"plan.update", "plan_id":"b", "path": b, "state":"planning"}),
+        serde_json::json!({"event":"plan.complete", "plan_id":"b", "path": b}),
+    ] {
+        mgr.append_custom_entry(event).unwrap();
+    }
+    let incremental = load_or_rebuild_resume_index(&transcript)
+        .unwrap()
+        .index
+        .resume_control_state();
+    assert_eq!(incremental.active_plan.as_ref().unwrap().id, "a");
+    assert!(incremental.active_plan.as_ref().unwrap().is_executing());
+    let index_path = resume_index_path(&transcript);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+    old["schema_version"] = serde_json::json!(6);
+    old.as_object_mut().unwrap().remove("seen_plan_current");
+    std::fs::write(index_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let rebuilt = load_or_rebuild_resume_index(&transcript).unwrap();
+    assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
+    assert_eq!(incremental, rebuilt.index.resume_control_state());
+}
+
+#[test]
+fn current_plan_can_be_explicitly_cleared_then_replaced() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+    let a = transcript.with_file_name("a.plan.md");
+    let b = transcript.with_file_name("b.plan.md");
+    let load = || load_or_rebuild_resume_index(&transcript).unwrap();
+    let append = |event| mgr.append_custom_entry(event).unwrap();
+    append(
+        serde_json::json!({"event":"plan.current", "plan_id":"a", "path":a, "state":"executing"}),
+    );
+    append(
+        serde_json::json!({"event":"plan.current", "path":null, "reason":"resume_plan_owned_elsewhere"}),
+    );
+    append(serde_json::json!({"event":"plan.update", "plan_id":"b", "path":b}));
+    let cleared = load();
+    assert_eq!(cleared.source, ResumeIndexSource::Existing);
+    assert!(cleared.index.resume_control.active_plan.is_none());
+    std::fs::remove_file(resume_index_path(&transcript)).unwrap();
+    assert!(load().index.resume_control.active_plan.is_none());
+
+    append(
+        serde_json::json!({"event":"plan.current", "plan_id":"b", "path":b, "state":"planning"}),
+    );
+    let incremental = load();
+    assert_eq!(
+        incremental
+            .index
+            .resume_control
+            .active_plan
+            .as_ref()
+            .unwrap()
+            .id,
+        "b"
+    );
+    std::fs::remove_file(resume_index_path(&transcript)).unwrap();
+    assert_eq!(
+        load().index.resume_control,
+        incremental.index.resume_control
+    );
+}
+
+#[test]
+fn legacy_transcript_uses_last_plan_event_without_inferring_ownership() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_custom_entry(serde_json::json!({
+        "event":"plan.build", "plan_id":"a", "path":transcript.with_file_name("a.plan.md")
+    }))
+    .unwrap();
+    mgr.append_custom_entry(serde_json::json!({
+        "event":"plan.update", "plan_id":"b", "path":transcript.with_file_name("b.plan.md")
+    }))
+    .unwrap();
+    let incremental = load_or_rebuild_resume_index(&transcript)
+        .unwrap()
+        .index
+        .resume_control;
+    assert_eq!(incremental.active_plan.as_ref().unwrap().id, "b");
+    assert_eq!(incremental.mode, Some(AgentMode::Chat));
+    std::fs::remove_file(resume_index_path(&transcript)).unwrap();
+    let rebuilt = load_or_rebuild_resume_index(&transcript).unwrap();
+    assert_eq!(rebuilt.index.resume_control, incremental);
 }
 
 #[test]

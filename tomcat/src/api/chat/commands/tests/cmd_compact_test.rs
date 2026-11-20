@@ -220,8 +220,10 @@ async fn compact_restores_todos_before_first_turn_survives_recompaction_and_swit
         .plan_runtime
         .attach_from_resume_state(crate::core::session::manager::ResumeControlState {
             mode: Some(crate::core::session::AgentMode::Chat),
-            plan_path: Some(plan_path.clone()),
-            plan_id: Some("bound".into()),
+            active_plan: Some(crate::core::plan_runtime::ActivePlan::from_file(
+                plan_path.clone(),
+                &plan,
+            )),
         })
         .unwrap();
     let plan_before = std::fs::read(&plan_path).unwrap();
@@ -238,6 +240,148 @@ async fn compact_restores_todos_before_first_turn_survives_recompaction_and_swit
     assert!(!third.contains("saved: unfinished work"));
     assert_eq!(std::fs::read(&plan_path).unwrap(), plan_before);
     assert!(std::fs::read_to_string(path).unwrap().ends_with(body));
+}
+
+#[tokio::test]
+#[serial]
+async fn completed_plan_compaction_uses_newer_todos_even_after_reopen() {
+    use crate::core::plan_runtime::file_store::{self, PlanFile, PlanFileState};
+    use crate::core::tools::plan_tool::update_plan::{self, UpdateOp, UpdatePlanArgs};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
+    let fixture = super::test_support::Fixture::new();
+    let mut ctx = fixture.ctx();
+    install_compactor(&mut ctx);
+    let plan_path = fixture.workspace.path().join("completed-a.plan.md");
+    let plan: PlanFile = PlanFile {
+        frontmatter: serde_json::from_value(serde_json::json!({
+            "plan_id":"completed-a", "goal":"formal work", "state":"planning", "created_at":"now", "schema_version":1,
+            "todos":[{"id":"formal", "content":"OLD PLAN WORK", "status":"pending"}]
+        })).unwrap(),
+        body: String::new(),
+    };
+    file_store::write_plan(&plan_path, &plan, 2000).unwrap();
+    let todos = &ctx.session_runtime.todos_runtime;
+    todos
+        .commit(false, |doc| {
+            doc.items.push(file_store::TodoItem {
+                id: "scratch".into(),
+                content: "OLDER TODOS WORK".into(),
+                status: file_store::TodoStatus::Pending,
+                evidence: vec![],
+                kind: Default::default(),
+            });
+            Ok::<_, AppError>(())
+        })
+        .unwrap();
+    let todos_path = todos.path().to_path_buf();
+    let set_time = |path: &std::path::Path, seconds| {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap()
+    };
+    set_time(&todos_path, 100);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user","content":"Finish A"}))
+        .unwrap();
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .unwrap();
+    ctx.session_runtime
+        .plan_runtime
+        .build_plan(plan_path.to_str().unwrap(), Some(session_id), true)
+        .unwrap();
+    let outcome = update_plan::execute(
+        &ctx.session_runtime.plan_runtime,
+        UpdatePlanArgs {
+            plan_id: None,
+            path: Some(plan_path.to_string_lossy().into_owned()),
+            replace: false,
+            ops: vec![UpdateOp::SetStatus {
+                id: "formal".into(),
+                content: None,
+                status: file_store::TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome["plan_state_after"], "completed");
+    set_time(&plan_path, 200);
+    compact_session(&ctx).await.unwrap();
+    let first = latest_summary(&ctx);
+    assert!(first.contains("## Progress\nThe plan is complete."));
+    assert!(first.contains(" (200000)\n") && first.contains(" (100000)\n"));
+    assert!(!first.contains("OLDER TODOS WORK"));
+
+    todos
+        .commit(false, |doc| {
+            doc.items[0].content = "NEW TODOS WORK".into();
+            Ok::<_, AppError>(())
+        })
+        .unwrap();
+    set_time(&todos_path, 300);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user","content":"Move on to the newer Todos"}))
+        .unwrap();
+    compact_session(&ctx).await.unwrap();
+    let second = latest_summary(&ctx);
+    drop(ctx);
+
+    let mut reopened = fixture.ctx();
+    install_compactor(&mut reopened);
+    // The CLI and Serve attach the recovered control state after context construction.
+    let hydrated = init_context_state(
+        &reopened.session_runtime.session,
+        &reopened.config.context,
+        "",
+    )
+    .unwrap();
+    reopened
+        .session_runtime
+        .plan_runtime
+        .attach_from_resume_state(hydrated.resume_control)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .session_runtime
+            .plan_runtime
+            .active_plan()
+            .unwrap()
+            .state,
+        PlanFileState::Completed
+    );
+    reopened
+        .session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user","content":"Continue after reopening"}))
+        .unwrap();
+    compact_session(&reopened).await.unwrap();
+    let third = latest_summary(&reopened);
+    for summary in [&second, &third] {
+        assert!(summary.contains("NEW TODOS WORK") && summary.contains(" (300000)\n"));
+        assert!(!summary.contains("The plan is complete."));
+    }
+    for (index, summary) in [&first, &second, &third].into_iter().enumerate() {
+        assert!(summary.contains("plan_file_state: completed"));
+        assert!(!summary.contains("OLD PLAN WORK") && !summary.contains("MODEL CLAIM"));
+        assert_eq!(summary.matches("## Progress").count(), 1);
+        let control = summary.split("</control_state>").next().unwrap();
+        let progress = summary.split("## Progress").nth(1).unwrap();
+        println!(
+            "summary {}:\n{}\n## Progress{}",
+            index + 1,
+            control,
+            progress
+        );
+    }
 }
 
 #[tokio::test]

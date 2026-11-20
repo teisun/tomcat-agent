@@ -37,6 +37,7 @@ sidecar 只保存恢复定位所需的轻量 metadata，不保存完整消息正
 - `recent_turn_starts`
 - `latest_day_first_entry`
 - `latest_plan_event`
+- `agent_mode`、`active_plan`（`id` / `path` / `state`）、`seen_plan_current`
 
 其中 anchor 统一保存：
 
@@ -45,7 +46,9 @@ sidecar 只保存恢复定位所需的轻量 metadata，不保存完整消息正
 - `timestamp`
 - `entry_kind`
 
-`latest_plan_event` 保存的是可直接恢复成 `PlanEventRef` 的 metadata，不要求把 plan event 本体重新塞回聊天 slice。
+`latest_plan_event` 保存可直接恢复成 `PlanEventRef` 的 metadata，不要求把事件本体重新塞回聊天 slice。它不等于 `active_plan`：程序换当前计划时才追加 `plan.current`；重启取最后一笔，再读计划文件确认。清空用 `path: null`，`seen_plan_current` 区分已明确清空和从未写过这类记录。老会话没有 `plan.current` 时，按最后一条带计划路径与 ID 的计划事件恢复；会话模式推断不变。
+
+恢复索引 schema 7：旧索引从 transcript 重建，增量更新与重建使用同一套事件读取规则。即使消息回退到全量读取，只要索引可用，控制态仍来自完整索引，不从截断的消息尾部猜。
 
 ---
 

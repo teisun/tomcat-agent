@@ -108,12 +108,13 @@ commit：锁内克隆 → 应用并校验 → 原子保存 → 替换内存 → 
 
 ```text
 ControlSnapshot::capture(本 loop 的 Plan?, 本 loop 的 Todos?)
-    可读 Plan → plan_path
-    否则已保存/恢复的 Todos（空条目也算）→ todos_path
-    否则 → 无工作文件入口
+    未完成 Plan → Plan 路径、时间、待办
+    已完成 Plan → 保留 Plan 路径和时间，有 Todos 也记其路径和时间
+                   Todos 严格更新才列其待办，否则显示完成提示，不列待办
+    无可读 Plan → 已保存/恢复的 Todos 路径、时间、待办（空文档也算）
 ```
 
-只选择一份路径与同源进度，Plan 即使空清单或已完成也优先。正文与完整证据不放进摘要；模型按入口读文件，使用 `todos` 更新工作本。预热快照采用启动时状态，不在后台追随之后的修改；详见 [上下文管理 §7.5](../context-management.md#75-compaction-v2-修订t2-p0-002)。
+上述判断只影响摘要，不改变计划绑定或侧栏。正文与完整证据不放进摘要；模型按入口读文件，使用 `todos` 更新工作本。预热快照采用启动时状态，不在后台追随之后的修改；详见 [上下文管理 §7.5](../context-management.md#75-compaction-v2-修订t2-p0-002)。
 
 ## 6. 回归覆盖
 

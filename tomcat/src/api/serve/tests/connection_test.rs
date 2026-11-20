@@ -5,6 +5,41 @@ use std::sync::Arc;
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn shared_initialize_reports_attachment_root_before_workspace_scope() {
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (connection, output) = connect(&runtime);
+    assert!(connection.current_scope().is_none());
+    handle_control_or_interrupt(
+        connection.clone(),
+        ServeCommand::ControlRequest {
+            request_id: "initialize-root".into(),
+            subtype: "initialize".into(),
+            session_id: None,
+            payload: serde_json::Value::Null,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = frame(&output, |f| f["requestId"] == "initialize-root").await;
+    let root = reply["payload"]["attachmentRoot"]
+        .as_str()
+        .expect("attachment root before workspace scope");
+    assert!(connection.current_scope().is_none());
+    new_shared(&connection, work.path(), "new").await;
+    let slot = runtime
+        .registry
+        .get(&connection.active_session_id().unwrap())
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(root),
+        slot.ctx.session_runtime.session.attachment_store().root()
+    );
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn disk_sessions_require_workspace_scope_before_bootstrap() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(2);

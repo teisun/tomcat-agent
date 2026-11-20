@@ -159,18 +159,16 @@ export function WebSearchSettingsView({ state, vscodeApi }: {
   }
 
   return <SettingsShell state={state} vscodeApi={vscodeApi}>
-    <main className="tc-settings-shell__content">
+    <main className="tc-settings-shell__content tc-search-settings__content">
       <header className="tc-settings-shell__header"><div>
-        <h1>{t("settings.tools")}</h1>
         <div role="tablist" aria-label={t("settings.tools")} className="tc-search-settings__tabs">
           <button type="button" role="tab" id="web-search-tab" aria-selected="true" aria-controls="web-search-panel" className="tc-chip tc-search-settings__tab">{t("searchSettings.title")}</button>
         </div>
       </div></header>
       <section id="web-search-panel" role="tabpanel" aria-labelledby="web-search-tab">
         <p>{t("searchSettings.description")}</p>
-        <p>{t("searchSettings.keyHint")}</p>
       {state.error && <div className="tc-banner tc-banner--warning" role="alert">{state.error}</div>}
-      <div role="status">{busy ? t("searchSettings.saving") : [state.status, announcement].filter(Boolean).join(" ")}</div>
+      <div role="status" className={busy ? undefined : "tc-visually-hidden"}>{busy ? t("searchSettings.saving") : [state.status, announcement].filter(Boolean).join(" ")}</div>
       {!state.ready && !state.error && <p>{t("settings.waitingForConnection")}</p>}
       {state.ready && !state.capabilities.webSearchSettings && <div className="tc-banner tc-banner--warning">{t("searchSettings.unsupported")}</div>}
       {settings?.backends.length === 0 && <div className="tc-banner">{t("searchSettings.noPluginBackends")}</div>}

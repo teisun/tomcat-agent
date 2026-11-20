@@ -131,17 +131,42 @@ impl NextAction {
     }
 }
 
-/// A readable Plan wins, including an empty Plan. Otherwise use this Agent's saved Todos.
+/// Summary-only snapshot. Completed plans retain their path, not their checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScratchpadProgress {
+    pub path: PathBuf,
+    pub modified_at_ms: Option<i64>,
+    pub todos: Vec<file_store::TodoItem>,
+}
+
+impl ScratchpadProgress {
+    fn capture(runtime: Option<&todo_runtime::TodosRuntime>) -> Option<Self> {
+        let (path, todos) = runtime?.progress()?;
+        Some(Self {
+            modified_at_ms: file_modified_at_ms(&path),
+            path,
+            todos,
+        })
+    }
+}
+
+fn file_modified_at_ms(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis())
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressSource {
     PlanFile {
         path: PathBuf,
+        modified_at_ms: Option<i64>,
         todos: Vec<file_store::TodoItem>,
     },
-    SessionScratchpad {
+    CompletedPlan {
         path: PathBuf,
-        todos: Vec<file_store::TodoItem>,
+        modified_at_ms: Option<i64>,
+        scratchpad: Option<ScratchpadProgress>,
     },
+    SessionScratchpad(ScratchpadProgress),
 }
 
 /// 会话控制态快照。摘要的 `<control_state>` 机器区块（第 3 章）与恢复日志共用这一份取数，
@@ -154,8 +179,7 @@ pub struct ControlSnapshot {
     pub plan_file_state: Option<String>,
     pub plan_id: Option<String>,
     pub model: Option<String>,
-    /// Runtime-selected Progress source. See [`ProgressSource`] for the
-    /// PlanFile-first, scratchpad-fallback invariant.
+    /// Documents and checklist selected at compaction start, not live session state.
     pub progress: Option<ProgressSource>,
 }
 
@@ -177,16 +201,27 @@ impl ControlSnapshot {
         let plan_file_state = plan
             .as_ref()
             .map(|(_, plan)| plan.frontmatter.state.as_str().to_string());
-        let progress = plan
-            .map(|(path, plan)| ProgressSource::PlanFile {
-                path,
-                todos: plan.frontmatter.todos,
-            })
-            .or_else(|| {
-                todos_runtime
-                    .and_then(|todos| todos.progress())
-                    .map(|(path, todos)| ProgressSource::SessionScratchpad { path, todos })
-            });
+        let progress = match plan {
+            Some((path, plan)) => {
+                let modified_at_ms = file_modified_at_ms(&path);
+                if plan.frontmatter.state == file_store::PlanFileState::Completed {
+                    Some(ProgressSource::CompletedPlan {
+                        path,
+                        modified_at_ms,
+                        scratchpad: ScratchpadProgress::capture(todos_runtime),
+                    })
+                } else {
+                    Some(ProgressSource::PlanFile {
+                        path,
+                        modified_at_ms,
+                        todos: plan.frontmatter.todos,
+                    })
+                }
+            }
+            None => {
+                ScratchpadProgress::capture(todos_runtime).map(ProgressSource::SessionScratchpad)
+            }
+        };
         Some(Self {
             mode: runtime.map(PlanRuntime::mode).unwrap_or(AgentMode::Chat),
             plan_file_state,
@@ -639,33 +674,30 @@ impl PlanRuntime {
         self.transition_agent_mode(AgentMode::Plan, AgentMode::Chat)
     }
 
-    /// 启动恢复：模式只来自 sidecar；计划文件只恢复 active plan 缓存。
+    /// 启动恢复：以恢复控制态为起点，读盘确认绑定是否仍有效。
     pub fn attach_from_resume_state(
         &self,
         state: ResumeControlState,
     ) -> Result<(), PlanRuntimeError> {
         *self.mode.write() = state.mode.unwrap_or(AgentMode::Chat);
-        let mut unavailable_basis = "resume_plan_file_unreadable";
-        let active_plan = state.plan_path.as_ref().and_then(|path| {
-            read_plan_for_restore(path, self.lock_timeout_ms).and_then(|plan| {
-                if plan.frontmatter.state == file_store::PlanFileState::Executing
-                    && !self.owns_executing_plan(&plan)
-                {
-                    unavailable_basis = "resume_plan_owned_elsewhere";
-                    None
-                } else {
-                    Some(ActivePlan::from_file(path.clone(), &plan))
-                }
-            })
+        let mut unavailable_reason = None;
+        let active_plan = state.active_plan.as_ref().and_then(|active| {
+            let Some(plan) = read_plan_for_restore(&active.path, self.lock_timeout_ms) else {
+                unavailable_reason = Some("resume_plan_file_unreadable");
+                return None;
+            };
+            if plan.frontmatter.state == file_store::PlanFileState::Executing
+                && !self.owns_executing_plan(&plan)
+            {
+                unavailable_reason = Some("resume_plan_owned_elsewhere");
+                return None;
+            }
+            Some(ActivePlan::from_file(active.path.clone(), &plan))
         });
-        if state.plan_path.is_some() && active_plan.is_none() {
-            self.write_transcript_custom(serde_json::json!({
-                "event": crate::infra::wire::WIRE_PLAN_RESTORE,
-                "state": "unavailable",
-                "basis": unavailable_basis,
-            }));
-        }
-        *self.active_plan.write() = active_plan;
+        let mut current = self.active_plan.write();
+        // Compare against the recovered binding, not the freshly constructed runtime.
+        *current = state.active_plan;
+        self.set_active_plan(current, active_plan, unavailable_reason);
         Ok(())
     }
 
@@ -694,18 +726,26 @@ impl PlanRuntime {
     pub fn sync_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
         if let Some(active) = self.active_plan() {
             let Some(plan) = read_plan_for_restore(&active.path, self.lock_timeout_ms) else {
-                *self.active_plan.write() = None;
+                self.set_active_plan(
+                    self.active_plan.write(),
+                    None,
+                    Some("restore_plan_file_unreadable"),
+                );
                 return Ok(None);
             };
             if plan.frontmatter.state == file_store::PlanFileState::Executing
                 && !self.owns_executing_plan(&plan)
             {
-                *self.active_plan.write() = None;
+                self.set_active_plan(
+                    self.active_plan.write(),
+                    None,
+                    Some("restore_plan_owned_elsewhere"),
+                );
                 return Ok(None);
             }
             let refreshed = ActivePlan::from_file(active.path, &plan);
             let plan_id = refreshed.id.clone();
-            *self.active_plan.write() = Some(refreshed);
+            self.set_active_plan(self.active_plan.write(), Some(refreshed), None);
             return Ok(Some(plan_id));
         }
 
@@ -730,7 +770,11 @@ impl PlanRuntime {
                     continue;
                 };
                 let plan_id = plan.frontmatter.plan_id.clone();
-                *self.active_plan.write() = Some(ActivePlan::from_file(path.clone(), &plan));
+                self.set_active_plan(
+                    self.active_plan.write(),
+                    Some(ActivePlan::from_file(path, &plan)),
+                    None,
+                );
                 return Ok(Some(plan_id));
             }
         }
@@ -751,14 +795,50 @@ impl PlanRuntime {
         path: PathBuf,
         plan: &file_store::PlanFile,
     ) {
-        let mut active = self.active_plan.write();
-        if active
+        self.refresh_active_plan(ActivePlan::from_file(path, plan));
+    }
+
+    fn refresh_active_plan(&self, updated: ActivePlan) {
+        let current = self.active_plan.write();
+        if current
             .as_ref()
-            .is_some_and(|current| current.is_executing() && current.path != path)
+            .is_some_and(|plan| plan.is_executing() && plan.path != updated.path)
         {
             return;
         }
-        *active = Some(ActivePlan::from_file(path, plan));
+        self.set_active_plan(current, Some(updated), None);
+    }
+
+    /// Refresh the cached state even for the same path, but only record a binding change.
+    /// Use the existing write guard to keep the append in binding order; the event is not broadcast.
+    fn set_active_plan(
+        &self,
+        mut current: parking_lot::RwLockWriteGuard<'_, Option<ActivePlan>>,
+        next: Option<ActivePlan>,
+        reason: Option<&str>,
+    ) {
+        let changed =
+            current.as_ref().map(|plan| &plan.path) != next.as_ref().map(|plan| &plan.path);
+        *current = next;
+        if !changed {
+            return;
+        }
+        let event = match current.as_ref() {
+            Some(plan) => serde_json::json!({
+                "event": crate::infra::wire::WIRE_PLAN_CURRENT,
+                "plan_id": plan.id,
+                "path": crate::infra::platform::format_home_path(&plan.path),
+                "state": plan.state.as_str(),
+            }),
+            None => serde_json::json!({
+                "event": crate::infra::wire::WIRE_PLAN_CURRENT,
+                "path": null,
+                "reason": reason,
+            }),
+        };
+        if let Err(error) = self.append_transcript_custom(event) {
+            tracing::warn!(%error, "Failed to record current plan in transcript");
+        }
     }
 
     #[cfg(test)]
@@ -1600,11 +1680,15 @@ impl PlanRuntime {
         }
         let prev_disk_state = build.prev_disk_state;
         // 4: 写盘成功后刷新 active-plan 缓存；Build 离开 Plan 会话模式。
-        *self.active_plan.write() = Some(ActivePlan {
-            id: plan_id.clone(),
-            path: path.clone(),
-            state: file_store::PlanFileState::Executing,
-        });
+        self.set_active_plan(
+            self.active_plan.write(),
+            Some(ActivePlan {
+                id: plan_id.clone(),
+                path: path.clone(),
+                state: file_store::PlanFileState::Executing,
+            }),
+            None,
+        );
         // 一次 build 就是一次交付尝试，code review 轮数预算按次发放而不是按计划终身发放。
         // 少了这一步，同一进程里二次 build 同一个计划会因为计数器没清而直接跳过 review。
         self.reset_review_infra_retries(&plan_id);
@@ -1698,9 +1782,8 @@ impl PlanRuntime {
     ///
     /// **副作用**（事务序）：
     /// 1. 读当前 plan 文件
-    /// 2. 写 frontmatter.state = pending（atomic + advisory lock；写完即释放，防 D1）
-    /// 3. 刷新 active-plan 缓存为 pending
-    /// 4. 返回 plan_id 给上层做 transcript `plan.cancel.demote_to_pending`
+    /// 2. 在同一把文件锁内确认仍由本会话执行，才写 pending
+    /// 3. 刷新缓存；只有实际写入时才记 plan.pending 并返回 plan_id
     ///
     /// **幂等**：没有 executing plan 时直接返回 Ok(None)。
     /// **错误**：磁盘读/写失败不修改缓存，返回 `Io`；上层应仅 warning（D8）。
@@ -1714,20 +1797,34 @@ impl PlanRuntime {
         self.completion_guard_stalled.lock().remove(&plan_id);
         // ② 仅降级计划生命周期；todo 状态原样保留。
         let path = active.path;
-        file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
-            plan.frontmatter.state = file_store::PlanFileState::Pending;
-            Ok::<(), PlanRuntimeError>(())
-        })
-        .map_err(|e| match e {
-            file_store::LockedPlanMutationError::Plan(err) => PlanRuntimeError::from_plan_io(err),
-            file_store::LockedPlanMutationError::Callback(err) => err,
-        })?;
-        // ③ 刷新缓存并记录纯计划文件事件（会话模式从头到尾仍是 Chat）。
-        *self.active_plan.write() = Some(ActivePlan {
-            id: plan_id.clone(),
-            path: path.clone(),
-            state: file_store::PlanFileState::Pending,
-        });
+        use file_store::{LockedPlanMutationError, PlanFileState};
+        let (refreshed, parked) =
+            match file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
+                if plan.frontmatter.plan_id != plan_id
+                    || plan.frontmatter.state != PlanFileState::Executing
+                    || !self.owns_executing_plan(plan)
+                {
+                    // A callback error leaves the disk unchanged, including its mtime.
+                    return Err(ActivePlan::from_file(path.clone(), plan));
+                }
+                plan.frontmatter.state = PlanFileState::Pending;
+                Ok(ActivePlan::from_file(path.clone(), plan))
+            }) {
+                Ok(updated) => (updated, true),
+                Err(LockedPlanMutationError::Callback(on_disk)) => (on_disk, false),
+                Err(LockedPlanMutationError::Plan(error)) => {
+                    return Err(PlanRuntimeError::from_plan_io(error))
+                }
+            };
+        // Stop may refresh the file it parked, but it does not switch plans.
+        let mut current = self.active_plan.write();
+        if current.as_ref().is_some_and(|active| active.path == path) {
+            *current = Some(refreshed);
+        }
+        drop(current);
+        if !parked {
+            return Ok(None);
+        }
         self.emit_plan_state_event(
             crate::infra::wire::WIRE_PLAN_PENDING,
             file_store::PlanFileState::Pending.as_str(),

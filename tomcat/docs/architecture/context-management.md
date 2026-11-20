@@ -1639,24 +1639,23 @@ T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`
 | `#T-043` 不新增 `tool-results/_index.jsonl` 落盘索引 | 信息可由 transcript 占位符 + fs mtime + 文件名（tool_call_id）完全重建，主路径无消费者 | 真实归属 `executor/primitives.rs::edit_file`（agent 写大文件方式），抽出 **T2-P0-011 large-file-edit-strategy** 承接 |
 | `#T-044` 不实施 Two-pass summary | CC 用 fork 子代理 + prompt cache 抵消草稿成本，tomcat 单次 LLM 直发性价比不好 | 模板指令区追加 `First reason internally, then output the final summary.` 隐式诱导，不开第二轮 LLM |
 
-#### 7.5.6 工作文件恢复入口：Plan 优先，否则本 Agent 的 Todos
+#### 7.5.6 压缩时的计划与 Todos 快照
 
 ```text
 ControlSnapshot::capture(本 loop 的 PlanRuntime?, 本 loop 的 TodosRuntime?, model)
-    ├─ 当前 Plan 可读（空清单、completed 也算）→ PlanFile { path, todos }
-    ├─ 否则本 Agent 的 Todos 文档存在        → SessionScratchpad { path, todos }
-    └─ 两者都没有                          → 无工作文件入口
-                            ↓
-              control_state 只输出所选 plan_path 或 todos_path
-              Progress 同时使用所选文档的条目，不让模型猜
+    ├─ 可读的未完成 Plan → Plan 路径、修改时间和待办
+    ├─ 可读的已完成 Plan → Plan 路径和修改时间；若有 Todos 也记其路径和修改时间
+    │                       仅 Todos 严格更新才列其待办，否则 Progress 写完成提示和统一说明
+    ├─ Plan 不可读或未绑定，已有 Todos → Todos 路径、修改时间和待办
+    └─ 无任务文件 → 保留模型写的普通进展
 ```
 
-- 手动 `/compact`、主循环预热、轮末预热、current-tail 预热/Collapse 都使用同一选源入口。路径属于 ProgressSource，不另行拼接两个互相竞争的指针；旧机器区块先 strip，再按当前快照重建。
+- 手动 `/compact`、主循环预热、轮末预热、current-tail 预热/Collapse 都使用同一选源入口。路径、时间和待办来自同一次快照。排序和显示使用同一毫秒时间戳；相等或读不到时间都不算更新。旧机器区块先 strip，再按当前快照重建。只要输出任务文件路径，Progress 就由程序重写。计划清单与 Todos 清单统一用 `Rendered by the runtime; this supersedes any prose below.`；不列待办的完成分支在前面加 `The plan is complete.`。快照时点和以后续消息为准的说明只留在 `<control_state>`。
 - Todos 即使只有正文或空条目也可作为恢复入口；损坏/加载失败的文档不提供入口。Plan 读失败时不输出该路径，但不改绑定、ID 或生命周期。
 - `capture` 只收当前 loop 的两个句柄：reviewer 借用可读 Plan 时仍优先看 Plan，退回 Todos 时只能看自己的工作本；仅有 TodosRuntime 的 loop 使用 chat 模式。两种运行时都没有则保持无控制快照。
 - 机器区块不复制正文或完整证据。`todos_path` 提示用 `read` 查看原件、用 `todos` 修改；主 Agent 关闭后再打开，TodosRuntime 直接从 v2 文件恢复完整文档，不依赖摘要。
 - **时序边界不变**：预热在启动时取快照。后台生成期间若清单变化，旧结果仍表达启动时状态，下次压缩再体现；不后台刷新旧摘要，不修改历史文本或 `recent_files`。
-- 未压缩的恢复上下文保留工具结果中的 `todos_path`；压缩后靠上述唯一入口。不增加每轮常驻的路径提示。
+- 未压缩的恢复上下文保留工具结果中的 `todos_path`；摘要使用上述快照，不增加每轮常驻的路径提示。
 
 行为与回归入口见 [`tools/todos.md`](./tools/todos.md)、`cmd_compact_test.rs`、`current_tail_guard_test.rs`、`lifecycle_test.rs` 与 `machine_block_test.rs`。
 

@@ -276,10 +276,10 @@ fn pending_plan_session_override_warns() {
 fn pending_session_can_build_another_explicit_plan() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "sid-a");
 
     write_disk_plan("old_pending", PlanFileState::Planning);
-    rt.build_plan("old_pending", Some("sid-old".into()), false)
+    rt.build_plan("old_pending", Some("sid-a".into()), false)
         .expect("old plan build should succeed");
     let demoted = rt.park_executing_plan().expect("demote should succeed");
     assert_eq!(demoted.as_deref(), Some("old_pending"));
@@ -290,7 +290,7 @@ fn pending_session_can_build_another_explicit_plan() {
 
     write_disk_plan("new_plan", PlanFileState::Planning);
     let outcome = rt
-        .build_plan("new_plan", Some("sid-new".into()), false)
+        .build_plan("new_plan", Some("sid-a".into()), false)
         .expect("pending session should build another explicit plan");
 
     assert_eq!(outcome.plan_id, "new_plan");

@@ -32,6 +32,7 @@ fn park_preserves_in_progress_acceptance_todo() {
     let path = directory.path().join("delivery.plan.md");
     let mut frontmatter = sample_frontmatter();
     frontmatter.state = PlanFileState::Executing;
+    frontmatter.session_key = Some("session".into());
     frontmatter.todos = vec![TodoItem {
         id: "acceptance".into(),
         content: "验收".into(),

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "./i18n/LocaleProvider";
 import type { Translator } from "../../src/shared/i18n";
 import { freshOccurrences } from "../../src/shared/composerOccurrences";
-import { nextThumbnailTarget } from "./attachments/thumbnailBackfill";
+import { nextThumbnailTarget, ThumbnailFailures } from "./attachments/thumbnailBackfill";
 
 import {
   blobToBase64,
@@ -1751,9 +1751,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
    *
    * So the webview fills the gap itself: read the image over the resource protocol,
    * downsample inside the decoder, hand the small result back. Each hash is attempted
-   * once per session; a failure leaves the placeholder rather than retrying forever.
+   * once per webview; a failure replaces the placeholder rather than retrying forever.
    */
   const attemptedThumbnailsRef = useRef(new Set<string>());
+  const [thumbnailFailures, setThumbnailFailures] = useState<ReadonlySet<string>>(() => new Set());
+  const markThumbnailFailed = useCallback((sha: string) => {
+    setThumbnailFailures(current => current.has(sha) ? current : new Set([...current, sha]));
+  }, []);
   const thumbnailWorkRef = useRef(false);
   const [thumbnailPass, setThumbnailPass] = useState(0);
   useEffect(() => {
@@ -1778,8 +1782,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           thumbBase64: await blobToBase64(thumb),
         });
       } catch (error) {
-        // The placeholder stays. Retrying would most likely fail the same way, and a
-        // missing thumbnail costs memory rather than correctness.
+        markThumbnailFailed(target.blobSha);
         console.warn(`Tomcat could not build a thumbnail for ${target.blobSha}`, error);
       } finally {
         thumbnailWorkRef.current = false;
@@ -1788,7 +1791,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         setThumbnailPass((pass) => pass + 1);
       }
     })();
-  }, [activeSession, thumbnailPass, vscodeApi]);
+  }, [activeSession, thumbnailPass, vscodeApi, markThumbnailFailed]);
 
   useEffect(() => {
     if (!contextSearch.open) {
@@ -1921,6 +1924,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         return;
       }
       if (frame.channel === "event") {
+        if (isRecord(frame.content) && frame.content.type === "attachmentThumbnailFailed" && typeof frame.content.blobSha === "string") {
+          markThumbnailFailed(frame.content.blobSha);
+          return;
+        }
         if (isRecord(frame.content) && frame.content.type === "composerSubmissionResult" && frame.content.accepted === false && typeof frame.content.userMessageId === "string") {
           pendingComposerSubmissionRef.current.delete(frame.content.userMessageId);
           return;
@@ -2168,7 +2175,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [vscodeApi]);
+  }, [vscodeApi, markThumbnailFailed]);
 
   useEffect(() => {
     flushPendingInsertions();
@@ -2711,6 +2718,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   };
 
   return (
+    <ThumbnailFailures.Provider value={thumbnailFailures}>
     <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
@@ -2958,5 +2966,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         </div>
       </div>
     </main>
+    </ThumbnailFailures.Provider>
   );
 }

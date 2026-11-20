@@ -1,5 +1,6 @@
 import { useT } from "../i18n/LocaleProvider";
-import type { KeyboardEvent } from "react";
+import { useContext, useState, type KeyboardEvent } from "react";
+import { ThumbnailFailures } from "../attachments/thumbnailBackfill";
 
 import type { WebviewPendingAttachment } from "../types";
 
@@ -94,53 +95,20 @@ export function AttachmentStrip({
           );
         }
 
-        // Thumbnails are generated in the webview and stored by the backend, so for a
-        // moment after a paste — and while a history image's thumbnail is being cached —
-        // there is nothing to show yet. A placeholder of exactly the final size keeps the
-        // composer from jumping as the images land.
-        if (isImage && !attachment.thumbUri) {
+        if (isImage) {
           return (
             <div
               key={attachment.id}
               className="tc-attachment-strip__item"
               role="listitem"
             >
-              <span
-                aria-label={t("attachment.loading", { name: attachment.label })}
-                className="tc-attachment-strip__skeleton"
-                data-testid="attachment-skeleton"
-                title={attachment.label}
-              />
-              {removeButton}
-            </div>
-          );
-        }
-
-        if (isImage && attachment.thumbUri) {
-          return (
-            <div
-              key={attachment.id}
-              className="tc-attachment-strip__item"
-              role="listitem"
-            >
-              <button
-                aria-label={t("attachment.open", { name: attachment.label })}
-                className="tc-attachment-strip__thumb"
-                data-testid={readonly ? "history-attachment-thumb" : "attachment-thumb"}
-                onClick={() => onOpen?.(attachment)}
+              <Thumbnail
+                key={attachment.thumbUri ?? "pending"}
+                attachment={attachment}
+                readonly={readonly}
+                onOpen={onOpen}
                 onKeyDown={removeOnDeleteKey}
-                title={attachment.label}
-                type="button"
-              >
-                <img
-                  alt={attachment.label}
-                  className="tc-attachment-strip__img"
-                  data-attachment-resolution={attachment.hasThumb ? "thumb" : "full"}
-                  decoding="async"
-                  loading="lazy"
-                  src={attachment.thumbUri}
-                />
-              </button>
+              />
               {removeButton}
             </div>
           );
@@ -193,6 +161,43 @@ export function AttachmentStrip({
       })}
     </section>
   );
+}
+
+function Thumbnail({ attachment, readonly, onOpen, onKeyDown }: {
+  attachment: WebviewPendingAttachment;
+  readonly: boolean;
+  onOpen?: (attachment: WebviewPendingAttachment) => void;
+  onKeyDown: (event: KeyboardEvent) => void;
+}) {
+  const t = useT();
+  const failures = useContext(ThumbnailFailures);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const { label, thumbUri, fullUri, hasThumb, blobSha } = attachment;
+  const failed = loadFailed || (!thumbUri && (!fullUri || hasThumb || failures.has(blobSha)));
+  if (!thumbUri && !failed) {
+    return <span aria-label={t("attachment.loading", { name: label })}
+      className="tc-attachment-strip__skeleton" data-testid="attachment-skeleton" title={label} />;
+  }
+  const open = fullUri && onOpen;
+  const testId = readonly ? "history-attachment-thumb" : "attachment-thumb";
+  if (failed) {
+    const explanation = t("attachment.previewUnavailableNamed", { name: label });
+    const unavailableTestId = readonly ? "history-attachment-preview-unavailable" : "attachment-preview-unavailable";
+    const content = <span>{t("attachment.previewUnavailable")}</span>;
+    const className = "tc-attachment-strip__thumb tc-attachment-strip__preview-unavailable";
+    return open
+      ? <button type="button" aria-label={`${explanation}. ${t("attachment.open", { name: label })}`}
+          className={className} data-testid={unavailableTestId} title={explanation}
+          onClick={() => open(attachment)} onKeyDown={onKeyDown}>{content}</button>
+      : <span className={className} data-testid={unavailableTestId} title={explanation}>{content}</span>;
+  }
+  return <button type="button" aria-label={t("attachment.open", { name: label })}
+    className="tc-attachment-strip__thumb" data-testid={testId} title={label}
+    onClick={() => onOpen?.(attachment)} onKeyDown={onKeyDown}>
+    <img alt={label} className="tc-attachment-strip__img"
+      data-attachment-resolution={hasThumb ? "thumb" : "full"} decoding="async" loading="lazy"
+      src={thumbUri ?? undefined} onError={() => setLoadFailed(true)} />
+  </button>;
 }
 
 function describeAttachment(attachment: WebviewPendingAttachment): string {

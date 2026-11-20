@@ -7,7 +7,7 @@ use serial_test::serial;
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileState, TodoKind, TodoStatus,
 };
-use tomcat::core::plan_runtime::PlanRuntime;
+use tomcat::core::plan_runtime::{ActivePlan, PlanRuntime};
 use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::tools::plan_tool::{create_plan, update_plan};
 
@@ -28,8 +28,7 @@ fn start_execution(runtime: &PlanRuntime, plan_id: &str) {
     runtime
         .attach_from_resume_state(ResumeControlState {
             mode: Some(AgentMode::Chat),
-            plan_path: Some(path),
-            plan_id: Some(plan_id.to_string()),
+            active_plan: Some(ActivePlan::from_file(path, &plan)),
         })
         .expect("bind executing plan");
 }

@@ -22,6 +22,20 @@ function setup() {
   return { postMessage, update: (patch: Partial<SettingsStateSnapshot>) => component.rerender(view({ ...state, ...patch })) };
 }
 
+it.each([
+  ["en", "Tools", "Web Search", "Tomcat tries enabled providers from top to bottom and stops at the first successful response."],
+  ["zh-CN", "工具", "网页搜索", "按从上到下的顺序尝试已启用的服务，第一个正常返回就停止。"],
+] as const)("shows only one line of explanatory copy in %s", (locale, tools, tab, firstSentence) => {
+  const { rerender } = render(<LocaleProvider locale={locale}><WebSearchSettingsView state={state} vscodeApi={{ postMessage() {} }} /></LocaleProvider>);
+  expect(screen.getByRole("button", { name: tools })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: tools })).toBeNull();
+  const panel = screen.getByRole("tabpanel", { name: tab });
+  expect([...panel.querySelectorAll(":scope > p")].map(p => p.textContent)).toEqual([firstSentence]);
+  rerender(<LocaleProvider locale={locale}><WebSearchSettingsView state={{ ...state, status: "Saved", webSearchReceipt: { requestId: "saved", phase: "saved" } }} vscodeApi={{ postMessage() {} }} /></LocaleProvider>);
+  expect(screen.getByRole("status").classList.contains("tc-visually-hidden")).toBe(true);
+  expect(screen.getByRole("status").textContent).toBe("Saved");
+});
+
 it("renders arbitrary declared providers and saves routing without guessing the result", () => {
   const { postMessage, update } = setup();
   const tab = screen.getByRole("tab", { name: "Web Search", selected: true });

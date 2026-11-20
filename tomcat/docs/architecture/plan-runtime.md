@@ -29,7 +29,7 @@ start_plan({plan_id?}) → PLAN 内用户确认 ──┘
 
 同一 AgentLoop 的稳定 system 快照和 tools 不重建，runtime tail 实时切换提醒。供应商适配器会把 tail 合并到 wire 的 system/instructions 中（OpenAI Completions 亦如此），因此**不承诺整个 wire 前缀或缓存命中不变**。PLAN 中开工的首回合仍不显示 `package_install`，下一用户回合刷新工具后恢复。
 
-执行中 `ask_question` 沿用原有等待式问答；回答/跳过继续当前回合，Stop 停放计划。恢复的问题接当前回合取消信号，不会因为恢复问题而自动开工。执行 A 时修改或新建 B 不得替换 A 的执行绑定。
+执行中 `ask_question` 沿用原有等待式问答；回答/跳过继续当前回合，Stop 停放计划。恢复的问题接当前回合取消信号，不会因为恢复问题而自动开工。执行 A 时修改或新建 B 不得替换 A 的执行绑定。程序换当前计划时才向 transcript 写一条 `plan.current`，记录 ID、路径和状态，或清空绑定及其原因。重启取最后一笔并读盘确认；正常重启或同路径状态变化不重复记。升级前的会话没有这类记录时，以最后一条带计划路径与 ID 的计划事件为准。
 
 ## 计划文件
 
@@ -80,8 +80,8 @@ update_plan
 ```
 
 所有 todo `completed` 或 `cancelled` 且列表非空时完成计划。若已完成计划有 todo 被重新
-打开，状态回到 `pending`。`park_executing_plan` 只把 lifecycle 降为 `pending`，不会
-篡改任意 todo 状态。
+打开，状态回到 `pending`。完成的计划仍保留绑定；压缩摘要不再列它的待办。
+`park_executing_plan` 在现有文件锁内确认计划仍由本会话执行，才写成 `pending` 并发事件；已完成的计划不改文件，只刷新缓存。暂停不会改待办状态。
 
 无参数 `/plan build` 续跑当前绑定的 `planning/pending` 文件：使用绑定中已有的真实路径，
 不把路径降成 ID 后重新去默认目录查找。工作区里的计划与默认目录的同 ID 文件不能串改；

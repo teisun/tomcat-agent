@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::core::llm::MessageKind;
 use crate::core::session::manager::{
-    AgentMode, PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
+    PlanEventKind, PlanEventRef, PlanModeTransition, ResumeControlState,
 };
 use crate::core::session::transcript::{
     read_entries_tail_with_stats, TranscriptEntry, TranscriptReadStats,
@@ -18,7 +18,7 @@ use crate::core::session::transcript::{
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 5;
+pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 7;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -236,13 +236,11 @@ pub(crate) struct ResumeIndex {
     pub recent_turn_starts: Vec<ResumeAnchor>,
     pub latest_day_first_entry: Option<ResumeDayAnchor>,
     pub latest_plan_event: Option<StoredPlanEventRef>,
-    /// schema v2：会话当前所处的模式。旧 sidecar 没有这项，恢复时走推断兜底。
+    #[serde(flatten)]
+    pub resume_control: ResumeControlState,
+    /// Distinguishes an explicit clear from a legacy session without a binding record.
     #[serde(default)]
-    pub agent_mode: Option<AgentMode>,
-    #[serde(default)]
-    pub active_plan_path: Option<String>,
-    #[serde(default)]
-    pub active_plan_id: Option<String>,
+    pub seen_plan_current: bool,
 }
 
 impl ResumeIndex {
@@ -253,14 +251,7 @@ impl ResumeIndex {
     }
 
     pub(crate) fn resume_control_state(&self) -> ResumeControlState {
-        ResumeControlState {
-            mode: self.agent_mode,
-            plan_path: self
-                .active_plan_path
-                .as_deref()
-                .and_then(|raw| crate::infra::platform::normalize_path(raw).ok()),
-            plan_id: self.active_plan_id.clone(),
-        }
+        self.resume_control.clone()
     }
 }
 
@@ -442,15 +433,9 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
             Some(StoredPlanEventRef::from_plan_event_ref(plan_event, &anchor));
     }
     if let Some(transition) = maybe_plan_mode_transition(entry) {
-        if let Some(mode) = transition.mode {
-            index.agent_mode = Some(mode);
-        }
-        if let Some(plan_id) = transition.plan_id {
-            index.active_plan_id = Some(plan_id);
-        }
-        if let Some(path) = transition.path {
-            index.active_plan_path = Some(path.to_string_lossy().to_string());
-        }
+        index
+            .resume_control
+            .apply(transition, &mut index.seen_plan_current);
     }
 }
 
@@ -467,9 +452,8 @@ fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
-        agent_mode: None,
-        active_plan_path: None,
-        active_plan_id: None,
+        resume_control: ResumeControlState::default(),
+        seen_plan_current: false,
     })
 }
 
@@ -501,7 +485,6 @@ fn build_index_from_lines(
         }
     }
 
-    write_sidecar(transcript_path, &index)?;
     Ok((index, stats))
 }
 
@@ -527,7 +510,13 @@ pub(crate) fn rebuild_resume_index(
         lines.push(line.clone());
     }
 
-    build_index_from_lines(transcript_path, &lines, stats)
+    let (index, stats) = build_index_from_lines(transcript_path, &lines, stats)?;
+    // Persistence is optional on resume: a read-only or unusable sidecar must not
+    // discard the binding that was just recovered from the full transcript.
+    if let Err(error) = write_sidecar(transcript_path, &index) {
+        warn!(path = %transcript_path.display(), %error, "using rebuilt resume index in memory");
+    }
+    Ok((index, stats))
 }
 
 pub(crate) fn rebuild_resume_index_from_lines(
@@ -536,6 +525,7 @@ pub(crate) fn rebuild_resume_index_from_lines(
 ) -> Result<(ResumeIndex, ResumeIndexIoStats), AppError> {
     let (index, stats) =
         build_index_from_lines(transcript_path, lines, ResumeIndexIoStats::default())?;
+    write_sidecar(transcript_path, &index)?;
     #[cfg(test)]
     LAST_INLINE_REBUILD_STATS.with(|slot| {
         *slot.borrow_mut() = Some(stats);
@@ -584,14 +574,20 @@ fn matches_previous_transcript_tail(
 pub(crate) fn load_or_rebuild_resume_index(
     transcript_path: &Path,
 ) -> Result<ResumeIndexLoad, AppError> {
-    if let Some(index) = read_sidecar_raw(transcript_path)? {
-        let (valid, stats) = validate_sidecar(&index, transcript_path)?;
-        if valid {
-            return Ok(ResumeIndexLoad {
-                index,
-                stats,
-                source: ResumeIndexSource::Existing,
-            });
+    match read_sidecar_raw(transcript_path) {
+        Ok(Some(index)) => {
+            let (valid, stats) = validate_sidecar(&index, transcript_path)?;
+            if valid {
+                return Ok(ResumeIndexLoad {
+                    index,
+                    stats,
+                    source: ResumeIndexSource::Existing,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(path = %transcript_path.display(), %error, "resume index unreadable; rebuilding from transcript");
         }
     }
 

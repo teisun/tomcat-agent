@@ -146,7 +146,6 @@ pub(crate) async fn execute_at_path(
     let warnings = tx.warnings;
 
     let plan_state_after = plan.frontmatter.state;
-    let next_action = runtime.next_action(&plan.frontmatter).await;
     let active_in_progress = plan
         .frontmatter
         .todos
@@ -193,6 +192,7 @@ pub(crate) async fn execute_at_path(
         }));
     }
 
+    let next_action = runtime.next_action(&plan.frontmatter).await;
     Ok(serde_json::json!({
         "plan_id": target_plan_id,
         "path": crate::infra::platform::format_home_path(&path),

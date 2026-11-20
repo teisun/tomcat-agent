@@ -103,6 +103,26 @@ it("projects live remote input through the provider without fetching history or 
   } finally { provider.dispose(); }
 });
 
+it("reports rejected thumbnail storage without removing the original attachment", async () => {
+  const request = vi.fn().mockResolvedValue({ success: false });
+  const provider = new TomcatWebviewViewProvider({
+    extensionUri: vscode.Uri.file("/workspace/extension"), getDefaultCwd: () => "/workspace", ide: {} as never,
+    initialize: async () => ({ capabilities: [] } as never),
+    messenger: { onEvent: () => ({ dispose() {} }), request } as never, sessionRouter: {} as never,
+  });
+  const host = provider as any;
+  const sha = "a".repeat(64);
+  host.draftStore.update("s1", () => ({ text: "", segments: [], attachments: [{ id: "image", blobSha: sha, kind: "image", hasThumb: false }] }));
+  const post = vi.spyOn(host, "postEvent").mockResolvedValue(undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    await host.storeGeneratedThumbnail({ sessionId: "s1", blobSha: sha, thumbBase64: "fixture" });
+    expect(request).toHaveBeenCalledWith({ sessionId: "s1", type: "cache_attachment_thumbnail", thumbnail: { sourceSha: sha, thumbBase64: "fixture" } });
+    expect(post).toHaveBeenCalledWith({ type: "attachmentThumbnailFailed", sessionId: "s1", blobSha: sha });
+    expect(host.draftStore.peek("s1").attachments).toEqual([{ id: "image", blobSha: sha, kind: "image", hasThumb: false }]);
+  } finally { warn.mockRestore(); provider.dispose(); }
+});
+
 describe("shared-session draft hydration", () => {
   it.each([false, true])("renews observed drafts only with shared-input capability (%s)", async sharedInput => {
     const retainAttachmentLeases = vi.fn().mockResolvedValue(undefined);

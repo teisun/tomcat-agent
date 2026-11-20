@@ -4017,6 +4017,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     );
     if (!stored) {
       console.warn(`Tomcat could not store a thumbnail for ${data.blobSha}`);
+      await this.postEvent({ type: "attachmentThumbnailFailed", sessionId: data.sessionId, blobSha: data.blobSha });
       return;
     }
 
