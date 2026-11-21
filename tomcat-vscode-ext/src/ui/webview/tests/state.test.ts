@@ -2697,6 +2697,20 @@ describe("custom history replay", () => {
     );
   });
 
+  it("does not restore a plan or checklist cleared by the service from old history", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState({ sessionId: "s1", busy: false, activePlan: null, planTodos: [] });
+    store.hydrateHistory("s1", {
+      sessionId: "s1",
+      messages: [
+        { type: "custom", event: "plan.create", id: "old-plan", plan_id: "old", path: "/old.plan.md" },
+        { type: "custom", event: "plan.todos", id: "old-todos", todos: [{ id: "todo", content: "Old work", status: "pending" }] },
+      ],
+    });
+    expect(store.snapshot().sessionViews.s1).toMatchObject({ activePlan: null, planTodos: [] });
+  });
+
   it("upserts a replayed plan verification notice after history hydration", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

@@ -410,6 +410,8 @@ fn install_chat_turn_recorder(ctx: &mut ChatContext) -> Arc<ChatTurnRecorder> {
         catalog: ctx.global_services.model_catalog.snapshot(),
         recorder: recorder.clone(),
     });
+    // These tests observe requests and transcripts, not Git snapshots of the checkout.
+    ctx.scope_services.checkpoint_store = Arc::new(crate::core::NoopStore);
     ctx.session_runtime.suppress_cli_output = true;
     recorder
 }
@@ -2851,11 +2853,30 @@ async fn validate_capabilities_accepts_pdf_when_files_enabled() {
     let _api_guard = EnvGuard::set(ENV_KEY, "stub");
     let _no_proxy = EnvGuard::set("NO_PROXY", "127.0.0.1,localhost");
     let _no_proxy_lower = EnvGuard::set("no_proxy", "127.0.0.1,localhost");
-    let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);
-    let (_dir, ctx, transcript_path) = chat_turn_test_context(&[
+    let server = wiremock::MockServer::start().await;
+    // This case checks the capability gate, not retries or a provider's PDF handling.
+    // Consume the complete HTTP request and return a terminal error after it arrives.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+            "error": { "type": "invalid_request_error", "message": "fixture terminal response" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let base_url = server.uri();
+    let (_dir, mut ctx, transcript_path) = chat_turn_test_context(&[
         crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)
             .with_base_url(&base_url),
     ]);
+    ctx.scope_services.checkpoint_store = Arc::new(crate::core::NoopStore);
+    // Title generation shares this endpoint but is not part of the PDF turn.
+    let session = &ctx.session_runtime.session;
+    session
+        .update_session(session.current_session_key(), |entry| {
+            entry.title = Some("PDF capability fixture".into());
+        })
+        .unwrap();
     let mut context_state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
 
@@ -2869,18 +2890,16 @@ async fn validate_capabilities_accepts_pdf_when_files_enabled() {
     .await
     .expect("turn outcome");
 
-    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    let AgentRunOutcome::Failed(error) = outcome else {
+        panic!("expected the fixture's terminal HTTP response");
+    };
+    assert_eq!(crate::infra::error::llm_http_status(&error), Some(400));
     let rendered = fs::read_to_string(&transcript_path).expect("read transcript after");
     assert!(
         rendered.contains("brief.pdf"),
         "正常路径应保留 user transcript"
     );
-    assert_eq!(
-        hits.load(Ordering::SeqCst),
-        1,
-        "通过校验后应实际发起一次请求"
-    );
-    handle.join().unwrap();
+    server.verify().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

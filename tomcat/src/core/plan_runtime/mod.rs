@@ -141,17 +141,12 @@ pub struct ScratchpadProgress {
 
 impl ScratchpadProgress {
     fn capture(runtime: Option<&todo_runtime::TodosRuntime>) -> Option<Self> {
-        let (path, todos) = runtime?.progress()?;
-        Some(Self {
-            modified_at_ms: file_modified_at_ms(&path),
-            path,
-            todos,
-        })
+        runtime?.progress()
     }
 }
 
-fn file_modified_at_ms(path: &std::path::Path) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+fn modified_at_ms(metadata: std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
     Some(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis())
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,16 +189,16 @@ impl ControlSnapshot {
         }
         let active = runtime.and_then(PlanRuntime::active_plan);
         let plan = active.as_ref().and_then(|active| {
-            file_store::read_plan(&active.path)
+            file_store::read_plan_with_modified_at(&active.path)
                 .ok()
-                .map(|plan| (active.path.clone(), plan))
+                .filter(|(plan, _)| plan.frontmatter.plan_id == active.id)
+                .map(|(plan, modified_at_ms)| (active.path.clone(), plan, modified_at_ms))
         });
         let plan_file_state = plan
             .as_ref()
-            .map(|(_, plan)| plan.frontmatter.state.as_str().to_string());
+            .map(|(_, plan, _)| plan.frontmatter.state.as_str().to_string());
         let progress = match plan {
-            Some((path, plan)) => {
-                let modified_at_ms = file_modified_at_ms(&path);
+            Some((path, plan, modified_at_ms)) => {
                 if plan.frontmatter.state == file_store::PlanFileState::Completed {
                     Some(ProgressSource::CompletedPlan {
                         path,
@@ -695,8 +690,12 @@ impl PlanRuntime {
             Some(ActivePlan::from_file(active.path.clone(), &plan))
         });
         let mut current = self.active_plan.write();
-        // Compare against the recovered binding, not the freshly constructed runtime.
-        *current = state.active_plan;
+        // Write a legacy binding once so later lifecycle events for other files cannot replace it.
+        *current = if state.seen_plan_current || active_plan.is_none() {
+            state.active_plan
+        } else {
+            None
+        };
         self.set_active_plan(current, active_plan, unavailable_reason);
         Ok(())
     }
@@ -1800,28 +1799,32 @@ impl PlanRuntime {
         use file_store::{LockedPlanMutationError, PlanFileState};
         let (refreshed, parked) =
             match file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
+                // A callback error leaves the disk unchanged, including its mtime.
                 if plan.frontmatter.plan_id != plan_id
-                    || plan.frontmatter.state != PlanFileState::Executing
-                    || !self.owns_executing_plan(plan)
+                    || (plan.frontmatter.state == PlanFileState::Executing
+                        && !self.owns_executing_plan(plan))
                 {
-                    // A callback error leaves the disk unchanged, including its mtime.
-                    return Err(ActivePlan::from_file(path.clone(), plan));
+                    return Err(None);
+                }
+                if plan.frontmatter.state != PlanFileState::Executing {
+                    return Err(Some(ActivePlan::from_file(path.clone(), plan)));
                 }
                 plan.frontmatter.state = PlanFileState::Pending;
                 Ok(ActivePlan::from_file(path.clone(), plan))
             }) {
-                Ok(updated) => (updated, true),
+                Ok(updated) => (Some(updated), true),
                 Err(LockedPlanMutationError::Callback(on_disk)) => (on_disk, false),
                 Err(LockedPlanMutationError::Plan(error)) => {
                     return Err(PlanRuntimeError::from_plan_io(error))
                 }
             };
         // Stop may refresh the file it parked, but it does not switch plans.
-        let mut current = self.active_plan.write();
-        if current.as_ref().is_some_and(|active| active.path == path) {
-            *current = Some(refreshed);
+        let current = self.active_plan.write();
+        if current.as_ref().is_some_and(|active| {
+            active.path == path && active.id == plan_id && active.is_executing()
+        }) {
+            self.set_active_plan(current, refreshed, Some("stop_plan_identity_changed"));
         }
-        drop(current);
         if !parked {
             return Ok(None);
         }

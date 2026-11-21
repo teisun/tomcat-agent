@@ -678,11 +678,10 @@ fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef
 /// 全量扫描路径（无 sidecar 可用时）折出与 sidecar 等价的控制态。
 fn extract_resume_control(entries: &[TranscriptEntry]) -> ResumeControlState {
     let mut control = ResumeControlState::default();
-    let mut seen_plan_current = false;
     for entry in entries {
         if let TranscriptEntry::Custom(custom) = entry {
             if let Some(transition) = PlanModeTransition::from_custom_event(&custom.extra) {
-                control.apply(transition, &mut seen_plan_current);
+                control.apply(transition);
             }
         }
     }

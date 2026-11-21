@@ -1032,19 +1032,14 @@ fn install_builtin_web_search_backends_plugin(work_dir: &Path) -> PathBuf {
 fn write_function_plugin_dir(
     plugin_dir: &Path,
     plugin_id: &str,
-    functions: &[(&str, &str)],
+    backends: &[(&str, &str)],
     script: &str,
 ) {
     fs::create_dir_all(plugin_dir).expect("create function plugin dir");
-    let manifest_functions = functions
+    let backends: Vec<_> = backends
         .iter()
-        .map(|(point, function)| {
-            json!({
-                "point": point,
-                "function": function,
-            })
-        })
-        .collect::<Vec<_>>();
+        .map(|(id, secret)| json!({ "id": id, "label": id, "secret": secret, "defaultAuto": true }))
+        .collect();
     let manifest = json!({
         "id": plugin_id,
         "name": plugin_id,
@@ -1056,7 +1051,11 @@ fn write_function_plugin_dir(
         "requiredApiVersion": "1.0",
         "tags": [],
         "tools": [],
-        "functions": manifest_functions,
+        "functions": [{
+            "point": "web_search.backend",
+            "function": "webSearchBackend",
+            "metadata": { "backends": backends }
+        }],
     });
     fs::write(
         plugin_dir.join("plugin.json"),
@@ -1069,13 +1068,13 @@ fn write_function_plugin_dir(
 fn write_project_function_plugin(
     workspace: &Path,
     plugin_id: &str,
-    functions: &[(&str, &str)],
+    backends: &[(&str, &str)],
     script: &str,
 ) {
     write_function_plugin_dir(
         &workspace.join(".agents").join("plugins").join(plugin_id),
         plugin_id,
-        functions,
+        backends,
         script,
     );
 }
@@ -1083,13 +1082,13 @@ fn write_project_function_plugin(
 fn write_host_root_function_plugin(
     work_dir: &Path,
     plugin_id: &str,
-    functions: &[(&str, &str)],
+    backends: &[(&str, &str)],
     script: &str,
 ) {
     write_function_plugin_dir(
         &work_dir.join("plugins").join(plugin_id),
         plugin_id,
-        functions,
+        backends,
         script,
     );
 }
@@ -6766,7 +6765,7 @@ async fn test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_s
     write_project_function_plugin(
         workspace.path(),
         "project-web-search-missing-key",
-        &[("web_search.backend", "webSearchBackend")],
+        &[("tavily", "TAVILY_API_KEY"), ("brave", "BRAVE_API_KEY")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
   return {
@@ -6837,7 +6836,8 @@ pi.registerFunction("webSearchBackend", function () {
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("backend_unavailable:auto"),
+        tool_text.contains("backend_unavailable:tavily")
+            && tool_text.contains("backend_unavailable:brave"),
         "shadowed plugin slot declination 应记录 auto exhausted warnings，实际: {}",
         trunc(tool_text, 400)
     );
@@ -6981,7 +6981,7 @@ async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
     write_project_function_plugin(
         workspace.path(),
         "project-web-search-runtime-fail",
-        &[("web_search.backend", "webSearchBackend")],
+        &[("mimo", ENV_KEY)],
         r#"
 pi.registerFunction("webSearchBackend", function () {
   throw new Error("opaque execution failure");
@@ -7090,7 +7090,7 @@ async fn test_chat_path_auto_missing_keys_remains_degraded() {
     write_project_function_plugin(
         workspace.path(),
         "project-web-search-missing-key",
-        &[("web_search.backend", "webSearchBackend")],
+        &[("tavily", "TAVILY_API_KEY"), ("brave", "BRAVE_API_KEY")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
   return {
@@ -7162,14 +7162,15 @@ pi.registerFunction("webSearchBackend", function () {
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("backend_unavailable:auto"),
+        tool_text.contains("backend_unavailable:tavily")
+            && tool_text.contains("backend_unavailable:brave"),
         "degraded auto path 应保留 fallback warnings，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
         !tool_text.contains(&tr(
             "search.runtime",
-            &[("backend", "auto"), ("detail", "")]
+            &[("backend", "tavily"), ("detail", "")]
         )),
         "纯缺 key 不应被误升级成 runtime hard failure，实际: {}",
         trunc(tool_text, 400)
@@ -7332,7 +7333,7 @@ async fn test_web_search_backend_does_not_fallback_to_shadowed_provider() {
     write_host_root_function_plugin(
         work_dir.path(),
         "global-web-search-success",
-        &[("web_search.backend", "webSearchBackend")],
+        &[("mimo", API_ENV)],
         r#"
 pi.registerFunction("webSearchBackend", function (params) {
   return {
@@ -7346,7 +7347,7 @@ pi.registerFunction("webSearchBackend", function (params) {
     write_project_function_plugin(
         workspace.path(),
         "project-shadow-web-search",
-        &[("web_search.backend", "webSearchBackend")],
+        &[("mimo", API_ENV)],
         r#"
 pi.registerFunction("webSearchBackend", function () {
   return { hits: [], warnings: [], unsupported_backend: true };

@@ -549,6 +549,7 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     write_plan(&path, &plan, 2000).unwrap();
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
+        seen_plan_current: true,
         active_plan: Some(ActivePlan::from_file(path, &plan)),
     })
     .expect("bind executing plan");

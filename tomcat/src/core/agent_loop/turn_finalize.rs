@@ -180,11 +180,6 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     // its covered end to be the durable transcript tail.
     let compaction_provider = agent.compaction_provider();
     let compaction_emitter = Arc::new(agent.emitter.clone());
-    let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
-        agent.config.plan_runtime.as_deref(),
-        agent.todos_runtime.as_deref(),
-        Some(agent.wire_model()),
-    );
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
     if agent.context_state.is_some() {
@@ -195,6 +190,11 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         });
         if restart_needed {
             ensure_working_message_ids(agent, messages)?;
+            let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
+                agent.config.plan_runtime.as_deref(),
+                agent.todos_runtime.as_deref(),
+                Some(agent.wire_model()),
+            );
             if let Some(ctx_state) = agent.context_state.as_mut() {
                 ctx_state.preheat.try_restart_if_pending(
                     ctx_state.usage_ratio(),
@@ -205,7 +205,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
                     agent.config.compaction_output_limit,
                     &agent.config.context_config,
                     Arc::clone(&compaction_emitter),
-                    control_snapshot.clone(),
+                    control_snapshot,
                 );
             }
         }
@@ -220,6 +220,11 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         });
         if start_needed {
             ensure_working_message_ids(agent, messages)?;
+            let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
+                agent.config.plan_runtime.as_deref(),
+                agent.todos_runtime.as_deref(),
+                Some(agent.wire_model()),
+            );
             if let Some(ctx_state) = agent.context_state.as_mut() {
                 let ratio = ctx_state.usage_ratio();
                 let covered_count = messages.len();
@@ -232,7 +237,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
                     agent.config.compaction_output_limit,
                     &agent.config.context_config,
                     Arc::clone(&compaction_emitter),
-                    control_snapshot.clone(),
+                    control_snapshot,
                 ) {
                     preheat_started = Some((covered_count, ratio));
                 }

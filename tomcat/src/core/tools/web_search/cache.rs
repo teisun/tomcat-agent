@@ -6,9 +6,13 @@ use crate::infra::ToolsWebSearchConfig;
 
 use super::types::{WebSearchFreshness, WebSearchOutput, WebSearchRequest};
 
+/// Keep unavailable routes in the key: they can still contribute fallback warnings.
+type BackendRoute = (String, Option<(String, u64)>);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    backends: Vec<(String, String, u64)>,
+    route_revisions: (u64, u64),
+    backends: Vec<BackendRoute>,
     query: String,
     count: usize,
     freshness: Option<String>,
@@ -20,8 +24,13 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
-    pub fn from_request(request: &WebSearchRequest, backends: Vec<(String, String, u64)>) -> Self {
+    pub fn from_request(
+        request: &WebSearchRequest,
+        route_revisions: (u64, u64),
+        backends: Vec<BackendRoute>,
+    ) -> Self {
         Self {
+            route_revisions,
             backends,
             query: request.query.clone(),
             count: request.count,

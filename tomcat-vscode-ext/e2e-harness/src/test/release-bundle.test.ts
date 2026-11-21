@@ -30,7 +30,9 @@ type Api = { __testing: {
   reloadWebview(): Promise<void>;
   restartServe(): Promise<void>;
   sendWebviewIntent(intent: { type: string; messageId: string; data: Record<string, unknown> }): Promise<void>;
-  sendWebviewDomAction(action: { kind: string; testId: string }): Promise<void>;
+  sendWebviewDomAction(action: { kind: string; testId: string; files?: Array<{ filename: string; mimeType: string; dataBase64: string }> }): Promise<void>;
+  getAttachmentDiagnostics(): { attachmentRoot: string | null; attachmentRootResolved: boolean };
+  sendSettingsIntent(intent: { type: string; messageId: string; data: Record<string, unknown> }): Promise<void>;
   waitForEvent(filter: { type: string; sessionId: string; timeoutMs: number; textIncludes?: string }): Promise<Event>;
   captureWebviewDom(): Promise<{ html: string; messageTexts: string[] }>;
 } };
@@ -38,7 +40,7 @@ const support = require(path.join(extensionRoot, "out/test/suite/support/hostE2e
   getTomcatExtensionApi(): Promise<Api>;
   waitForWebviewDomSnapshot<T>(api: Api, predicate: (snapshot: Awaited<ReturnType<Api["__testing"]["captureWebviewDom"]>>) => T | undefined): Promise<T>;
 };
-type FrameSnapshot = { text: string; viewport: { width: number; height: number }; buttons: Array<{ testId: string | null; disabled: boolean }> };
+type FrameSnapshot = { text: string; viewport: { width: number; height: number }; buttons: Array<{ testId: string | null; disabled: boolean; name: string }> };
 type FrameDriver = {
   capture(file: string): Promise<unknown>; close(): void;
   evaluate<T>(expression: string): Promise<T>;
@@ -53,6 +55,81 @@ const capture = require(path.join(extensionRoot, "out/test/suite/support/workben
   SettingsFrameDriver: { connectFromEnvironment(selector: string): Promise<FrameDriver> };
 };
 function required(name: string): string { const value = process.env[name]; assert.ok(value, `Missing ${name}`); return value; }
+
+async function verifyInstalledImage(api: Api, sessionId: string, root: string, artifacts: string) {
+  const host = api.__testing;
+  const model = "acceptance/image";
+  // Configure only the disposable Serve, and send image bytes only to the loopback model fixture.
+  await host.sendSettingsIntent({ type: "upsertModel", messageId: "image-model", data: {
+    model: { id: model, api: "openai", provider: "openai", apiKeyEnv: "ACCEPTANCE_API_KEY",
+      baseUrl: `${required("TOMCAT_ONBOARDING_BASE_URL")}/v1`, modelName: model,
+      capabilities: { vision: true, files: false, tools: true, reasoning: false } },
+    providerKey: { envName: "ACCEPTANCE_API_KEY", value: "isolated-image-fixture" }, setAsDefault: true,
+  } });
+  const png = await fs.readFile(path.join(extensionRoot, "media/icon.png"));
+  const sha = createHash("sha256").update(png).digest("hex");
+  const draftThumb = '[data-testid="attachment-thumb"] img';
+  const historyThumb = '[data-testid="history-attachment-thumb"] img';
+  const decodedWidth = (driver: FrameDriver, selector: string) => driver.evaluate<number>(`new Promise((resolve, reject) => {
+    const end = Date.now() + 8000;
+    const timer = setInterval(() => {
+      const img = document.querySelector(${JSON.stringify(selector)});
+      if (img?.complete && img.naturalWidth > 0) { clearInterval(timer); resolve(img.naturalWidth); }
+      else if (Date.now() >= end) { clearInterval(timer); reject(new Error('Image did not decode: ' + ${JSON.stringify(selector)})); }
+    }, 100);
+  })`);
+  await host.focusWebview();
+  await vscode.commands.executeCommand("workbench.action.maximizeAuxiliaryBar");
+  const chat = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  let thumbnail: number;
+  let original: number;
+  try {
+    await chat.setViewport(1440, 900);
+    const selected = await host.getSessionState(sessionId);
+    assert.equal(selected.model, model, "The installed service selected the local vision model");
+    assert.equal(selected.modelReady, true);
+    await chat.fill('[data-testid="composer-input"]', "Inspect this image");
+    await chat.waitForSnapshot(s => s.buttons.some(b => b.testId === "send-button" && !b.disabled), "The vision composer is ready");
+    await host.sendWebviewDomAction({ kind: "pasteClipboardFiles", testId: "composer-input", files: [
+      { filename: "acceptance.png", mimeType: "image/png", dataBase64: png.toString("base64") },
+    ] });
+    thumbnail = await decodedWidth(chat, draftThumb);
+    assert.ok(thumbnail <= 192, "The strip must decode a downsampled thumbnail");
+    await chat.click("attachment-thumb");
+    const preview = await capture.SettingsFrameDriver.connectFromEnvironment('[data-testid="preview-stage"]');
+    try {
+      original = await decodedWidth(preview, '[data-testid="preview-stage-image"]');
+      assert.equal(original, 256, "The preview must decode the original fixture image");
+      await preview.capture(path.join(artifacts, "image-original.png"));
+    } finally { preview.close(); }
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await host.focusWebview();
+    const idle = host.waitForEvent({ type: "agent_idle", sessionId, timeoutMs: 30_000 });
+    void idle.catch(() => undefined);
+    await chat.click("send-button");
+    assert.equal((await idle).outcome, "completed");
+  } finally { chat.close(); }
+  const reopen = async () => {
+    await vscode.commands.executeCommand("workbench.action.webview.reloadWebviewAction");
+    await host.waitForWebviewReady();
+    return capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+  };
+  const history = await reopen();
+  try {
+    assert.equal(await decodedWidth(history, historyThumb), thumbnail);
+    await history.capture(path.join(artifacts, "image-history.png"));
+  } finally { history.close(); }
+  // Keep a present but unreadable thumbnail: a missing file can be repaired by backfill.
+  // Touch only the fixture's thumbnail, not the original or the resource allowlist.
+  await fs.writeFile(path.join(root, "thumbs", sha), "deliberately invalid image");
+  const broken = await reopen();
+  try {
+    await broken.waitForSnapshot(s => s.text.includes("预览不可用"), "Undecodable thumbnail shows the localized fallback");
+    assert.equal(await broken.evaluate<boolean>(`!!document.querySelector('[data-testid="history-attachment-preview-unavailable"]') && !document.querySelector(${JSON.stringify(historyThumb)})`), true);
+    await broken.capture(path.join(artifacts, "image-fallback.png"));
+  } finally { broken.close(); }
+  return { thumbnail, original, historyDecoded: true, fallback: true };
+}
 
 async function verifyBuiltinPlaywright(api: Api, sessionId: string, artifacts: string) {
   await vscode.commands.executeCommand("tomcat.openSettings");
@@ -266,6 +343,12 @@ suite("Native installed release bundle", () => {
         await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", upgrade, resolved, architecture: process.arch, platform: process.platform, vscode: vscode.version, webviewErrors: api.__testing.getObservedWebviewErrors() }, null, 2));
         return;
       }
+      const searchSmoke = process.env.TOMCAT_RELEASE_WEB_SEARCH === "1";
+      const attachment = searchSmoke ? api.__testing.getAttachmentDiagnostics() : undefined;
+      if (attachment) {
+        assert.ok(attachment.attachmentRootResolved && attachment.attachmentRoot);
+        assert.equal(path.relative(required("HOME"), attachment.attachmentRoot), path.join(".tomcat", "agents", "main", "sessions", "attachments"));
+      }
       const sessionId = await api.__testing.createFreshWebviewSession(workspace);
       const mcpPath = path.join(required("HOME"), ".tomcat/mcp.json");
       if (process.env.TOMCAT_RELEASE_NEW_USER === "1") {
@@ -279,12 +362,13 @@ suite("Native installed release bundle", () => {
       }
       const firstPid = api.__testing.getServeProcessId();
       assert.ok(firstPid, "real Serve must be running before model configuration");
-      if (process.env.TOMCAT_RELEASE_WEB_SEARCH === "1") {
+      if (searchSmoke) {
         const pluginDir = path.join(path.dirname(configPath), "plugins", "web-search-backends");
         for (const file of ["main.js", "plugin.json", "README.md"]) assert.ok((await fs.stat(path.join(pluginDir, file))).size > 0);
         assert.equal(vscode.window.terminals.length, 0, "cold start must not launch init in a terminal");
         const selector = '[data-testid="web-search-row-brave"]';
         const fixtureKey = "isolated-search-fixture";
+        const credentialPath = path.join(path.dirname(configPath), "assets", ".env");
         const open = async () => {
           await vscode.commands.executeCommand("tomcat.openSettings", "tools");
           return capture.SettingsFrameDriver.connectFromEnvironment(".tc-search-settings__rows");
@@ -344,17 +428,27 @@ suite("Native installed release bundle", () => {
           })`);
           await reopened.setViewport(1440, 980);
           await reopened.capture(path.join(artifacts, "web-search-zh-light.png"));
+          assert.ok((await fs.readFile(credentialPath, "utf8")).includes(`BRAVE_API_KEY=${fixtureKey}`));
+          if (process.platform !== "win32") assert.equal((await fs.stat(credentialPath)).mode & 0o077, 0);
+          await reopened.evaluate(`Array.from(document.querySelectorAll('[data-testid="web-search-key-actions-brave"]:popover-open button')).find(button => button.textContent.includes('移除 Key')).click()`);
+          await reopened.click("web-search-key-submit");
+          await reopened.waitForSnapshot(s => s.buttons.some(b => b.testId === "web-search-key-brave" && !b.disabled && b.name === "去配置"), "Removal settles and Brave is no longer configured");
+          const credentials = await fs.readFile(credentialPath, "utf8").catch(error => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          });
+          assert.doesNotMatch(credentials, /^BRAVE_API_KEY=/m);
         } finally { reopened.close(); }
         const config = await fs.readFile(configPath, "utf8");
         assert.match(config, /backends\s*=/);
         assert.ok(!config.includes(fixtureKey));
-        const credentialPath = path.join(path.dirname(configPath), "assets", ".env");
-        assert.ok((await fs.readFile(credentialPath, "utf8")).includes(`BRAVE_API_KEY=${fixtureKey}`));
-        if (process.platform !== "win32") assert.equal((await fs.stat(credentialPath)).mode & 0o077, 0);
         const serviceLog = path.join(path.dirname(configPath), "agents", "main", "serve", "serve.log");
         assert.ok(!(await fs.readFile(serviceLog, "utf8")).includes(fixtureKey));
+        assert.ok(attachment?.attachmentRoot);
+        await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+        const image = await verifyInstalledImage(api, sessionId, attachment.attachmentRoot, artifacts);
         assert.deepEqual(api.__testing.getObservedWebviewErrors(), []);
-        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", firstPid, coldStart: true }, null, 2));
+        await fs.writeFile(path.join(artifacts, "release-host.json"), JSON.stringify({ status: "passed", firstPid, coldStart: true, image }, null, 2));
         return;
       }
       assert.equal((await api.__testing.getSessionState(sessionId)).modelReady, false);

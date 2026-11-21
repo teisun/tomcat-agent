@@ -383,21 +383,37 @@ pub fn validate_single_acceptance(todos: &[TodoItem]) -> Result<(), PlanError> {
 
 // ─── 读 / 写 / lock（高层 API） ────────────────────────────────────────────
 
-fn read_plan_text(path: &Path) -> Result<String, PlanError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+fn open_plan(path: &Path) -> Result<std::fs::File, PlanError> {
+    std::fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
             PlanError::NotFound {
                 path: path.display().to_string(),
             }
         } else {
-            PlanError::Io(e)
+            PlanError::Io(error)
         }
-    })?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+    })
+}
+
+fn read_plan_file(mut file: std::fs::File) -> Result<PlanFile, PlanError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(PlanError::Io)?;
+    parse_plan_file(&String::from_utf8_lossy(&bytes))
 }
 
 fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
-    parse_plan_file(&read_plan_text(path)?)
+    read_plan_file(open_plan(path)?)
+}
+
+/// Read the timestamp from the same file handle as the content; an atomic
+/// replacement may already have published a newer file at the path.
+pub(super) fn read_plan_with_modified_at(
+    path: &Path,
+) -> Result<(PlanFile, Option<i64>), PlanError> {
+    let file = open_plan(path)?;
+    let modified_at_ms = file.metadata().ok().and_then(super::modified_at_ms);
+    Ok((read_plan_file(file)?, modified_at_ms))
 }
 
 fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), PlanError> {

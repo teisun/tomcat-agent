@@ -1582,12 +1582,24 @@ export class SettingsPanel implements vscode.Disposable {
     } finally {
       this.savingSearchSettings = false;
       if (epoch === this.connectorEpoch) {
-        await this.refreshWebSearch(error, { requestId, phase: error ? "failed" : "saved" });
+        const current = this.state.webSearch;
+        const webSearch = !error && current && intent.type === "setWebSearchRouting"
+          ? { ...current, order: intent.data.backends, usingDefaults: false }
+          : current;
+        this.state = {
+          ...this.state,
+          webSearch,
+          webSearchReceipt: { requestId, phase: error ? "failed" : "saved" },
+          error,
+          status: error ? null : t("searchSettings.saved"),
+        };
+        this.postState();
+        if (this.route === "tools") await this.refreshWebSearch(error);
       }
     }
   }
 
-  private async refreshWebSearch(error: string | null = null, receipt?: SettingsStateSnapshot["webSearchReceipt"]): Promise<void> {
+  private async refreshWebSearch(error: string | null = null): Promise<void> {
     const epoch = ++this.viewEpoch;
     try {
       const initialized = await this.deps.ensureInitialized();
@@ -1601,11 +1613,10 @@ export class SettingsPanel implements vscode.Disposable {
         else error ??= response.error ?? t("searchSettings.loadFailed");
       }
       if (epoch !== this.viewEpoch) return;
-      this.state = { ...this.state, capabilities, webSearch, webSearchReceipt: receipt ?? this.state.webSearchReceipt,
-        error, status: receipt?.phase === "saved" ? t("searchSettings.saved") : null, ready: true, serverVersion: initialized.serverVersion };
+      this.state = { ...this.state, capabilities, webSearch, error, ready: true, serverVersion: initialized.serverVersion };
     } catch {
       if (epoch !== this.viewEpoch) return;
-      this.state = { ...this.state, webSearch: undefined, webSearchReceipt: receipt, error: error ?? t("searchSettings.loadFailed") };
+      this.state = { ...this.state, webSearch: undefined, error: error ?? t("searchSettings.loadFailed") };
     }
     this.postState();
   }

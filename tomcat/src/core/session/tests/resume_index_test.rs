@@ -299,6 +299,7 @@ fn executing_plan_survives_later_events_for_other_plans() {
     let b = transcript.with_file_name("b.plan.md");
     for event in [
         serde_json::json!({"event":"plan.current", "plan_id":"a", "path": a, "state":"executing"}),
+        serde_json::json!({"event":"session.agent_mode.changed", "agentMode":"plan"}),
         serde_json::json!({"event":"plan.update", "plan_id":"b", "path": b, "state":"planning"}),
         serde_json::json!({"event":"plan.complete", "plan_id":"b", "path": b}),
     ] {
@@ -308,6 +309,7 @@ fn executing_plan_survives_later_events_for_other_plans() {
         .unwrap()
         .index
         .resume_control_state();
+    assert_eq!(incremental.mode, Some(AgentMode::Plan));
     assert_eq!(incremental.active_plan.as_ref().unwrap().id, "a");
     assert!(incremental.active_plan.as_ref().unwrap().is_executing());
     let index_path = resume_index_path(&transcript);

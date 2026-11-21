@@ -1027,9 +1027,9 @@ Parameters:
 - Permission scope: `Read`
 - Read only: `true`
 - Destructive: `false`
-- Search hint: `web search internet tavily brave serper query`
+- Search hint: `web search internet query`
 
-Search the web and return normalized search hits. Use this to discover candidate URLs/snippets; use `web_fetch` when you need one URL body afterward. Required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`. Results are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends with automatic fallback in `auto` mode. Preserve source attribution when citing, and mind the current date for time-sensitive queries.
+Search the web and return normalized search hits. Use this to discover candidate URLs/snippets; use `web_fetch` when you need one URL body afterward. Required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`. Tomcat tries enabled search backends in settings order and returns normalized hits from the first successful backend. Preserve source attribution when citing, and mind the current date for time-sensitive queries.
 
 Parameters:
 

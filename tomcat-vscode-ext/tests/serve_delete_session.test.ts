@@ -62,7 +62,7 @@ describe("real Serve session deletion", () => {
       const id = first.sessionId!;
       const refused = await other.request({ type: "delete_session", sessionId: id });
       expect(refused.success).toBe(false);
-      expect(refused.error).toBe("read_only_session");
+      expect(refused.error).toBe("session_in_use");
       const reopened = await runtime.messenger.request({ type: "switch_session", sessionId: id });
       expect(reopened.success, JSON.stringify(reopened)).toBe(true);
       expect((await other.request({ type: "close_session", sessionId: id })).success).toBe(true);

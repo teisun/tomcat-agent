@@ -55,6 +55,8 @@ function cloneSessionSnapshot(
 
 type SessionRuntimeState = {
   activeAssistantId: string | null;
+  hasCurrentPlan: boolean;
+  hasCurrentPlanTodos: boolean;
   activeThinkingId: string | null;
   streamingAssistantId: string | null;
   hasMoreHistory: boolean;
@@ -2036,6 +2038,8 @@ function buildBranchSummaryTextLookup(entries: unknown[]): Map<string, string> {
 function createSessionRuntime(): SessionRuntimeState {
   return {
     activeAssistantId: null,
+    hasCurrentPlan: false,
+    hasCurrentPlanTodos: false,
     activeThinkingId: null,
     streamingAssistantId: null,
     hasMoreHistory: false,
@@ -2847,18 +2851,21 @@ export class WebviewStateStore {
     session.modelReady = payload.modelReady;
     session.thinkingLevel = payload.thinkingLevel ?? null;
     session.agentMode = payload.agentMode ?? "chat";
-    session.planTodos = payload.planTodos ?? session.planTodos;
+    const runtime = this.ensureRuntime(payload.sessionId);
+    if (payload.planTodos !== undefined) {
+      runtime.hasCurrentPlanTodos = true;
+      session.planTodos = payload.planTodos;
+    }
     session.sessionTodos = payload.sessionTodos ?? session.sessionTodos;
     if (payload.contextRatio !== undefined) {
       session.contextRatio = payload.contextRatio ?? null;
     }
-    session.activePlan = payload.activePlan
-      ? {
-        path: payload.activePlan.path,
-        planId: payload.activePlan.id,
-        state: payload.activePlan.state,
-      }
-      : null;
+    if (payload.activePlan !== undefined) {
+      runtime.hasCurrentPlan = true;
+      session.activePlan = payload.activePlan
+        ? { path: payload.activePlan.path, planId: payload.activePlan.id, state: payload.activePlan.state }
+        : null;
+    }
     this.syncTabOwnedByFrontend(payload.sessionId);
   }
 
@@ -3810,7 +3817,7 @@ export class WebviewStateStore {
     }
     runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
-    if (!session.activePlan && historySession.activePlan) {
+    if (!runtime.hasCurrentPlan && !session.activePlan && historySession.activePlan) {
       session.activePlan = historySession.activePlan;
     } else if (
       session.activePlan &&
@@ -3824,7 +3831,7 @@ export class WebviewStateStore {
         state: session.activePlan.state ?? historySession.activePlan.state ?? null,
       };
     }
-    if (session.planTodos.length === 0 && historySession.planTodos.length > 0) {
+    if (!runtime.hasCurrentPlanTodos && session.planTodos.length === 0 && historySession.planTodos.length > 0) {
       session.planTodos = historySession.planTodos;
     }
     session.hasMoreHistory = runtime.hasMoreHistory;

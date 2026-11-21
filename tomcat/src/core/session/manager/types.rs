@@ -244,6 +244,7 @@ impl AgentMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlanModeTransition {
     pub mode: Option<AgentMode>,
+    legacy_mode: Option<AgentMode>,
     binding: Option<PlanBindingTransition>,
 }
 
@@ -277,21 +278,22 @@ impl PlanModeTransition {
             };
             return Some(Self {
                 mode: None,
+                legacy_mode: None,
                 binding: Some(PlanBindingTransition::Current(plan)),
             });
         }
         let mode = match event {
             wire::WIRE_PLAN_ENTER => Some(AgentMode::Plan),
             wire::WIRE_PLAN_EXIT => Some(AgentMode::Chat),
-            wire::WIRE_PLAN_BUILD | wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_COMPLETE => {
-                Some(AgentMode::Chat)
-            }
+            wire::WIRE_PLAN_BUILD => Some(AgentMode::Chat),
             wire::WIRE_SESSION_AGENT_MODE_CHANGED => obj
                 .get("agentMode")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw.into())).ok()),
-            // create / update 只绑定计划，不改模式。
-            wire::WIRE_PLAN_CREATE | wire::WIRE_PLAN_UPDATE => None,
+            wire::WIRE_PLAN_CREATE
+            | wire::WIRE_PLAN_UPDATE
+            | wire::WIRE_PLAN_PENDING
+            | wire::WIRE_PLAN_COMPLETE => None,
             _ => return None,
         };
         let state = obj
@@ -306,7 +308,15 @@ impl PlanModeTransition {
                 _ => PlanFileState::Planning,
             });
         let binding = parse_plan(state).map(PlanBindingTransition::Legacy);
-        Some(Self { mode, binding })
+        // Modern pending/completed records describe files, not a change of session mode.
+        // Preserve the original fallback only until replay sees an explicit binding.
+        let legacy_mode = matches!(event, wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_COMPLETE)
+            .then_some(AgentMode::Chat);
+        Some(Self {
+            mode,
+            legacy_mode,
+            binding,
+        })
     }
 }
 
@@ -318,20 +328,28 @@ pub struct ResumeControlState {
     #[serde(rename = "agent_mode")]
     pub mode: Option<AgentMode>,
     pub active_plan: Option<ActivePlan>,
+    /// Whether replay saw an explicit binding, including an explicit clear.
+    #[serde(default)]
+    pub seen_plan_current: bool,
 }
 
 impl ResumeControlState {
     /// 折叠一条事件的影响。
-    pub(crate) fn apply(&mut self, transition: PlanModeTransition, seen_plan_current: &mut bool) {
-        if let Some(mode) = transition.mode {
+    pub(crate) fn apply(&mut self, transition: PlanModeTransition) {
+        let mode = if self.seen_plan_current {
+            transition.mode
+        } else {
+            transition.mode.or(transition.legacy_mode)
+        };
+        if let Some(mode) = mode {
             self.mode = Some(mode);
         }
         match transition.binding {
             Some(PlanBindingTransition::Current(plan)) => {
-                *seen_plan_current = true;
+                self.seen_plan_current = true;
                 self.active_plan = plan;
             }
-            Some(PlanBindingTransition::Legacy(plan)) if !*seen_plan_current => {
+            Some(PlanBindingTransition::Legacy(plan)) if !self.seen_plan_current => {
                 self.active_plan = Some(plan);
             }
             _ => {}

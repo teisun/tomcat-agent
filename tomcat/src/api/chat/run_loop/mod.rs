@@ -933,21 +933,23 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         turns = turn_count(&messages)
     );
 
-    context_state.preheat.try_restart_if_pending(
-        context_state.usage_ratio(),
-        &messages,
-        &context_state.transcript_path,
-        PromptCacheKeyFamily::Compaction.key_for(&session_id),
-        compaction_provider.clone(),
-        compaction_output_limit,
-        &context_config,
-        Arc::clone(&root_event_emitter),
-        crate::core::plan_runtime::ControlSnapshot::capture(
-            Some(&ctx.session_runtime.plan_runtime),
-            Some(&ctx.session_runtime.todos_runtime),
-            Some(main_call.wire_model()),
-        ),
-    );
+    if context_state.preheat.is_exhausted_pending() {
+        context_state.preheat.try_restart_if_pending(
+            context_state.usage_ratio(),
+            &messages,
+            &context_state.transcript_path,
+            PromptCacheKeyFamily::Compaction.key_for(&session_id),
+            compaction_provider.clone(),
+            compaction_output_limit,
+            &context_config,
+            Arc::clone(&root_event_emitter),
+            crate::core::plan_runtime::ControlSnapshot::capture(
+                Some(&ctx.session_runtime.plan_runtime),
+                Some(&ctx.session_runtime.todos_runtime),
+                Some(main_call.wire_model()),
+            ),
+        );
+    }
     let boundary_env = BoundaryEnv {
         config: &context_config,
         work_dir: ctx.scope_services.agent_trail_dir.as_path(),

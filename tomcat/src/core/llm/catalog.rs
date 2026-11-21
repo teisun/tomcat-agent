@@ -299,9 +299,16 @@ impl SharedModelCatalog {
         self.inner.read().clone()
     }
 
+    /// Read a catalog and its generation together for consumers that cache derived results.
+    pub(crate) fn snapshot_with_generation(&self) -> (Arc<ModelCatalog>, u64) {
+        let catalog = self.inner.read();
+        (catalog.clone(), self.generation())
+    }
+
     pub fn replace(&self, catalog: ModelCatalog) -> Arc<ModelCatalog> {
         let next = Arc::new(catalog);
-        *self.inner.write() = next.clone();
+        let mut catalog = self.inner.write();
+        *catalog = next.clone();
         self.generation.fetch_add(1, Ordering::Relaxed);
         next
     }

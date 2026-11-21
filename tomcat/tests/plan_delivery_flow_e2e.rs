@@ -28,6 +28,7 @@ fn start_execution(runtime: &PlanRuntime, plan_id: &str) {
     runtime
         .attach_from_resume_state(ResumeControlState {
             mode: Some(AgentMode::Chat),
+            seen_plan_current: true,
             active_plan: Some(ActivePlan::from_file(path, &plan)),
         })
         .expect("bind executing plan");

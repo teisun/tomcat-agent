@@ -13,13 +13,16 @@ use crate::infra::AppConfig;
 use super::super::backend::{BackendFailure, WebSearchBackend};
 use super::super::cache::CacheKey;
 use super::super::declarations::{parse_declarations, BackendDeclaration};
-use super::super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
+use super::super::plugin_backend::{
+    PluginSearchCatalog, PluginSearchInvoker, PluginWebSearchBackend,
+};
 use super::super::types::{normalize_hits, RawHit, WebSearchArgs};
 use super::super::WebSearchRuntime;
 
 struct RecordingPluginInvoker {
     calls: Mutex<Vec<(String, serde_json::Value, String)>>,
     responses: Mutex<VecDeque<Result<serde_json::Value, BackendFailure>>>,
+    revision: std::sync::atomic::AtomicU64,
 }
 
 impl RecordingPluginInvoker {
@@ -27,6 +30,7 @@ impl RecordingPluginInvoker {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             responses: Mutex::new(VecDeque::from(responses)),
+            revision: Default::default(),
         })
     }
 
@@ -37,8 +41,8 @@ impl RecordingPluginInvoker {
 
 #[async_trait]
 impl PluginSearchInvoker for RecordingPluginInvoker {
-    fn backend_declarations(&self) -> Vec<BackendDeclaration> {
-        ["tavily", "brave", "mimo"]
+    fn search_catalog(&self) -> PluginSearchCatalog {
+        let declarations = ["tavily", "brave", "mimo"]
             .into_iter()
             .map(|id| BackendDeclaration {
                 id: id.into(),
@@ -48,7 +52,12 @@ impl PluginSearchInvoker for RecordingPluginInvoker {
                 host: None,
                 default_auto: true,
             })
-            .collect()
+            .collect();
+        PluginSearchCatalog {
+            declarations,
+            revision: self.revision.load(std::sync::atomic::Ordering::Relaxed),
+            ..Default::default()
+        }
     }
 
     async fn search(
@@ -56,6 +65,7 @@ impl PluginSearchInvoker for RecordingPluginInvoker {
         backend: &str,
         params: serde_json::Value,
         session_id: &str,
+        _revision: u64,
     ) -> Result<serde_json::Value, BackendFailure> {
         self.calls.lock().unwrap().push((
             backend.to_string(),
@@ -195,7 +205,7 @@ async fn plugin_backend_maps_missing_key_warning_to_backend_failure() {
         "hits": [],
         "warnings": ["__missing_key__:TAVILY_API_KEY"]
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "tavily", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "tavily", "test-session", 0);
     let request = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust".into(),
@@ -309,7 +319,7 @@ async fn plugin_backend_maps_unauthorized_warning_to_backend_failure() {
         "hits": [],
         "warnings": ["__unauthorized__:403"]
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "brave", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "brave", "test-session", 0);
     let request = super::super::types::WebSearchRequest::from_tool_args(
         WebSearchArgs {
             query: "rust".into(),
@@ -339,7 +349,7 @@ async fn plugin_backend_maps_plugin_backend_error_to_plugin_runtime_failure() {
             "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
         ]
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session", 0);
 
     let err = backend
         .search(&basic_web_search_request())
@@ -379,7 +389,7 @@ async fn plugin_backend_plugin_runtime_warning_wins_over_missing_key() {
             "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
         ]
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session", 0);
 
     let err = backend
         .search(&basic_web_search_request())
@@ -402,7 +412,7 @@ async fn plugin_backend_timeout_warning_stays_retryable_on_exhausted_auto_respon
         ],
         "unsupported_backend": true
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session", 0);
 
     let err = backend
         .search(&basic_web_search_request())
@@ -430,7 +440,7 @@ async fn plugin_backend_timeout_warning_allows_successful_auto_fallback() {
             "plugin_backend_error (backend=tavily): Error: pi.fetch request timed out"
         ]
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session", 0);
 
     let output = backend
         .search(&basic_web_search_request())
@@ -451,7 +461,7 @@ async fn plugin_backend_bare_unsupported_backend_includes_warning_summary() {
         "warnings": ["shadowed_provider"],
         "unsupported_backend": true
     }))]);
-    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session", 0);
 
     let err = backend
         .search(&basic_web_search_request())
@@ -556,8 +566,8 @@ fn cache_key_tracks_allowed_and_blocked_domains() {
     .expect("request b");
 
     assert_ne!(
-        CacheKey::from_request(&req_a, Vec::new()),
-        CacheKey::from_request(&req_b, Vec::new()),
+        CacheKey::from_request(&req_a, (0, 0), Vec::new()),
+        CacheKey::from_request(&req_b, (0, 0), Vec::new()),
         "cache key must change when config-level allow/block filters change"
     );
 }
@@ -650,6 +660,7 @@ async fn ordered_route_skips_missing_and_stops_on_empty_with_hot_updates() {
         Err(BackendFailure::RateLimited { status: 429 }),
         Ok(json!({"hits": []})),
         Ok(json!({"hits": []})),
+        Ok(json!({"hits": []})),
     ]);
     let order = Arc::new(parking_lot::RwLock::new(Some(vec![
         "tavily".into(),
@@ -684,6 +695,12 @@ async fn ordered_route_skips_missing_and_stops_on_empty_with_hot_updates() {
             .stats
             .cached
     );
+    invoker
+        .revision
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let replaced = runtime.search(args.clone(), "same").await.unwrap();
+    assert!(!replaced.stats.cached);
+    assert_eq!(replaced.backend, "tavily");
     *order.write() = Some(vec!["mimo".into()]);
     let updated = runtime.search(args, "same").await.unwrap();
     assert_eq!(updated.backend, "mimo");
@@ -694,7 +711,7 @@ async fn ordered_route_skips_missing_and_stops_on_empty_with_hot_updates() {
             .iter()
             .map(|call| call.0.as_str())
             .collect::<Vec<_>>(),
-        ["tavily", "brave", "mimo"]
+        ["tavily", "brave", "tavily", "mimo"]
     );
     assert!(invoker
         .calls()

@@ -589,7 +589,7 @@ fn resume_cli_build_uses_persisted_binding_and_consumes_kickoff() {
     std::env::set_var("HOME", &fx.home_path);
     // Persist via real runtime events and the real session writer, not bind_for_test.
     {
-        let runtime = PlanRuntime::new(session_key);
+        let runtime = PlanRuntime::new_with_session_id(session_key, &session_id);
         let transcript = fx.session.clone();
         runtime.attach_transcript_appender(Arc::new(move |event| {
             transcript

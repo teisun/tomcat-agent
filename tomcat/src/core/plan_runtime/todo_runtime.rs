@@ -102,13 +102,18 @@ impl TodosRuntime {
         })
     }
 
-    /// Even a draft-only document is a useful recovery entry.
-    pub fn progress(&self) -> Option<(PathBuf, Vec<TodoItem>)> {
-        self.state
-            .lock()
-            .document
-            .as_ref()
-            .map(|doc| (self.path.clone(), doc.items.clone()))
+    /// Even a draft-only document is a useful recovery entry. Keep the timestamp
+    /// and checklist together while the commit lock prevents a concurrent rename.
+    pub(super) fn progress(&self) -> Option<super::ScratchpadProgress> {
+        let state = self.state.lock();
+        let document = state.document.as_ref()?;
+        Some(super::ScratchpadProgress {
+            path: self.path.clone(),
+            modified_at_ms: std::fs::metadata(&self.path)
+                .ok()
+                .and_then(super::modified_at_ms),
+            todos: document.items.clone(),
+        })
     }
 
     /// Each runtime has one AgentLoop writer. Do not call publishers while holding the

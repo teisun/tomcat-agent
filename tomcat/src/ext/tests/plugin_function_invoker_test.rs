@@ -1605,9 +1605,11 @@ pi.registerFunction("webSearchBackend", function (params) {
     manager.load_plugin(plugin_a.path()).expect("load plugin-a");
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
 
-    let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
+    let search_invoker = ExtPluginSearchInvoker::new(function_registry.clone(), invoker);
+    let revision = search_invoker.search_catalog().revision;
+    let params = json!({ "backend": "mimo", "query": "rust" });
     let result = search_invoker
-        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .search("mimo", params.clone(), "s1", revision)
         .await
         .expect("first provider should satisfy request");
 
@@ -1618,6 +1620,30 @@ pi.registerFunction("webSearchBackend", function (params) {
         !manager.has_session_vm("s1", "plugin-b"),
         "shadowed provider should not be started once a winner exists"
     );
+
+    manager.set_catalog_fingerprint("plugin-a", 1);
+    let stale_instance = search_invoker
+        .search("mimo", params.clone(), "s1", revision)
+        .await;
+    assert!(matches!(
+        stale_instance,
+        Err(BackendFailure::Transport { .. })
+    ));
+    function_registry.remove_by_plugin("plugin-a");
+    let stale_route = search_invoker
+        .search("mimo", params.clone(), "s1", revision)
+        .await;
+    assert!(matches!(
+        stale_route,
+        Err(BackendFailure::Incompatible { .. })
+    ));
+    assert!(!manager.has_session_vm("s1", "plugin-b"));
+    let current = search_invoker.search_catalog().revision;
+    let replacement = search_invoker
+        .search("mimo", params, "s1", current)
+        .await
+        .unwrap();
+    assert_eq!(replacement["provider"], "plugin-b");
 
     manager.end_session("s1").await.expect("end session");
 }
@@ -1670,7 +1696,12 @@ pi.registerFunction("webSearchBackend", function (params) {
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
     let result = search_invoker
-        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .search(
+            "mimo",
+            json!({ "backend": "mimo", "query": "rust" }),
+            "s1",
+            search_invoker.search_catalog().revision,
+        )
         .await
         .expect("unsupported_backend should be passed through for upper-layer classification");
 
@@ -1712,7 +1743,12 @@ pi.registerFunction("webSearchBackend", function () {
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
     let result = search_invoker
-        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .search(
+            "mimo",
+            json!({ "backend": "mimo", "query": "rust" }),
+            "s1",
+            search_invoker.search_catalog().revision,
+        )
         .await
         .expect("unsupportedBackend payload should be returned for upper-layer classification");
     assert_eq!(result["unsupportedBackend"], json!(true));
@@ -1731,7 +1767,12 @@ async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatibl
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
     let err = search_invoker
-        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .search(
+            "mimo",
+            json!({ "backend": "mimo", "query": "rust" }),
+            "s1",
+            search_invoker.search_catalog().revision,
+        )
         .await
         .expect_err("missing provider registration should still be incompatible");
 

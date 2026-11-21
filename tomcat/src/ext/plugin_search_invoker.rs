@@ -5,10 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::tools::web_search::backend::BackendFailure;
-use crate::core::tools::web_search::declarations::{
-    parse_declarations, BackendDeclaration, SEARCH_POINT,
-};
-use crate::core::tools::web_search::plugin_backend::PluginSearchInvoker;
+use crate::core::tools::web_search::declarations::{parse_declarations, SEARCH_POINT};
+use crate::core::tools::web_search::plugin_backend::{PluginSearchCatalog, PluginSearchInvoker};
 use crate::ext::{FunctionRegistry, PluginFunctionInvoker};
 
 pub struct ExtPluginSearchInvoker {
@@ -30,20 +28,13 @@ impl ExtPluginSearchInvoker {
 
 #[async_trait]
 impl PluginSearchInvoker for ExtPluginSearchInvoker {
-    fn backend_declarations(&self) -> Vec<BackendDeclaration> {
-        let winner = self
-            .functions
-            .functions_for_point(SEARCH_POINT)
-            .into_iter()
-            .next();
-        parse_declarations(winner.as_ref().and_then(|entry| entry.metadata.as_ref()))
-    }
-
-    fn winner_can_use_saved_keys(&self) -> bool {
+    fn search_catalog(&self) -> PluginSearchCatalog {
         self.functions
-            .functions_for_point(SEARCH_POINT)
-            .first()
-            .is_some_and(|winner| winner.source.can_use_saved_keys())
+            .with_winner(SEARCH_POINT, |winner, revision| PluginSearchCatalog {
+                declarations: parse_declarations(winner.and_then(|entry| entry.metadata.as_ref())),
+                saved_keys: winner.is_some_and(|entry| entry.source.can_use_saved_keys()),
+                revision,
+            })
     }
 
     async fn search(
@@ -51,15 +42,21 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
         backend: &str,
         params: serde_json::Value,
         session_id: &str,
+        revision: u64,
     ) -> Result<serde_json::Value, BackendFailure> {
-        let Some(provider) = self
+        let provider = self
             .functions
-            .functions_for_point(SEARCH_POINT)
-            .into_iter()
-            .next()
-        else {
-            return Err(unsupported_backend_error(backend));
-        };
+            .with_winner(SEARCH_POINT, |winner, current| {
+                // Do not send a query to a replacement using the earlier plugin's declarations.
+                if current != revision {
+                    return Err(BackendFailure::Incompatible {
+                        detail: tr("plugin.searchRouteChanged", &[]),
+                    });
+                }
+                winner
+                    .cloned()
+                    .ok_or_else(|| unsupported_backend_error(backend))
+            })?;
 
         match self
             .function_invoker

@@ -197,7 +197,8 @@
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
 - [ ] webview composer 的 `+` 智能选取可将图片 / PDF 作为待发送附件，将工作区文件 / 目录作为 reference chips；发送时附件走 `prompt.params.attachments[]`，reference 作为可恢复消息段保留在 transcript
 - [ ] `@` 搜索维持有界文件索引；达到索引上限时，即使当前查询零/少量命中也提示搜索范围有限，并保留 `+`/拖拽入口，不把未收录的路径伪报为完整搜索结果。
-- [ ] 同一工具图片跨会话出现时复用 agent 共享仓库里的缩略图；生成完成前已有的其他引用也收到更新，不切换会话、不携带图片字节、不用原图替代缺失 thumbnail。
+- [ ] 同一工具图片跨会话出现时复用 agent 共享仓库里的缩略图；生成完成前已有的其他引用也收到更新，不切换会话、不携带图片字节、不用原图替代缺失 thumbnail。预览失败明确提示，不留下空占位。
+- [ ] 新安装可直接在「设置 → 工具 → 网页搜索」管理后端顺序和 Key，不用先运行 `init`。保存 Key 不启用后端；服务重启后仍使用已保存的顺序。
 - [ ] Host 草稿继续防抖保存，正常退出等待当时已排队/在写的草稿并报告写盘错误；某个会话失败不放弃其他会话，不承诺强杀进程时逐键持久。
 - [ ] 后端或队列已接受输入后，仅退休对应草稿版本；保存稿删除失败提示旧稿可能再出现，不把输入改成发送失败、不重发写请求，也不声称磁盘清理成功。自动清理损坏/孤立草稿失败只记录诊断，不阻止用户重新输入。
 - [ ] 历史编辑重发与模型移除保留后端原回执；后续视图/目录刷新失败单独提示，不覆盖原成功或失败原因，不自动重复已经提交的操作。
@@ -214,6 +215,7 @@
 - [ ] tool 行渲染为扁平行（ToolRow），非大卡片；read/grep 行含 FileChip 点击 `openFile`；bash 行显示 `Ran <cmd>` 可展开看输出，无"打开终端"按钮；完成态默认折叠、streaming 默认展开
 - [ ] plan executing 或 chat 有 in_progress session todo 时，live cluster 末尾显示进度行 `(current/total) title`；PlanFileCard 同步渲染 planTodos
 - [ ] `update_plan` 的完成状态与本批 todos 在同一次文件锁更新中提交；迟到的完成事件不能重新写入旧快照、覆盖另一条已成功的待办更新。不恢复自动 Code Review/Verifier 门禁。
+- [ ] 已完成的计划仍是当前计划；执行 A 时编辑 B，重开本会话仍恢复 A。会话 Todos 可独立保存和恢复，不继承其他会话的待办。
 - [ ] 原生 `update_plan` 对路径的显式 deny/readonly 与普通文件工具一致，拒绝时不读改计划或创建锁文件；已授权外部计划仍可正常推进，未知目录复用既有权限确认，等待审批后不得改用另一份 active plan。
 - [ ] 后端 `LlmScene::Title`（默认 `utility-flash`）异步生成 turn 折叠标题与 session 标题；占位优先 + 失败静默回退规则摘要，不阻塞 UI
 - [ ] wire 事件：`TurnEnd.summaryTitle`、`session.title_updated`、`plan.todos`、`session.todos`；`get_state` 含 planTodos/sessionTodos

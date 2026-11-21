@@ -2,6 +2,7 @@ use super::{ManifestFunction, PluginSource};
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredFunction {
@@ -16,6 +17,7 @@ pub struct RegisteredFunction {
 #[derive(Debug, Default)]
 pub struct FunctionRegistry {
     by_point: RwLock<BTreeMap<String, Vec<RegisteredFunction>>>,
+    revision: AtomicU64,
 }
 
 impl FunctionRegistry {
@@ -24,11 +26,12 @@ impl FunctionRegistry {
     }
 
     pub fn register(&self, function: RegisteredFunction) {
-        self.by_point
-            .write()
+        let mut guard = self.by_point.write();
+        guard
             .entry(function.point.clone())
             .or_default()
             .push(function);
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Direct registration appends raw manifest entries for a plugin and does
@@ -57,6 +60,7 @@ impl FunctionRegistry {
                     metadata: function.metadata.clone(),
                 });
         }
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Replace the registry with an already-resolved effective snapshot.
@@ -67,7 +71,22 @@ impl FunctionRegistry {
                 .or_default()
                 .push(function);
         }
-        *self.by_point.write() = next;
+        let mut guard = self.by_point.write();
+        *guard = next;
+        self.revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the winner and its cache revision under the same lock.
+    pub(crate) fn with_winner<R>(
+        &self,
+        point: &str,
+        f: impl FnOnce(Option<&RegisteredFunction>, u64) -> R,
+    ) -> R {
+        let guard = self.by_point.read();
+        f(
+            guard.get(point).and_then(|entries| entries.first()),
+            self.revision.load(Ordering::Relaxed),
+        )
     }
 
     pub fn functions_for_point(&self, point: &str) -> Vec<RegisteredFunction> {
@@ -87,6 +106,9 @@ impl FunctionRegistry {
             });
             !entries.is_empty()
         });
+        if removed > 0 {
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
         removed
     }
 }

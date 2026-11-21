@@ -238,9 +238,6 @@ pub(crate) struct ResumeIndex {
     pub latest_plan_event: Option<StoredPlanEventRef>,
     #[serde(flatten)]
     pub resume_control: ResumeControlState,
-    /// Distinguishes an explicit clear from a legacy session without a binding record.
-    #[serde(default)]
-    pub seen_plan_current: bool,
 }
 
 impl ResumeIndex {
@@ -433,9 +430,7 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
             Some(StoredPlanEventRef::from_plan_event_ref(plan_event, &anchor));
     }
     if let Some(transition) = maybe_plan_mode_transition(entry) {
-        index
-            .resume_control
-            .apply(transition, &mut index.seen_plan_current);
+        index.resume_control.apply(transition);
     }
 }
 
@@ -453,39 +448,23 @@ fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
         latest_day_first_entry: None,
         latest_plan_event: None,
         resume_control: ResumeControlState::default(),
-        seen_plan_current: false,
     })
 }
 
-fn build_index_from_lines(
-    transcript_path: &Path,
-    lines: &[String],
-    mut stats: ResumeIndexIoStats,
-) -> Result<(ResumeIndex, ResumeIndexIoStats), AppError> {
-    let mut index = build_empty_index(transcript_path)?;
-    stats.max_live_bytes = stats
-        .max_live_bytes
-        .max(lines.iter().map(|line| line.len()).max().unwrap_or(0));
-
-    let mut ordinal = 0usize;
-    for line in lines.iter().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+fn fold_resume_line(index: &mut ResumeIndex, stats: &mut ResumeIndexIoStats, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    match serde_json::from_str::<TranscriptEntry>(trimmed) {
+        Ok(entry) => {
+            apply_entry(index, &entry, stats.entries_scanned);
+            stats.entries_scanned += 1;
         }
-        match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(entry) => {
-                stats.entries_scanned += 1;
-                apply_entry(&mut index, &entry, ordinal);
-                ordinal += 1;
-            }
-            Err(error) => {
-                tracing::warn!(line = trimmed, error = %error, "skipping unparseable JSONL entry while rebuilding resume index");
-            }
+        Err(error) => {
+            tracing::warn!(%error, "skipping unparseable JSONL entry while rebuilding resume index");
         }
     }
-
-    Ok((index, stats))
 }
 
 pub(crate) fn rebuild_resume_index(
@@ -493,12 +472,14 @@ pub(crate) fn rebuild_resume_index(
 ) -> Result<(ResumeIndex, ResumeIndexIoStats), AppError> {
     let f = std::fs::File::open(transcript_path).map_err(AppError::Io)?;
     let mut reader = BufReader::new(f);
-    let mut stats = ResumeIndexIoStats::default();
-    let mut header = String::new();
-    stats.max_live_bytes = header.capacity();
-    stats.bytes_scanned += reader.read_line(&mut header).map_err(AppError::Io)? as u64;
-    let mut lines = vec![header];
+    let mut index = build_empty_index(transcript_path)?;
     let mut line = String::new();
+    let header_bytes = reader.read_line(&mut line).map_err(AppError::Io)?;
+    let mut stats = ResumeIndexIoStats {
+        bytes_scanned: header_bytes as u64,
+        max_live_bytes: line.capacity(),
+        ..Default::default()
+    };
     loop {
         line.clear();
         let bytes = reader.read_line(&mut line).map_err(AppError::Io)?;
@@ -506,11 +487,10 @@ pub(crate) fn rebuild_resume_index(
             break;
         }
         stats.bytes_scanned += bytes as u64;
-        stats.max_live_bytes = stats.max_live_bytes.max(line.len());
-        lines.push(line.clone());
+        stats.max_live_bytes = stats.max_live_bytes.max(line.capacity());
+        fold_resume_line(&mut index, &mut stats, &line);
     }
 
-    let (index, stats) = build_index_from_lines(transcript_path, &lines, stats)?;
     // Persistence is optional on resume: a read-only or unusable sidecar must not
     // discard the binding that was just recovered from the full transcript.
     if let Err(error) = write_sidecar(transcript_path, &index) {
@@ -523,8 +503,14 @@ pub(crate) fn rebuild_resume_index_from_lines(
     transcript_path: &Path,
     lines: &[String],
 ) -> Result<(ResumeIndex, ResumeIndexIoStats), AppError> {
-    let (index, stats) =
-        build_index_from_lines(transcript_path, lines, ResumeIndexIoStats::default())?;
+    let mut index = build_empty_index(transcript_path)?;
+    let mut stats = ResumeIndexIoStats {
+        max_live_bytes: lines.iter().map(String::len).max().unwrap_or_default(),
+        ..Default::default()
+    };
+    for line in lines.iter().skip(1) {
+        fold_resume_line(&mut index, &mut stats, line);
+    }
     write_sidecar(transcript_path, &index)?;
     #[cfg(test)]
     LAST_INLINE_REBUILD_STATS.with(|slot| {

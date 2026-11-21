@@ -344,14 +344,14 @@ export class SessionRouter {
           : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       interrupted: payload.interrupted === true,
-      activePlan: parseActivePlan(payload.activePlan),
+      activePlan: payload.activePlan === undefined ? undefined : parseActivePlan(payload.activePlan),
       agentMode:
         payload.agentMode === "chat" || payload.agentMode === "plan"
           ? payload.agentMode
           : null,
       model: typeof payload.model === "string" ? payload.model : null,
       modelReady: typeof payload.modelReady === "boolean" ? payload.modelReady : undefined,
-      planTodos: parseTodos(payload.planTodos),
+      planTodos: payload.planTodos === undefined ? undefined : parseTodos(payload.planTodos),
       sessionId: payload.sessionId,
       sessionKey:
         typeof payload.sessionKey === "string" ? payload.sessionKey : null,

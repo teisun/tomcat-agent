@@ -49,6 +49,7 @@ async fn same_project_plan_handoff_keeps_one_file_and_excludes_the_old_planner()
     let resume_events = capture_plan_current(&resumed_planner);
     resumed_planner
         .attach_from_resume_state(ResumeControlState {
+            seen_plan_current: true,
             mode: Some(AgentMode::Plan),
             active_plan: Some(ActivePlan::from_file(path.clone(), &approved)),
         })
@@ -181,6 +182,7 @@ fn restore_preserves_in_progress_unknown_legacy_todos() {
     .unwrap();
     let rt = PlanRuntime::new("session-a");
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: Some(AgentMode::Chat),
         active_plan: Some(ActivePlan::from_file(
             path.clone(),
@@ -232,6 +234,26 @@ fn stopping_does_not_rewrite_a_completed_plan() {
         before
     );
     assert!(events.lock().is_empty());
+    cleanup_home(&home);
+}
+
+#[test]
+fn stopping_after_handoff_clears_the_old_executing_binding() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new_with_session_id("project", "old-owner");
+    let path = write_disk_plan("handed-off", PlanFileState::Planning);
+    rt.build_plan("handed-off", Some("old-owner".into()), false)
+        .unwrap();
+    let mut transferred = read_plan(&path).unwrap();
+    transferred.frontmatter.session_id = Some("new-owner".into());
+    write_plan(&path, &transferred, 2_000).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let events = capture_plan_current(&rt);
+    assert_eq!(rt.park_executing_plan().unwrap(), None);
+    assert!(rt.active_plan().is_none());
+    assert_eq!(events.lock()[0]["path"], serde_json::Value::Null);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     cleanup_home(&home);
 }
 
@@ -456,6 +478,7 @@ fn attach_exec_with_missing_plan_file_falls_back_to_chat() {
     let rt = PlanRuntime::new_with_session_id("session-a", "run-new");
     let events = capture_plan_current(&rt);
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: Some(AgentMode::Chat),
         active_plan: Some(ActivePlan {
             id: "orphan-plan".into(),
@@ -485,6 +508,7 @@ fn attach_plan_mode_survives_without_plan_file() {
     let rt = PlanRuntime::new("session-a");
     // 进 PLAN 时计划文件往往还不存在，这正是旧实现会静默掉回 CHAT 的场景。
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: Some(AgentMode::Plan),
         active_plan: None,
     })
@@ -500,6 +524,7 @@ fn attach_plan_mode_without_path_does_not_invent_an_active_plan() {
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: Some(AgentMode::Plan),
         active_plan: None,
     })
@@ -523,7 +548,9 @@ fn restart_after_plan_build_restores_chat_mode_and_executing_plan() {
     write_plan(&path, &p, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
+    let events = capture_plan_current(&rt);
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: false,
         mode: Some(AgentMode::Chat),
         active_plan: Some(ActivePlan::from_file(
             path.clone(),
@@ -535,6 +562,7 @@ fn restart_after_plan_build_restores_chat_mode_and_executing_plan() {
     assert_eq!(rt.mode(), AgentMode::Chat);
     assert_eq!(rt.executing_plan_id().as_deref(), Some(plan_id));
     assert_eq!(rt.active_plan_path(), Some(path));
+    assert_eq!(events.lock()[0]["plan_id"], plan_id);
     cleanup_home(&home);
 }
 
@@ -550,6 +578,7 @@ fn restart_after_plan_completion_restores_chat_mode() {
     let rt = PlanRuntime::new("session-a");
     let events = capture_plan_current(&rt);
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: None,
         active_plan: Some(ActivePlan {
             id: plan_id.into(),
@@ -598,6 +627,7 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
 
     let rt = PlanRuntime::new_with_session_id("session-a", "snapshot-session");
     rt.attach_from_resume_state(ResumeControlState {
+        seen_plan_current: true,
         mode: Some(AgentMode::Chat),
         active_plan: Some(ActivePlan::from_file(
             path.clone(),

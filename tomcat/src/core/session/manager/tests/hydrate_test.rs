@@ -222,7 +222,6 @@ fn base_resume_index(total_entries: usize) -> ResumeIndex {
         latest_day_first_entry: None,
         latest_plan_event: None,
         resume_control: Default::default(),
-        seen_plan_current: false,
     }
 }
 

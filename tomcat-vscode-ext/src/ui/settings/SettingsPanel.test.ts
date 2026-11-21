@@ -43,7 +43,25 @@ describe("web search settings", () => {
       sendSetProviderKey.mockRejectedValueOnce(new Error("Socket closed"));
       await save("brave");
       expect(panel.__testingSnapshot().state.error).toBe("Socket closed");
-      await save("brave");
+      // The write must settle even if a later refresh supersedes its list readback.
+      let finishRead!: () => void;
+      let signalRead!: () => void;
+      const readStarted = new Promise<void>(resolve => { signalRead = resolve; });
+      const finish = new Promise<void>(resolve => { finishRead = resolve; });
+      const result = await request({});
+      request.mockImplementationOnce(async () => {
+        signalRead();
+        await finish;
+        return result;
+      });
+      const saving = save("brave");
+      await readStarted;
+      try {
+        await ready();
+      } finally {
+        finishRead();
+        await saving;
+      }
       expect(sendSetProviderKey).toHaveBeenCalledWith("BRAVE_API_KEY", "synthetic-key");
       expect(panel.__testingSnapshot().state.webSearchReceipt).toEqual({ requestId: "brave", phase: "saved" });
       expect(JSON.stringify(panel.__testingSnapshot().state)).not.toContain("synthetic-key");

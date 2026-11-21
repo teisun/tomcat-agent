@@ -98,26 +98,28 @@ impl WebSearchRuntime {
         session_id: &str,
     ) -> Result<WebSearchOutput, AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
-        let catalog = self.model_catalog.snapshot();
+        let (catalog, model_revision) = self.model_catalog.snapshot_with_generation();
         let invoker = self.plugin_invoker.get();
-        let declarations = invoker
-            .map(|invoker| invoker.backend_declarations())
+        let plugin = invoker
+            .map(|invoker| invoker.search_catalog())
             .unwrap_or_default();
-        let order = effective_order(self.order.read().as_deref(), &declarations);
-        let saved_keys = invoker.is_some_and(|invoker| invoker.winner_can_use_saved_keys());
+        let order = effective_order(self.order.read().as_deref(), &plugin.declarations);
         let targets: Vec<_> = order
             .iter()
-            .map(|id| target_for(id, &declarations, &catalog, saved_keys))
+            .map(|id| target_for(id, &plugin.declarations, &catalog, plugin.saved_keys))
             .collect();
-        let available = order
+        let routes = order
             .iter()
             .zip(&targets)
-            .filter_map(|(id, target)| {
-                let (_, slot) = target.as_ref().ok()?;
-                Some((id.clone(), slot.clone(), credential_generation(slot)))
+            .map(|(id, target)| {
+                let credential = target
+                    .as_ref()
+                    .ok()
+                    .map(|(_, slot)| (slot.clone(), credential_generation(slot)));
+                (id.clone(), credential)
             })
             .collect();
-        let cache_key = CacheKey::from_request(&request, available);
+        let cache_key = CacheKey::from_request(&request, (plugin.revision, model_revision), routes);
         if let Some(mut output) = self.cache.get(&cache_key) {
             output.stats.cached = true;
             return Ok(output);
@@ -130,10 +132,15 @@ impl WebSearchRuntime {
                 Err(failure) => Err(failure),
                 Ok((declaration, _)) => tokio::time::timeout(timeout, async {
                     let invoker = invoker.expect("declarations require a plugin invoker");
-                    PluginWebSearchBackend::new(invoker.clone(), id.as_str(), session_id)
-                        .with_model(declaration.model.clone())
-                        .search(&request)
-                        .await
+                    PluginWebSearchBackend::new(
+                        invoker.clone(),
+                        id.as_str(),
+                        session_id,
+                        plugin.revision,
+                    )
+                    .with_model(declaration.model.clone())
+                    .search(&request)
+                    .await
                 })
                 .await
                 .unwrap_or(Err(BackendFailure::Timeout)),
@@ -175,7 +182,7 @@ impl WebSearchRuntime {
     ) -> Result<(), AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
         self.cache
-            .insert(CacheKey::from_request(&request, Vec::new()), value);
+            .insert(CacheKey::from_request(&request, (0, 0), Vec::new()), value);
         Ok(())
     }
 }

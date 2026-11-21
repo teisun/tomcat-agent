@@ -1,5 +1,5 @@
 use crate::ext::plugin::RegisteredFunction;
-use crate::ext::{HostApiDispatcher, PluginManager};
+use crate::ext::{EventEnvelope, HostApiDispatcher, PluginManager};
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
 use crate::infra::wire;
@@ -100,9 +100,17 @@ impl PluginFunctionInvoker {
             )));
         }
 
-        let _handle = plugin_manager
+        let handle = plugin_manager
             .start_session_vm(session_id, &function.plugin_id)
             .await?;
+        // Reload drains other sessions' VMs rather than interrupting them. A new
+        // host-function call must not run old code under the replacement's route.
+        if !plugin_manager.is_instance_current(&handle.instance_id) {
+            return Err(AppError::Plugin(tr(
+                "plugin.functionInstanceChanged",
+                &[("id", &function.plugin_id)],
+            )));
+        }
 
         let call_id = self.alloc_call_id(session_id, &function.plugin_id, &function.function);
         let rx = dispatcher.register_command_waiter(&call_id);
@@ -110,25 +118,25 @@ impl PluginFunctionInvoker {
             dispatcher: &dispatcher,
             call_id: &call_id,
         };
-        let dispatched = plugin_manager.dispatch_session_event(
-            session_id,
-            &function.plugin_id,
-            wire::vm::WIRE_COMMAND_INVOKE,
-            serde_json::json!({
-                "kind": "function",
-                "callId": call_id,
-                "functionName": function.function,
-                "point": function.point,
-                "params": params,
-            }),
-            serde_json::json!({
-                "sessionId": session_id,
-                "pluginId": function.plugin_id,
-                "functionName": function.function,
-                "point": function.point,
-            }),
-        );
-        dispatched?;
+        dispatcher.deliver_event(
+            &handle.instance_id,
+            EventEnvelope {
+                event_type: wire::vm::WIRE_COMMAND_INVOKE.into(),
+                data: serde_json::json!({
+                    "kind": "function",
+                    "callId": call_id,
+                    "functionName": function.function,
+                    "point": function.point,
+                    "params": params,
+                }),
+                context: serde_json::json!({
+                    "sessionId": session_id,
+                    "pluginId": function.plugin_id,
+                    "functionName": function.function,
+                    "point": function.point,
+                }),
+            },
+        )?;
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),

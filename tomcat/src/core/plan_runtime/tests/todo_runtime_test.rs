@@ -30,7 +30,7 @@ fn todo_document_v2_roundtrips_body_and_all_metadata() {
         body.as_bytes()
     );
     assert_eq!(
-        reopened.progress().unwrap().0,
+        reopened.progress().unwrap().path,
         todo_path_for(dir.path(), "ses-a")
     );
     assert_eq!(reopened.snapshot_items(), before.items);

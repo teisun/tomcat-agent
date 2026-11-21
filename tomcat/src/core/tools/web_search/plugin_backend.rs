@@ -6,14 +6,17 @@ use serde::Deserialize;
 use super::backend::{BackendFailure, BackendSearchResponse, WebSearchBackend};
 use super::types::{RawHit, WebSearchRequest};
 
+#[derive(Default)]
+pub struct PluginSearchCatalog {
+    pub declarations: Vec<super::declarations::BackendDeclaration>,
+    pub saved_keys: bool,
+    pub revision: u64,
+}
+
 #[async_trait]
 pub trait PluginSearchInvoker: Send + Sync {
-    fn backend_declarations(&self) -> Vec<super::declarations::BackendDeclaration> {
-        Vec::new()
-    }
-
-    fn winner_can_use_saved_keys(&self) -> bool {
-        false
+    fn search_catalog(&self) -> PluginSearchCatalog {
+        PluginSearchCatalog::default()
     }
 
     async fn search(
@@ -21,6 +24,7 @@ pub trait PluginSearchInvoker: Send + Sync {
         backend: &str,
         params: serde_json::Value,
         session_id: &str,
+        revision: u64,
     ) -> Result<serde_json::Value, BackendFailure>;
 }
 
@@ -30,6 +34,7 @@ pub struct PluginWebSearchBackend {
     backend: String,
     session_id: String,
     model: Option<String>,
+    revision: u64,
 }
 
 impl PluginWebSearchBackend {
@@ -37,12 +42,14 @@ impl PluginWebSearchBackend {
         invoker: Arc<dyn PluginSearchInvoker>,
         backend: impl Into<String>,
         session_id: impl Into<String>,
+        revision: u64,
     ) -> Self {
         Self {
             invoker,
             backend: backend.into(),
             session_id: session_id.into(),
             model: None,
+            revision,
         }
     }
 
@@ -148,7 +155,7 @@ impl WebSearchBackend for PluginWebSearchBackend {
         });
         let raw = self
             .invoker
-            .search(&self.backend, payload, &self.session_id)
+            .search(&self.backend, payload, &self.session_id, self.revision)
             .await?;
         let parsed: PluginSearchResponse =
             serde_json::from_value(raw).map_err(|err| BackendFailure::Parse {

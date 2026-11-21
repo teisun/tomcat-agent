@@ -228,6 +228,8 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
           { parts: [sseToolCall("upgrade-complete", "update_plan", JSON.stringify({ ops: [{ kind: "set_status", id: "check-old-data", status: "completed", evidence: ["Legacy data loaded and user answered during execution"] }] })), sseFinish("tool_calls"), sseDone()] },
           { parts: [sseDelta("UPGRADE_EXECUTION_COMPLETE"), sseFinish("stop"), sseDone()] },
         );
+      } else if (options.webSearchSmoke) {
+        responses.push({ parts: [sseDelta("Image fixture received."), sseFinish("stop"), sseDone()] });
       } else if (options.playwrightSmoke) {
         mcpSmoke = await createPlaywrightMcpSmoke();
         responses.push({ parts: [sseDelta("RELEASE_BUNDLE_READY"), sseFinish("stop"), sseDone()] }, ...mcpSmoke.responses);
@@ -305,9 +307,12 @@ export async function runInstalledScenario(options: InstalledScenarioOptions): P
     });
     if (server) {
       const requests = server.capturedNonTitleRequests();
-      if (cliDiscovery || options.webSearchSmoke) {
+      if (cliDiscovery) {
         if (server.capturedRequests().length !== 0) throw new Error("This acceptance scenario must not make model requests");
         await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: 0 }));
+      } else if (options.webSearchSmoke) {
+        if (requests.length !== 1 || !requests[0].includes("data:image/png;base64,")) throw new Error("Expected one image turn at the loopback model fixture");
+        await fs.writeFile(path.join(options.artifactsDir, "release-model-requests.json"), JSON.stringify({ count: 1, loopbackImage: true }));
       } else {
       const expectedCount = mcpSmoke ? 1 + mcpSmoke.responses.length : options.upgradeFixture ? 5 : 7;
       if (requests.length !== expectedCount) throw new Error(`Expected ${expectedCount} real model requests, got ${requests.length}`);

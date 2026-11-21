@@ -220,6 +220,7 @@ async fn compact_restores_todos_before_first_turn_survives_recompaction_and_swit
         .plan_runtime
         .attach_from_resume_state(crate::core::session::manager::ResumeControlState {
             mode: Some(crate::core::session::AgentMode::Chat),
+            seen_plan_current: true,
             active_plan: Some(crate::core::plan_runtime::ActivePlan::from_file(
                 plan_path.clone(),
                 &plan,
