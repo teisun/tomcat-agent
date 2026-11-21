@@ -236,12 +236,12 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
             .env("HTTP_PROXY", "http://proxy.invalid:9000")
             .env("TOMCAT_E2E_OPENAI_TARGET", "gpt-5.6")
             .env_remove("OPENAI_API_KEY")
-            .env_remove("IDATATLAS_OPENAI_API_KEY");
+            .env_remove(common::NICKMJIANG_TEST_API_KEY_ENV);
         if target_key {
             cmd.env("OPENAI_API_KEY", "selected-target-stub");
         }
         if delivery_key {
-            cmd.env("IDATATLAS_OPENAI_API_KEY", "fixed-delivery-stub");
+            cmd.env(common::NICKMJIANG_TEST_API_KEY_ENV, "fixed-delivery-stub");
         }
         let output = cmd.output().expect("run isolated gate preflight");
         if target_key && delivery_key {
@@ -255,7 +255,7 @@ fn live_gate_preflights_both_selected_target_and_fixed_delivery_credentials() {
         } else {
             assert_eq!(output.status.code(), Some(2), "{output:?}");
             let missing = if target_key {
-                "IDATATLAS_OPENAI_API_KEY"
+                common::NICKMJIANG_TEST_API_KEY_ENV
             } else {
                 "OPENAI_API_KEY"
             };

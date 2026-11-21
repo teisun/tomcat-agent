@@ -96,15 +96,13 @@ TEST_PID=$!
 
 ### LLM / CLI 集成测试凭证（配置要点）
 
-`cli_tests`、`llm_tests` 及走 DeepSeek 兼容链路的对话/E2E 用例依赖 **真实** `DEEPSEEK_API_KEY` 与可达的 `api.deepseek.com`；`openai_responses_integration_tests` 与显式 OpenAI Responses 路径仍依赖 **真实** `OPENAI_API_KEY` 与可达的 `api.openai.com`（见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) §5.2）。跑全量门禁时，建议两类 key 都在同一个 shell 环境内准备好。
+全量门禁默认使用 `nickmjiang/gpt-6-astra` 和 `NICKMJIANG_API_KEY`，包括 CLI/LLM/Plan 交付场景与 Responses 协议测试。用 `TOMCAT_E2E_OPENAI_TARGET` 切换协议探针时，所选供应商的凭据另行准备，交付场景仍使用 NickMjiang。DeepSeek 协议专项不属于默认全量门禁。详见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) §7.2。
 
-1. **密钥文件位置**：在 **`tomcat/.env`**（crate 根，与 [`scripts/verify-openai-apis.sh`](../../scripts/verify-openai-apis.sh) 使用的 `ROOT_DIR/.env` 为同一路径）中配置至少：
-   - `DEEPSEEK_API_KEY=...`（`cli_tests` / `llm_tests` / DeepSeek 兼容对话 E2E 必填）
-   - `OPENAI_API_KEY=...`（`openai_responses_integration_tests` 与 OpenAI Responses 相关门禁必填）
+1. **密钥文件位置**：在私有 **`tomcat/.env`**（crate 根）或当前 shell 配置所需凭据。门禁以当前进程导出的环境变量为准；不要将密钥提交到 Git 或写入日志。
 2. **代理（按需）**：若直连上游不可用，在同一 `.env` 中配置 `HTTPS_PROXY`（及必要时 `HTTP_PROXY`）。`reqwest` 会读取当前进程环境；`llm_tests` / `openai_responses_integration_tests` 日志中都可见代理是否生效。
    - **私有 OpenAI 兼容网关实战备注（2026-06-20）**：当本机已接入内网时，`integration-openai-responses-wire` 更稳定的口径是**直连你的网关 host，不要再走本地 `127.0.0.1:7890` 代理**；否则 `responses_inline_image_describe_roundtrip` 可能返回 HTML `403 Forbidden`。建议在同一命令前显式加：
      `env -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u http_proxy NO_PROXY=<gateway-host> no_proxy=<gateway-host>`
-3. **先探活再跑长测**：OpenAI 路径可在 `tomcat` 下执行 `./scripts/verify-openai-apis.sh 1 3`（或交互选 `1`～`5`）快速验证 `OPENAI_API_KEY` 与网络；DeepSeek 路径至少应先单跑一条 `llm_tests` 用例确认 `DEEPSEEK_API_KEY` 可用，避免 `cargo test` 编译许久后才因 401/网络失败。
+3. **先探活再跑长测**：如需排除凭据或网络故障，用所选 target 运行一条 Responses 非流式用例；协议连通性不代替完整门禁。
 4. **向测试进程注入环境（推荐）**：仅依赖测试内的 `dotenvy::dotenv()` 时，cwd 非 crate 根可能加载不到 `.env`。**推荐**在 shell 中先导出变量再跑测试：
 
 ```bash
@@ -113,10 +111,10 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
-cargo nextest run --no-fail-fast --test cli_tests --test llm_tests --test openai_responses_integration_tests
+./scripts/run-integration-tests.sh integration-real-llm
 ```
 
-5. **与 §4 全量门禁衔接**：仍需遵守上文「写日志 + 后台 + 轮询」模板时，可将上述 `cargo nextest run` 换为全量命令并重定向到 `.integration_test_output.log`；若环境变量仅存在于当前 shell，须在**同一** `source .env` 后的子 shell 内启动后台测试，避免子进程丢失 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`。
+5. **与 §4 全量门禁衔接**：按上文「写日志 + 后台 + 轮询」模板，以 `gate-full` 替换 `integration-real-llm`。在导出凭据的同一 shell 启动，确保后台进程继承对应环境。
 
 ---
 

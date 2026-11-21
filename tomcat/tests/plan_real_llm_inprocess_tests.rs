@@ -6,9 +6,8 @@
 //! acceptance todo、真实产物、planner review 和 transcript 顺序的主验收锚点。
 //!
 //! ## 门禁
-//! - `IDATATLAS_OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
-//! - 默认模型来自 `TOMCAT_E2E_IDATATLAS_MODEL` env，未设则
-//!   `idatatlas/gpt-5.6-terra`。
+//! - `NICKMJIANG_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
+//! - 使用 `nickmjiang/gpt-6-astra` 验证真实规划、审阅和执行。
 //!
 //! ## 数据目录
 //! - 每个测试进程先切到独立临时 `HOME`，把 `~/.tomcat/*` 隔离到私有 tempdir。
@@ -69,7 +68,7 @@ const TRANSIENT_LLM_RETRY_DELAY: Duration = Duration::from_secs(2);
 const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn require_api_key() {
-    let _ = common::require_idatatlas_api_key("plan_real_llm_inprocess_tests");
+    let _ = common::require_nickmjiang_api_key("plan_real_llm_inprocess_tests");
 }
 
 fn current_home() -> PathBuf {
@@ -98,7 +97,7 @@ fn load_user_config() -> tomcat::AppConfig {
             .to_string_lossy()
             .into_owned(),
     );
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_nickmjiang_app_config(&mut cfg);
     cfg
 }
 

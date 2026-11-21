@@ -383,7 +383,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     if std::env::var("PI_LIVE_SKILL").ok().as_deref() != Some("1") {
         return;
     }
-    let _api_key = common::require_idatatlas_api_key("live_skill_load_roundtrip_with_real_llm");
+    let _api_key = common::require_nickmjiang_api_key("live_skill_load_roundtrip_with_real_llm");
 
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -401,7 +401,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_nickmjiang_app_config(&mut cfg);
     cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 

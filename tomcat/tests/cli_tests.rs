@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -385,49 +385,49 @@ fn management_commands_fail_when_configuration_is_invalid() {
 }
 
 fn real_llm_api_key(test_name: &str) -> String {
-    common::require_idatatlas_api_key(test_name)
+    common::require_nickmjiang_api_key(test_name)
 }
 
-fn seed_idatatlas_real_llm_catalog(work_dir: &Path) {
+fn seed_delivery_model_catalog(work_dir: &Path) {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_nickmjiang_app_config(&mut cfg);
     assert!(
         work_dir.join("models.toml").is_file(),
-        "idatatlas Terra entry must be written before the CLI resolves it"
+        "NickMjiang model entry must be written before the CLI resolves it"
     );
 }
 
-fn configure_idatatlas_real_llm(command: &mut Command, api_key: &str, work_dir: &Path) {
-    seed_idatatlas_real_llm_catalog(work_dir);
-    let model = common::idatatlas_test_model();
+fn configure_real_llm(command: &mut Command, api_key: &str, work_dir: &Path) {
+    seed_delivery_model_catalog(work_dir);
+    let model = common::NICKMJIANG_TEST_DEFAULT_MODEL;
     command
-        .env(common::IDATATLAS_TEST_API_KEY_ENV, api_key)
-        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
-        .env("TOMCAT__LLM__TITLE_MODEL", &model)
-        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+        .env(common::NICKMJIANG_TEST_API_KEY_ENV, api_key)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", model)
+        .env("TOMCAT__LLM__TITLE_MODEL", model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", model);
 }
 
-fn configure_idatatlas_without_key(command: &mut Command, work_dir: &Path) {
-    seed_idatatlas_real_llm_catalog(work_dir);
-    let model = common::idatatlas_test_model();
+fn configure_real_llm_without_key(command: &mut Command, work_dir: &Path) {
+    seed_delivery_model_catalog(work_dir);
+    let model = common::NICKMJIANG_TEST_DEFAULT_MODEL;
     command
-        .env_remove(common::IDATATLAS_TEST_API_KEY_ENV)
-        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
-        .env("TOMCAT__LLM__TITLE_MODEL", &model)
-        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+        .env_remove(common::NICKMJIANG_TEST_API_KEY_ENV)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", model)
+        .env("TOMCAT__LLM__TITLE_MODEL", model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", model);
 }
 
 fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-fn assert_current_cli_reply(config_path: &Path, work_dir: &Path) -> String {
+fn assert_current_cli_reply(config_path: &Path, work_dir: &Path, cwd: &Path) -> String {
     let mut cfg = tomcat::load_config_toml_file(config_path).expect("load isolated CLI config");
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
     let session = SessionManager::new_scoped(
         tomcat::resolve_sessions_dir(&cfg).unwrap(),
-        current_code_session_key(),
+        tomcat::session_key_for(tomcat::SessionMode::Code, cwd),
     );
     let messages = session
         .get_entries(256)
@@ -461,7 +461,7 @@ fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
     cfg.storage.work_dir = Some(dir.path().display().to_string());
     let config_path = dir.path().join("config.toml");
     fs::write(&config_path, toml::to_string(&cfg).unwrap()).unwrap();
-    let key = current_code_session_key();
+    let key = tomcat::session_key_for(tomcat::SessionMode::Code, dir.path());
     let session =
         SessionManager::new_scoped(tomcat::resolve_sessions_dir(&cfg).unwrap(), key.clone());
     session.create_session(&key, None).unwrap();
@@ -474,9 +474,12 @@ fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
             .append_message(serde_json::to_value(message).unwrap())
             .unwrap();
     }
-    assert!(
-        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
-    );
+    assert!(std::panic::catch_unwind(|| assert_current_cli_reply(
+        &config_path,
+        dir.path(),
+        dir.path()
+    ))
+    .is_err());
     let intent = ChatMessage::assistant_with_tool_calls(
         Some("I'll try a tool"),
         vec![json!({
@@ -486,9 +489,12 @@ fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
     session
         .append_message(serde_json::to_value(intent).unwrap())
         .unwrap();
-    assert!(
-        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
-    );
+    assert!(std::panic::catch_unwind(|| assert_current_cli_reply(
+        &config_path,
+        dir.path(),
+        dir.path()
+    ))
+    .is_err());
     session
         .append_message(
             serde_json::to_value(ChatMessage::tool("unfinished-call", "tool finished")).unwrap(),
@@ -499,14 +505,17 @@ fn cli_reply_evidence_rejects_old_missing_and_failed_answers() {
     session
         .append_message(serde_json::to_value(failed).unwrap())
         .unwrap();
-    assert!(
-        std::panic::catch_unwind(|| assert_current_cli_reply(&config_path, dir.path())).is_err()
-    );
+    assert!(std::panic::catch_unwind(|| assert_current_cli_reply(
+        &config_path,
+        dir.path(),
+        dir.path()
+    ))
+    .is_err());
     session
         .append_message(serde_json::to_value(ChatMessage::assistant("fresh reply")).unwrap())
         .unwrap();
     assert_eq!(
-        assert_current_cli_reply(&config_path, dir.path()),
+        assert_current_cli_reply(&config_path, dir.path(), dir.path()),
         "fresh reply"
     );
 }
@@ -2470,7 +2479,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    info!("Arrange: init config in temp dir, set work_dir and IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: init config in temp dir, set work_dir and NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -2481,13 +2490,14 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
         real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
 
     let config_path = dir.path().join(".tomcat/tomcat.config.toml");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__CONFIG_PATH", &config_path)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
 
     info!("Act: execute chat with stdin 'hi', timeout 60s");
     let assert = c.assert();
@@ -2496,11 +2506,11 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
 
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         out_str.contains(&tr(
             "terminal.welcome",
-            &[("model", &common::idatatlas_test_model())]
+            &[("model", common::NICKMJIANG_TEST_DEFAULT_MODEL)]
         )) || out_str.contains("agent.main>"),
         "chat 应输出对话模式 banner 或模型信息或 agent.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
@@ -2542,7 +2552,7 @@ fn test_chat_with_session_dir_does_not_crash() {
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_idatatlas_without_key(&mut c, &work_dir);
+    configure_real_llm_without_key(&mut c, &work_dir);
 
     info!("Act: run chat without API key, timeout 5s");
     let output = c.output().expect("chat 进程应在 5s 内结束");
@@ -3160,13 +3170,13 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
-// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
+// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 NICKMJIANG_API_KEY） ────────────────────
 
 /// [E2E-CLI-011] 用户向助手提问并收到回答
 ///
 /// 用户意图：在 tomcat chat 中提问，收到 AI 回复
 /// 验证：exit 0；stdout 非空
-/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
+/// 要求：NICKMJIANG_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_a_question() {
@@ -3179,7 +3189,7 @@ fn test_user_asks_pi_a_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -3188,18 +3198,19 @@ fn test_user_asks_pi_a_question() {
     let api_key = real_llm_api_key("test_user_asks_pi_a_question");
 
     info!("Act: tomcat chat stdin 你好，介绍一下你自己，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("你好，介绍一下你自己\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         !out.trim().is_empty(),
         "AI 应输出非空回复，实际 stdout 为空"
@@ -3210,7 +3221,7 @@ fn test_user_asks_pi_a_question() {
 ///
 /// 用户意图：问 Rust 所有权系统
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
-/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
+/// 要求：NICKMJIANG_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_technical_question() {
@@ -3223,7 +3234,7 @@ fn test_user_asks_pi_technical_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -3232,13 +3243,14 @@ fn test_user_asks_pi_technical_question() {
     let api_key = real_llm_api_key("test_user_asks_pi_technical_question");
 
     info!("Act: tomcat chat stdin 问 Rust 所有权，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("Explain Rust ownership in one English sentence using the term ownership.\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -3273,7 +3285,7 @@ fn test_user_asks_pi_to_run_bash_command() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -3282,14 +3294,15 @@ fn test_user_asks_pi_to_run_bash_command() {
     let api_key = real_llm_api_key("test_user_asks_pi_to_run_bash_command");
 
     info!("Act: tomcat chat stdin 请执行 echo hello_from_pi，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .write_stdin("请执行 echo hello_from_pi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3314,7 +3327,7 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// [E2E-CLI-016B] 用户触发 read 失败时，终端应显示真实错误原因（非 failed 占位）
 ///
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
-/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
+/// 要求：NICKMJIANG_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_sees_read_failure_reason_in_tool_line() {
@@ -3327,7 +3340,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -3342,13 +3355,14 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     );
 
     info!("Act: tomcat chat 触发 read 不存在路径错误，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(format!("{prompt}\n"))
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -3426,26 +3440,24 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     let scratch = tomcat::infra::canonicalize(&scratch).expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
-    cmd()
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
+    isolated_cmd(dir.path())
         .args(["init"])
         .current_dir(&scratch)
         .timeout(std::time::Duration::from_secs(20))
-        .env("HOME", dir.path())
-        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = real_llm_api_key("setup_background_bash_p1_real_llm_fixture");
     let mut cfg = tomcat::load_config_toml_file(&config_path).expect("private live fixture config");
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_nickmjiang_app_config(&mut cfg);
     fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
     fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
-    cmd()
+    isolated_cmd(dir.path())
         .args(["workspace", "add", scratch_str])
-        .env("HOME", dir.path())
+        .current_dir(&scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
@@ -3469,23 +3481,24 @@ fn run_background_bash_autofeed_real_llm_chat(
     prompt: String,
     timeout: std::time::Duration,
 ) -> CliChatRunCapture {
-    let executable = std::env::var_os("CARGO_BIN_EXE_tomcat")
-        .expect("cargo must expose the tomcat integration-test binary");
-    let mut child = ProcessCommand::new(executable)
+    let mut child = common::serve::isolated_serve_command(fx._home.path())
         .arg("code")
         .current_dir(&fx.scratch)
-        .env("HOME", fx._home.path())
         .env("USERPROFILE", fx._home.path())
-        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
-        .env_remove("TOMCAT_AGENT_ACTIVE")
-        .env(common::IDATATLAS_TEST_API_KEY_ENV, &fx.api_key)
-        .env("TOMCAT__LLM__DEFAULT_MODEL", common::idatatlas_test_model())
-        .env("TOMCAT__LLM__TITLE_MODEL", common::idatatlas_test_model())
+        .env(common::NICKMJIANG_TEST_API_KEY_ENV, &fx.api_key)
+        .env(
+            "TOMCAT__LLM__DEFAULT_MODEL",
+            common::NICKMJIANG_TEST_DEFAULT_MODEL,
+        )
+        .env(
+            "TOMCAT__LLM__TITLE_MODEL",
+            common::NICKMJIANG_TEST_DEFAULT_MODEL,
+        )
         .env(
             "TOMCAT__CONTEXT__COMPACTION_MODEL",
-            common::idatatlas_test_model(),
+            common::NICKMJIANG_TEST_DEFAULT_MODEL,
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3543,17 +3556,15 @@ fn run_background_bash_p1_real_llm_chat(
     prompt: String,
     timeout: std::time::Duration,
 ) -> CliChatRunCapture {
-    let mut c = cmd();
+    let mut c = isolated_cmd(fx._home.path());
     c.arg("code")
         .current_dir(&fx.scratch)
-        .env("HOME", fx._home.path())
         .env("USERPROFILE", fx._home.path())
-        .env("TOMCAT__UI__LANGUAGE", "en")
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .write_stdin(format!("{prompt}\n"))
         .timeout(timeout);
-    configure_idatatlas_real_llm(&mut c, &fx.api_key, &fx.work_dir);
+    configure_real_llm(&mut c, &fx.api_key, &fx.work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     CliChatRunCapture {
@@ -4405,8 +4416,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 
 /// [E2E-CLI-013] 用户要求助手在仓库约定的 `workspace-temp` 子目录下写文件
 ///
-/// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
-/// 意义：scratch 走 `workspace-temp/`（INTEGRATION_TEST_SPEC §2.3），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
+/// 验证：exit 0，且独立 workspace 内的 `hello_e2e.txt` 存在、内容含 Hello E2E。
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_to_write_hello_world_bash() {
@@ -4419,14 +4429,12 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("workspace-temp")
-        .join("e2e_cli013_hello");
+    let scratch = dir.path().join("e2e_cli013_hello");
     std::fs::create_dir_all(&scratch).unwrap();
     let scratch_canon = tomcat::infra::canonicalize(&scratch).expect("workspace-temp scratch path");
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -4435,9 +4443,9 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let api_key = real_llm_api_key("test_user_asks_pi_to_write_hello_world_bash");
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
-    cmd()
+    isolated_cmd(dir.path())
         .args(["workspace", "add", scratch_str])
-        .env("HOME", dir.path())
+        .current_dir(&scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .assert()
@@ -4451,14 +4459,15 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         "请在目录 {} 下创建文件 hello_e2e.txt，内容写 Hello E2E。不要写到其他路径。\n",
         scratch_canon.display()
     );
-    info!("Act: tomcat chat stdin 要求在 workspace-temp 子目录创建 hello_e2e.txt，timeout 60s");
-    let mut c = cmd();
+    info!("Act: tomcat chat stdin 要求在临时 workspace 创建 hello_e2e.txt，timeout 60s");
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(&scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(prompt)
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -5303,13 +5312,13 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         .stdout(predicate::str::contains("scope:").and(predicate::str::contains("(none)")));
 }
 
-// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
+// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 NICKMJIANG_API_KEY） ────────────────────
 
 /// [E2E-CLI-041] 用户与 LLM 对话，获得流式渲染回复
 ///
 /// 用户意图：与 LLM 对话，获得非空 AI 回复
 /// 验证：exit 0；stdout 含 AI 回复
-/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
+/// 要求：NICKMJIANG_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chats_with_llm_gets_streaming_response() {
@@ -5322,7 +5331,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -5331,13 +5340,14 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     let api_key = real_llm_api_key("test_user_chats_with_llm_gets_streaming_response");
 
     info!("Act: tomcat chat + stdin 单句，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请用一句话回答：1+1 等于几？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -5348,7 +5358,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         trunc(&out, 300)
     );
     assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空流式回复，实际 stdout 为空"
@@ -5359,7 +5369,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 ///
 /// 用户意图：发送极短提问，验证 LLM 回复非空
 /// 验证：exit 0；stdout 非空
-/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
+/// 要求：NICKMJIANG_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_receives_nonempty_llm_response() {
@@ -5372,7 +5382,7 @@ fn test_user_receives_nonempty_llm_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -5381,13 +5391,14 @@ fn test_user_receives_nonempty_llm_response() {
     let api_key = real_llm_api_key("test_user_receives_nonempty_llm_response");
 
     info!("Act: tomcat chat + stdin 说一个字，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("说一个字\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -5395,7 +5406,7 @@ fn test_user_receives_nonempty_llm_response() {
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         !out.trim().is_empty(),
         "LLM 应输出非空回复，实际 stdout 为空"
@@ -5658,7 +5669,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init，移除 IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init，移除 NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -5674,7 +5685,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("hello\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_idatatlas_without_key(&mut c, &work_dir);
+    configure_real_llm_without_key(&mut c, &work_dir);
     let output = c.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -5685,7 +5696,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     let combined = format!("{stdout}{stderr}");
     assert!(!output.status.success(), "missing credentials must fail");
     assert!(
-        combined.contains(common::IDATATLAS_TEST_API_KEY_ENV),
+        combined.contains(common::NICKMJIANG_TEST_API_KEY_ENV),
         "chat 无 API Key 时应含错误提示，实际 combined: {}",
         trunc(&combined, 300)
     );
@@ -6059,7 +6070,7 @@ fn test_user_init_then_doctor_roundtrip() {
 ///
 /// 用户意图：用 --resume 恢复已有会话，历史消息从 JSONL 加载
 /// 验证：exit 0；进程正常退出（不崩溃）
-/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
+/// 要求：NICKMJIANG_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chat_resumes_last_session() {
@@ -6072,7 +6083,7 @@ fn test_user_chat_resumes_last_session() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init + NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -6081,27 +6092,29 @@ fn test_user_chat_resumes_last_session() {
     let api_key = real_llm_api_key("test_user_chat_resumes_last_session");
 
     info!("Act: 第一轮 tomcat chat，建立会话历史");
-    let mut first_round = cmd();
+    let mut first_round = isolated_cmd(dir.path());
     first_round
         .arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请回答：1+1=？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut first_round, &api_key, &work_dir);
+    configure_real_llm(&mut first_round, &api_key, &work_dir);
     let first_assert = first_round.assert();
     first_assert.success();
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
 
     info!("Act: 第二轮 tomcat chat --resume，恢复会话");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .arg("--resume")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("好的，谢谢\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -6109,7 +6122,7 @@ fn test_user_chat_resumes_last_session() {
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         !out.trim().is_empty(),
         "--resume 后 AI 应有回复，实际 stdout 为空"
@@ -7641,7 +7654,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 
 /// [用户场景] 用户启动 `tomcat chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复
 ///
-/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 IDATATLAS_OPENAI_API_KEY；无 key 时 panic，符合规范）
+/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 NICKMJIANG_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
 #[serial(env_lock)]
@@ -7655,7 +7668,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init 生成配置；加载 IDATATLAS_OPENAI_API_KEY");
+    info!("Arrange: tomcat init 生成配置；加载 NICKMJIANG_API_KEY");
     isolated_cmd(dir.path())
         .args(["init"])
         .env("SHELL", "/bin/zsh")
@@ -7665,13 +7678,14 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     let api_key = real_llm_api_key("test_user_chat_non_interactive_with_prompt_flag");
 
     info!("Act: tomcat chat stdin 单轮问答，timeout 60s");
-    let mut c = cmd();
+    let mut c = isolated_cmd(dir.path());
     c.arg("chat")
+        .current_dir(dir.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("Reply with exactly: pong\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
+    configure_real_llm(&mut c, &api_key, &work_dir);
 
     let assert = c.assert();
     let output = assert.get_output();
@@ -7685,7 +7699,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         out_str.chars().take(300).collect::<String>()
     );
     assert!(success, "CLI failed: {}", trunc(&stderr, 1200));
-    assert_current_cli_reply(&config_path, &work_dir);
+    assert_current_cli_reply(&config_path, &work_dir, dir.path());
     assert!(
         !out_str.trim().is_empty(),
         "AgentLoop 应输出非空 AI 回复，实际 stdout 为空"

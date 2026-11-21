@@ -91,7 +91,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   serve_rewind_and_resend
 )
 
-# 真 LLM E2E（需当前 Responses target 对应 key；默认是 idatatlas Terra）。
+# 真 LLM E2E（需当前 Responses target 对应 key；默认是 NickMjiang Astra）。
 # 默认快门禁不跑本组；显式 real-llm 层才运行。
 # 这几个 target 现在会在各自测试进程内切到临时 HOME，把 `~/.tomcat/*` 隔离到
 # 私有 tempdir；剩余并发约束只来自 provider API 限流，因此 nextest profile 把本组
@@ -129,7 +129,7 @@ TOMCAT_INTEGRATION_REAL_LLM_CASES=(
 )
 
 # OpenAI Responses wire 真链路子组：只收口到最终走 `api=openai-responses` 的验收入口。
-# 用途：集中管理 idatatlas Terra / OpenAI Responses 线上的 live 验收，不混入 DeepSeek / Mimo 专项分支。
+# 用途：集中管理 OpenAI Responses 线上的 live 验收，不混入 DeepSeek / MiMo 专项分支。
 # 注意：
 # - `reasoning_continuity_real_llm_tests` 只跑 OpenAI Responses 那条 case；
 # - `openai_files_integration_tests` 仍需 `--ignored`，且仅在 `PI_LIVE_OPENAI_FILES=1`

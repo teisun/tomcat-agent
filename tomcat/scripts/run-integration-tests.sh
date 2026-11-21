@@ -76,13 +76,16 @@ build_test_args() {
 }
 
 openai_responses_target() {
-  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-idatatlas/gpt-5.6-terra}"
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-nickmjiang/gpt-6-astra}"
 }
 
 openai_responses_key_env() {
   local target
   target="$(openai_responses_target)"
   case "$target" in
+  nickmjiang/*)
+    printf '%s' "NICKMJIANG_API_KEY"
+    ;;
     idatatlas/*)
     printf '%s' "IDATATLAS_OPENAI_API_KEY"
     ;;
@@ -104,9 +107,9 @@ missing_required_envs_for_real_llm() {
   if [ -z "${!openai_key_env}" ]; then
     printf '%s\n' "$openai_key_env"
   fi
-  # CLI/LLM/plan delivery fixtures deliberately remain on IDATATLAS.
-  if [ "$openai_key_env" != "IDATATLAS_OPENAI_API_KEY" ] && [ -z "${IDATATLAS_OPENAI_API_KEY:-}" ]; then
-    printf '%s\n' "IDATATLAS_OPENAI_API_KEY"
+  # Selecting a different wire probe must not change the CLI/LLM/Plan delivery model.
+  if [ "$openai_key_env" != "NICKMJIANG_API_KEY" ] && [ -z "${NICKMJIANG_API_KEY:-}" ]; then
+    printf '%s\n' "NICKMJIANG_API_KEY"
   fi
 }
 
@@ -202,7 +205,7 @@ run_integration_real_llm() {
     return 2
   fi
   ensure_nextest
-  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；target key=${openai_key_env}，delivery key=IDATATLAS_OPENAI_API_KEY）"
+  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；target key=${openai_key_env}，delivery key=NICKMJIANG_API_KEY）"
   PI_LIVE_OPENAI_RESPONSES=1 cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"

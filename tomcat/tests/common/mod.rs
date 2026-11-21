@@ -37,8 +37,11 @@ pub const IDATATLAS_TEST_MODEL_ENV: &str = "TOMCAT_E2E_IDATATLAS_MODEL";
 pub const IDATATLAS_TEST_DEFAULT_MODEL: &str = "idatatlas/gpt-5.6-terra";
 pub const IDATATLAS_TEST_API_KEY_ENV: &str = "IDATATLAS_OPENAI_API_KEY";
 pub const IDATATLAS_TEST_BASE_URL: &str = "https://sub2api.idatatlas.com";
+pub const NICKMJIANG_TEST_DEFAULT_MODEL: &str = "nickmjiang/gpt-6-astra";
+pub const NICKMJIANG_TEST_API_KEY_ENV: &str = "NICKMJIANG_API_KEY";
+pub const NICKMJIANG_TEST_BASE_URL: &str = "https://sub2api.nickmjiang.online/v1";
 pub const OPENAI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_OPENAI_TARGET";
-pub const OPENAI_TEST_DEFAULT_MODEL: &str = IDATATLAS_TEST_DEFAULT_MODEL;
+pub const OPENAI_TEST_DEFAULT_MODEL: &str = NICKMJIANG_TEST_DEFAULT_MODEL;
 pub const OPENAI_GATEWAY_TEST_API_KEY_ENV: &str = "LITELLM_SUNMI_API_KEY";
 pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
 pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
@@ -150,7 +153,9 @@ pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
 }
 
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
-    if target.starts_with("idatatlas/") {
+    if target.starts_with("nickmjiang/") {
+        NICKMJIANG_TEST_API_KEY_ENV
+    } else if target.starts_with("idatatlas/") {
         IDATATLAS_TEST_API_KEY_ENV
     } else if target.starts_with("fcodex/") {
         FCODEX_TEST_API_KEY_ENV
@@ -169,12 +174,15 @@ pub fn require_deepseek_api_key(test_name: &str) -> String {
     })
 }
 
-pub fn require_idatatlas_api_key(test_name: &str) -> String {
+pub fn require_nickmjiang_api_key(test_name: &str) -> String {
     setup_logging();
     load_openai_test_env();
-    std::env::var(IDATATLAS_TEST_API_KEY_ENV).unwrap_or_else(|_| {
-        panic!("{test_name} 必须设置 {IDATATLAS_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
-    })
+    std::env::var(NICKMJIANG_TEST_API_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!("{test_name} 必须设置 {NICKMJIANG_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
+        })
 }
 
 pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
@@ -191,7 +199,9 @@ pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
 
 pub fn apply_openai_app_config(cfg: &mut AppConfig) {
     let model_id = e2e_openai_model();
-    if model_id.starts_with("idatatlas/") {
+    if model_id.starts_with("nickmjiang/") {
+        apply_nickmjiang_responses_app_config(cfg, &model_id);
+    } else if model_id.starts_with("idatatlas/") {
         apply_idatatlas_responses_app_config(cfg, &model_id);
     } else if model_id.starts_with("fcodex/") {
         apply_fcodex_responses_app_config(cfg, &model_id);
@@ -200,6 +210,34 @@ pub fn apply_openai_app_config(cfg: &mut AppConfig) {
         cfg.context.compaction_model = cfg.llm.default_model.clone();
         seed_provider_specific_test_models(cfg);
     }
+}
+
+pub fn apply_nickmjiang_app_config(cfg: &mut AppConfig) {
+    apply_nickmjiang_responses_app_config(cfg, NICKMJIANG_TEST_DEFAULT_MODEL);
+}
+
+fn apply_nickmjiang_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
+    cfg.llm.default_model = model_id.to_string();
+    cfg.llm.title_model = Some(model_id.to_string());
+    cfg.context.compaction_model = model_id.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id,
+            api: "openai-responses",
+            provider: "nickmjiang",
+            env_key: NICKMJIANG_TEST_API_KEY_ENV,
+            base_url: Some(NICKMJIANG_TEST_BASE_URL),
+            model_name: model_id.strip_prefix("nickmjiang/"),
+            context_window: Some(400_000),
+            context_window_options: Some(&[400_000, 1_050_000]),
+            max_output_tokens: Some(128_000),
+            thinking_format: Some("openai"),
+            supported_reasoning_levels: Some(&["low", "medium", "high", "xhigh", "max"]),
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
 }
 
 pub fn apply_idatatlas_app_config(cfg: &mut AppConfig) {

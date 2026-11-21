@@ -20,34 +20,38 @@ fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
 
 #[test]
 #[serial(env_lock)]
-fn default_responses_target_uses_idatatlas_terra_configuration() {
+fn default_responses_target_uses_nickmjiang_configuration() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
 
     unsafe {
         std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
-        std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
+        std::env::set_var(common::NICKMJIANG_TEST_API_KEY_ENV, "nickmjiang-stub");
     }
 
     common::apply_openai_app_config(&mut cfg);
     let resolved = resolve_main_call(&cfg);
     let catalog = ModelCatalog::load(&cfg).expect("load model catalog");
     let entry = catalog
-        .lookup(common::IDATATLAS_TEST_DEFAULT_MODEL)
-        .expect("idatatlas Terra entry");
+        .lookup(common::NICKMJIANG_TEST_DEFAULT_MODEL)
+        .expect("NickMjiang catalog entry");
 
-    assert_eq!(cfg.llm.default_model, common::IDATATLAS_TEST_DEFAULT_MODEL);
-    assert_eq!(resolved.provider, "idatatlas");
+    assert_eq!(cfg.llm.default_model, common::NICKMJIANG_TEST_DEFAULT_MODEL);
+    assert_eq!(resolved.provider, "nickmjiang");
     assert_eq!(resolved.api, "openai-responses");
-    assert_eq!(resolved.model, "gpt-5.6-terra");
-    assert_eq!(resolved.key_source, common::IDATATLAS_TEST_API_KEY_ENV);
+    assert_eq!(resolved.model, "gpt-6-astra");
+    assert_eq!(resolved.key_source, common::NICKMJIANG_TEST_API_KEY_ENV);
+    assert_eq!(
+        resolved.base_url.as_deref(),
+        Some(common::NICKMJIANG_TEST_BASE_URL)
+    );
     assert_eq!(entry.context_window, Some(400_000));
-    assert_eq!(entry.context_window_options, vec![400_000, 1_000_000]);
+    assert_eq!(entry.context_window_options, vec![400_000, 1_050_000]);
     assert_eq!(entry.max_output_tokens, Some(128_000));
     assert_eq!(
         entry.supported_reasoning_levels,
-        vec!["low", "medium", "high", "xhigh"]
+        vec!["low", "medium", "high", "xhigh", "max"]
     );
     assert!(entry.capabilities.vision);
     assert!(entry.capabilities.files);
@@ -55,7 +59,7 @@ fn default_responses_target_uses_idatatlas_terra_configuration() {
     assert!(entry.capabilities.reasoning);
 
     unsafe {
-        std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);
+        std::env::remove_var(common::NICKMJIANG_TEST_API_KEY_ENV);
     }
 }
 
@@ -75,7 +79,7 @@ fn wire_model_name_is_not_a_catalog_id_so_subagents_must_dispatch_by_id() {
         std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
         std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
     }
-    common::apply_openai_app_config(&mut cfg);
+    common::apply_idatatlas_responses_app_config(&mut cfg, common::IDATATLAS_TEST_DEFAULT_MODEL);
 
     let catalog = ModelCatalog::load(&cfg).expect("load model catalog");
     let id = cfg.llm.default_model.clone();

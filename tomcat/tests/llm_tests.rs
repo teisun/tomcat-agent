@@ -1,5 +1,5 @@
 //! 集成测试：LLM 与真实外部 API 的协作（chat / chat_stream）。
-//! 不 Mock 网络，在配置 IDATATLAS_OPENAI_API_KEY 时通过 OpenAI Responses 真实发起 HTTP
+//! 不 Mock 网络，在配置 NICKMJIANG_API_KEY 时通过 OpenAI Responses 真实发起 HTTP
 //! 请求；无 key 时视为失败，不得 ignore。
 //! 鲁棒性：异步用例均包裹在超时内，避免依赖挂起导致测试挂起（INTEGRATION_TEST_ROBUSTNESS 2.2）。
 //!
@@ -29,15 +29,15 @@ fn responses_config() -> AppConfig {
     let mut cfg = AppConfig::default();
     let dir = tempfile::tempdir().expect("create llm test workdir");
     cfg.storage.work_dir = Some(dir.path().display().to_string());
-    common::apply_idatatlas_app_config(&mut cfg);
+    common::apply_nickmjiang_app_config(&mut cfg);
     std::mem::forget(dir);
     cfg
 }
 
-/// [LLM 非流式 chat] 真实 API 调用 idatatlas OpenAI Responses 返回合法响应
+/// [LLM 非流式 chat] 真实 API 调用 NickMjiang OpenAI Responses 返回合法响应
 ///
 /// 验证：choices 非空、首条 index=0（超时 60s）
-/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 IDATATLAS_OPENAI_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
+/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 NICKMJIANG_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
@@ -45,7 +45,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
     common::setup_logging();
     let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
     let _api_key =
-        common::require_idatatlas_api_key("test_llm_provider_chat_real_request_returns_ok");
+        common::require_nickmjiang_api_key("test_llm_provider_chat_real_request_returns_ok");
 
     let config = responses_config();
     let provider = common::resolve_main_provider(&config);
@@ -107,7 +107,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 /// [LLM 流式 chat_stream] 真实 API 调用产生流式事件
 ///
 /// 验证：stream 至少产生一个 StreamEvent（超时 60s）
-/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 IDATATLAS_OPENAI_API_KEY 时用例必须失败
+/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 NICKMJIANG_API_KEY 时用例必须失败
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_llm_provider_chat_stream_real_request_yields_events(
@@ -115,7 +115,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     common::setup_logging();
     let _span =
         tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
-    let _api_key = common::require_idatatlas_api_key(
+    let _api_key = common::require_nickmjiang_api_key(
         "test_llm_provider_chat_stream_real_request_yields_events",
     );
 
