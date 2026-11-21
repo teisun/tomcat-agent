@@ -498,7 +498,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage this Agent session's private working document, never the active PlanFile. Optional `draft` replaces the complete Markdown body verbatim; omitted draft/title preserves it, and an empty string clears it. Item `ops` are optional for body/title-only changes. `set_status.evidence` appends deduplicated completion evidence and is valid only with completed. `new_todos=true` resets the entire document; `replace=true` rebuilds only items from nonempty upserts and discards their old evidence. At most three independent items may be in_progress. Every successful call saves first and returns full `items`, document identity/title and absolute `todos_path`; use `read` on that path for the full body and evidence. Save/load failures are errors, never memory-only success. One v2 file per Agent session at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Main-session updates refresh its panel; reviewer documents are isolated.\n",
+        description: "Manage this Agent session's private working document, not the active PlanFile (use `update_plan` for its todos). Saves before returning items, document identity, title and absolute `todos_path`. Use `read` on that path for the Markdown and evidence. At most three independent items may be `in_progress`. Reviewer documents are isolated.\n",
         display_summary: Some("Maintain this Agent's saved Todos document; returns items and todos_path."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
@@ -1385,7 +1385,7 @@ fn update_plan_parameters() -> Value {
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Agent-local Todos document (CHAT / PLAN / EXEC). Every successful call saves the file and returns todos_path plus the full items snapshot, not the Markdown draft; read todos_path for full content. Never writes Plan todos. Omitted draft/title are preserved. new_todos=true resets the entire document; replace=true rebuilds only items and discards their prior evidence. Saving failure rejects the update.",
+        "description": "Saved Agent-session Todos (CHAT / PLAN / EXEC).",
         "properties": {
             "new_todos": {
                 "type": "boolean",

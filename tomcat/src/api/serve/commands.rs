@@ -1666,7 +1666,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let catalog = resolve_model_catalog_snapshot(&state)?;
+            let catalog = state.shared_model_catalog.snapshot();
             let payload = list_models_payload(&config, &catalog, Some(&state.shared_model_prefs));
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -2965,25 +2965,6 @@ pub(crate) fn list_models_payload(
             .to_owned(),
         warnings: catalog.diagnostics().to_vec(),
     }
-}
-
-fn resolve_model_catalog_snapshot(
-    state: &ServeState,
-) -> Result<Arc<crate::core::llm::ModelCatalog>, AppError> {
-    if let Some(active_session_id) = state.active_session_id() {
-        if let Some(slot) = state.registry.get(&active_session_id) {
-            return Ok(slot.ctx.global_services.model_catalog.snapshot());
-        }
-    }
-    if let Some(slot) = state
-        .registry
-        .list()
-        .into_iter()
-        .find_map(|summary| state.registry.get(&summary.session_id))
-    {
-        return Ok(slot.ctx.global_services.model_catalog.snapshot());
-    }
-    Ok(state.shared_model_catalog.snapshot())
 }
 
 /// Returns the applied selection config so callers report the same default the resolvers use.

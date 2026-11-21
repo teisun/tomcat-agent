@@ -6065,11 +6065,6 @@ async fn serve_set_model_rejects_a_model_removed_after_the_catalog_was_cached() 
         .shared_model_catalog
         .reload(&state.cfg)
         .expect("cache the new model before external removal");
-    slot.ctx
-        .global_services
-        .model_catalog
-        .reload(&state.cfg)
-        .expect("cache the new model in the active session before external removal");
     crate::core::llm::remove_user_model(&state.cfg, model_id).expect("remove model from disk");
 
     handle_command(

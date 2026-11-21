@@ -12,10 +12,10 @@ use tomcat::{
     parse_manifest, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
     ChatResponseChoice, DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult,
     EditOperation, EventBus, FunctionRegistry, HostApiDispatcher, LlmProvider, LlmResolver,
-    LlmScene, PluginEngine, PluginEngineConfig, PluginFunctionInvoker, PluginInstance,
-    PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor, PrimitiveExecutor,
-    PrimitiveOperation, ResolvedCall, SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor,
-    ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
+    LlmScene, PluginEngine, PluginEngineConfig, PluginFunctionInvoker, PluginManager,
+    PluginRuntimeManager, PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
+    SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 
 type FunctionManagerHarness = (
@@ -58,36 +58,15 @@ fn create_plugin_dir_with_manifest(manifest: serde_json::Value, script: &str) ->
     tmp
 }
 
-fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin_id: &str) {
+fn register_plugin(manager: &PluginManager, plugin_dir: &Path) {
     let manifest_json = std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap();
     let manifest = parse_manifest(&manifest_json).unwrap();
-    let manifest_tool_names = manifest
-        .tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect::<Vec<_>>();
-    let manifest_functions = manifest.functions.clone();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
     manager
-        .register_plugin(PluginInstance {
-            id: plugin_id.to_string(),
-            source: tomcat::ext::plugin::PluginSource::Project,
+        .register_catalog_plugin(
+            plugin_dir,
             manifest,
-            fingerprint: None,
-            plugin_vm_instance: None,
-            status: PluginStatus::Loaded,
-            registered_tools: manifest_tool_names,
-            registered_functions: manifest_functions,
-            registered_commands: vec![],
-            event_listener_ids: vec![],
-            config: serde_json::json!({}),
-            created_at: now,
-            loaded_at: now,
-            plugin_root: plugin_dir.to_path_buf(),
-        })
+            tomcat::ext::plugin::PluginSource::Project,
+        )
         .unwrap();
 }
 
@@ -309,7 +288,7 @@ pi.on('probe', function() { pi.emit('startup-probe-done'); });
 __pi_start_event_loop();
 "#,
     );
-    register_plugin(&manager, plugin.path(), "zero-start");
+    register_plugin(&manager, plugin.path());
     let handle = tokio::time::timeout(
         Duration::from_secs(5),
         manager.start_session_vm("zero-session", "zero-start"),
@@ -353,7 +332,7 @@ async fn zero_timeout_session_start_reports_initialization_error_and_cleans_up()
         "zero-error",
         "pi.emit('startup-delay'); throw new Error('zero-startup-error-marker');",
     );
-    register_plugin(&manager, plugin.path(), "zero-error");
+    register_plugin(&manager, plugin.path());
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         manager.start_session_vm("zero-session", "zero-error"),
@@ -678,7 +657,7 @@ __pi_start_event_loop();
     );
 
     let (manager, rm) = make_manager();
-    register_plugin(&manager, plugin_dir.path(), "shim-session-plugin");
+    register_plugin(&manager, plugin_dir.path());
 
     let handle = manager
         .start_session_vm("s1", "shim-session-plugin")
@@ -737,7 +716,7 @@ __pi_start_event_loop();
             .with_llm_resolver(Arc::new(QuickJsFixedResolver { provider: llm })),
     );
     let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
-    register_plugin(&manager, plugin_dir.path(), "readfile-llm-plugin");
+    register_plugin(&manager, plugin_dir.path());
 
     let handle = manager
         .start_session_vm("s1", "readfile-llm-plugin")
@@ -898,7 +877,7 @@ __pi_start_event_loop();
             .with_ui_notify_counter(notify_count.clone()),
     );
     let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
-    register_plugin(&manager, plugin_dir.path(), "phase-session-plugin");
+    register_plugin(&manager, plugin_dir.path());
 
     let handle = manager
         .start_session_vm("s1", "phase-session-plugin")
@@ -1033,7 +1012,7 @@ __pi_start_event_loop();
     );
 
     let (manager, rm) = make_manager();
-    register_plugin(&manager, runaway_dir.path(), "runaway-plugin");
+    register_plugin(&manager, runaway_dir.path());
 
     let handle = manager.start_session_vm("s1", "runaway-plugin").await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1098,7 +1077,7 @@ __pi_start_event_loop();
             ..Default::default()
         },
     );
-    register_plugin(&manager, runaway_dir.path(), "runaway-timeout-plugin");
+    register_plugin(&manager, runaway_dir.path());
 
     let handle = manager
         .start_session_vm("s1", "runaway-timeout-plugin")
@@ -1163,8 +1142,8 @@ __pi_start_event_loop();
     );
 
     let (manager, rm) = make_manager();
-    register_plugin(&manager, crash_dir.path(), "crashy-plugin");
-    register_plugin(&manager, healthy_dir.path(), "healthy-plugin");
+    register_plugin(&manager, crash_dir.path());
+    register_plugin(&manager, healthy_dir.path());
 
     let crashy = manager.start_session_vm("s1", "crashy-plugin").await?;
     let healthy = manager.start_session_vm("s1", "healthy-plugin").await?;

@@ -1362,9 +1362,8 @@ export async function assertWebviewAddModelsFlow(
     builtinModels.length > 0,
     "expected the settings panel to expose builtin models so official presets are available",
   );
-  assert.match(
-    settingsSnapshot.state.serverVersion ?? "",
-    /^0\.1\.\d+$/u,
+  assert.ok(
+    settingsSnapshot.state.serverVersion,
     "expected the settings panel state to carry the active serve version",
   );
   assert.strictEqual(

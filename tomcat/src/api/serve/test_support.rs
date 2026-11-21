@@ -369,11 +369,12 @@ pub async fn build_initialized_state_with_provider(
         .pin_session(&current_entry.session_id)
         .expect("pin current session");
 
-    let overrides = ChatContextOverrides::default()
+    let mut overrides = ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
         .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
         .with_session_cwd_override(cwd_path.clone());
+    overrides.shared_model_catalog = Some(state.shared_model_catalog.clone());
     let mut ctx =
         ChatContext::from_config_with_mode_and_overrides(cfg.clone(), SessionMode::Code, overrides)
             .expect("chat context");

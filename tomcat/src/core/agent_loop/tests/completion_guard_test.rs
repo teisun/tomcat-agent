@@ -655,7 +655,7 @@ async fn guard_blocks_handback_while_todos_remain() {
             todo("t3", TodoStatus::Pending),
         ],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), SubagentType::User);
@@ -682,7 +682,7 @@ async fn guard_persists_nudge_with_its_distinct_kind() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id, PlanFileState::Executing);
     let sink = Arc::new(RecordingMessageSink::default());
     let sink_for_agent: Arc<dyn MessageAppendSink> = sink.clone();
@@ -722,7 +722,7 @@ async fn guard_allows_handback_when_all_todos_are_terminal() {
             todo("t2", TodoStatus::Completed),
         ],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -758,7 +758,7 @@ async fn in_progress_acceptance_todo_nudges_the_agent_to_load_verify_skill() {
             },
         ],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), SubagentType::User);
@@ -803,7 +803,7 @@ async fn review_infra_counters_do_not_block_a_completed_plan() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Completed)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
     for _ in 0..3 {
@@ -840,7 +840,7 @@ async fn guard_stops_after_two_zero_progress_nudges_and_hands_back() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
     let stalled_events = Arc::new(Mutex::new(Vec::new()));
@@ -897,7 +897,7 @@ async fn guard_injection_cap_hands_back_visibly() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -937,7 +937,7 @@ async fn tool_round_budget_hands_back_an_unfinished_plan_visibly() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -988,7 +988,7 @@ async fn guard_progress_resets_the_zero_progress_nudge_counter() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let action = NextAction::ContinueWork {
@@ -1072,7 +1072,7 @@ async fn guard_progress_resets_when_existing_dirty_code_file_content_changes() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
     plan_runtime.attach_workspace_root(workspace.path().to_path_buf());
@@ -1126,7 +1126,7 @@ async fn guard_does_not_fire_once_the_plan_file_leaves_executing() {
         PlanFileState::Completed,
         vec![todo("t1", TodoStatus::Completed)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
@@ -1170,7 +1170,7 @@ async fn guard_never_fires_for_non_root_subagents() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     for subagent_type in [
@@ -1276,7 +1276,7 @@ async fn guard_cap_survives_tool_rounds_between_text_turns() {
         PlanFileState::Executing,
         vec![todo("t1", TodoStatus::Pending)],
     );
-    let plan_runtime = PlanRuntime::new("sess-guard");
+    let plan_runtime = PlanRuntime::new_with_session_id("sess-guard", "sid-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     let mut streams = Vec::new();
