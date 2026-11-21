@@ -10,7 +10,7 @@ var backends = Object.assign(Object.create(null), {
 async function dispatchBackend(req) {
   var backend = req.backend;
   if (typeof backends[backend] !== "function") {
-    return { backend: backend, hits: [], warnings: [], unsupported_backend: true };
+    throw new Error("Unknown web_search backend: " + backend);
   }
   return backends[backend](req);
 }

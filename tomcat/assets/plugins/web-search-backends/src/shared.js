@@ -24,33 +24,6 @@ function dedupeHits(hits) {
   return out;
 }
 
-function sentinelResponse(backend, warning) {
-  return {
-    backend: backend,
-    hits: [],
-    warnings: [warning]
-  };
-}
-
-function missingKeyWarning(secretName) {
-  return "__missing_key__:" + String(secretName || "");
-}
-
-function unauthorizedWarning(status) {
-  return "__unauthorized__:" + String(status || 401);
-}
-
-function isUnauthorizedStatus(status) {
-  return status === 401 || status === 403;
-}
-
-function extractSecretName(err, fallback) {
-  if (err && err.details && err.details.secretName) {
-    return String(err.details.secretName);
-  }
-  return fallback;
-}
-
 function parseJsonBody(raw, backend) {
   var text = raw == null ? "" : String(raw);
   if (!text) {
@@ -64,48 +37,32 @@ function parseJsonBody(raw, backend) {
 }
 
 async function fetchJsonBackend(backend, req, options) {
-  try {
-    var response = await tomcat.fetch(options.request);
-    if (response && response.data && typeof response.data.status === "number") {
-      response = response.data;
-    }
-    if (isUnauthorizedStatus(response && response.status)) {
-      return sentinelResponse(backend, unauthorizedWarning(response.status));
-    }
-    if (!response || typeof response.status !== "number") {
-      throw new Error(
-        "web_search backend `" + backend + "` returned an invalid HTTP envelope"
-      );
-    }
-    if (response.status < 200 || response.status >= 300) {
-      var detail;
-      try {
-        var payload = JSON.parse(response.body);
-        if (payload && payload.error && typeof payload.error.message === "string") {
-          detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
-        }
-      } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
-      var message = (options.statusMessages && options.statusMessages[response.status]) ||
-        "web_search backend `" + backend + "` returned HTTP status " + response.status;
-      throw new Error(detail ? message + ": " + detail : message);
-    }
-    return {
-      backend: backend,
-      hits: dedupeHits(options.parse(parseJsonBody(response.body, backend))),
-      warnings: options.warnings || []
-    };
-  } catch (err) {
-    if (err && err.code === "missing_secret") {
-      return {
-        backend: backend,
-        hits: [],
-        warnings: (options.warnings || []).concat([
-          missingKeyWarning(extractSecretName(err, options.secretName))
-        ])
-      };
-    }
-    throw err;
+  var response = await tomcat.fetch(options.request);
+  if (response && response.data && typeof response.data.status === "number") {
+    response = response.data;
   }
+  if (!response || typeof response.status !== "number") {
+    throw new Error(
+      "web_search backend `" + backend + "` returned an invalid HTTP envelope"
+    );
+  }
+  if (response.status < 200 || response.status >= 300) {
+    var detail;
+    try {
+      var payload = JSON.parse(response.body);
+      if (payload && payload.error && typeof payload.error.message === "string") {
+        detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
+      }
+    } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
+    var message = (options.statusMessages && options.statusMessages[response.status]) ||
+      "web_search backend `" + backend + "` returned HTTP status " + response.status;
+    throw new Error(detail ? message + ": " + detail : message);
+  }
+  return {
+    backend: backend,
+    hits: dedupeHits(options.parse(parseJsonBody(response.body, backend))),
+    warnings: options.warnings || []
+  };
 }
 
 function rewriteQueryWithDomainFilter(query, domains) {

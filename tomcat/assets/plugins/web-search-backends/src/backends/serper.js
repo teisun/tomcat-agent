@@ -22,7 +22,6 @@ async function searchWithSerper(req) {
     }
   }
   return fetchJsonBackend("serper", req, {
-    secretName: "SERPER_API_KEY",
     warnings: warnings,
     request: {
       method: "POST",

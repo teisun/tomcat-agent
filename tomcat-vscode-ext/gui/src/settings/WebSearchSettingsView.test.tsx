@@ -110,7 +110,7 @@ it("keeps shared keys in Models and offers direct navigation when a model is mis
   fireEvent.click(actions.getByText("Replace key"));
   expect((shared.getByLabelText("API key") as HTMLInputElement).value).toBe("");
   fireEvent.click(actions.getByText("Open Models"));
-  expect(screen.getByText(/Configure a key for api.openai.com in Models/)).toBeTruthy();
+  expect(screen.getByText(/Give that model its own key in Models/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Open Models · OpenAI" }));
   expect(postMessage.mock.calls.map(([message]) => message)).toEqual([
     expect.objectContaining({ type: "settings.ready", data: { route: "models" } }),

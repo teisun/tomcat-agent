@@ -1,5 +1,6 @@
+use super::function_registry::canonicalize_or_keep;
 use super::source_scan::{host_root_plugin_dir, plugin_roots};
-use super::{parse_manifest, PluginManifest};
+use super::{parse_manifest, PluginManifest, RegisteredFunction};
 use crate::infra::error::AppError;
 use crate::infra::i18n::tr;
 use crate::AppConfig;
@@ -8,7 +9,8 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Variant order is precedence: earlier layers shadow later ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PluginSource {
     Project,
     Agent,
@@ -102,6 +104,59 @@ impl PluginCatalog {
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &CatalogEntry)> {
         self.entries.iter()
+    }
+
+    /// The winning function for each point, by source precedence and then discovery
+    /// order, plus a warning for every shadowed declaration.
+    pub fn host_functions(&self) -> (Vec<RegisteredFunction>, Vec<String>) {
+        let mut candidates: Vec<RegisteredFunction> = self
+            .entries
+            .iter()
+            .flat_map(|(plugin_id, entry)| {
+                let plugin_root = canonicalize_or_keep(&entry.plugin_root);
+                entry
+                    .manifest
+                    .functions
+                    .iter()
+                    .map(move |function| RegisteredFunction {
+                        plugin_id: plugin_id.clone(),
+                        plugin_root: plugin_root.clone(),
+                        source: entry.source,
+                        point: function.point.clone(),
+                        function: function.function.clone(),
+                        metadata: function.metadata.clone(),
+                    })
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| candidate.source);
+
+        let mut warnings = Vec::new();
+        let mut winners = BTreeMap::<String, RegisteredFunction>::new();
+        for candidate in candidates {
+            let Some(winner) = winners.get(&candidate.point) else {
+                winners.insert(candidate.point.clone(), candidate);
+                continue;
+            };
+            warnings.push(if winner.source == candidate.source {
+                format!(
+                    "function_point_conflict:{}:{} shadowed_by {} (source={}, policy=first_wins)",
+                    candidate.point,
+                    candidate.plugin_id,
+                    winner.plugin_id,
+                    candidate.source.as_str()
+                )
+            } else {
+                format!(
+                    "function_point_shadowed:{}:{}:{} shadowed_by {}:{}",
+                    candidate.point,
+                    candidate.source.as_str(),
+                    candidate.plugin_id,
+                    winner.source.as_str(),
+                    winner.plugin_id
+                )
+            });
+        }
+        (winners.into_values().collect(), warnings)
     }
 
     fn insert_entry(&mut self, entry: CatalogEntry) {

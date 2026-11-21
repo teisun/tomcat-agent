@@ -3,7 +3,6 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::api::chat::collect_host_functions_from_catalog;
 use crate::core::llm::admin::inferred_api_key_env;
 use crate::core::llm::auth::KeySource;
 use crate::core::tools::web_search::declarations::{
@@ -45,7 +44,7 @@ fn declarations(
         // Use the same agent and managed layers as chat, but no ambient project.
         None => PluginCatalog::discover_without_project(&state.cfg)?,
     };
-    let (functions, _) = collect_host_functions_from_catalog(&catalog);
+    let (functions, _) = catalog.host_functions();
     let winner = functions
         .iter()
         .find(|function| function.point == SEARCH_POINT);

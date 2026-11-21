@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::core::tools::web_search::backend::BackendFailure;
 use crate::core::tools::web_search::declarations::{parse_declarations, SEARCH_POINT};
 use crate::core::tools::web_search::plugin_backend::{PluginSearchCatalog, PluginSearchInvoker};
+use crate::ext::plugin::RegisteredFunction;
 use crate::ext::{FunctionRegistry, PluginFunctionInvoker};
 
 pub struct ExtPluginSearchInvoker {
@@ -24,17 +24,25 @@ impl ExtPluginSearchInvoker {
             function_invoker,
         })
     }
+
+    fn winner(&self) -> Option<RegisteredFunction> {
+        self.functions
+            .functions_for_point(SEARCH_POINT)
+            .into_iter()
+            .next()
+    }
 }
 
 #[async_trait]
 impl PluginSearchInvoker for ExtPluginSearchInvoker {
     fn search_catalog(&self) -> PluginSearchCatalog {
-        self.functions
-            .with_winner(SEARCH_POINT, |winner, revision| PluginSearchCatalog {
-                declarations: parse_declarations(winner.and_then(|entry| entry.metadata.as_ref())),
-                saved_keys: winner.is_some_and(|entry| entry.source.can_use_saved_keys()),
-                revision,
-            })
+        let winner = self.winner();
+        PluginSearchCatalog {
+            declarations: parse_declarations(
+                winner.as_ref().and_then(|entry| entry.metadata.as_ref()),
+            ),
+            saved_keys: winner.is_some_and(|entry| entry.source.can_use_saved_keys()),
+        }
     }
 
     async fn search(
@@ -42,80 +50,38 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
         backend: &str,
         params: serde_json::Value,
         session_id: &str,
-        revision: u64,
-    ) -> Result<serde_json::Value, BackendFailure> {
+    ) -> Result<serde_json::Value, AppError> {
         let provider = self
-            .functions
-            .with_winner(SEARCH_POINT, |winner, current| {
-                // Do not send a query to a replacement using the earlier plugin's declarations.
-                if current != revision {
-                    return Err(BackendFailure::Incompatible {
-                        detail: tr("plugin.searchRouteChanged", &[]),
-                    });
-                }
-                winner
-                    .cloned()
-                    .ok_or_else(|| unsupported_backend_error(backend))
-            })?;
-
-        match self
-            .function_invoker
+            .winner()
+            .ok_or_else(|| AppError::Tool(tr("plugin.searchMissing", &[("name", backend)])))?;
+        self.function_invoker
             .execute(&provider, params, Some(session_id))
             .await
-        {
-            Ok(value) => Ok(value),
-            Err(err) => Err(classify_plugin_invocation_error(
-                backend,
-                provider.plugin_id.as_str(),
-                &err,
-            )),
-        }
+            .map_err(|err| invocation_error(backend, &provider.plugin_id, &err))
     }
 }
 
-fn unsupported_backend_error(backend: &str) -> BackendFailure {
-    let detail = if backend == "auto" {
-        tr("plugin.searchUnavailable", &[])
-    } else {
-        tr("plugin.searchMissing", &[("name", backend)])
-    };
-    BackendFailure::Incompatible { detail }
-}
-
-fn classify_plugin_invocation_error(
-    backend: &str,
-    plugin_id: &str,
-    error: &AppError,
-) -> BackendFailure {
-    let err_text = error.to_string();
-    let code = match error {
+fn invocation_error(backend: &str, plugin_id: &str, error: &AppError) -> AppError {
+    let timed_out = match error {
         AppError::Plugin(raw) | AppError::QuickJS(raw) => {
-            serde_json::from_str::<serde_json::Value>(raw)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
+            serde_json::from_str::<serde_json::Value>(raw).is_ok_and(|value| {
+                value.get("code").and_then(|code| code.as_str()) == Some("timeout")
+            })
         }
-        _ => None,
+        _ => false,
     };
-    if code.as_deref() == Some("timeout") {
-        return BackendFailure::Timeout;
-    }
-    let detail = tr(
-        "plugin.searchFailed",
-        &[
-            ("backend", backend),
-            ("plugin", plugin_id),
-            ("detail", &err_text),
-        ],
-    );
-    if code.is_none() && matches!(error, AppError::QuickJS(_)) {
-        return BackendFailure::PluginRuntime { detail };
-    }
-    BackendFailure::Transport { detail }
+    AppError::Tool(if timed_out {
+        tr("search.timeout", &[("backend", backend)])
+    } else {
+        tr(
+            "plugin.searchFailed",
+            &[
+                ("backend", backend),
+                ("plugin", plugin_id),
+                ("detail", &error.to_string()),
+            ],
+        )
+    })
 }
 
 #[cfg(test)]

@@ -33,33 +33,6 @@ function dedupeHits(hits) {
   return out;
 }
 
-function sentinelResponse(backend, warning) {
-  return {
-    backend: backend,
-    hits: [],
-    warnings: [warning]
-  };
-}
-
-function missingKeyWarning(secretName) {
-  return "__missing_key__:" + String(secretName || "");
-}
-
-function unauthorizedWarning(status) {
-  return "__unauthorized__:" + String(status || 401);
-}
-
-function isUnauthorizedStatus(status) {
-  return status === 401 || status === 403;
-}
-
-function extractSecretName(err, fallback) {
-  if (err && err.details && err.details.secretName) {
-    return String(err.details.secretName);
-  }
-  return fallback;
-}
-
 function parseJsonBody(raw, backend) {
   var text = raw == null ? "" : String(raw);
   if (!text) {
@@ -73,48 +46,32 @@ function parseJsonBody(raw, backend) {
 }
 
 async function fetchJsonBackend(backend, req, options) {
-  try {
-    var response = await tomcat.fetch(options.request);
-    if (response && response.data && typeof response.data.status === "number") {
-      response = response.data;
-    }
-    if (isUnauthorizedStatus(response && response.status)) {
-      return sentinelResponse(backend, unauthorizedWarning(response.status));
-    }
-    if (!response || typeof response.status !== "number") {
-      throw new Error(
-        "web_search backend `" + backend + "` returned an invalid HTTP envelope"
-      );
-    }
-    if (response.status < 200 || response.status >= 300) {
-      var detail;
-      try {
-        var payload = JSON.parse(response.body);
-        if (payload && payload.error && typeof payload.error.message === "string") {
-          detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
-        }
-      } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
-      var message = (options.statusMessages && options.statusMessages[response.status]) ||
-        "web_search backend `" + backend + "` returned HTTP status " + response.status;
-      throw new Error(detail ? message + ": " + detail : message);
-    }
-    return {
-      backend: backend,
-      hits: dedupeHits(options.parse(parseJsonBody(response.body, backend))),
-      warnings: options.warnings || []
-    };
-  } catch (err) {
-    if (err && err.code === "missing_secret") {
-      return {
-        backend: backend,
-        hits: [],
-        warnings: (options.warnings || []).concat([
-          missingKeyWarning(extractSecretName(err, options.secretName))
-        ])
-      };
-    }
-    throw err;
+  var response = await tomcat.fetch(options.request);
+  if (response && response.data && typeof response.data.status === "number") {
+    response = response.data;
   }
+  if (!response || typeof response.status !== "number") {
+    throw new Error(
+      "web_search backend `" + backend + "` returned an invalid HTTP envelope"
+    );
+  }
+  if (response.status < 200 || response.status >= 300) {
+    var detail;
+    try {
+      var payload = JSON.parse(response.body);
+      if (payload && payload.error && typeof payload.error.message === "string") {
+        detail = payload.error.message.replace(/[\r\n]+/g, " ").slice(0, 512);
+      }
+    } catch (_) { /* Non-JSON errors retain the HTTP status. */ }
+    var message = (options.statusMessages && options.statusMessages[response.status]) ||
+      "web_search backend `" + backend + "` returned HTTP status " + response.status;
+    throw new Error(detail ? message + ": " + detail : message);
+  }
+  return {
+    backend: backend,
+    hits: dedupeHits(options.parse(parseJsonBody(response.body, backend))),
+    warnings: options.warnings || []
+  };
 }
 
 function rewriteQueryWithDomainFilter(query, domains) {
@@ -280,7 +237,6 @@ async function searchWithBrave(req) {
     }
   }
   return fetchJsonBackend("brave", req, {
-    secretName: "BRAVE_API_KEY",
     warnings: warnings,
     request: {
       method: "GET",
@@ -330,15 +286,9 @@ async function searchWithDeepSeek(req) {
     if (after) query += " after:" + after;
   }
   if (!query || Array.from(query).length > 128) {
-    return {
-      backend: "deepseek",
-      hits: [],
-      warnings: warnings.concat([query ? "deepseek_query_too_long" : "deepseek_query_empty"]),
-      unsupported_backend: true
-    };
+    throw new Error("DeepSeek search query must be 1-128 characters after filters");
   }
   return fetchJsonBackend("deepseek", req, {
-    secretName: "DEEPSEEK_API_KEY",
     warnings: warnings,
     statusMessages: { 402: "DeepSeek search: insufficient balance (HTTP 402)" },
     request: {
@@ -356,9 +306,6 @@ async function searchWithDeepSeek(req) {
 
 // --- src/backends/mimo.js ---
 async function searchWithMimo(req) {
-  if (typeof req.model !== "string" || !req.model) {
-    return { backend: "mimo", hits: [], warnings: ["mimo_requires_model"], unsupported_backend: true };
-  }
   var warnings = [];
   if (req.language) {
     warnings.push("mimo_ignores_language");
@@ -447,7 +394,7 @@ async function searchWithOpenAI(req) {
     request: {
       url: "https://api.openai.com/v1/responses",
       method: "POST",
-      headers: { Authorization: "Bearer {{host_key}}", "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer {{secret:OPENAI_API_KEY}}", "Content-Type": "application/json" },
       body: {
         model: OPENAI_SEARCH_MODEL,
         input: normalizeQuery(req.query),
@@ -486,7 +433,6 @@ async function searchWithSerper(req) {
     }
   }
   return fetchJsonBackend("serper", req, {
-    secretName: "SERPER_API_KEY",
     warnings: warnings,
     request: {
       method: "POST",
@@ -518,7 +464,6 @@ async function searchWithTavily(req) {
     body.include_domains = req.domainFilter.slice();
   }
   return fetchJsonBackend("tavily", req, {
-    secretName: "TAVILY_API_KEY",
     warnings: warnings,
     request: {
       method: "POST",
@@ -546,7 +491,7 @@ var backends = Object.assign(Object.create(null), {
 async function dispatchBackend(req) {
   var backend = req.backend;
   if (typeof backends[backend] !== "function") {
-    return { backend: backend, hits: [], warnings: [], unsupported_backend: true };
+    throw new Error("Unknown web_search backend: " + backend);
   }
   return backends[backend](req);
 }

@@ -30,7 +30,7 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
         "id":"tomcat.web-search-backends", "name":"Fixture", "version":"1.0.0", "main":"main.js",
         "description":"Project search fixture", "author":"tests", "requiredApiVersion":"1.0", "tags":[],
         "functions":[{"point":"web_search.backend","function":"webSearchBackend","metadata":{
-            "backends":[{"id":"fixture","label":"Fixture","secret":"BRAVE_API_KEY","defaultAuto":true}]
+            "backends":[{"id":"fixture","label":"Fixture","secret":"BRAVE_API_KEY","host":"api.search.example","defaultAuto":true}]
         }}]
     }).to_string()).unwrap();
     let info = output_json(
@@ -83,22 +83,18 @@ async fn web_search_settings_are_scoped_but_route_and_keys_are_shared() {
     assert_eq!(backend(&conflicted, "openai")["keyEnv"], Value::Null);
     assert_eq!(backend(&conflicted, "openai")["keySource"], Value::Null);
 
-    let alternative = first
-        .request(json!({"type":"upsert_model","id":"official-model","model":{
-            "id":"search-fixture-official", "api":"openai-responses", "provider":"openai",
-            "baseUrl":"https://api.openai.com/v1", "apiKeyEnv":"OFFICIAL_FIXTURE_API_KEY"
-        }}))
+    let separated = first
+        .request(
+            json!({"type":"upsert_model","id":"gateway-own-key","model":{
+                "id":"search-fixture-gateway", "api":"openai-responses", "provider":"openai",
+                "baseUrl":"https://gateway.example/v1", "apiKeyEnv":"GATEWAY_FIXTURE_API_KEY"
+            }}),
+        )
         .await;
-    assert_eq!(alternative["success"], true, "{alternative}");
-    let key = first.request(json!({"type":"set_provider_key","id":"alternative-key","envName":"OFFICIAL_FIXTURE_API_KEY","value":"synthetic-alternative-key"})).await;
-    assert_eq!(key["success"], true, "{key}");
-    let rebound = second.request(request(&fx.0.workspace)).await;
-    assert_eq!(
-        backend(&rebound, "openai")["keyEnv"],
-        "OFFICIAL_FIXTURE_API_KEY"
-    );
-    assert_eq!(backend(&rebound, "openai")["keySource"], "saved");
-    assert!(!rebound.to_string().contains("synthetic-alternative-key"));
+    assert_eq!(separated["success"], true, "{separated}");
+    let restored = second.request(request(&fx.0.workspace)).await;
+    assert_eq!(backend(&restored, "openai")["keyEnv"], "OPENAI_API_KEY");
+    assert_eq!(backend(&restored, "openai")["keySource"], "saved");
     assert_eq!(backend(&initial, "brave")["keySource"], Value::Null);
     assert_eq!(backend(&initial, "brave")["canSaveKey"], true);
     assert!(

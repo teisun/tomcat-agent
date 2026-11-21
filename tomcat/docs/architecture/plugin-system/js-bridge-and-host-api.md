@@ -90,7 +90,7 @@ HostApiDispatcher
 
 ## `tomcat.fetch`：凭据只在请求头展开
 
-`net:fetch` 需要在清单中声明 `allowedHosts`。已有 `{{secret:NAME}}` 使用 `requiredSecrets` 中的命名槽；`{{host_key}}` 则按实际 HTTPS 目的主机（端口 443）在当前模型目录中找 Key，排除与其他地址共用的槽。有多个安全槽时按合并顺序用首个有值的；不会遍历账号重试。只有当前的 Agent 层或托管层插件实例可用 `{{host_key}}`。共享 Serve 只读已保存值，CLI 可以回退到显式环境变量。占位符不允许出现在 URL 或 query，请求体中的占位符不展开；不跟随重定向，明文 Key 不返回给插件。
+`net:fetch` 需要在清单中声明 `allowedHosts`。`{{secret:NAME}}` 只能引用 `requiredSecrets` 中的命名槽，且只在请求头的值里展开；出现在 URL、query 或请求头名里会以 `forbidden_secret` 拒绝，请求体原样发送。Agent 层和托管层插件可读已保存的 Key，项目层插件只读显式进程环境变量；共享 Serve 只读已保存值，CLI 可以回退到显式环境变量。不跟随重定向，明文 Key 不返回给插件。
 
 ## host -> guest：事件如何推回 JS
 

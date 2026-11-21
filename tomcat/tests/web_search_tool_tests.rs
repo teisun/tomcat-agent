@@ -84,7 +84,7 @@ async fn runtime_explicit_tavily_works_from_public_api() {
 
 #[tokio::test]
 #[serial]
-async fn deepseek_requests_use_rotated_keys_without_reusing_the_old_cache() {
+async fn deepseek_requests_use_the_current_saved_key() {
     use std::time::Duration;
     use tomcat::api::chat::{ChatContext, ChatContextOverrides};
     use tomcat::core::llm::auth::refresh_managed_credentials_from_entries;
@@ -122,31 +122,43 @@ async fn deepseek_requests_use_rotated_keys_without_reusing_the_old_cache() {
     .unwrap();
     let sid = current_session_id(&ctx);
     let runtime = &ctx.global_services.web_search_runtime;
-    let args = WebSearchArgs {
-        query: "same query".into(),
+    let args = |query: &str| WebSearchArgs {
+        query: query.into(),
         count: None,
         freshness: None,
         country: None,
         language: None,
         domain_filter: vec![],
     };
-    for key in ["saved-first", "saved-second"] {
+    for (key, query) in [
+        ("saved-first", "first query"),
+        ("saved-second", "second query"),
+    ] {
         refresh_managed_credentials_from_entries(&[("DEEPSEEK_API_KEY".into(), key.into())].into());
-        let result = runtime.search(args.clone(), &sid).await.unwrap();
+        let result = runtime.search(args(query), &sid).await.unwrap();
         assert!(!result.stats.cached);
         assert_eq!(result.backend, "deepseek");
         assert_eq!(result.hits[0].snippet, "Language");
         assert!(
             runtime
-                .search(args.clone(), &sid)
+                .search(args(query), &sid)
                 .await
                 .unwrap()
                 .stats
                 .cached
         );
     }
+    // Rotating a key's value keeps the route, so earlier results stay cached.
+    assert!(
+        runtime
+            .search(args("first query"), &sid)
+            .await
+            .unwrap()
+            .stats
+            .cached
+    );
     refresh_managed_credentials_from_entries(&Default::default());
-    let deleted = runtime.search(args, &sid).await.unwrap_err();
+    let deleted = runtime.search(args("first query"), &sid).await.unwrap_err();
     end_current_plugin_session(&ctx).await;
     assert!(
         deleted.to_string().contains("DEEPSEEK_API_KEY"),
@@ -380,19 +392,20 @@ async fn runtime_single_backend_preserves_plugin_runtime_failure() {
     let err = search_result.expect_err("unexpected plugin runtime errors should fail loud");
     let text = err.to_string();
     assert!(text.contains(&tomcat::infra::tr(
-        "search.runtime",
-        &[("backend", "mimo"), ("detail", "")]
+        "plugin.searchFailed",
+        &[
+            ("backend", "mimo"),
+            ("plugin", "tomcat.web-search-backends"),
+            ("detail", "")
+        ]
     )));
     assert!(text.contains("synthetic plugin failure"));
     assert!(
         !text.contains(&tomcat::infra::tr(
-            "search.allUnavailable",
-            &[("query", "reqwest rust")]
-        )) && !text.contains(&tomcat::infra::tr(
             "search.allUnavailableDetails",
             &[("query", "reqwest rust"), ("details", "")]
         )),
-        "plugin runtime failures should not be flattened into all_backends_unavailable: {text}"
+        "a single backend's failure should not be wrapped as all_backends_unavailable: {text}"
     );
 }
 
@@ -546,7 +559,7 @@ async fn runtime_explicit_serper_works_from_public_api() {
 
 #[tokio::test]
 #[serial]
-async fn openai_plugin_sends_only_the_official_key_and_invalidates_cache() {
+async fn openai_search_key_is_refused_while_a_gateway_model_shares_it() {
     use std::time::Duration;
     use tomcat::api::chat::{ChatContext, ChatContextOverrides};
     use tomcat::core::llm::auth::refresh_managed_credentials_from_entries;
@@ -557,10 +570,7 @@ async fn openai_plugin_sends_only_the_official_key_and_invalidates_cache() {
         }
     }
     let _reset = Reset;
-    let _env = EnvGuard::set_many(&[
-        ("OPENAI_API_KEY", None),
-        ("OPENAI_SEARCH_FIXTURE_KEY", None),
-    ]);
+    let _env = EnvGuard::set_many(&[("OPENAI_API_KEY", None)]);
     let host = "api.openai.com";
     let server = common::HttpsTestServer::start(host, "200 OK", vec![("Content-Type".into(), "application/json".into())],
         serde_json::to_vec(&json!({"output":[{"type":"web_search_call","action":{"sources":[{"url":"https://docs.rs/reqwest"}]}}]})).unwrap(), Duration::ZERO).await;
@@ -568,26 +578,19 @@ async fn openai_plugin_sends_only_the_official_key_and_invalidates_cache() {
     let workspace = tempfile::tempdir().unwrap();
     install_builtin_web_search_plugin(work.path());
     let models_path = work.path().join("models.toml");
-    std::fs::write(
-        &models_path,
-        r#"
-[[models]]
-id = "fixture/official"
-model_name = "not-the-search-model"
-api = "openai-responses"
-provider = "openai"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_SEARCH_FIXTURE_KEY"
-capabilities = { web_search = true }
+    let gateway = |key: &str| {
+        format!(
+            r#"
 [[models]]
 id = "fixture/gateway"
 api = "openai-responses"
 provider = "openai"
 base_url = "https://gateway.example"
-api_key_env = "OPENAI_API_KEY"
-"#,
-    )
-    .unwrap();
+api_key_env = "{key}"
+"#
+        )
+    };
+    std::fs::write(&models_path, gateway("OPENAI_API_KEY")).unwrap();
     let mut config = AppConfig::default();
     config.storage.work_dir = Some(work.path().to_string_lossy().into_owned());
     config.tools.web_search.backends = Some(vec!["openai".into()]);
@@ -610,74 +613,39 @@ api_key_env = "OPENAI_API_KEY"
         domain_filter: vec![],
     };
     refresh_managed_credentials_from_entries(
-        &[("OPENAI_API_KEY".into(), "synthetic-company".into())].into(),
+        &[("OPENAI_API_KEY".into(), "synthetic-official".into())].into(),
     );
-    assert!(runtime
-        .search(args.clone(), &sid)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("OPENAI_SEARCH_FIXTURE_KEY"));
+    let conflict = "also used by a model at another address";
+    let refused = runtime.search(args.clone(), &sid).await.unwrap_err();
+    assert!(refused.to_string().contains(conflict), "{refused}");
     assert!(server.request_headers().is_empty());
-    for key in ["synthetic-first", "synthetic-second"] {
-        refresh_managed_credentials_from_entries(
-            &[
-                ("OPENAI_SEARCH_FIXTURE_KEY".into(), key.into()),
-                ("OPENAI_API_KEY".into(), "synthetic-company".into()),
-            ]
-            .into(),
-        );
-        let result = runtime.search(args.clone(), &sid).await.unwrap();
-        assert_eq!(result.hits[0].url, "https://docs.rs/reqwest");
-        assert!(!result.stats.cached);
-        assert!(
-            runtime
-                .search(args.clone(), &sid)
-                .await
-                .unwrap()
-                .stats
-                .cached
-        );
-    }
-    // The already running session must observe an address conflict immediately,
-    // even though the key value and cached query did not change.
-    let initial_models = std::fs::read_to_string(&models_path).unwrap();
-    std::fs::write(
-        &models_path,
-        format!(
-            r#"{initial_models}
-[[models]]
-id = "fixture/shared-gateway"
-api = "openai-responses"
-provider = "openai"
-base_url = "https://gateway.example"
-api_key_env = "OPENAI_SEARCH_FIXTURE_KEY"
-capabilities = {{ web_search = true }}
-"#
-        ),
-    )
-    .unwrap();
+
+    std::fs::write(&models_path, gateway("GATEWAY_FIXTURE_KEY")).unwrap();
     ctx.global_services.model_catalog.reload(&config).unwrap();
-    assert!(runtime
-        .search(args.clone(), &sid)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("no eligible key"));
-    assert_eq!(server.request_headers().len(), 2);
-    std::fs::write(&models_path, initial_models).unwrap();
+    let result = runtime.search(args.clone(), &sid).await.unwrap();
+    assert_eq!(result.hits[0].url, "https://docs.rs/reqwest");
+    assert!(!result.stats.cached);
+    assert!(
+        runtime
+            .search(args.clone(), &sid)
+            .await
+            .unwrap()
+            .stats
+            .cached
+    );
+
+    // A running session sees the conflict as soon as the catalog changes, cached result or not.
+    std::fs::write(&models_path, gateway("OPENAI_API_KEY")).unwrap();
     ctx.global_services.model_catalog.reload(&config).unwrap();
-    refresh_managed_credentials_from_entries(&Default::default());
-    assert!(runtime.search(args, &sid).await.is_err());
+    let refused = runtime.search(args, &sid).await.unwrap_err();
     end_current_plugin_session(&ctx).await;
+    assert!(refused.to_string().contains(conflict), "{refused}");
     let headers = server.request_headers();
-    assert_eq!(headers.len(), 2);
-    for (headers, key) in headers.iter().zip(["synthetic-first", "synthetic-second"]) {
-        assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
-        assert!(headers
-            .to_ascii_lowercase()
-            .contains(&format!("\r\nauthorization: bearer {key}")));
-    }
+    assert_eq!(headers.len(), 1);
+    assert!(headers[0].starts_with("POST /v1/responses HTTP/1.1"));
+    assert!(headers[0]
+        .to_ascii_lowercase()
+        .contains("\r\nauthorization: bearer synthetic-official"));
 }
 
 #[tokio::test]

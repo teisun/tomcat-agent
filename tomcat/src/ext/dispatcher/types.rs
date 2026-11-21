@@ -1,4 +1,3 @@
-use crate::core::llm::SharedModelCatalog;
 use crate::core::tools::primitive::BashTaskRegistry;
 use crate::core::{LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
@@ -32,7 +31,6 @@ pub(super) struct SessionBinding {
     pub session: Weak<SessionManager>,
     pub primitive: Option<Weak<dyn PrimitiveExecutor>>,
     pub bash: Option<Weak<BashTaskRegistry>>,
-    pub model_catalog: Option<SharedModelCatalog>,
 }
 
 /// 宿主 API 分发器：Send + Sync，支持多 Agent 并发。
@@ -245,7 +243,6 @@ impl HostApiDispatcher {
         session: Weak<SessionManager>,
         primitive: Option<Weak<dyn PrimitiveExecutor>>,
         bash: Option<Weak<BashTaskRegistry>>,
-        model_catalog: Option<SharedModelCatalog>,
     ) {
         self.session_registry.insert(
             session_id.to_string(),
@@ -253,19 +250,8 @@ impl HostApiDispatcher {
                 session,
                 primitive,
                 bash,
-                model_catalog,
             },
         );
-    }
-
-    pub(super) fn model_catalog_for_instance(
-        &self,
-        instance_id: &str,
-    ) -> Option<SharedModelCatalog> {
-        let (session_id, _) = instance_id.split_once('/')?;
-        let binding = self.session_registry.get(session_id)?;
-        binding.session.upgrade()?;
-        binding.model_catalog.clone()
     }
 
     pub(super) fn primitive_for_instance(

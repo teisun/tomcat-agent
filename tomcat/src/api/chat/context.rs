@@ -12,8 +12,7 @@ use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ext::plugin::{PluginCatalog, PluginSource};
 use crate::ext::{
     FunctionRegistry, HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
-    PluginManager, PluginRuntimeManager, PluginToolExecutor, RegisteredFunction,
-    SharedPluginRuntimeManager,
+    PluginManager, PluginRuntimeManager, PluginToolExecutor, SharedPluginRuntimeManager,
 };
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
@@ -790,7 +789,6 @@ impl ChatContext {
             Arc::downgrade(&session_arc),
             Some(Arc::downgrade(&primitive)),
             Some(Arc::downgrade(&bash_task_registry)),
-            Some(model_catalog.clone()),
         );
         let event_bus = shared_scope_runtime.event_bus.clone();
         let tool_registry = shared_scope_runtime.tool_registry.clone();
@@ -1509,98 +1507,13 @@ struct PluginRuntimeDeps {
     session: Arc<SessionManager>,
 }
 
-fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
-    crate::infra::platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn host_function_source_rank(source: PluginSource) -> u8 {
-    match source {
-        PluginSource::Project => 0,
-        PluginSource::Agent => 1,
-        PluginSource::Managed => 2,
-    }
-}
-
 pub(super) fn materialize_host_functions_from_catalog(
     registry: &FunctionRegistry,
     catalog: &PluginCatalog,
 ) -> Vec<String> {
-    let (functions, warnings) = collect_host_functions_from_catalog(catalog);
+    let (functions, warnings) = catalog.host_functions();
     registry.replace_all(functions);
     warnings
-}
-
-pub(crate) fn collect_host_functions_from_catalog(
-    catalog: &PluginCatalog,
-) -> (Vec<RegisteredFunction>, Vec<String>) {
-    #[derive(Debug)]
-    struct HostFunctionCandidate {
-        order: usize,
-        source: PluginSource,
-        plugin_id: String,
-        plugin_root: std::path::PathBuf,
-        point: String,
-        function: String,
-        metadata: Option<serde_json::Map<String, serde_json::Value>>,
-    }
-
-    let mut candidates = Vec::<HostFunctionCandidate>::new();
-    for (plugin_id, entry) in catalog.iter() {
-        for function in &entry.manifest.functions {
-            candidates.push(HostFunctionCandidate {
-                order: candidates.len(),
-                source: entry.source,
-                plugin_id: plugin_id.clone(),
-                plugin_root: canonicalize_or_keep(&entry.plugin_root),
-                point: function.point.clone(),
-                function: function.function.clone(),
-                metadata: function.metadata.clone(),
-            });
-        }
-    }
-    candidates.sort_by(|left, right| {
-        host_function_source_rank(left.source)
-            .cmp(&host_function_source_rank(right.source))
-            .then(left.order.cmp(&right.order))
-    });
-
-    let mut warnings = Vec::new();
-    let mut winners = std::collections::BTreeMap::<String, RegisteredFunction>::new();
-    for candidate in candidates {
-        let registered = RegisteredFunction {
-            plugin_id: candidate.plugin_id.clone(),
-            plugin_root: candidate.plugin_root.clone(),
-            source: candidate.source,
-            point: candidate.point.clone(),
-            function: candidate.function.clone(),
-            metadata: candidate.metadata,
-        };
-        if let Some(winner) = winners.get(&candidate.point) {
-            let warning = if winner.source == candidate.source {
-                format!(
-                    "function_point_conflict:{}:{} shadowed_by {} (source={}, policy=first_wins)",
-                    candidate.point,
-                    candidate.plugin_id,
-                    winner.plugin_id,
-                    candidate.source.as_str()
-                )
-            } else {
-                format!(
-                    "function_point_shadowed:{}:{}:{} shadowed_by {}:{}",
-                    candidate.point,
-                    candidate.source.as_str(),
-                    candidate.plugin_id,
-                    winner.source.as_str(),
-                    winner.plugin_id
-                )
-            };
-            warnings.push(warning);
-            continue;
-        }
-        winners.insert(candidate.point, registered);
-    }
-
-    (winners.into_values().collect(), warnings)
 }
 
 pub(super) fn register_catalog_entry(

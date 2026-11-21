@@ -12,7 +12,8 @@
     "TAVILY_API_KEY",
     "BRAVE_API_KEY",
     "SERPER_API_KEY",
-    "DEEPSEEK_API_KEY"
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY"
   ],
   "allowedHosts": [
     "api.tavily.com",
@@ -38,7 +39,7 @@
           { "id": "brave", "label": "Brave", "secret": "BRAVE_API_KEY", "host": "api.search.brave.com", "defaultAuto": true },
           { "id": "serper", "label": "Serper", "secret": "SERPER_API_KEY", "host": "google.serper.dev", "defaultAuto": true },
           { "id": "mimo", "label": "MiMo", "model": "mimo/mimo-v2.6-pro", "defaultAuto": true },
-          { "id": "openai", "label": "OpenAI", "host": "api.openai.com", "defaultAuto": true }
+          { "id": "openai", "label": "OpenAI", "secret": "OPENAI_API_KEY", "host": "api.openai.com", "defaultAuto": true }
         ]
       }
     }

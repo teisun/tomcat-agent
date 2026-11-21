@@ -22,7 +22,6 @@ async function searchWithBrave(req) {
     }
   }
   return fetchJsonBackend("brave", req, {
-    secretName: "BRAVE_API_KEY",
     warnings: warnings,
     request: {
       method: "GET",

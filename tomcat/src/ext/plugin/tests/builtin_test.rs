@@ -90,16 +90,18 @@ fn declarations_match_network_grants_and_catalog() {
         metadata["backends"].as_array().unwrap().len()
     );
     for row in &declarations {
-        if let Some(secret) = &row.secret {
-            let host = row.host.as_ref().expect("declared REST host");
-            assert!(manifest.required_secrets.contains(secret));
-            assert!(manifest.allowed_hosts.contains(host));
-        } else if let Some(model) = &row.model {
+        if let Some(model) = &row.model {
             assert!(models.lookup(model).is_some());
         } else {
+            let secret = row.secret.as_ref().expect("REST backends declare a secret");
+            assert!(manifest.required_secrets.contains(secret));
             assert!(manifest.allowed_hosts.contains(row.host.as_ref().unwrap()));
-            assert_eq!(row.key_status(&models, true).unwrap().0, "OPENAI_API_KEY");
         }
+        assert!(
+            row.key_status(&models, true).is_some(),
+            "builtin models must not share a key with {} at another address",
+            row.id
+        );
     }
 }
 

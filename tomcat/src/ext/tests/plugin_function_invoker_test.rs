@@ -1,4 +1,3 @@
-use crate::core::tools::web_search::backend::BackendFailure;
 use crate::core::tools::web_search::plugin_backend::PluginSearchInvoker;
 use crate::ext::{
     ExtPluginSearchInvoker, FunctionRegistry, HostApiDispatcher, HostRequest, ManifestFunction,
@@ -277,7 +276,7 @@ async fn net_fetch_uses_one_configured_client_across_session_bindings() {
         fixture.path().join("sessions"),
     ));
     for session in ["a", "b"] {
-        dispatcher.bind_session(session, Arc::downgrade(&sessions), None, None, None);
+        dispatcher.bind_session(session, Arc::downgrade(&sessions), None, None);
         let instance = manager
             .start_session_vm(session, "shared-fetch")
             .await
@@ -920,7 +919,7 @@ backends.tavily = searchWithTavily;
         .load_plugin(plugin_dir.path())
         .expect("load builtin web_search plugin");
 
-    let result = invoker
+    let err = invoker
         .execute(
             &registered_function(
                 &plugin_dir,
@@ -936,17 +935,18 @@ backends.tavily = searchWithTavily;
             Some("s1"),
         )
         .await
-        .expect("builtin web_search function call");
+        .expect_err("auto is not a backend");
 
     manager.end_session("s1").await.expect("end session");
-    assert_eq!(result["backend"], "auto");
-    assert_eq!(result["unsupported_backend"], true);
-    assert_eq!(result["hits"], json!([]));
+    assert!(
+        err.to_string().contains("Unknown web_search backend: auto"),
+        "{err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn official_web_search_backend_function_returns_missing_key_sentinel_for_tavily() {
+async fn official_web_search_backend_function_propagates_missing_secret_for_tavily() {
     let plugin_dir = builtin_web_search_backends_fixture();
     let _env = EnvGuard::set_many(&[
         ("TAVILY_API_KEY", None),
@@ -1008,7 +1008,7 @@ async fn official_web_search_backend_function_returns_missing_key_sentinel_for_t
         .unwrap_or("")
         .contains("missing_secret"));
 
-    let result = invoker
+    let err = invoker
         .execute(
             &registered_function(
                 &plugin_dir,
@@ -1024,16 +1024,9 @@ async fn official_web_search_backend_function_returns_missing_key_sentinel_for_t
             Some("s1"),
         )
         .await
-        .expect("builtin web_search function call");
+        .expect_err("a missing secret should fail the call");
 
-    assert_eq!(result["backend"], "tavily");
-    assert_eq!(result["hits"].as_array().map(Vec::len), Some(0));
-    assert!(result["warnings"]
-        .as_array()
-        .expect("warnings array")
-        .iter()
-        .any(|warning| warning == "__missing_key__:TAVILY_API_KEY"));
-
+    assert!(err.to_string().contains("missing_secret"), "{err}");
     manager.end_session("s1").await.expect("end session");
 }
 
@@ -1111,7 +1104,7 @@ pi.fetch = async function () {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn official_web_search_backend_function_returns_unauthorized_sentinel_for_brave() {
+async fn official_web_search_backend_function_fails_on_unauthorized_brave() {
     let plugin_dir = builtin_web_search_backends_fixture_with_main_suffix(
         r#"
 pi.fetch = async function () {
@@ -1139,7 +1132,7 @@ pi.fetch = async function () {
         .load_plugin(plugin_dir.path())
         .expect("load builtin web_search plugin");
 
-    let result = invoker
+    let err = invoker
         .execute(
             &registered_function(
                 &plugin_dir,
@@ -1155,16 +1148,12 @@ pi.fetch = async function () {
             Some("s1"),
         )
         .await
-        .expect("builtin web_search function call");
+        .expect_err("HTTP 403 should fail the call");
 
-    assert_eq!(result["backend"], "brave");
-    assert_eq!(result["hits"].as_array().map(Vec::len), Some(0));
-    assert!(result["warnings"]
-        .as_array()
-        .expect("warnings array")
-        .iter()
-        .any(|warning| warning == "__unauthorized__:403"));
-
+    assert!(
+        err.to_string().contains("returned HTTP status 403"),
+        "{err}"
+    );
     manager.end_session("s1").await.expect("end session");
 }
 
@@ -1606,10 +1595,9 @@ pi.registerFunction("webSearchBackend", function (params) {
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry.clone(), invoker);
-    let revision = search_invoker.search_catalog().revision;
     let params = json!({ "backend": "mimo", "query": "rust" });
     let result = search_invoker
-        .search("mimo", params.clone(), "s1", revision)
+        .search("mimo", params.clone(), "s1")
         .await
         .expect("first provider should satisfy request");
 
@@ -1622,40 +1610,23 @@ pi.registerFunction("webSearchBackend", function (params) {
     );
 
     manager.set_catalog_fingerprint("plugin-a", 1);
-    let stale_instance = search_invoker
-        .search("mimo", params.clone(), "s1", revision)
-        .await;
-    assert!(matches!(
-        stale_instance,
-        Err(BackendFailure::Transport { .. })
-    ));
+    let stale_instance = search_invoker.search("mimo", params.clone(), "s1").await;
+    assert!(stale_instance.is_err());
     function_registry.remove_by_plugin("plugin-a");
-    let stale_route = search_invoker
-        .search("mimo", params.clone(), "s1", revision)
-        .await;
-    assert!(matches!(
-        stale_route,
-        Err(BackendFailure::Incompatible { .. })
-    ));
-    assert!(!manager.has_session_vm("s1", "plugin-b"));
-    let current = search_invoker.search_catalog().revision;
-    let replacement = search_invoker
-        .search("mimo", params, "s1", current)
-        .await
-        .unwrap();
+    let replacement = search_invoker.search("mimo", params, "s1").await.unwrap();
     assert_eq!(replacement["provider"], "plugin-b");
 
     manager.end_session("s1").await.expect("end session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_passthroughs_unsupported_backend_without_shadow_fallback() {
+async fn ext_plugin_search_invoker_does_not_fall_back_to_shadowed_provider() {
     let plugin_a = plugin_function_fixture(
         "plugin-a",
         &[("web_search.backend", "webSearchBackend")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  return { hits: [], warnings: [], unsupported_backend: true };
+  throw new Error("winner declined");
 });
 "#,
     );
@@ -1695,69 +1666,23 @@ pi.registerFunction("webSearchBackend", function (params) {
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
-    let result = search_invoker
-        .search(
-            "mimo",
-            json!({ "backend": "mimo", "query": "rust" }),
-            "s1",
-            search_invoker.search_catalog().revision,
-        )
+    let err = search_invoker
+        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
         .await
-        .expect("unsupported_backend should be passed through for upper-layer classification");
+        .expect_err("the winner's failure is final");
 
-    assert_eq!(result["unsupported_backend"], json!(true));
+    assert!(err.to_string().contains("winner declined"), "{err}");
     assert!(manager.has_session_vm("s1", "plugin-a"));
     assert!(
         !manager.has_session_vm("s1", "plugin-b"),
-        "shadowed provider should stay untouched after unsupported_backend"
+        "shadowed provider should stay untouched after the winner fails"
     );
 
     manager.end_session("s1").await.expect("end session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_returns_raw_unsupported_backend_when_only_provider_declines() {
-    let plugin_a = plugin_function_fixture(
-        "plugin-a",
-        &[("web_search.backend", "webSearchBackend")],
-        r#"
-pi.registerFunction("webSearchBackend", function () {
-  return { hits: [], warnings: [], unsupportedBackend: true };
-});
-"#,
-    );
-    let dispatcher = Arc::new(
-        HostApiDispatcher::new(Arc::new(DefaultEventBus::new()))
-            .with_tokio_handle(tokio::runtime::Handle::current()),
-    );
-    let (invoker, function_registry, manager, _dispatcher) =
-        function_search_harness(dispatcher, Duration::from_secs(1));
-
-    function_registry.register_plugin_functions(
-        "plugin-a",
-        plugin_a.path(),
-        &[manifest_function("web_search.backend", "webSearchBackend")],
-        crate::ext::plugin::PluginSource::Project,
-    );
-    manager.load_plugin(plugin_a.path()).expect("load plugin-a");
-
-    let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
-    let result = search_invoker
-        .search(
-            "mimo",
-            json!({ "backend": "mimo", "query": "rust" }),
-            "s1",
-            search_invoker.search_catalog().revision,
-        )
-        .await
-        .expect("unsupportedBackend payload should be returned for upper-layer classification");
-    assert_eq!(result["unsupportedBackend"], json!(true));
-
-    manager.end_session("s1").await.expect("end session");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatible() {
+async fn ext_plugin_search_invoker_without_registered_provider_fails_clearly() {
     let dispatcher = Arc::new(
         HostApiDispatcher::new(Arc::new(DefaultEventBus::new()))
             .with_tokio_handle(tokio::runtime::Handle::current()),
@@ -1767,25 +1692,14 @@ async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatibl
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
     let err = search_invoker
-        .search(
-            "mimo",
-            json!({ "backend": "mimo", "query": "rust" }),
-            "s1",
-            search_invoker.search_catalog().revision,
-        )
+        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
         .await
-        .expect_err("missing provider registration should still be incompatible");
+        .expect_err("missing provider registration should fail");
 
-    match err {
-        BackendFailure::Incompatible { detail } => {
-            assert!(detail.contains(&crate::infra::i18n::tr_in(
-                crate::infra::i18n::Locale::En,
-                "plugin.searchMissing",
-                &[("name", "mimo")]
-            )));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(err.to_string().contains(&crate::infra::i18n::tr(
+        "plugin.searchMissing",
+        &[("name", "mimo")]
+    )));
 
     manager.end_session("s1").await.expect("end session");
 }

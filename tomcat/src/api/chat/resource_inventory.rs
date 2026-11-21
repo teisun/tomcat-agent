@@ -193,8 +193,7 @@ impl ChatContext {
                 .collect();
         }
         let host_functions = catalog.as_ref().map(|catalog| {
-            let (functions, warnings) =
-                super::context::collect_host_functions_from_catalog(catalog);
+            let (functions, warnings) = catalog.host_functions();
             report.warnings.extend(warnings);
             functions
         });

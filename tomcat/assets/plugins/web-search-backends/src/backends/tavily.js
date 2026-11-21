@@ -14,7 +14,6 @@ async function searchWithTavily(req) {
     body.include_domains = req.domainFilter.slice();
   }
   return fetchJsonBackend("tavily", req, {
-    secretName: "TAVILY_API_KEY",
     warnings: warnings,
     request: {
       method: "POST",

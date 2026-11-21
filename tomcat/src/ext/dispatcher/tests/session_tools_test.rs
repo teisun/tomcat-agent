@@ -44,14 +44,12 @@ async fn shared_dispatcher_routes_files_shell_and_task_control_to_the_calling_se
         Arc::downgrade(&manager),
         Some(Arc::downgrade(d.primitive.as_ref().unwrap())),
         Some(Arc::downgrade(&a_registry)),
-        None,
     );
     d.bind_session(
         "b",
         Arc::downgrade(&manager),
         Some(Arc::downgrade(other.primitive.as_ref().unwrap())),
         Some(Arc::downgrade(&b_registry)),
-        None,
     );
 
     let read = call(&d, "b/plugin", "readFile", json!({"path":"value.txt"})).await;

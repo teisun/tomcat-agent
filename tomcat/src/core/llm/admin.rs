@@ -719,56 +719,6 @@ pub(crate) fn inferred_api_key_env(entry: &ModelEntry) -> String {
         .unwrap_or_else(|| env_name_for_provider(&entry.provider))
 }
 
-/// Credential lookup is restricted to exact HTTPS DNS hosts on the default port.
-pub(crate) fn credential_host(url: &reqwest::Url) -> Option<String> {
-    if url.scheme() != "https"
-        || url.port_or_known_default() != Some(443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return None;
-    }
-    let domain = url.domain()?.trim_end_matches('.');
-    domain.contains('.').then(|| domain.to_ascii_lowercase())
-}
-
-/// Resolve a configured key name in catalog order, preferring an available value.
-/// If none have values, return the first safe name for the settings form.
-pub(crate) fn resolve_host_key<T>(
-    catalog: &ModelCatalog,
-    host: &str,
-    lookup: impl Fn(&str) -> Option<T>,
-) -> Option<(String, Option<T>)> {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    let mut candidates = Vec::new();
-    let mut foreign = std::collections::HashSet::new();
-    for model in catalog.iter_in_merge_order() {
-        let slot = inferred_api_key_env(model);
-        let configured_host = model
-            .base_url
-            .as_deref()
-            .and_then(|url| reqwest::Url::parse(url).ok())
-            .as_ref()
-            .and_then(credential_host);
-        if configured_host.as_deref() != Some(host.as_str()) {
-            foreign.insert(slot);
-        } else if is_valid_api_key_env_name(&slot) && !candidates.contains(&slot) {
-            candidates.push(slot);
-        }
-    }
-    let mut first = None;
-    for slot in candidates
-        .into_iter()
-        .filter(|slot| !foreign.contains(slot))
-    {
-        if let Some(value) = lookup(&slot) {
-            return Some((slot, Some(value)));
-        }
-        first.get_or_insert(slot);
-    }
-    first.map(|slot| (slot, None))
-}
-
 fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
     UserModelEntry {
         id: entry.id.clone(),

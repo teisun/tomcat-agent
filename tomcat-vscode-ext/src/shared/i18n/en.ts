@@ -700,7 +700,7 @@ export const en = {
   "searchSettings.keyShared": "Shared with: {names}",
   "searchSettings.keyUnavailable": "This workspace uses a project search plugin. Project plugins cannot use saved keys for direct requests.",
   "searchSettings.clearUnavailable": "Only saved search keys that aren't shared with a model can be removed here.",
-  "searchSettings.configureHost": "Configure a key for {host} in Models.",
+  "searchSettings.keyConflict": "A model at another address uses this key. Give that model its own key in Models.",
   "searchSettings.models": "Open Models",
   "searchSettings.clear": "Remove key",
   "searchSettings.clearPrompt": "Remove the saved key for {name}?",

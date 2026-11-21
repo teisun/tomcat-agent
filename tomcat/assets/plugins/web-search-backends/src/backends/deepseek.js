@@ -32,15 +32,9 @@ async function searchWithDeepSeek(req) {
     if (after) query += " after:" + after;
   }
   if (!query || Array.from(query).length > 128) {
-    return {
-      backend: "deepseek",
-      hits: [],
-      warnings: warnings.concat([query ? "deepseek_query_too_long" : "deepseek_query_empty"]),
-      unsupported_backend: true
-    };
+    throw new Error("DeepSeek search query must be 1-128 characters after filters");
   }
   return fetchJsonBackend("deepseek", req, {
-    secretName: "DEEPSEEK_API_KEY",
     warnings: warnings,
     statusMessages: { 402: "DeepSeek search: insufficient balance (HTTP 402)" },
     request: {

@@ -129,7 +129,7 @@ set +a
 - **动作**：
   - **User_Stories.md**：若本次变更实现或变更了某 P0/P1 用户故事相关能力，则补充或更新对应描述与验收标准，使其与当前实现一致。
   - **E2E_SCENARIO_LIBRARY.md**：若引入了新的用户可见操作或场景，则补充或更新 E2E 用例表（编号、用例名、用户意图、操作序列、必须断言）。无变更则无需修改。
-  - **Host-facing functions 特判**：若本次改动涉及 `manifest.functions[]` / `FunctionRegistry` / `PluginFunctionInvoker` / `web_search.backend`，须显式核对文档口径是否仍一致表达“发现根复用 `scope > agent > global`，注册面按 `point` override，高层覆盖低层、同层 first-wins + warning、`unsupported_backend` 不再跨插件兜底”。
+  - **Host-facing functions 特判**：若本次改动涉及 `manifest.functions[]` / `FunctionRegistry` / `PluginFunctionInvoker` / `web_search.backend`，须显式核对文档口径是否仍一致表达“发现根复用 `scope > agent > global`，注册面按 `point` override，高层覆盖低层、同层 first-wins + warning、赢家失败不跨插件兜底”。
 - **自检**：规格与场景库与本次变更实现一致、无遗漏；再进入 §2、§3。
 
 ### §2 编写集成测试代码

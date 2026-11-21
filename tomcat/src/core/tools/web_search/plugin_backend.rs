@@ -1,128 +1,36 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use super::backend::{BackendFailure, BackendSearchResponse, WebSearchBackend};
+use crate::infra::i18n::tr;
+use crate::infra::AppError;
+
+use super::declarations::BackendDeclaration;
 use super::types::{RawHit, WebSearchRequest};
 
 #[derive(Default)]
 pub struct PluginSearchCatalog {
-    pub declarations: Vec<super::declarations::BackendDeclaration>,
+    pub declarations: Vec<BackendDeclaration>,
     pub saved_keys: bool,
-    pub revision: u64,
 }
 
 #[async_trait]
 pub trait PluginSearchInvoker: Send + Sync {
-    fn search_catalog(&self) -> PluginSearchCatalog {
-        PluginSearchCatalog::default()
-    }
+    fn search_catalog(&self) -> PluginSearchCatalog;
 
     async fn search(
         &self,
         backend: &str,
         params: serde_json::Value,
         session_id: &str,
-        revision: u64,
-    ) -> Result<serde_json::Value, BackendFailure>;
-}
-
-#[derive(Clone)]
-pub struct PluginWebSearchBackend {
-    invoker: Arc<dyn PluginSearchInvoker>,
-    backend: String,
-    session_id: String,
-    model: Option<String>,
-    revision: u64,
-}
-
-impl PluginWebSearchBackend {
-    pub fn new(
-        invoker: Arc<dyn PluginSearchInvoker>,
-        backend: impl Into<String>,
-        session_id: impl Into<String>,
-        revision: u64,
-    ) -> Self {
-        Self {
-            invoker,
-            backend: backend.into(),
-            session_id: session_id.into(),
-            model: None,
-            revision,
-        }
-    }
-
-    pub(super) fn with_model(mut self, model: Option<String>) -> Self {
-        self.model = model;
-        self
-    }
-
-    fn classify_warning_failure(&self, warnings: &[String]) -> Option<BackendFailure> {
-        for warning in warnings {
-            if let Some(raw_env_name) = warning.strip_prefix("__missing_key__:") {
-                let env_name = raw_env_name.trim();
-                return Some(if env_name.is_empty() {
-                    BackendFailure::missing_key_for(&self.backend)
-                } else {
-                    BackendFailure::MissingKey {
-                        env_name: env_name.to_string(),
-                    }
-                });
-            }
-            if let Some(raw_status) = warning.strip_prefix("__unauthorized__:") {
-                let status = raw_status.trim().parse::<u16>().unwrap_or(401);
-                return Some(BackendFailure::Unauthorized { status });
-            }
-        }
-        None
-    }
-
-    fn classify_plugin_runtime_failure(&self, warnings: &[String]) -> Option<BackendFailure> {
-        let plugin_runtime_warnings: Vec<String> = warnings
-            .iter()
-            .filter(|warning| {
-                warning.starts_with("plugin_backend_error")
-                    && !is_retryable_timeout_warning(warning)
-            })
-            .cloned()
-            .collect();
-        if plugin_runtime_warnings.is_empty() {
-            None
-        } else {
-            Some(BackendFailure::PluginRuntime {
-                detail: plugin_runtime_warnings.join("; "),
-            })
-        }
-    }
-
-    fn unsupported_backend_failure(&self, warnings: &[String]) -> BackendFailure {
-        let mut detail = format!(
-            "web_search plugin backend `{}` reported unsupported_backend",
-            self.backend
-        );
-        if !warnings.is_empty() {
-            detail.push('：');
-            detail.push_str(&warnings.join("; "));
-        }
-        BackendFailure::Incompatible { detail }
-    }
-}
-
-fn is_retryable_timeout_warning(warning: &str) -> bool {
-    warning.starts_with("plugin_backend_error")
-        && (warning.contains("pi.fetch request timed out") || warning.contains("request timed out"))
+    ) -> Result<serde_json::Value, AppError>;
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct PluginSearchResponse {
     #[serde(default)]
     hits: Vec<PluginSearchHit>,
     #[serde(default)]
     warnings: Vec<String>,
-    #[serde(default, alias = "unsupported_backend")]
-    unsupported_backend: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,60 +45,48 @@ struct PluginSearchHit {
     published_at: Option<String>,
 }
 
-#[async_trait]
-impl WebSearchBackend for PluginWebSearchBackend {
-    async fn search(
-        &self,
-        request: &WebSearchRequest,
-    ) -> Result<BackendSearchResponse, BackendFailure> {
-        let payload = serde_json::json!({
-            "backend": self.backend,
-            "query": request.query,
-            "count": request.count,
-            "freshness": request.freshness.map(|value| value.as_str()),
-            "country": request.country,
-            "language": request.language,
-            "domainFilter": request.domain_filter,
-            "model": self.model,
-        });
-        let raw = self
-            .invoker
-            .search(&self.backend, payload, &self.session_id, self.revision)
-            .await?;
-        let parsed: PluginSearchResponse =
-            serde_json::from_value(raw).map_err(|err| BackendFailure::Parse {
-                detail: err.to_string(),
-            })?;
-        if let Some(failure) = self.classify_plugin_runtime_failure(&parsed.warnings) {
-            return Err(failure);
-        }
-        if let Some(failure) = self.classify_warning_failure(&parsed.warnings) {
-            return Err(failure);
-        }
-        if parsed.unsupported_backend {
-            if parsed
-                .warnings
-                .iter()
-                .any(|warning| is_retryable_timeout_warning(warning))
-            {
-                return Err(BackendFailure::Timeout);
-            }
-            return Err(self.unsupported_backend_failure(&parsed.warnings));
-        }
-        Ok(BackendSearchResponse {
-            raw_hits: parsed
-                .hits
-                .into_iter()
-                .filter_map(|hit| {
-                    Some(RawHit {
-                        title: hit.title,
-                        url: hit.url?,
-                        snippet: hit.snippet,
-                        published_at: hit.published_at,
-                    })
+pub(super) struct BackendSearchResponse {
+    pub raw_hits: Vec<RawHit>,
+    pub warnings: Vec<String>,
+}
+
+pub(super) async fn invoke_backend(
+    invoker: &dyn PluginSearchInvoker,
+    declaration: &BackendDeclaration,
+    request: &WebSearchRequest,
+    session_id: &str,
+) -> Result<BackendSearchResponse, AppError> {
+    let backend = declaration.id.as_str();
+    let payload = serde_json::json!({
+        "backend": backend,
+        "query": request.query,
+        "count": request.count,
+        "freshness": request.freshness.map(|value| value.as_str()),
+        "country": request.country,
+        "language": request.language,
+        "domainFilter": request.domain_filter,
+        "model": declaration.model,
+    });
+    let raw = invoker.search(backend, payload, session_id).await?;
+    let parsed: PluginSearchResponse = serde_json::from_value(raw).map_err(|err| {
+        AppError::Tool(tr(
+            "search.runtime",
+            &[("backend", backend), ("detail", &err.to_string())],
+        ))
+    })?;
+    Ok(BackendSearchResponse {
+        raw_hits: parsed
+            .hits
+            .into_iter()
+            .filter_map(|hit| {
+                Some(RawHit {
+                    title: hit.title,
+                    url: hit.url?,
+                    snippet: hit.snippet,
+                    published_at: hit.published_at,
                 })
-                .collect(),
-            warnings: parsed.warnings,
-        })
-    }
+            })
+            .collect(),
+        warnings: parsed.warnings,
+    })
 }

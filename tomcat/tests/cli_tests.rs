@@ -1047,7 +1047,15 @@ fn write_function_plugin_dir(
     fs::create_dir_all(plugin_dir).expect("create function plugin dir");
     let backends: Vec<_> = backends
         .iter()
-        .map(|(id, secret)| json!({ "id": id, "label": id, "secret": secret, "defaultAuto": true }))
+        .map(|(id, secret)| {
+            json!({
+                "id": id,
+                "label": id,
+                "secret": secret,
+                "host": format!("{id}.example"),
+                "defaultAuto": true
+            })
+        })
         .collect();
     let manifest = json!({
         "id": plugin_id,
@@ -6781,12 +6789,7 @@ async fn test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_s
         &[("tavily", "TAVILY_API_KEY"), ("brave", "BRAVE_API_KEY")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  return {
-    backend: "tavily",
-    hits: [],
-    warnings: ["__missing_key__:TAVILY_API_KEY"],
-    unsupported_backend: true
-  };
+  throw new Error("project plugin declined");
 });
 "#,
     );
@@ -6974,8 +6977,10 @@ async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
         info_span!("test_chat_path_surfaces_plugin_runtime_error_with_original_detail").entered();
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_PLUGIN_RUNTIME_CHAT_KEY";
+    const SEARCH_KEY: &str = "TOMCAT_WEB_SEARCH_PLUGIN_RUNTIME_SEARCH_KEY";
     let _env = EnvGuard::set_many(&[
         (ENV_KEY, Some("stub")),
+        (SEARCH_KEY, Some("stub")),
         ("OPENAI_API_KEY", None),
         ("MIMO_API_KEY", None),
         ("TAVILY_API_KEY", None),
@@ -6994,7 +6999,7 @@ async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
     write_project_function_plugin(
         workspace.path(),
         "project-web-search-runtime-fail",
-        &[("mimo", ENV_KEY)],
+        &[("mimo", SEARCH_KEY)],
         r#"
 pi.registerFunction("webSearchBackend", function () {
   throw new Error("opaque execution failure");
@@ -7055,10 +7060,14 @@ pi.registerFunction("webSearchBackend", function () {
     let tool_text = tool_msg.text_content().expect("tool error should be text");
     assert!(
         tool_text.contains(&tr(
-            "search.runtime",
-            &[("backend", "mimo"), ("detail", "")]
+            "plugin.searchFailed",
+            &[
+                ("backend", "mimo"),
+                ("plugin", "project-web-search-runtime-fail"),
+                ("detail", "")
+            ]
         )),
-        "tool error 应标记为 runtime hard failure，实际: {}",
+        "tool error 应指明失败的后端和插件，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
@@ -7070,8 +7079,8 @@ pi.registerFunction("webSearchBackend", function () {
         !tool_text.contains(&tr(
             "search.allUnavailableDetails",
             &[("query", "reqwest rust"), ("details", "")]
-        )) && !tool_text.contains(&tr("search.allUnavailable", &[("query", "reqwest rust")])),
-        "runtime hard failure 不应被压扁为 all_backends_unavailable，实际: {}",
+        )),
+        "单一后端失败不应被包装为 all_backends_unavailable，实际: {}",
         trunc(tool_text, 400)
     );
 }
@@ -7106,12 +7115,7 @@ async fn test_chat_path_auto_missing_keys_remains_degraded() {
         &[("tavily", "TAVILY_API_KEY"), ("brave", "BRAVE_API_KEY")],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  return {
-    backend: "tavily",
-    hits: [],
-    warnings: ["__missing_key__:TAVILY_API_KEY"],
-    unsupported_backend: true
-  };
+  throw new Error("project plugin declined");
 });
 "#,
     );
@@ -7181,11 +7185,11 @@ pi.registerFunction("webSearchBackend", function () {
         trunc(tool_text, 400)
     );
     assert!(
-        !tool_text.contains(&tr(
-            "search.runtime",
-            &[("backend", "tavily"), ("detail", "")]
+        tool_text.contains(&tr(
+            "search.missingKey",
+            &[("backend", "tavily"), ("env", "TAVILY_API_KEY")]
         )),
-        "纯缺 key 不应被误升级成 runtime hard failure，实际: {}",
+        "纯缺 key 应在预检阶段说明缺少的 key，实际: {}",
         trunc(tool_text, 400)
     );
 }
@@ -7339,14 +7343,15 @@ async fn test_web_search_backend_does_not_fallback_to_shadowed_provider() {
         info_span!("test_web_search_backend_does_not_fallback_to_shadowed_provider").entered();
 
     const API_ENV: &str = "TOMCAT_WEB_SEARCH_SHADOWED_PROVIDER_KEY";
-    let _env = EnvGuard::set_many(&[(API_ENV, Some("stub"))]);
+    const SEARCH_KEY: &str = "TOMCAT_WEB_SEARCH_SHADOWED_SEARCH_KEY";
+    let _env = EnvGuard::set_many(&[(API_ENV, Some("stub")), (SEARCH_KEY, Some("stub"))]);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let _cwd_guard = common::CwdGuard::set(workspace.path());
     let work_dir = tempfile::tempdir().expect("workdir tempdir");
     write_host_root_function_plugin(
         work_dir.path(),
         "global-web-search-success",
-        &[("mimo", API_ENV)],
+        &[("mimo", SEARCH_KEY)],
         r#"
 pi.registerFunction("webSearchBackend", function (params) {
   return {
@@ -7360,10 +7365,10 @@ pi.registerFunction("webSearchBackend", function (params) {
     write_project_function_plugin(
         workspace.path(),
         "project-shadow-web-search",
-        &[("mimo", API_ENV)],
+        &[("mimo", SEARCH_KEY)],
         r#"
 pi.registerFunction("webSearchBackend", function () {
-  return { hits: [], warnings: [], unsupported_backend: true };
+  throw new Error("project plugin declined");
 });
 "#,
     );
@@ -7391,12 +7396,11 @@ pi.registerFunction("webSearchBackend", function () {
             "shadowed-provider-session",
         )
         .await
-        .expect_err("unsupported_backend should not fall through to lower provider");
+        .expect_err("a failing winner should not fall through to the lower provider");
 
     assert!(
-        err.to_string()
-            .contains("web_search plugin backend `mimo` reported unsupported_backend"),
-        "should surface passthrough unsupported_backend incompatibility without touching shadowed provider: {err}"
+        err.to_string().contains("project plugin declined"),
+        "should surface the winner's failure without touching the shadowed provider: {err}"
     );
     if let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() {
         plugin_manager

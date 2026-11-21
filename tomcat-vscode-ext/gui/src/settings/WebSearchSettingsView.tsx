@@ -55,7 +55,7 @@ function BackendRow({ row, index, enabledCount, busy, editor, onMove, onToggle, 
       <div className="tc-settings-card__identity">
         <strong>{row.label}</strong>
         {details && <span className="tc-settings-card__hosts">{details}</span>}
-        {row.host && row.canSaveKey && !row.keyEnv && <span className="tc-settings-card__hosts">{t("searchSettings.configureHost", { host: row.host })}</span>}
+        {row.host && row.canSaveKey && !row.keyEnv && <span className="tc-settings-card__hosts">{t("searchSettings.keyConflict")}</span>}
         {!row.canSaveKey && row.keyEnv && !row.model && <span className="tc-settings-card__hosts">{t("searchSettings.keyUnavailable")}</span>}
       </div>
       <div className="tc-search-settings__actions">

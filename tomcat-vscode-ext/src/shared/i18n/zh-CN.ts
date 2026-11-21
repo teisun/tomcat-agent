@@ -698,7 +698,7 @@ export const zhCN = {
   "searchSettings.keyShared": "与以下模型共用：{names}",
   "searchSettings.keyUnavailable": "此工作区的搜索插件来自项目目录，不能在直连接口的请求中使用已保存的 Key。",
   "searchSettings.clearUnavailable": "这里只能移除已保存且未与模型共用的搜索 Key。",
-  "searchSettings.configureHost": "请在模型设置中为 {host} 配置 Key。",
+  "searchSettings.keyConflict": "其他地址的模型也在用这个 Key，请在模型设置中给那个模型换一个 Key。",
   "searchSettings.models": "打开模型设置",
   "searchSettings.clear": "移除 Key",
   "searchSettings.clearPrompt": "移除为 {name} 保存的 Key？",

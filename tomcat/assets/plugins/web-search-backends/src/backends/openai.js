@@ -50,7 +50,7 @@ async function searchWithOpenAI(req) {
     request: {
       url: "https://api.openai.com/v1/responses",
       method: "POST",
-      headers: { Authorization: "Bearer {{host_key}}", "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer {{secret:OPENAI_API_KEY}}", "Content-Type": "application/json" },
       body: {
         model: OPENAI_SEARCH_MODEL,
         input: normalizeQuery(req.query),

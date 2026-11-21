@@ -1,4 +1,3 @@
-pub(crate) mod backend;
 mod cache;
 pub mod declarations;
 pub mod plugin_backend;
@@ -12,14 +11,13 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-use crate::core::llm::auth::credential_generation;
 use crate::core::llm::{ModelCatalog, SharedModelCatalog};
+use crate::infra::i18n::tr;
 use crate::infra::{AppConfig, AppError, ToolsWebSearchConfig};
 
-use self::backend::{BackendFailure, BackendSearchResponse, WebSearchBackend};
 use self::cache::{CacheKey, WebSearchCache};
 use self::declarations::{effective_order, BackendDeclaration};
-use self::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
+use self::plugin_backend::{invoke_backend, BackendSearchResponse, PluginSearchInvoker};
 use self::types::{normalize_hits, Stats, WebSearchArgs, WebSearchOutput, WebSearchRequest};
 
 pub type SearchOrder = Arc<RwLock<Option<Vec<String>>>>;
@@ -38,32 +36,35 @@ fn target_for<'a>(
     declarations: &'a [BackendDeclaration],
     catalog: &ModelCatalog,
     saved_keys: bool,
-) -> Result<(&'a BackendDeclaration, String), BackendFailure> {
+) -> Result<&'a BackendDeclaration, AppError> {
     let declaration = declarations
         .iter()
         .find(|entry| entry.id == id)
-        .ok_or_else(|| BackendFailure::Incompatible {
-            detail: format!("backend_unknown:{id}. Check Settings → Tools → Web Search."),
+        .ok_or_else(|| {
+            AppError::Tool(format!(
+                "backend_unknown:{id}. Check Settings → Tools → Web Search."
+            ))
         })?;
-    let (slot, source) = declaration.key_status(catalog, saved_keys).ok_or_else(|| {
-        BackendFailure::Incompatible {
-            detail: if declaration.uses_host_key() {
-                format!(
-                    "Search backend {id} has no eligible key for {}. Check Settings → Models.",
-                    declaration.host.as_deref().unwrap_or_default()
-                )
-            } else {
-                format!(
+    let (slot, source) = declaration
+        .key_status(catalog, saved_keys)
+        .ok_or_else(|| {
+            AppError::Tool(match (&declaration.secret, &declaration.model) {
+                (Some(secret), _) => format!(
+                    "Search backend {id}: {secret} is also used by a model at another address. Give that model its own key in Settings → Models."
+                ),
+                (None, model) => format!(
                     "Search backend {id} requires model {}",
-                    declaration.model.as_deref().unwrap_or_default()
-                )
-            },
-        }
-    })?;
+                    model.as_deref().unwrap_or_default()
+                ),
+            })
+        })?;
     if source.is_none() {
-        return Err(BackendFailure::MissingKey { env_name: slot });
+        return Err(AppError::Tool(tr(
+            "search.missingKey",
+            &[("backend", id), ("env", &slot)],
+        )));
     }
-    Ok((declaration, slot))
+    Ok(declaration)
 }
 
 impl WebSearchRuntime {
@@ -98,7 +99,7 @@ impl WebSearchRuntime {
         session_id: &str,
     ) -> Result<WebSearchOutput, AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
-        let (catalog, model_revision) = self.model_catalog.snapshot_with_generation();
+        let catalog = self.model_catalog.snapshot();
         let invoker = self.plugin_invoker.get();
         let plugin = invoker
             .map(|invoker| invoker.search_catalog())
@@ -111,15 +112,9 @@ impl WebSearchRuntime {
         let routes = order
             .iter()
             .zip(&targets)
-            .map(|(id, target)| {
-                let credential = target
-                    .as_ref()
-                    .ok()
-                    .map(|(_, slot)| (slot.clone(), credential_generation(slot)));
-                (id.clone(), credential)
-            })
+            .map(|(id, target)| (id.clone(), target.is_ok()))
             .collect();
-        let cache_key = CacheKey::from_request(&request, (plugin.revision, model_revision), routes);
+        let cache_key = CacheKey::from_request(&request, routes);
         if let Some(mut output) = self.cache.get(&cache_key) {
             output.stats.cached = true;
             return Ok(output);
@@ -129,21 +124,18 @@ impl WebSearchRuntime {
         let timeout = Duration::from_millis(self.config.timeout_ms);
         for (id, target) in order.iter().zip(targets) {
             let result = match target {
-                Err(failure) => Err(failure),
-                Ok((declaration, _)) => tokio::time::timeout(timeout, async {
+                Err(error) => Err(error),
+                Ok(declaration) => {
                     let invoker = invoker.expect("declarations require a plugin invoker");
-                    PluginWebSearchBackend::new(
-                        invoker.clone(),
-                        id.as_str(),
-                        session_id,
-                        plugin.revision,
+                    tokio::time::timeout(
+                        timeout,
+                        invoke_backend(invoker.as_ref(), declaration, &request, session_id),
                     )
-                    .with_model(declaration.model.clone())
-                    .search(&request)
                     .await
-                })
-                .await
-                .unwrap_or(Err(BackendFailure::Timeout)),
+                    .unwrap_or_else(|_| {
+                        Err(AppError::Tool(tr("search.timeout", &[("backend", id)])))
+                    })
+                }
             };
             match result {
                 Ok(response) => {
@@ -159,8 +151,7 @@ impl WebSearchRuntime {
                     }
                     return Ok(output);
                 }
-                Err(failure) => {
-                    let error = failure.to_tool_error(id);
+                Err(error) => {
                     if order.len() == 1 {
                         return Err(error);
                     }
@@ -168,7 +159,7 @@ impl WebSearchRuntime {
                 }
             }
         }
-        Err(AppError::Tool(crate::infra::i18n::tr(
+        Err(AppError::Tool(tr(
             "search.allUnavailableDetails",
             &[("query", &request.query), ("details", &failures.join("; "))],
         )))
@@ -182,7 +173,7 @@ impl WebSearchRuntime {
     ) -> Result<(), AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
         self.cache
-            .insert(CacheKey::from_request(&request, (0, 0), Vec::new()), value);
+            .insert(CacheKey::from_request(&request, Vec::new()), value);
         Ok(())
     }
 }
