@@ -5,10 +5,12 @@ describe("read-only frame discovery", () => {
   it("skips a vanished context and probes a replacement without replaying the first request", async () => {
     const send = vi.fn()
       .mockRejectedValueOnce(new Error("CDP -32000: Cannot find context with specified id"))
+      .mockRejectedValueOnce(new Error("CDP -32000: Execution context was destroyed."))
       .mockResolvedValueOnce({ result: { value: { assets: ["https://owned/image-preview.js"] } } });
     expect(await probeRenderedContext({ send }, 1, '[data-testid="preview-stage"]')).toBeNull();
-    expect(await probeRenderedContext({ send }, 2, '[data-testid="preview-stage"]')).toEqual({ assets: ["https://owned/image-preview.js"] });
-    expect(send.mock.calls.map(([, params]) => params.contextId)).toEqual([1, 2]);
+    expect(await probeRenderedContext({ send }, 2, '[data-testid="preview-stage"]')).toBeNull();
+    expect(await probeRenderedContext({ send }, 3, '[data-testid="preview-stage"]')).toEqual({ assets: ["https://owned/image-preview.js"] });
+    expect(send.mock.calls.map(([, params]) => params.contextId)).toEqual([1, 2, 3]);
     expect(send.mock.calls.every(([method]) => method === "Runtime.evaluate")).toBe(true);
     expect(send.mock.calls[0][1].expression).not.toContain(".click(");
   });

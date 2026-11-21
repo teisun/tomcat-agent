@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-21 08:50 +0800 | ACTIVE | feat/web-search-backends | - |
+| Tomcat Agent | 2026-11-21 11:03 +0800 | ACTIVE | feat/web-search-backends | - |
 
 ### ✅ DONE (已完成/进行中)
 - CLI 和共享 Serve 启动时补齐内置网页搜索插件，VS Code 用户不必先执行 `tomcat init`。
@@ -26,18 +26,22 @@
 - Serve 新增 `web_search_settings`、`set_web_search_routing`、`clear_provider_key`，保存 Key 复用 `set_provider_key`。设置读取按窗口工作区解析生效插件，路由和凭据更新对共享 Serve 生效。
 - 会话记录新增内部 `plan.current` 事件，恢复索引升级到 schema 7；无该事件的旧会话仍按最后一条带计划 ID 和路径的事件恢复。共享 Serve 在 `initialize` 阶段就返回 `attachmentRoot`，不再等待项目选定。
 
-### 本轮门禁复验（候选 `46f3740b` 后继续整改）
+### 本轮门禁复验
 - Rust lib 复验（`1795222137759-6140uq`）：strict Clippy 通过；3555 通过、8 失败、7 忽略。5 条模型目录测试在独立 HOME 仍失败（`1795224098202-69i811`），去掉从会话目录回退读取的分支，列表和会话夹具都用 Serve 自己刷新的共享目录。另 3 条 Plan 交还测试在独立 HOME 仍失败（`1795224296165-y2stxl`）；运行时夹具补齐与文件相同的 session ID，未放宽所有权检查或事件断言。修后定向复验 27/27（`1795224377348-ms4q2z`，退出 0），含上述 8 条、插件替换及搜索上下文行。整改后全目标 strict Clippy 和 `cargo test --doc` 退出 0（`1795226330713-uo1p2l`，无 doctest 用例）。
 - Rust 默认集成（`1795219466777-iyincy`）：386 通过、11 失败、28 跳过。两条 prompt 体积超出原上限 131 字符，删去 Todos tool 描述与参数说明之间的重复，不调门槛。八条 QuickJS 用例的手工实例没有规范化临时目录路径（macOS `/var` 与 `/private/var`）；统一使用真实目录注册接口，不改插件路径校验。空 glob 超时在独立环境原断言通过（`1795224421605-us08ik`）。修后从正式并行组筛选复跑 23/23（`1795226143128-yoldoi`，退出 0）：全部 QuickJS、prompt 体积、生成目录一致性及空 glob。同一门禁的集成串行组 96/96（3 跳过）通过，run `df335c06-1c0b-4bfa-a5b6-c6ed520e8987`；门禁总体退出 1。
 - 搜索证据：同一集成批次的 17 条 `web_search_tool_tests` 都通过（真实 QuickJS + 本地 HTTPS，不是真供应商）。覆盖普通缓存命中、Key 轮换/清除、模型地址冲突导致旧缓存不可复用、工作区覆盖隔离；lib 中插件适配器拒绝旧选择，未启动被覆盖插件，下一次查询选中新提供方（`1795222137759-6140uq`）。
 - 扩展复验（`1795221275165-uhqbwq`，退出 1）：lint、宿主 965/965、GUI 920/920、构建通过，README 打包 smoke 14/14、会话删除 3/3（含观察者被拒绝后原持有者继续控制）通过。集成共 284 通过、3 失败、1 跳过：两个真实 CLI 初始化超时和一个 SDK 类型检查超时。SDK 原样隔离复跑 1/1（`1795224367120-eqtord`，退出 0）；两个 CLI 场景原样隔离复跑 2/2（`1795224760290-azu40j`，退出 0）。没有放宽时间预算；正式安装阶段未到达。使用缓存 VS Code 1.106.0 的全门禁复验（`1795226915515-yve1om`，退出 1）通过单测和全部扩展集成（287 通过、1 跳过），安装套件 23 通过、6 跳过、1 失败：模型设置宿主断言还写死了 CLI `0.1.x`。保留版本存在、与当前扩展声明一致以及界面显示正确的断言，只删除固定次版本号。原安装用例复跑 1/1（`1795227678648-mra1kx`）；随后补跑 `npm run verify:vsix` 的五组宿主场景 10/10（`1795227790388-a0in14`）。这些使用替身 CLI，不计为候选整包验收。
+- `git diff --check`、Rust 格式、发布版本与 Serve Rust/TS wire 声明比对通过（`1795230038700-u99od7`）；候选 CLI 的 `init`、`doctor`、`config`、`session`、`plugin`、`audit` 帮助均正常（`1795230132888-enjrxb`）。
 - 按授权补跑 NickMjiang 真实 Responses：隔离 HOME 下，新构建的 CLI `serve --stdio` 使用 `nickmjiang/gpt-6-astra`，接收请求、流式返回预期文本、完成回合并正常退出（`1795225632901-iis3d2`）。Key 仅由该子进程从环境读取，没有输出或写入夹具；这条证据不代替固定 IDATATLAS 的全量真实模型门禁。
+
+### Intel 候选包：真实 VS Code 安装验收
+- 用干净的 `f0959fd5`（树 `c0bd59894459e2fa684d4bdec052bc9e8f7b9394`）构建 CLI（`1795228160916-2bn7xu`），另产候选 VSIX。候选 SHA-256 `2f64d4e06c108abf638565baed24b378cfb45749b7e1eb754c31f4e4b0ada69d`；包内 `extension/bin/tomcat` 为 `0755`、Mach-O x86_64、CLI `0.2.1`，其 SHA-256 `b5e3099c000d65106734789ad3e93661b3e055cf9edf4c1c51989494e1626558` 与安装及实际运行的副本一致。原交付包 SHA-256 仍为 `e87291fd72e6afe3fb301dd340b029dbfb1283b0504d035251f7e604653c92f5`。
+- 同包三次独立安装：首轮夹具误将 macOS `/tmp` 与 `/private/tmp` 当不同根（`1795229238682-ados9a`），次轮读取了刚销毁的 Webview 上下文（`1795229361882-i8w3td`）。只修测试：对临时 HOME 取实际路径；重载后等待新文档；只读探针跳过已销毁上下文，不重试点击或吞其他协议错误。产品代码、包内文件和功能断言不变。
+- `TOMCAT_RELEASE_WEB_SEARCH=1 npm run verify:vsix -- --release-bundle <候选>`（`1795229502317-mzk2hm`，退出 0）：临时 HOME、独立 VS Code 1.106.0 profile、真共享 Serve。冷启动铺好内置搜索插件；合成 Brave Key 保存、移除及服务重启后状态、顺序和启用项正确，Key 不进共享设置或 Serve 日志。原图解码 256px、缩略图 192px，重载后历史图可解码，破损缩略图显示「预览不可用」。回环模型收到一条带图片请求，不计外部模型或搜索供应商实测。6 组最终 PNG、ARIA 和 console（捕获范围内无错误）在 `.agents/acceptance/plan-progress/intel-f0959fd5-3OXDKG/reload-Viwh40/gui-VEegMo`（`1795229598472-6cwwze`）。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
 | Rust 全门禁未通过 | 首次 lib 阶段因测试夹具等待实际 Git checkpoint 被中止，`NoopStore` 复跑 9/9（`1795221142336-ii83hm`），之后 full lib 暴露 8 条失败。默认集成结果见上 | 不重复已通过的检查；精准复跑整改和超时用例，补齐未通过或未执行阶段 |
-| 扩展门禁分段补齐 | lint、单测、集成在全门禁复跑通过；安装失败用例及未运行的 `verify:vsix` 阶段已按原断言意图复跑通过 | 候选整包另验，不把退出 1 的历史门禁记为单次全绿 |
 | 真实模型门禁未运行 | `integration-real-llm` 退出 2（`1795225101990-mzyk2o`）；当前环境和项目 `tomcat/.env` 均未配置 `IDATATLAS_OPENAI_API_KEY`（`1795225119124-6gs817`，只检查存在性） | 配齐获授权的测试凭据后运行；不计通过，不合入 `develop` |
-| 候选 VSIX 安装态未执行 | 原交付包只核过内容与版本且 SHA 未变；新增安装态场景已过 TypeScript 检查（`1795187913090-6b2bdh`），不是运行证据 | 前置门禁完成后另产候选包，在临时 HOME / VS Code profile 验证设置和实际图片解码 |
 | DeepSeek 真账号未验证 | 未验证开放平台 Search API 的授权、额度与计费 | 使用明确授权的账户单独验证；本地替身不计供应商实测 |

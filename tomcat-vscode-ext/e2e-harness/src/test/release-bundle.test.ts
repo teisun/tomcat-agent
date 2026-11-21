@@ -110,9 +110,13 @@ async function verifyInstalledImage(api: Api, sessionId: string, root: string, a
     assert.equal((await idle).outcome, "completed");
   } finally { chat.close(); }
   const reopen = async () => {
+    const current = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    try {
+      await current.evaluate("document.documentElement.setAttribute('data-before-acceptance-reload', '')");
+    } finally { current.close(); }
     await vscode.commands.executeCommand("workbench.action.webview.reloadWebviewAction");
-    await host.waitForWebviewReady();
-    return capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
+    // The host may still report the previous document ready when the command returns.
+    return capture.SettingsFrameDriver.connectFromEnvironment("html:not([data-before-acceptance-reload]) .tc-shell");
   };
   const history = await reopen();
   try {
@@ -347,7 +351,8 @@ suite("Native installed release bundle", () => {
       const attachment = searchSmoke ? api.__testing.getAttachmentDiagnostics() : undefined;
       if (attachment) {
         assert.ok(attachment.attachmentRootResolved && attachment.attachmentRoot);
-        assert.equal(path.relative(required("HOME"), attachment.attachmentRoot), path.join(".tomcat", "agents", "main", "sessions", "attachments"));
+        const home = await fs.realpath(required("HOME"));
+        assert.equal(attachment.attachmentRoot, path.join(home, ".tomcat", "agents", "main", "sessions", "attachments"));
       }
       const sessionId = await api.__testing.createFreshWebviewSession(workspace);
       const mcpPath = path.join(required("HOME"), ".tomcat/mcp.json");

@@ -291,7 +291,10 @@ export async function probeRenderedContext(
     }) as { result?: { value?: { assets: string[] } }; exceptionDetails?: unknown };
     return result.exceptionDetails ? null : result.result?.value ?? null;
   } catch (error) {
-    if (error instanceof Error && error.message === "CDP -32000: Cannot find context with specified id") return null;
+    if (error instanceof Error && (
+      error.message === "CDP -32000: Cannot find context with specified id" ||
+      error.message === "CDP -32000: Execution context was destroyed."
+    )) return null;
     throw error;
   }
 }
