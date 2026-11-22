@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.20
+
+- Long conversations no longer wait for a background summary when the next request fits. If compaction is necessary, Tomcat reuses an available summary before starting another. The progress row shows **Compacting context** only while the turn is waiting on compaction; Stop ends that turn without discarding a background summary in progress.
+- Keep prompts and background-task notifications in their saved order when sending or summarizing a conversation. When a summary request is too large, automatic compaction and `/compact` omit tool results from that request without removing them from the saved conversation.
+- Since the last published extension (0.2.16), this release also includes the web search settings, session Todos, plan recovery and image preview fixes described under 0.2.19. In **Settings → Tools → Web Search**, failed providers fall through in your chosen order. OpenAI search uses `OPENAI_API_KEY`; if a model at a different address uses that key name, give the model its own key name in **Models**.
+- For custom REST search plugins, declare the receiving HTTPS host and a named secret, and use `{{secret:NAME}}` in the request header instead of `{{host_key}}`.
+- Platform-specific packages bundle CLI 0.2.2. For the pure extension, update your external CLI to 0.2.2. An already running shared service keeps its old executable: let active tasks finish before restarting it, because a restart stops them all.
+
 ## 0.2.19
 
 Includes the changes prepared in 0.2.17 and 0.2.18.

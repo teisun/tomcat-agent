@@ -1,8 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-22 12:28 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-22 12:32 +0800 | ACTIVE | develop | - |
 
-### CURRENT RELEASE：TOMC-8 CLI 0.1.97 / EXT 0.2.15（GitHub 与 Marketplace 已发布；OpenVSX 阻塞，部分完成）
+### CURRENT RELEASE：CLI 0.2.2 / EXT 0.2.20
+
+- 本次发布提交将扩展内置 CLI 固定为 `0.2.2`。以最近公开的扩展 `ext-v0.2.16` 为基线核对 CHANGELOG；`0.2.17`–`0.2.19` 的候选功能随 `0.2.20` 一起交付。
+- 本段记录发布提交内容，不代表资产已上线。先发布 [CLI 0.2.2](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.2.2)，四平台归档及 `SHA256SUMS` 就绪后再发布[扩展 0.2.20](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.2.20)。
+
+### 历史发布：TOMC-8 CLI 0.1.97 / EXT 0.2.15（GitHub 与 Marketplace 已发布；OpenVSX 阻塞，部分完成）
 
 ```text
 R + 两个 tag → CLI 四包校验 → EXT 四平台原生验收 → GitHub 五份 VSIX
