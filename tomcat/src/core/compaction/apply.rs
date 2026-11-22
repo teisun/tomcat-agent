@@ -1,15 +1,12 @@
-//! Layer 2 延迟应用：时机 ⑤ 非阻塞检查 + 时机 ② async 检查（含 ratio >= 0.98 同步等待）。
+//! Layer 2: nonblocking application at the request and reply waterlines.
 
 use std::path::Path;
-use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::core::compaction::preheat::PreheatOutcome;
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::session::manager::{
-    estimated_tokens_from_chars, turn_count, CompactionResult, ContextState,
-};
+use crate::core::session::manager::{estimated_tokens_from_chars, CompactionResult, ContextState};
 use crate::core::session::transcript::{
     append_entry, read_entries_tail, BranchSummaryTextEntry, TranscriptEntry,
 };
@@ -30,13 +27,7 @@ pub struct BoundaryEnv<'a> {
     pub read_file_state: &'a ReadFileState,
 }
 
-// ---------------------------------------------------------------------------
-// check_after_reply — 时机 ⑤（非阻塞）
-// ---------------------------------------------------------------------------
-
-/// 在 reasoning loop 最终 assistant 回复后检查：
-/// ratio >= 0.85 且预热已完成 → 立即应用 boundary switch。
-/// 不阻塞——预热未完成则跳过。
+/// Apply ready preheat at the post-reply waterline, without waiting on generation.
 #[must_use = "a successful boundary application rewrites the supplied working message list"]
 pub fn check_after_reply(
     state: &mut ContextState,
@@ -45,119 +36,40 @@ pub fn check_after_reply(
     env: &BoundaryEnv<'_>,
     turn_start: &mut usize,
 ) -> bool {
-    if state.usage_ratio() < 0.85 {
-        return false;
-    }
-    let ratio_before = state.usage_ratio();
-
-    match state.preheat.poll_result() {
-        PreheatOutcome::Completed(result) => apply_and_emit_boundary(
-            state,
-            messages,
-            result,
-            ratio_before,
-            false,
-            emitter,
-            env,
-            turn_start,
-        ),
-        _ => false,
-    }
+    apply_at_waterline(state, messages, emitter, env, turn_start, 0.85)
 }
 
-// ---------------------------------------------------------------------------
-// check_before_request — 时机 ②（async）
-// ---------------------------------------------------------------------------
-
-/// 在发起下一次 LLM 请求前检查：
-/// - ratio >= 0.70：已完成则切换
-/// - ratio >= 0.98：未完成则 await（30s 超时）
+/// Apply ready preheat at the pre-request waterline, without waiting on generation.
 #[must_use = "a successful boundary application rewrites the supplied working message list"]
-pub async fn check_before_request(
+pub fn check_before_request(
     state: &mut ContextState,
     messages: &mut Vec<crate::core::llm::ChatMessage>,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
     turn_start: &mut usize,
 ) -> bool {
-    let ratio = state.usage_ratio();
-    let user_turns_len = turn_count(messages);
-    let preheat_finished = state.preheat.is_finished();
-    let preheat_running = state.preheat.is_running();
-    info!(
-        target: "tomcat_chat_diag",
-        phase = "timing2_check_before_request_entry",
-        ratio,
-        user_turns_len,
-        preheat_finished,
-        preheat_running
-    );
+    apply_at_waterline(state, messages, emitter, env, turn_start, 0.70)
+}
 
-    if ratio < 0.70 {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "timing2_check_before_request_exit",
-            path = "below_0_70",
-            applied = false
-        );
+fn apply_at_waterline(
+    state: &mut ContextState,
+    messages: &mut Vec<crate::core::llm::ChatMessage>,
+    emitter: &ScopedEventEmitter,
+    env: &BoundaryEnv<'_>,
+    turn_start: &mut usize,
+    minimum_ratio: f64,
+) -> bool {
+    state.preheat.settle();
+    let ratio = state.usage_ratio();
+    if ratio < minimum_ratio {
         return false;
     }
-
-    let ratio_before = state.usage_ratio();
-
-    if state.preheat.is_finished() {
-        let applied = match state.preheat.poll_result() {
-            PreheatOutcome::Completed(result) => apply_and_emit_boundary(
-                state,
-                messages,
-                result,
-                ratio_before,
-                false,
-                emitter,
-                env,
-                turn_start,
-            ),
-            _ => false,
-        };
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "timing2_check_before_request_exit",
-            path = "finished_apply",
-            applied
-        );
-        return applied;
-    }
-
-    if ratio >= 0.98 && state.preheat.is_running() {
-        let applied = match state.preheat.await_result(Duration::from_secs(30)).await {
-            PreheatOutcome::Completed(result) => apply_and_emit_boundary(
-                state,
-                messages,
-                result,
-                ratio_before,
-                true,
-                emitter,
-                env,
-                turn_start,
-            ),
-            _ => false,
-        };
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "timing2_check_before_request_exit",
-            path = "await_0_98_apply",
-            applied
-        );
-        return applied;
-    }
-
-    info!(
-        target: "tomcat_chat_diag",
-        phase = "timing2_check_before_request_exit",
-        path = "no_op",
-        applied = false
-    );
-    false
+    let PreheatOutcome::Completed(result) = state.preheat.poll_result() else {
+        return false;
+    };
+    apply_and_emit_boundary(
+        state, messages, result, ratio, false, emitter, env, turn_start,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -175,14 +175,16 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         }
     }
 
-    // Timing ⑤: try_restart → non-blocking boundary apply (including L0)
+    // Timing ⑤: settle → retry pending failure or apply ready result (including L0)
     // → try_start → metrics. Preheat snapshots the current working set because Scheme E requires
     // its covered end to be the durable transcript tail.
     let compaction_provider = agent.compaction_provider();
+    let compaction_input_budget = agent.compaction_input_budget();
     let compaction_emitter = Arc::new(agent.emitter.clone());
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
-    if agent.context_state.is_some() {
+    if let Some(ctx_state) = agent.context_state.as_mut() {
+        ctx_state.preheat.settle();
         // Step 1: restore ExhaustedPending → Running from the full working set, whose tail is
         // the transcript tail while this turn is being finalized.
         let restart_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
@@ -203,6 +205,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
                     compaction_cache_key.clone(),
                     Arc::clone(&compaction_provider),
                     agent.config.compaction_output_limit,
+                    Some(compaction_input_budget),
                     &agent.config.context_config,
                     Arc::clone(&compaction_emitter),
                     control_snapshot,
@@ -235,6 +238,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
                     compaction_cache_key,
                     Arc::clone(&compaction_provider),
                     agent.config.compaction_output_limit,
+                    Some(compaction_input_budget),
                     &agent.config.context_config,
                     Arc::clone(&compaction_emitter),
                     control_snapshot,

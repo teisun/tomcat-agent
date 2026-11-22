@@ -359,6 +359,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  compacting?: import("../../src/ui/webview/protocol").WebviewSessionSnapshot["compacting"];
   requestRetry?: import("../../src/ui/webview/protocol").WebviewSessionSnapshot["requestRetry"];
   errorRecovery?: { errorId: string; dueAt: number };
   access?: import("../../src/serveClient/sessionRouter").SessionAccess;

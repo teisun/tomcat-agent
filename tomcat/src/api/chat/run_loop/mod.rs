@@ -231,13 +231,14 @@ fn compose_planned_turn_messages_from_message(
     input_message: Option<ChatMessage>,
     drained_follow_ups: Vec<ChatMessage>,
 ) -> Vec<ChatMessage> {
-    // Synthetic background completions are runtime signals, not a fresher user ask.
-    // Keep any real typed prompt last so the next request preserves user intent.
-    let mut planned = drained_follow_ups;
-    if let Some(message) = input_message {
-        planned.push(message);
-    }
-    planned
+    // Keep the durable prefix in append order. Messages without an ID are appended by
+    // this turn; the current prompt (CLI) precedes any still-unpersisted notifications.
+    let (mut durable, pending): (Vec<_>, Vec<_>) = input_message
+        .into_iter()
+        .chain(drained_follow_ups)
+        .partition(|message| message.msg_id.is_some());
+    durable.extend(pending);
+    durable
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -836,6 +837,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
     let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
     let compaction_provider = compaction_call.provider_impl.clone();
     let compaction_output_limit = compaction_call.output_limit_for_request(None).0;
+    let compaction_input_budget = Some(compaction_call.limits.input_budget_tokens);
     let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
     let (session_title_provider, session_title_model, session_title_output_limit) = title_call
         .as_ref()
@@ -933,6 +935,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         turns = turn_count(&messages)
     );
 
+    context_state.preheat.settle();
     if context_state.preheat.is_exhausted_pending() {
         context_state.preheat.try_restart_if_pending(
             context_state.usage_ratio(),
@@ -941,6 +944,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
             PromptCacheKeyFamily::Compaction.key_for(&session_id),
             compaction_provider.clone(),
             compaction_output_limit,
+            compaction_input_budget,
             &context_config,
             Arc::clone(&root_event_emitter),
             crate::core::plan_runtime::ControlSnapshot::capture(
@@ -970,8 +974,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         &root_event_emitter,
         &boundary_env,
         &mut turn_start,
-    )
-    .await;
+    );
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_timing2_check",
@@ -1000,6 +1003,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
         compaction_output_limit,
+        compaction_input_budget,
         title_provider: title_provider.clone(),
         title_model,
         title_output_limit,

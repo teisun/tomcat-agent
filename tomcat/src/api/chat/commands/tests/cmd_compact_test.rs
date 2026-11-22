@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serial_test::serial;
@@ -15,9 +15,11 @@ use crate::core::session::TranscriptEntry;
 
 use crate::{init_context_state, AppConfig, AppError};
 
-/// `/compact` should use the non-streaming compaction scene; a streamed main-turn request here
-/// would mean the CLI command escaped its intended path.
-struct CompactOnlyProvider;
+/// `/compact` should collect a summary, not start a streamed main turn.
+#[derive(Default)]
+struct CompactOnlyProvider {
+    requests: Mutex<Vec<ChatRequest>>,
+}
 
 #[async_trait]
 impl LlmProvider for CompactOnlyProvider {
@@ -25,7 +27,8 @@ impl LlmProvider for CompactOnlyProvider {
         "compact-only"
     }
 
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AppError> {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.requests.lock().unwrap().push(request);
         Ok(ChatResponse {
             id: Some("compact-cli-summary".to_string()),
             choices: vec![ChatResponseChoice {
@@ -63,29 +66,37 @@ impl LlmProvider for CompactOnlyProvider {
 struct FixedResolver {
     catalog: Arc<crate::core::llm::ModelCatalog>,
     provider: Arc<dyn LlmProvider>,
+    compaction_input_budget: Option<usize>,
 }
 
 impl LlmResolver for FixedResolver {
     fn resolve(
         &self,
-        _scene: LlmScene,
+        scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
         let model = self
             .catalog
             .lookup_explicit(session_override.unwrap_or("gpt-5.6"))?;
-        Ok(ResolvedCall::from_parts_unchecked(
+        let mut call = ResolvedCall::from_parts_unchecked(
             Arc::clone(&self.provider),
             model.id.clone(),
             model.request_model_name().to_string(),
-        ))
+        );
+        if scene == LlmScene::Compaction {
+            if let Some(budget) = self.compaction_input_budget {
+                call.limits.input_budget_tokens = budget;
+            }
+        }
+        Ok(call)
     }
 }
 
 fn install_compactor(ctx: &mut ChatContext) {
     ctx.global_services.llm_resolver = Arc::new(FixedResolver {
         catalog: ctx.global_services.model_catalog.snapshot(),
-        provider: Arc::new(CompactOnlyProvider),
+        provider: Arc::new(CompactOnlyProvider::default()),
+        compaction_input_budget: None,
     });
 }
 
@@ -398,10 +409,11 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
     config.llm.api_key_env = Some(API_KEY_ENV.to_string());
     config.llm.default_model = "gpt-5.6".to_string();
     let mut ctx = ChatContext::from_config(config).expect("chat context");
-    let provider: Arc<dyn LlmProvider> = Arc::new(CompactOnlyProvider);
+    let provider = Arc::new(CompactOnlyProvider::default());
     ctx.global_services.llm_resolver = Arc::new(FixedResolver {
         catalog: ctx.global_services.model_catalog.snapshot(),
-        provider,
+        provider: provider.clone(),
+        compaction_input_budget: Some(1),
     });
 
     ctx.session_runtime
@@ -411,6 +423,12 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
             "content": format!("first CLI message: {}", "historical detail ".repeat(2_000)),
         }))
         .expect("append user");
+    for message in [
+        serde_json::json!({"role":"assistant", "tool_calls":[{"id":"read-1", "type":"function", "function":{"name":"read", "arguments":"{}"}}]}),
+        serde_json::json!({"role":"tool", "tool_call_id":"read-1", "content":"compact-budget-tool-body"}),
+    ] {
+        ctx.session_runtime.session.append_message(message).unwrap();
+    }
     ctx.session_runtime
         .session
         .append_message(serde_json::json!({
@@ -426,9 +444,21 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
     .expect("hydrate CLI context");
     let before_ratio = context_state.usage_ratio();
 
+    assert!(context_state
+        .messages
+        .iter()
+        .any(|message| message.text_content() == Some("compact-budget-tool-body")));
     let outcome = run(&ctx, &mut context_state, "system prompt").await;
 
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].messages[1].text_content().unwrap();
+        assert!(body.contains("first CLI message"));
+        assert!(body.contains("first CLI reply"));
+        assert!(!body.contains("compact-budget-tool-body"));
+    }
     assert!(
         ctx.session_runtime
             .session
@@ -456,6 +486,9 @@ async fn compact_command_persists_boundary_and_rehydrates_cli_context() {
         .current_transcript_path()
         .expect("current transcript query")
         .expect("current transcript");
+    assert!(std::fs::read_to_string(&transcript)
+        .unwrap()
+        .contains("compact-budget-tool-body"));
     let sidecar_path = user_message_sidecar_path(&transcript);
     assert!(
         sidecar_path.is_file(),

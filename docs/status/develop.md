@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-21 16:17 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-22 12:28 +0800 | ACTIVE | develop | - |
 
 ### CURRENT RELEASE：TOMC-8 CLI 0.1.97 / EXT 0.2.15（GitHub 与 Marketplace 已发布；OpenVSX 阻塞，部分完成）
 
@@ -42,7 +42,15 @@ Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强
 - **真实模型**：按用户确认将门禁默认切到 `nickmjiang/gpt-6-astra`，只用该网关的 `NICKMJIANG_API_KEY`。`integration-real-llm` 退出 0（`1795233902622-65yc09`），29 条通过含两条原 opt-in 未开启和一条离线边界；另跑 Skill 真链路 1/1。不改变产品默认模型，不把协议测试算作 DeepSeek 实际搜索账号验证。
 - **Intel 真包**：独立 VS Code 1.106.0 安装候选扩展 `0.2.19` 与自带 CLI `0.2.1`，Key 设置/重启、原图、历史缩略图与缺图提示通过（`1795229502317-mzk2hm`）。候选 SHA-256 `2f64d4e06c108abf638565baed24b378cfb45749b7e1eb754c31f4e4b0ada69d`。原交付包未覆盖。安装态证据仅限本机 Intel macOS；搜索 Key 为合成值，图片请求走本地模型替身。未发布、未打标签、未变更在用服务或用户配置。
 
+### DONE：预热压缩与前台交接整改（2026-11-22，本地验收）
+
+- **一致性**：在请求前、回复后和工具之间的预算检查点收取已完成的后台摘要；失败仅在允许的检查点重启。摘要与主请求按持久化顺序处理已落盘消息，未落盘的完成通知随后按队列顺序加入。摘要模型输入超预算时只从摘要请求中省略工具结果，不改磁盘记录。
+- **前台交接**：先尝试现成摘要及本地削减，仍需前台压缩才等待已在运行的后台摘要，最多等 300 秒；超时先确认本地任务退出再启动前台压缩。用户 Stop 则结束本轮并保留后台任务。删除不参与决策的路由预测，`/compact` 使用摘要模型自己的输入预算。
+- **已有验收**：Rust 全量单测首轮并行 99 项失败（多项为英文断言收到中文），固定语言环境后串行复跑 3557 项通过、7 项忽略。Serve 多会话夹具改用流式摘要后，定向离线集成合计 72 项通过；扩展 966 项、GUI 923 项，以及协议快照、`check:wire`、严格 Clippy 和格式检查通过。提交阶段只核对范围与空白，不重跑测试。
+
 ### INTERFACE：当前接口与兼容边界
+
+- **预热压缩（2026-11-22）**：Serve 新增 `foreground_compaction_start` / `foreground_compaction_end`，扩展在等待后台摘要或执行前台压缩时显示「Context 压缩中」，纯后台预热不触发。保留原 `auto_compaction_*` 事件；OpenAI Chat Completions 的 `chat_collect` 改为流式收集，只交付完整响应，调用方仍一次收到结果。
 
 - **网页搜索后续重构（2026-11-21）**：`web_search.backend` 的 REST 项须声明固定 `secret` 和 `host`，模型项仍声明 `model`。`pi.fetch` 移除 `{{host_key}}`，只展开请求头中的 `{{secret:NAME}}`；OpenAI 搜索使用 `OPENAI_API_KEY`，不会再自动借用官方模型配置中的自定义 Key。插件成功返回 `{ hits, warnings }`，失败抛错，不再使用 `unsupported_backend` 标记；多项按配置顺序尝试，单项直接报错，不回落到被覆盖的插件。
 
@@ -54,6 +62,8 @@ Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强
 - 普通提示词保存成功后发布 `session.user_message { sessionId, userMessageId, message }`，正文复用 reference 历史投影，先于回执与新轮输出；ACP 不回显本通知。CLI 与扩展需配套升级，旧端仍沿用既有行为；不扩展 steer/retry/rewind 的跨端同步。
 
 ### BLOCKED：部署与交付边界
+
+- **预热压缩边界**：未启用真实模型验收，未安装或重启在用服务；未测覆盖率。忙碌时 Serve `follow_up` 可能先落盘、后进入活动内存，跨这段时差的压缩覆盖问题单列后续，不计入本次修复。
 
 - **网页搜索后续重构待验**：按用户要求仅做提交范围和空白检查，不运行测试，不测覆盖率。上方合并验收仅对应此前的代码快照。缓存按后端顺序和预检是否通过区分；只轮换 Key 值或替换同 ID 且预检结果不变的插件时，旧结果仍可能在 TTL 内命中。
 

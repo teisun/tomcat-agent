@@ -105,6 +105,8 @@ pub mod wire {
     pub const WIRE_TOOL_RESULT: &str = "tool_result";
     pub const WIRE_AUTO_COMPACTION_START: &str = "auto_compaction_start";
     pub const WIRE_AUTO_COMPACTION_END: &str = "auto_compaction_end";
+    pub const WIRE_FOREGROUND_COMPACTION_START: &str = "foreground_compaction_start";
+    pub const WIRE_FOREGROUND_COMPACTION_END: &str = "foreground_compaction_end";
     pub const WIRE_COMPACTION_ERROR: &str = "compaction_error";
     pub const WIRE_TOOL_RESULT_TRUNCATED: &str = "tool_result_truncated";
     pub const WIRE_AUTO_RETRY_START: &str = "auto_retry_start";
@@ -563,6 +565,9 @@ pub enum AgentEvent {
         #[serde(rename = "estimatedTokensSaved")]
         estimated_tokens_saved: usize,
     },
+    /// The current request is blocked on compaction, not merely warming up in the background.
+    ForegroundCompactionStart,
+    ForegroundCompactionEnd,
     CompactionError {
         #[serde(rename = "exhaustedAfterRetries")]
         exhausted_after_retries: bool,

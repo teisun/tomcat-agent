@@ -401,6 +401,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let compaction_output_limit = runtime
             .compaction_output_limit
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
+        let compaction_input_budget = runtime.compaction_input_budget;
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let max_attempts = deps.agent_max_attempts;
@@ -467,6 +468,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         context_config,
                         compaction_provider,
                         compaction_output_limit,
+                        compaction_input_budget,
                         title_provider: None,
                         title_model: String::new(),
                         title_output_limit: None,

@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use tokio_stream::Stream;
 
 use crate::core::compaction::preheat::{
-    generate_summary, SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT,
+    generate_summary, generate_summary_with_output_limit, SummaryRequestOptions,
+    SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT,
 };
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
@@ -189,7 +190,10 @@ impl LlmProvider for CapturingMockProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
-        *self.captured.lock().unwrap() = Some(request);
+        assert!(
+            self.captured.lock().unwrap().replace(request).is_none(),
+            "expected one summary request"
+        );
         Ok(ChatResponse {
             id: Some("test_resp".into()),
             choices: vec![ChatResponseChoice {
@@ -214,6 +218,46 @@ impl LlmProvider for CapturingMockProvider {
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)
     }
+}
+
+#[tokio::test]
+async fn compaction_request_projects_tool_results_without_changing_history() {
+    let snapshot = vec![
+        ChatMessage::user("original prompt"),
+        ChatMessage::tool("first", "short tool result"),
+        ChatMessage::assistant("assistant text"),
+        ChatMessage::tool("second", &"long result ".repeat(100)),
+        ChatMessage::user("last prompt"),
+    ];
+    let original = serde_json::to_value(&snapshot).unwrap();
+    for (budget, strips_tools) in [(100_000, false), (1, true)] {
+        let (provider, captured) = CapturingMockProvider::new();
+        generate_summary_with_output_limit(
+            &snapshot,
+            None,
+            &provider,
+            "smaller-summary-model",
+            None,
+            SummaryRequestOptions {
+                input_budget_tokens: Some(budget),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let request = captured.lock().unwrap().take().unwrap();
+        assert_eq!(request.messages.len(), 2);
+        let projection = request.messages[1].text_content().unwrap();
+        assert_eq!(projection.contains("short tool result"), !strips_tools);
+        assert_eq!(projection.contains("long result"), !strips_tools);
+        if strips_tools {
+            assert_eq!(
+                projection,
+                "[User] original prompt\n[Assistant] assistant text\n[User] last prompt\n"
+            );
+        }
+    }
+    assert_eq!(serde_json::to_value(&snapshot).unwrap(), original);
 }
 
 #[tokio::test]
@@ -242,7 +286,7 @@ async fn compaction_request_carries_no_tools() {
     assert_eq!(
         req.stream,
         Some(false),
-        "compaction 走非流式响应，stream 必须显式 false（而非 None）",
+        "callers request a collected response; the provider chooses the transport",
     );
 
     let system_msg_text = req

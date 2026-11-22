@@ -139,6 +139,7 @@ export const en = {
   "todo.progress": "Todos ({current}/{total})",
   "todo.activeProgress": "{content} ({current}/{total})",
   "progress.working": "Still working",
+  "progress.compacting": "Compacting context",
   "progress.retrying": "Retrying · request {attempt} / {maxAttempts}",
   "attachment.pending": "Pending attachments",
   "attachment.history": "Attached images",

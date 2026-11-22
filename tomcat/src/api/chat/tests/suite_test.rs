@@ -210,14 +210,14 @@ fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn compose_planned_turn_messages_keeps_real_user_prompt_last() {
+fn compose_planned_turn_messages_appends_cli_prompt_before_unpersisted_notifications() {
     let follow_up = crate::core::llm::ChatMessage::user(
         "<background-task-finished task_id=\"t-1\" exit_code=\"0\">done</background-task-finished>",
     );
     let planned = compose_planned_turn_messages("real user prompt", vec![follow_up.clone()]);
     assert_eq!(planned.len(), 2);
-    assert_eq!(planned[0].text_content(), follow_up.text_content());
-    assert_eq!(planned[1].text_content(), Some("real user prompt"));
+    assert_eq!(planned[0].text_content(), Some("real user prompt"));
+    assert_eq!(planned[1].text_content(), follow_up.text_content());
 }
 
 #[test]
@@ -921,6 +921,97 @@ async fn mcp_connection_lifecycle_keeps_prompt_snapshot_until_source_removed() {
                 .is_none_or(|name| name != "mcp__fake__capture")
         }),
         "the concrete MCP catalog must never enter the prompt-facing tool array"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn preheat_regression_persisted_prompt_and_signal_share_one_order() {
+    const KEY: &str = "TOMCAT_CHAT_ORDER_TEST_KEY";
+    let _key = EnvGuard::set(KEY, "stub");
+    let (_dir, mut ctx, path) = checkpoint_recording_test_context(KEY);
+    let recorder = install_chat_turn_recorder(&mut ctx);
+    ctx.sync_resource_inventory_before_turn().await.unwrap();
+    let budget = ctx
+        .resolve_call(crate::core::llm::LlmScene::Main, None)
+        .unwrap()
+        .limits
+        .input_budget_tokens
+        * 4;
+    let mut snapshot = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    let mut prompt = crate::ChatMessage::user("ordering-fixture-prompt");
+    prompt.msg_id = Some(
+        ctx.session_runtime
+            .session
+            .append_message(serde_json::to_value(&prompt).unwrap())
+            .unwrap(),
+    );
+    let mut signal = crate::ChatMessage::user(
+        "<background-task-finished>ordering-fixture-signal</background-task-finished>",
+    );
+    signal.kind = crate::core::llm::MessageKind::Signal;
+    ctx.session_runtime.follow_up_queue.lock().push(signal);
+    let result = crate::api::chat::run_loop::run_chat_turn_with_message_and_snapshot(
+        &ctx,
+        Some(prompt),
+        &mut snapshot,
+        &mut state,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(result, AgentRunOutcome::Completed(_)),
+        "{result:?}"
+    );
+    let disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        disk.find("ordering-fixture-prompt").unwrap()
+            < disk.find("ordering-fixture-signal").unwrap()
+    );
+    fn fixture_inputs(messages: &[crate::ChatMessage]) -> Vec<(&str, Option<&str>)> {
+        messages
+            .iter()
+            .filter_map(|m| {
+                let text = m.text_content()?;
+                text.contains("ordering-fixture-")
+                    .then_some((text, m.msg_id.as_deref()))
+            })
+            .collect()
+    }
+    let requests = recorder.requests.lock().unwrap();
+    let inputs = fixture_inputs(&requests[0].messages);
+    let reloaded = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        snapshot.system_text(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture_inputs(&state.messages),
+        inputs,
+        "in-memory history must have the provider's order"
+    );
+    assert_eq!(
+        fixture_inputs(&reloaded.messages),
+        inputs,
+        "reload preserves order and unique IDs"
+    );
+    assert_ne!(inputs[0].1, inputs[1].1);
+    let inputs: Vec<_> = inputs.iter().map(|(text, _)| *text).collect();
+    assert_eq!(
+        inputs,
+        [
+            "ordering-fixture-prompt",
+            "<background-task-finished>ordering-fixture-signal</background-task-finished>"
+        ],
+        "the first main request must use the persisted order"
     );
 }
 

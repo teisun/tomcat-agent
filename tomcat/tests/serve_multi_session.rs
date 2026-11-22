@@ -219,7 +219,7 @@ fn serve_multi_session_concurrency_and_isolation() {
 #[test]
 #[serial]
 fn compact_job_does_not_block_another_session_and_emits_no_agent_lifecycle() {
-    use common::serve::{spawn_routed_openai_stream_server, ScriptedPart};
+    use common::serve::spawn_routed_openai_stream_server;
     use std::sync::{mpsc, Arc, Mutex};
     // The server records compact entering before waiting; B completes while
     // that gate is still closed. No sleep or machine-speed assertion is needed.
@@ -227,9 +227,10 @@ fn compact_job_does_not_block_another_session_and_emits_no_agent_lifecycle() {
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     let server = spawn_routed_openai_stream_server(move |request| {
-        if request["stream"] == false {
-            let messages = request["messages"].to_string();
-            assert!(messages.contains("Respond with text only. Do not call any tools."));
+        // Summaries and main turns both stream. Route by the summary instruction, not `stream`.
+        let messages = request["messages"].to_string();
+        if messages.contains("Respond with text only. Do not call any tools.") {
+            assert_eq!(request["stream"], true);
             assert!(messages.contains("A seed for compact"));
             entered_tx.send(()).unwrap();
             release_rx
@@ -237,7 +238,11 @@ fn compact_job_does_not_block_another_session_and_emits_no_agent_lifecycle() {
                 .unwrap()
                 .recv_timeout(Duration::from_secs(15))
                 .expect("compact release");
-            response(vec![ScriptedPart {delay_ms:0, body:json!({"id":"compact","choices":[{"index":0,"message":{"role":"assistant","content":"A compact checkpoint with user goal and progress."},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":10,"total_tokens":40}}).to_string()}])
+            response(vec![
+                sse_delta("A compact checkpoint with user goal and progress."),
+                sse_finish("stop"),
+                sse_done(),
+            ])
         } else {
             response(vec![sse_delta("done"), sse_finish("stop"), sse_done()])
         }

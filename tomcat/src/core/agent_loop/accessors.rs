@@ -335,6 +335,13 @@ impl AgentLoop {
             .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
+    /// 使用摘要模型的输入预算；未单独解析时沿用会话模型预算。
+    pub(super) fn compaction_input_budget(&self) -> usize {
+        self.config
+            .compaction_input_budget
+            .unwrap_or(self.binding.limits.input_budget_tokens)
+    }
+
     /// 返回 title / utility 路径应使用的 provider。
     pub(super) fn title_provider(&self) -> Arc<dyn LlmProvider> {
         self.config

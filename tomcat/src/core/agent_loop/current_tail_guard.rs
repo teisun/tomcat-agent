@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::core::compaction::apply::BoundaryEnv;
-use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
+use crate::core::compaction::preheat::{
+    generate_summary_with_output_limit, PreheatOutcome, SummaryRequestOptions,
+};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
@@ -25,6 +28,8 @@ use crate::core::session::transcript::{
 use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
 
 use crate::infra::error::AppError;
+use crate::infra::event_bus::ScopedEventEmitter;
+use crate::infra::events::AgentEvent;
 
 use super::types::AgentLoop;
 
@@ -33,54 +38,14 @@ const COMPACTABLE_TOOLS: &[&str] = &["read", "search_files", "bash", "task_outpu
 /// agent's working set. This is deliberately not a user configuration knob: its value is a
 /// policy trade-off, and cache/compaction observations decide whether it should become 0.25.
 const MIDTURN_FOLD_KEEP_RATIO: f64 = 0.5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GuardRoute {
-    Fits,
-    Reduce,
-    Collapse,
-}
-
-impl GuardRoute {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Fits => "fits",
-            Self::Reduce => "reduce",
-            Self::Collapse => "collapse",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GuardRouteReason {
-    Fits,
-    PreheatShortcut,
-    ReducibleEnough,
-    NotEnoughReducible,
-    MissingContextState,
-}
-
-impl GuardRouteReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Fits => "fits",
-            Self::PreheatShortcut => "preheat_shortcut",
-            Self::ReducibleEnough => "reducible_enough",
-            Self::NotEnoughReducible => "not_enough_reducible",
-            Self::MissingContextState => "missing_context_state",
-        }
-    }
-}
+const PREHEAT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AggregatePrecheckDecision {
-    pub route: GuardRoute,
-    pub route_reason: GuardRouteReason,
+    pub fits: bool,
     pub working_tokens: usize,
     pub budget_tokens: usize,
     pub overflow_tokens: usize,
-    pub max_reducible: usize,
-    pub candidate_count: usize,
     pub yellow_lamp_only: bool,
     pub after_each_wave: Vec<usize>,
     pub after_collapse: Option<usize>,
@@ -115,62 +80,73 @@ pub struct CollapseSummaryArtifacts {
     pub entry_id: String,
 }
 
+#[cfg(test)]
 pub(super) async fn maybe_reduce_before_next_llm(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
-    let _ = maybe_reduce_before_next_llm_inner(agent, messages).await?;
+    let _ = prepare_request_context(agent, messages, &mut false).await?;
     Ok(())
 }
 
-async fn maybe_reduce_before_next_llm_inner(
+pub(super) async fn prepare_request_context(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
+    proactive_collapse_failed: &mut bool,
 ) -> Result<Option<AggregatePrecheckDecision>, AppError> {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
+    let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(None);
     };
+    ctx_state.preheat.settle();
     let working_tokens = ctx_state.estimated_token_count();
     let budget_tokens = ctx_state.context_budget_tokens;
     if budget_tokens == 0 {
         return Ok(None);
     }
 
-    let mut decision = build_precheck_decision(agent, messages, working_tokens, budget_tokens);
+    let ratio = ctx_state.usage_ratio();
+    let mut decision = build_precheck_decision(working_tokens, budget_tokens);
     if decision.yellow_lamp_only {
         info!(
             target: "tomcat_chat_diag",
             phase = "mid_turn_precheck_yellow",
-            ratio = ctx_state.usage_ratio(),
+            ratio,
             working_tokens = decision.working_tokens,
             budget_tokens = decision.budget_tokens
         );
     }
-    if matches!(decision.route, GuardRoute::Fits) {
+    if decision.fits {
         start_midturn_preheat_if_needed(agent, messages)?;
         log_aggregate_precheck_decision(&decision);
         return Ok(Some(decision));
     }
 
-    let reduction = if matches!(decision.route, GuardRoute::Reduce) {
-        reduce_before_next_llm(agent, messages)?
-    } else {
-        ReductionResult::default()
-    };
+    // Only actual reductions can tell us whether we still need B.
+    let reduction = reduce_before_next_llm(agent, messages)?;
     decision.after_each_wave = reduction.after_each_wave;
-
     let mut mutated = reduction.mutated;
-    let still_over_budget = agent
-        .context_state
-        .as_ref()
-        .is_some_and(ContextState::is_over_budget);
-    if matches!(decision.route, GuardRoute::Collapse) || still_over_budget {
-        collapse_to_branch_summary(agent, messages).await?;
-        decision.after_collapse = agent
-            .context_state
-            .as_ref()
-            .map(ContextState::estimated_token_count);
-        mutated = true;
+    if context_is_over_budget(agent) && !*proactive_collapse_failed {
+        if handoff_preheat_before_collapse(agent, messages).await? {
+            mutated = true;
+            if context_is_over_budget(agent) {
+                let after_preheat = reduce_before_next_llm(agent, messages)?;
+                decision
+                    .after_each_wave
+                    .extend(after_preheat.after_each_wave);
+            }
+        }
+        if context_is_over_budget(agent) {
+            match collapse_to_branch_summary(agent, messages).await? {
+                CollapseOutcome::Applied => {
+                    decision.after_collapse = agent
+                        .context_state
+                        .as_ref()
+                        .map(ContextState::estimated_token_count);
+                    mutated = true;
+                }
+                CollapseOutcome::GenerationFailed => *proactive_collapse_failed = true,
+            }
+        }
     }
 
     log_aggregate_precheck_decision(&decision);
@@ -188,90 +164,20 @@ pub(super) async fn maybe_reduce_before_next_llm_capture_decision(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<Option<AggregatePrecheckDecision>, AppError> {
-    maybe_reduce_before_next_llm_inner(agent, messages).await
+    prepare_request_context(agent, messages, &mut false).await
 }
 
-pub(super) fn build_precheck_decision(
-    agent: &AgentLoop,
-    messages: &[ChatMessage],
+fn build_precheck_decision(
     working_tokens: usize,
     budget_tokens: usize,
 ) -> AggregatePrecheckDecision {
-    let yellow_lamp_only = budget_tokens > 0
-        && working_tokens <= budget_tokens
-        && ctx_ratio(working_tokens, budget_tokens) >= 0.90;
-    let overflow_tokens = working_tokens.saturating_sub(budget_tokens);
-    if working_tokens <= budget_tokens {
-        return AggregatePrecheckDecision {
-            route: GuardRoute::Fits,
-            route_reason: GuardRouteReason::Fits,
-            working_tokens,
-            budget_tokens,
-            overflow_tokens,
-            max_reducible: 0,
-            candidate_count: 0,
-            yellow_lamp_only,
-            after_each_wave: Vec::new(),
-            after_collapse: None,
-        };
-    }
-
-    let needed_tokens = overflow_tokens
-        .saturating_add(256)
-        .max(((overflow_tokens as f64) * 1.2).ceil() as usize);
-    let Some(ctx_state) = agent.context_state.as_ref() else {
-        return AggregatePrecheckDecision {
-            route: GuardRoute::Collapse,
-            route_reason: GuardRouteReason::MissingContextState,
-            working_tokens,
-            budget_tokens,
-            overflow_tokens,
-            max_reducible: 0,
-            candidate_count: 0,
-            yellow_lamp_only,
-            after_each_wave: Vec::new(),
-            after_collapse: None,
-        };
-    };
-    let candidate_count = collect_tail_candidates(
-        messages,
-        agent.start_idx.min(messages.len()),
-        agent
-            .config
-            .context_config
-            .current_tail_compactable_min_chars,
-    )
-    .len();
-    let history_end = agent.start_idx.min(messages.len());
-    let max_reducible =
-        estimate_history_reduction_tokens(messages, history_end, &agent.config.context_config)
-            + estimate_tail_reduction_tokens(
-                messages,
-                history_end,
-                agent
-                    .config
-                    .context_config
-                    .current_tail_compactable_min_chars,
-            );
-    let (route, route_reason) = if ctx_state.preheat.is_finished() {
-        // D3：预热收益一旦就绪，就优先尝试整条 Reduce 链路
-        // （apply 历史 -> 历史再压 -> tail reduction），而不是先用纯理论
-        // `max_reducible >= needed` 再做一次严格裁决。
-        (GuardRoute::Reduce, GuardRouteReason::PreheatShortcut)
-    } else if max_reducible >= needed_tokens {
-        (GuardRoute::Reduce, GuardRouteReason::ReducibleEnough)
-    } else {
-        (GuardRoute::Collapse, GuardRouteReason::NotEnoughReducible)
-    };
+    let fits = working_tokens <= budget_tokens;
     AggregatePrecheckDecision {
-        route,
-        route_reason,
+        fits,
         working_tokens,
         budget_tokens,
-        overflow_tokens,
-        max_reducible,
-        candidate_count,
-        yellow_lamp_only,
+        overflow_tokens: working_tokens.saturating_sub(budget_tokens),
+        yellow_lamp_only: fits && ctx_ratio(working_tokens, budget_tokens) >= 0.90,
         after_each_wave: Vec::new(),
         after_collapse: None,
     }
@@ -356,9 +262,9 @@ fn start_midturn_preheat_if_needed(
         return Ok(());
     }
     ensure_working_message_ids(agent, messages)?;
-    let snapshot = messages.to_vec();
     let transcript_path = ctx_state.transcript_path.clone();
     let compaction_provider = agent.compaction_provider();
+    let compaction_input_budget = agent.compaction_input_budget();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
         agent.config.plan_runtime.as_deref(),
@@ -366,16 +272,17 @@ fn start_midturn_preheat_if_needed(
         Some(agent.wire_model()),
     );
     let emitter = std::sync::Arc::new(agent.emitter.clone());
-    let covered_count = snapshot.len();
+    let covered_count = messages.len();
 
     let started = agent.context_state.as_mut().is_some_and(|ctx_state| {
         ctx_state.preheat.try_start(
             usage_ratio,
-            &snapshot,
+            messages,
             &transcript_path,
             cache_key,
             compaction_provider,
             agent.config.compaction_output_limit,
+            Some(compaction_input_budget),
             &agent.config.context_config,
             emitter,
             control_snapshot,
@@ -396,24 +303,26 @@ pub(super) fn apply_ready_preheat(
     messages: &mut Vec<ChatMessage>,
     min_ratio: Option<f64>,
 ) -> Result<bool, AppError> {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
+    let Some(state) = agent.context_state.as_mut() else {
         return Ok(false);
     };
-    if min_ratio.is_some_and(|minimum| ctx_state.usage_ratio() < minimum) {
+    state.preheat.settle();
+    if min_ratio.is_some_and(|minimum| state.usage_ratio() < minimum) {
         return Ok(false);
     }
+    let outcome = state.preheat.poll_result();
+    Ok(apply_preheat_outcome(agent, messages, outcome, false))
+}
 
-    let Some(result) = (match agent.context_state.as_mut() {
-        Some(ctx_state) if ctx_state.preheat.is_finished() => match ctx_state.preheat.poll_result()
-        {
-            crate::core::compaction::preheat::PreheatOutcome::Completed(result) => Some(result),
-            _ => None,
-        },
-        _ => None,
-    }) else {
-        return Ok(false);
+fn apply_preheat_outcome(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+    outcome: PreheatOutcome,
+    waited: bool,
+) -> bool {
+    let PreheatOutcome::Completed(result) = outcome else {
+        return false;
     };
-
     let boundary_env = BoundaryEnv {
         config: &agent.config.context_config,
         work_dir: Path::new(&agent.config.agent_trail_dir),
@@ -421,18 +330,18 @@ pub(super) fn apply_ready_preheat(
         read_file_state: agent.config.read_file_state.as_ref(),
     };
     let Some(ctx_state) = agent.context_state.as_mut() else {
-        return Ok(false);
+        return false;
     };
-    Ok(crate::core::compaction::apply::apply_and_emit_boundary(
+    crate::core::compaction::apply::apply_and_emit_boundary(
         ctx_state,
         messages,
         result,
         ctx_state.usage_ratio(),
-        false,
+        waited,
         &agent.emitter,
         &boundary_env,
         &mut agent.start_idx,
-    ))
+    )
 }
 
 fn reduce_current_tail_messages(
@@ -598,53 +507,6 @@ fn collect_tail_candidates(
         .collect()
 }
 
-fn estimate_history_reduction_tokens(
-    messages: &[ChatMessage],
-    history_end: usize,
-    config: &crate::infra::config::ContextConfig,
-) -> usize {
-    let history = &messages[..history_end.min(messages.len())];
-    let protected_start = find_protected_turn_start(history, config.keep_recent_turns);
-    let reducible_chars: usize = history[..protected_start]
-        .iter()
-        .filter(|msg| msg.role == ChatMessageRole::Tool)
-        .filter_map(|msg| msg.text_content())
-        .filter(|text| text.len() > config.layer0_placeholder_threshold_chars)
-        .filter(|text| *text != TOOL_RESULT_PLACEHOLDER && !is_persisted_tool_result_text(text))
-        .map(|text| text.len().saturating_sub(TOOL_RESULT_PLACEHOLDER.len()))
-        .sum();
-    estimated_tokens_from_chars(reducible_chars)
-}
-
-fn estimate_tail_reduction_tokens(
-    messages: &[ChatMessage],
-    tail_start: usize,
-    min_chars: usize,
-) -> usize {
-    let reducible_chars: usize = collect_tail_candidates(messages, tail_start, min_chars)
-        .into_iter()
-        .filter_map(|candidate| messages[candidate.msg_idx].text_content())
-        .map(|text| text.len().saturating_sub(TOOL_RESULT_PLACEHOLDER.len()))
-        .sum();
-    estimated_tokens_from_chars(reducible_chars)
-}
-
-fn find_protected_turn_start(messages: &[ChatMessage], keep_recent_turns: usize) -> usize {
-    if keep_recent_turns == 0 {
-        return messages.len();
-    }
-    let turn_starts: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, msg)| msg.starts_logical_turn())
-        .map(|(idx, _)| idx)
-        .collect();
-    if turn_starts.len() <= keep_recent_turns {
-        return 0;
-    }
-    turn_starts[turn_starts.len() - keep_recent_turns]
-}
-
 fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>) {
     if path.as_os_str().is_empty() || rewrites.is_empty() {
         return;
@@ -667,10 +529,90 @@ fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>
     }
 }
 
+/// UI phase follows the blocking operation, including errors and cancellation.
+struct ForegroundCompaction(ScopedEventEmitter);
+
+impl ForegroundCompaction {
+    fn start(emitter: &ScopedEventEmitter) -> Self {
+        let _ = emitter.emit(AgentEvent::ForegroundCompactionStart);
+        Self(emitter.clone())
+    }
+}
+
+impl Drop for ForegroundCompaction {
+    fn drop(&mut self) {
+        let _ = self.0.emit(AgentEvent::ForegroundCompactionEnd);
+    }
+}
+
+fn compaction_cancelled() -> AppError {
+    AppError::Llm("compaction cancelled".to_string())
+}
+
+/// Only call at the point where B would otherwise run, never on the normal send path.
+pub(super) async fn handoff_preheat_before_collapse(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+) -> Result<bool, AppError> {
+    let cancel = &agent.cancel_token;
+    if cancel.is_cancelled() {
+        return Err(compaction_cancelled());
+    }
+    let Some(state) = agent.context_state.as_mut() else {
+        return Ok(false);
+    };
+    state.preheat.settle();
+    let waiting = state.preheat.is_running();
+    let _phase = waiting.then(|| ForegroundCompaction::start(&agent.emitter));
+    let outcome = if waiting {
+        info!(target: "tomcat_chat_diag", phase = "compaction_wait_preheat");
+        state
+            .preheat
+            .await_result_or_stop(PREHEAT_HANDOFF_TIMEOUT, cancel)
+            .await
+    } else {
+        state.preheat.poll_result()
+    };
+    if cancel.is_cancelled() {
+        return Err(compaction_cancelled());
+    }
+    let status = match &outcome {
+        PreheatOutcome::Completed(_) => "ready",
+        PreheatOutcome::Exhausted => "failed",
+        PreheatOutcome::Failed => "reaped",
+        PreheatOutcome::NotReady => "absent",
+    };
+    let applied = apply_preheat_outcome(agent, messages, outcome, waiting);
+    info!(target: "tomcat_chat_diag", phase = "compaction_preheat_handoff", status, applied);
+    Ok(applied)
+}
+
+pub(super) enum CollapseOutcome {
+    Applied,
+    GenerationFailed,
+}
+
+// Keep structure/persistence failures distinct from errors produced by the model call.
+enum CollapseBuildError {
+    Structure(AppError),
+    Generation(AppError),
+}
+
+impl CollapseBuildError {
+    fn into_inner(self) -> AppError {
+        match self {
+            Self::Structure(error) | Self::Generation(error) => error,
+        }
+    }
+}
+
 pub(super) async fn collapse_to_branch_summary(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
-) -> Result<(), AppError> {
+) -> Result<CollapseOutcome, AppError> {
+    if agent.cancel_token.is_cancelled() {
+        return Err(compaction_cancelled());
+    }
     let plan_runtime = agent.config.plan_runtime.clone();
     let todos_runtime = agent.todos_runtime.clone();
     let session_model = agent.wire_model().to_string();
@@ -689,10 +631,13 @@ pub(super) async fn collapse_to_branch_summary(
         session_model: Some(session_model.as_str()),
         cache_key: cache_key.as_deref(),
         resolved_output_limit: agent.config.compaction_output_limit,
+        input_budget_tokens: Some(agent.compaction_input_budget()),
         transcript_path: (!transcript_path.as_os_str().is_empty())
             .then_some(transcript_path.as_path()),
     };
     let cancel = agent.cancel_token.clone();
+    let _phase = ForegroundCompaction::start(&agent.emitter);
+    let mut generation_attempts = 1;
     let summary_request = async {
         let artifacts = match build_collapse_summary_artifacts(
             messages,
@@ -703,7 +648,10 @@ pub(super) async fn collapse_to_branch_summary(
         .await
         {
             Ok(artifacts) => artifacts,
-            Err(error) if agent.config.context_config.compaction_model != session_model => {
+            Err(CollapseBuildError::Generation(error))
+                if agent.config.context_config.compaction_model != session_model =>
+            {
+                generation_attempts += 1;
                 let reason = super::error_classifier::err_snippet(&error.to_string());
                 agent.emit_event(crate::infra::events::AgentEvent::LlmNotice {
                     finish_reason: "compaction_model_fallback".to_string(),
@@ -722,6 +670,7 @@ pub(super) async fn collapse_to_branch_summary(
                     &session_model,
                     CollapseSummaryRequest {
                         resolved_output_limit: None,
+                        input_budget_tokens: Some(agent.binding.limits.input_budget_tokens),
                         ..request
                     },
                 )
@@ -729,28 +678,39 @@ pub(super) async fn collapse_to_branch_summary(
             }
             Err(error) => return Err(error),
         };
-        Ok::<_, AppError>(artifacts)
+        Ok::<_, CollapseBuildError>(artifacts)
     };
     // Both proactive and overflow compaction share this cancellation boundary.
     // Once artifacts are ready, join disk/sidecar publication and the memory update.
     let artifacts = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return Err(AppError::Llm("compaction cancelled".to_string())),
-        result = summary_request => result?,
+        _ = cancel.cancelled() => return Err(compaction_cancelled()),
+        result = summary_request => match result {
+            Ok(artifacts) => artifacts,
+            Err(CollapseBuildError::Structure(error)) => return Err(error),
+            Err(CollapseBuildError::Generation(error)) => {
+                agent.emit_event(AgentEvent::CompactionError {
+                    exhausted_after_retries: false,
+                    attempts: generation_attempts,
+                    error: error.to_string(),
+                    source: "collapse".into(),
+                    ratio: agent.context_state.as_ref().map(ContextState::usage_ratio),
+                });
+                info!(target: "tomcat_chat_diag", phase = "compaction_collapse", outcome = "generation_failed");
+                return Ok(CollapseOutcome::GenerationFailed);
+            }
+        },
     };
-    let Some(ctx_state) = agent.context_state.as_mut() else {
-        return Ok(());
-    };
-    match maybe_write_collapse_entry(
+    let ctx_state = agent
+        .context_state
+        .as_mut()
+        .ok_or_else(|| AppError::internal("collapse requires context state"))?;
+    maybe_write_collapse_entry(
         &ctx_state.transcript_path,
         &artifacts.covered_end_id,
         &artifacts.transcript_entry,
-    ) {
-        Ok(()) => {
-            let _ = ensure_user_message_sidecar_current(&ctx_state.transcript_path).await;
-        }
-        Err(err) => warn!(error = %err, "collapse branch_summary transcript write failed"),
-    }
+    )?;
+    let _ = ensure_user_message_sidecar_current(&ctx_state.transcript_path).await;
 
     let summary_msg = artifacts.summary_message;
     let new_chars = estimate_msg_chars(&summary_msg);
@@ -764,7 +724,8 @@ pub(super) async fn collapse_to_branch_summary(
 
     *messages = vec![summary_msg];
     agent.start_idx = 1;
-    Ok(())
+    info!(target: "tomcat_chat_diag", phase = "compaction_collapse", outcome = "applied");
+    Ok(CollapseOutcome::Applied)
 }
 
 /// 生成 collapse 摘要所需的可选运行时资料，集中传递避免 helper 位置参数继续增长。
@@ -775,6 +736,7 @@ struct CollapseSummaryRequest<'a> {
     session_model: Option<&'a str>,
     cache_key: Option<&'a str>,
     resolved_output_limit: Option<u32>,
+    input_budget_tokens: Option<usize>,
     transcript_path: Option<&'a Path>,
 }
 
@@ -796,10 +758,12 @@ pub async fn build_collapse_summary_artifacts_for_test(
             session_model,
             cache_key: None,
             resolved_output_limit: None,
+            input_budget_tokens: None,
             transcript_path: None,
         },
     )
     .await
+    .map_err(CollapseBuildError::into_inner)
 }
 
 async fn build_collapse_summary_artifacts(
@@ -807,9 +771,12 @@ async fn build_collapse_summary_artifacts(
     llm: &dyn LlmProvider,
     compaction_model: &str,
     request: CollapseSummaryRequest<'_>,
-) -> Result<CollapseSummaryArtifacts, AppError> {
-    let (covered_start_id, covered_end_id) = collapse_bounds(messages)
-        .ok_or_else(|| AppError::Config("collapse is missing a message anchor".to_string()))?;
+) -> Result<CollapseSummaryArtifacts, CollapseBuildError> {
+    let (covered_start_id, covered_end_id) = collapse_bounds(messages).ok_or_else(|| {
+        CollapseBuildError::Structure(AppError::Config(
+            "collapse is missing a message anchor".to_string(),
+        ))
+    })?;
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
     let control = crate::core::plan_runtime::ControlSnapshot::capture(
@@ -826,10 +793,12 @@ async fn build_collapse_summary_artifacts(
         SummaryRequestOptions {
             cache_key: request.cache_key,
             resolved_output_limit: request.resolved_output_limit,
+            input_budget_tokens: request.input_budget_tokens,
             transcript_path: request.transcript_path,
         },
     )
-    .await?;
+    .await
+    .map_err(CollapseBuildError::Generation)?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = messages
         .iter()
@@ -858,7 +827,8 @@ async fn build_collapse_summary_artifacts(
         &covered_start_id,
         &covered_end_id,
         &entry_id,
-    )?;
+    )
+    .map_err(CollapseBuildError::Structure)?;
     Ok(CollapseSummaryArtifacts {
         summary_text,
         summary_message,
@@ -1024,13 +994,10 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
     info!(
         target: "tomcat_chat_diag",
         phase = "mid_turn_precheck",
-        route = decision.route.as_str(),
-        route_reason = decision.route_reason.as_str(),
+        fits = decision.fits,
         working_tokens = decision.working_tokens,
         budget_tokens = decision.budget_tokens,
         overflow = decision.overflow_tokens,
-        max_reducible = decision.max_reducible,
-        candidate_count = decision.candidate_count,
         yellow_lamp_only = decision.yellow_lamp_only,
         after_each_wave = ?decision.after_each_wave,
         after_collapse = ?decision.after_collapse

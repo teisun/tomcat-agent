@@ -648,7 +648,7 @@ async fn all_boundary_entry_paths_inherit_layer0_cleanup() {
         let mut turn_start = messages.len();
 
         assert!(
-            check_before_request(&mut state, &mut messages, &emitter, &env, &mut turn_start,).await,
+            check_before_request(&mut state, &mut messages, &emitter, &env, &mut turn_start,),
             "timing② must apply the ready boundary at ratio {}",
             prompt_tokens as f64 / 1000.0
         );

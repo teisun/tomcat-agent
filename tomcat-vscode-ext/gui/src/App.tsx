@@ -2826,6 +2826,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 availableModels={state.availableModels}
                 buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
+                compacting={activeSession.compacting}
                 requestRetry={activeSession.requestRetry}
                 errorRecoveryDisabled={!canRecoverErrorTurn}
                 bottomSpacerHeight={bottomSpacerHeight}

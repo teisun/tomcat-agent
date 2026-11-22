@@ -28,7 +28,7 @@ mid-turn 预热优化而保留 L0–L3。
 
 **时间点钉死**：
 
-- **「每次请求前」**：同一条 `maybe_reduce_before_next_llm` 合并在 `reasoning_loop` 的 loop 顶部。首个请求直接在此过磅；第 2 轮及以后，上一条 tool round 已由 `tool_dispatcher` 将 assistant/tool 消息 push 到局部 `messages` 并调用 `ctx_state.on_message_appended(...)` 记账，而轮末到下一轮 loop 顶之间不再改写 `messages`，故仍等价于「每次工具循环结束、发下一次 LLM 前」。
+- **「每次请求尝试前」**：`request_retry::run_request_once` 调用 `current_tail_guard::prepare_request_context`。它覆盖首个请求、工具轮后的请求及重试；工具轮消息已由 `tool_dispatcher` 追加到 `messages` 并记账。
 - **不是** 下一个 user turn 进入时的外层 `check_before_request`。
 - **也不是** reasoning loop 最终 assistant 回复后、user turn 全部结束的时刻。
 
@@ -79,10 +79,10 @@ current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 si
 | 术语 | 语义（大白话） | 数据载体 | 行为约束 | 说人话 |
 | --- | --- | --- | --- | --- |
 | **current tail** | 当前 reasoning 回合里新长出来的尾巴 | `reasoning_loop` 局部 `messages[agent.start_idx..]`；`Agent::start_idx` | `start_idx` 是 L0/L3 的硬上界；前缀替换时原语必须同步平移它，tail 永不被 L0/L3 越界改写 | 这篇方案处理的是“眼前这轮新堆起来的货”，不是老仓库。 |
-| **mid-turn aggregate precheck** | 当前轮里每次 tool round 结束后、下次 LLM 请求发出前的称重与路由 | `reasoning_loop.rs` 中 `tool_dispatcher` 返回与下一次 `llm.chat_stream(...)` 之间；`AggregatePrecheckDecision` | 每个 tool round 都要跑；只负责测量和决策，**不直接改写消息**；`working_set_tokens >= 0.90 * budget` 只打黄灯日志，不直接分流 | 每跑完一拨工具都要过磅一次。 |
+| **mid-turn aggregate precheck** | 每次 LLM 请求尝试前测量整个工作集 | `request_retry::run_request_once`；`AggregatePrecheckDecision` | 只判断当前是否放得下，不预测能削减多少；水位 ≥90% 且未超预算只记黄灯日志 | 每次发请求前都过磅。 |
 | **working_set_tokens** | 下一次 LLM 请求整份 prompt 的估算总重 | `ContextState::estimated_token_count()`；`last_api_usage` + `post_usage_appended_chars` | 是 A 的主判据；B/C 改写消息后必须同步修正相关计数，否则下一次称重会失真 | 看的是整车多重，不是某一个箱子多重。 |
 | **context_budget_tokens** | Prompt 可用上限 | `ContextState.context_budget_tokens`，来自 `context_window - max_output_tokens` | 本文统一使用这个名字；**不再**使用旧草案名 `promptBudgetBeforeReserve`；A 不再额外扣一次 output reserve | 红线已经扣过输出位了，不要再扣第二遍。 |
-| **route：`fits` / `reduce` / `collapse`** | A 的三路裁决结果 | `AggregatePrecheckDecision.route` / `GuardRoute` | `fits` = 直接继续；`reduce` = 进 B；`collapse` = 进 C | 先决定放行、先减负，还是直接把整份工作集折成一条摘要。 |
+| **`fits`** | 削减前的工作集估算是否在预算内 | `AggregatePrecheckDecision.fits` | `true` 直接继续；`false` 先做本地削减，再按削减后的估算决定是否需要前台摘要 | 能发就发，否则先减负，不猜减负够不够。 |
 | **COMPACTABLE_TOOLS** | 当前 tail 里允许进入 reduction 的工具白名单 | `{"read", "search_files", "bash", "task_output"}` | 首版只对白名单工具的 `tool_result` 做 placeholder；白名单外永不改写；后续扩集单独评估 | 先只动最常把 current tail 堆胖的几类读取/日志结果。 |
 | **transcript message rewrite helper** | reduction 后，经 `session/transcript` 模块提供的 helper 尝试回写对应 `tool_result` message | `transcript.rs` / `session_impl.rs` 暴露按 `msg_id` 重写 message 的 helper；helper 内部自行负责安全写盘策略 | reduction 不再引入 ledger；**当前轮内存减负不依赖 helper 成功**；helper 成功时 reload 更接近运行时真相 | 减负先在眼前这轮生效；能顺手把 transcript 也补齐最好，但别反过来卡住当前轮。 |
 | **single branch_summary collapse** | 当 B 仍压不下来时，把 apply 后的整份 working messages 折成一条 `branch_summary` | 复用既有 `BranchSummaryEntry` + `apply_boundary` 语义；`covered_start_id` 到 `covered_end_id` 覆盖整个工作集 | 不新增 `current_tail.split_turn` 事件；不保留 suffix verbatim；成功后 `messages` 中只剩一条摘要消息，并同步更新边界与 token 基线 | 真压不下来，就别再切前半/后半了，直接整份工作集折成一条摘要。 |
@@ -186,48 +186,26 @@ current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 si
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 | --- | --- | --- | --- | --- |
-| **PR-CTA：mid-turn precheck** | 在 `reasoning_loop` 内新增 current-tail precheck 与三路路由；交付物：`AggregatePrecheckDecision` / 结构化诊断 / 黄灯日志 | `../../src/core/agent_loop/reasoning_loop.rs`、`../../src/core/agent_loop/accessors.rs`、`../../src/core/agent_loop/current_tail_guard.rs` | `current_tail_guard_behavior_test.rs::build_precheck_decision_covers_fit_reduce_and_collapse_routes`、`current_tail_guard_behavior_test.rs::mid_turn_guard_fits_is_noop` | 先把“什么时候称重、怎么分流”钉死。 |
+| **PR-CTA：mid-turn precheck** | 每次发送前检查当前估算是否在预算内；只记录起始估算和实际执行削减后的结果 | `../../src/core/agent_loop/request_retry.rs`、`../../src/core/agent_loop/current_tail_guard.rs` | `mid_turn_guard_fits_is_noop`、`mid_turn_guard_stops_after_history_compaction_without_touching_tail`、`mid_turn_guard_collapses_when_two_candidates_remain` | 当前放不下才动手；削减后再称一次。 |
 | **PR-CTB：apply + history recompact + tail reduction** | 先 apply 已完成历史摘要，再对 apply 后历史整体再压一遍，最后做 `COMPACTABLE_TOOLS` 旧半区波次 placeholder；交付物：通过 transcript helper best-effort 回写对应 `tool_result` message | `../../src/core/agent_loop/current_tail_guard.rs`、`../../src/core/compaction/apply.rs`、`../../src/core/session/manager/context.rs`、`../../src/core/session/transcript.rs`、`../../src/core/compaction/truncation.rs` | `current_tail_guard_behavior_test.rs::mid_turn_guard_stops_after_history_compaction_without_touching_tail`、`current_tail_guard_behavior_test.rs::mid_turn_guard_runs_first_tail_wave_before_recheck`、`current_tail_guard_runtime_test.rs::mid_turn_guard_reduced_tail_survives_reload` | 先把已有历史收益吃干净，再去砍当前轮。 |
 | **PR-CTC：single branch_summary collapse + keepalive** | 生成单条 `branch_summary`、拼接 keepalive snapshot、复用现有 `apply_boundary` 全量折叠 working messages；交付物：reload 后等价恢复 | `../../src/core/compaction/preheat.rs`、`../../src/core/compaction/apply.rs`、`../../src/core/plan_runtime/mod.rs`、`../../src/core/session/manager/context.rs`、`../../src/core/agent_loop/current_tail_guard.rs` | `current_tail_guard_test.rs::collapse_to_branch_summary_keeps_planning_snapshot`、`current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_executing_snapshot`、`current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` | 真压不下来，就整份折成一条摘要，但不能把执行态丢了。 |
 | **PR-CTD：配置清理 + 文档/测试** | `keep_recent_turns` 默认值改 `5` 并接线；删除 `compaction_turns`；同步 allowlist、catalog、README、架构文档与测试矩阵 | `../../src/infra/config/types/context.rs`、`../../src/core/compaction/truncation.rs`、`../../src/core/tools/config_tool/allowlist.rs`、`../../src/core/tools/contract/catalog.rs`、`../../src/core/README.md`、本文 | `context_cfg_test.rs::default_keep_recent_turns_is_5`、`truncation_test.rs::compact_tool_results_respects_keep_recent_turns_config`、文档同步 | 配置别再骗人，字和代码一起收口。 |
 
 #### 4.2.1 PR-CTA：mid-turn precheck
 
-- **入口位置**：`tool_dispatcher::run_tool_calls(...)` 返回之后、下一次 `llm.chat_stream(...)` 之前。
-- **主流程**：
-  1. 取 `working_set_tokens = ctx_state.estimated_token_count()`；
-  2. 取 `current_tail = messages[agent.start_idx..]`；
-  3. 计算 `overflow_tokens`；
-  4. 调用 `current_tail_guard::estimate_reducible_tokens(ctx_state, messages, agent.start_idx)`；
-  5. 按 `fits / reduce / collapse` 路由；
-  6. B/C 改写完成后，**重新** precheck，一次确认已回到预算内。
-- **实现约束**：
-  - A 只做测量和路由，不直接改写消息；
-  - 不引入新的 `block_on`；
-  - `working_set_tokens >= 0.90 * context_budget_tokens` 只打诊断日志，不改变控制流。
+- **入口位置**：`run_request_once` 中调用 `prepare_request_context`，早于 `llm.chat_stream(...)`。
+- **主流程**：先 `settle`，取当前估算与预算；放得下直接发，否则先做无模型削减。每阶段削减后重新称重；仍超预算才交接已有后台摘要，并在需要时启动前台摘要。
+- **实现约束**：不预测可回收量；黄灯只记日志；前台摘要应用后的估算也仅做诊断。
 
 ```text
-tool_dispatcher done
-      |
-      v
-working_set_tokens = ctx_state.estimated_token_count()
-      |
-      v
-overflow_tokens = max(0, working - budget)
-      |
-      +--> overflow == 0 --------------------> fits -> next llm.chat_stream
-      |
-      +--> overflow > 0 -> ask current_tail_guard "先 apply 历史、再压历史、再压 tail，最多能减多少？"
-                                  |
-                  +---------------+---------------+
-                  |                               |
-            enough reducible                 not enough
-                  |                               |
-                  v                               v
-       reduce                           collapse
+每次发送前 → settle 并称重
+  ├─ 放得下 → 发送
+  └─ 超预算 → 先做无模型削减，再称重
+       ├─ 放得下 → 发送
+       └─ 仍超预算 → 交接已有后台摘要，必要时做前台摘要
 ```
 
-**说人话**：A 是路由器，不是刀子。它先看整车超了多少，再问“先把现成历史收益吃掉、再压一轮历史、最后再动这轮尾巴，能不能救回来”，能救就进 B，救不回来才进 C。
+**说人话**：不先猜能卸多少货；超载就先卸，卸完再称，仍然超载才做前台摘要。
 
 #### 4.2.2 PR-CTB：apply + history recompact + tail reduction
 
@@ -342,37 +320,17 @@ apply_boundary
 
 ### 5.1 `AggregatePrecheckDecision`
 
-当前实现把 precheck / tail wave / collapse 后称重收敛为结构化诊断，并通过 `tomcat_chat_diag` 输出。字段口径如下：
+这是 `tomcat_chat_diag` 的内部诊断，不写入 transcript，也不是 wire 协议。只记录本地估算和实际执行的削减结果，不预测可回收量。
 
-| 字段 | JSON 类型 | 必填 | 默认值 | 适用场景 | 说明 | 说人话 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `route` | `string enum` | 是 | 无 | A 输出 | `fits` / `reduce` / `collapse` | 这次是放行、先减负，还是直接整份折成一条摘要。 |
-| `routeReason` | `string enum` | 是 | 无 | A 输出 | `fits` / `preheat_shortcut` / `reducible_enough` / `not_enough_reducible` / `missing_context_state` | 这条路为什么被选中。 |
-| `workingSetTokens` | `integer` | 是 | 无 | A 输出 | 当前 prompt 总重，来自 `ContextState::estimated_token_count()` | 整车现在多重。 |
-| `contextBudgetTokens` | `integer` | 是 | 无 | A 输出 | Prompt 红线，等于 `context_window - max_output_tokens` | 这车最多能多重。 |
-| `overflowTokens` | `integer` | 是 | `0` | A 输出 | `max(0, working - budget)` | 超载了多少。 |
-| `maxReducibleTokens` | `integer` | 是 | `0` | A 输出 | 先 apply 已完成历史摘要、再压 apply 后历史、最后把 tail 候选都减到最轻时，最多能腾出的 token | 历史和当前轮全都尽力时，最多能减多少。 |
-| `compactableCandidateCount` | `integer` | 是 | `0` | A 输出 | 当前 tail 可参与 reduction 的候选数 | 真到 tail 阶段时，这轮有多少箱子能动。 |
-| `yellowLampOnly` | `boolean` | 是 | `false` | A 输出 | `>= 0.90 * budget` 但尚未超线时为 `true`，仅用于诊断日志 | 先亮黄灯提醒一下。 |
-| `afterEachWave` | `integer[]` | 是 | `[]` | B / 诊断 | tail reduction 每轮减负后的 token 称重快照 | 每一刀下去后还剩多重。 |
-| `afterCollapse` | `integer \| null` | 是 | `null` | C / 诊断 | collapse 完成后的最终称重结果；**只观测，不拦截控制流** | 整份折叠以后还多重。 |
-
-示例（内存态，不写 transcript）：
-
-```json
-{
-  "route": "reduce",
-  "routeReason": "preheat_shortcut",
-  "workingSetTokens": 273800,
-  "contextBudgetTokens": 272000,
-  "overflowTokens": 1800,
-  "maxReducibleTokens": 5400,
-  "compactableCandidateCount": 5,
-  "yellowLampOnly": false,
-  "afterEachWave": [269400, 264900],
-  "afterCollapse": null
-}
-```
+| 结构字段 | 含义 |
+| --- | --- |
+| `fits` | 削减前的估算是否在预算内。 |
+| `working_tokens` | 削减前的 `ContextState::estimated_token_count()`。 |
+| `budget_tokens` | 当前模型的有效输入预算。 |
+| `overflow_tokens` | 削减前估算超出预算的 token 数（日志字段 `overflow`）。 |
+| `yellow_lamp_only` | 水位 ≥90% 且未超预算，只记日志。 |
+| `after_each_wave` | 实际完成的 tail 削减波次之后的 token 估算。 |
+| `after_collapse` | 前台摘要成功应用后的 token 估算；未应用则无值，仅观测、不拦截发送。 |
 
 ### 5.2 Step 0 指针与 placeholder wave 的持久化边界
 
@@ -496,8 +454,8 @@ C 不新增 `CustomEntry`；它直接复用 [`context-management.md`](./context-
                                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ src/core/agent_loop/reasoning_loop.rs                               │
-│ • 每次 tool round 后触发 mid-turn aggregate precheck                 │
-│ • route = fits / reduce / collapse                                   │
+│ • 每次模型尝试经 request_retry 检查预算                              │
+│ • 超预算先做本地削减，按实际结果决定是否前台摘要                     │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
                  ┌─────────────┴─────────────┐
@@ -542,8 +500,8 @@ C 不新增 `CustomEntry`；它直接复用 [`context-management.md`](./context-
 
 阅读顺序：
 
-1. 先看 `tool_dispatcher.rs -> reasoning_loop.rs`，明确“为什么 guard 一定在 mid-turn”。
-2. 再看 `current_tail_guard.rs`，理解 A/B/C 的测量、历史 apply/recompact、tail reduction 与 collapse 逻辑。
+1. 先看 `tool_dispatcher.rs` 与 `request_retry.rs`，确认工具结果先入账、每次请求前再检查预算。
+2. 再看 `current_tail_guard.rs`，理解测量、历史 apply/recompact、tail reduction 与前台摘要交接。
 3. 最后看 `apply.rs / transcript.rs / context.rs / plan_runtime/mod.rs`，确认改写如何跨 reload 维持且不把执行态压没。
 
 **说人话**：自顶向下就是“配置收口 -> 工具结果入账 -> 当前轮过磅 -> 先吃历史收益 -> 再压历史 -> 再压 tail -> 还不够就整份 collapse -> reload 还能恢复同一份真相”。
@@ -555,80 +513,38 @@ C 不新增 `CustomEntry`；它直接复用 [`context-management.md`](./context-
 ### 7.1 fits / reduction 路径
 
 ```text
-LLM                tool_dispatcher        reasoning_loop       current_tail_guard    apply/transcript/context
- |                        |                     |                     |                        |
- | -- tool_calls -------> |                     |                     |                        |
- |                        | -- 执行工具 ------->|                     |                        |
- |                        | -- push tool msg -->|                     |                        |
- |                        | -- on_message_appended ------------------->|                        |
- |                        |                     | -- precheck -------> |                        |
- |                        |                     | <--- route=fits -----|                        |
- |                        |                     | -- next chat_stream -------------------------------->|
- |                        |                     |                     |                        |
- |                        |                     | -- precheck -------> |                        |
- |                        |                     | <--- route=reduce ---|                        |
- |                        |                     | -- apply ready history ----------------------------->|
- |                        |                     | -- recheck --------> |                        |
- |                        |                     | -- history recompact ------------------------------->|
- |                        |                     | -- recheck --------> |                        |
- |                        |                     | -- tail reduction -->|                        |
- |                        |                     |                     | -- rewrite memory/counters
- |                        |                     |                     | -- best-effort transcript sync
- |                        |                     | -- recheck --------> |                        |
- |                        |                     | <--- route=fits -----|                        |
- |                        |                     | -- next chat_stream -------------------------------->|
+tool_dispatcher 追加消息并记账（如有工具轮）
+  → run_request_once → prepare_request_context
+    ├─ 放得下 → 返回，发送 chat_stream
+    └─ 超预算 → 应用就绪摘要 → 削减历史 → 削减当前轮
+         每步都按新估算检查；放得下立即返回并发送
 ```
 
 ### 7.2 collapse 路径
 
 ```text
-tool_dispatcher     reasoning_loop      current_tail_guard      preheat/LLM         plan_runtime      apply/transcript/context
-      |                    |                    |                    |                    |                       |
-      | -- round done ---> |                    |                    |                    |                       |
-      |                    | -- precheck -----> |                    |                    |                       |
-      |                    | <--- route=collapse|                    |                    |                       |
-      |                    | -- summarize full working set ---------->|                    |                       |
-      |                    |                    | <--- summary -------|                    |                       |
-      |                    |                    | -- keepalive -------------------------> |                       |
-      |                    |                    | <--- snapshot ------------------------ |                       |
-      |                    |                    | -- append branch_summary ------------------------------------->|
-      |                    |                    | -- apply_boundary ------------------------------------------->|
-      |                    |                    | -- invalidate_api_usage ------------------------------------>|
-      |                    |                    | -- record afterCollapse diag ------------------------------->|
-      |                    | -- next chat_stream ------------------------------------------------------------->|
+实际削减后仍超预算 → 交接已有 A；应用成功则重新检查并按需削减
+  → 仍放不下才生成前台摘要 B
+    ├─ 成功 → 写入并应用摘要 → 记录 after_collapse → 发送
+    ├─ 生成失败 → 发 compaction_error → 发送当前工作集
+    └─ 停止或结构/持久化错误 → 不发送
 ```
 
 ### 7.3 控制流伪码
 
+这里的 A/B 指后台摘要与前台摘要。预检只记录当前估算是否放得下；超预算先实际削减，再根据新的估算决定是否需要 B。
+
 ```text
-after tool_dispatcher returns:
-    decision = precheck(ctx_state, messages, start_idx)
-
-    match decision.route:
-        fits:
-            continue next llm.chat_stream
-
-        reduce:
-            apply_ready_history_if_present(...)
-            if fits_after_apply(...):
-                continue
-            recompact_history_after_apply(...)
-            if fits_after_history_recompact(...):
-                continue
-            reduce_current_tail_in_waves(...)
-            if fits_after_tail_wave(...):
-                continue
-            goto collapse
-
-        collapse:
-            summary = generate_branch_summary_over_working_messages(...)
-            keepalive = build_keepalive_snapshot(...)
-            append branch_summary
-            apply_boundary
-            set start_idx = 1 (summary is history)
-            invalidate_api_usage()
-            record afterCollapse diagnostic
-            continue next llm.chat_stream
+before next llm.chat_stream:
+    settle_preheat()
+    if fits(): send
+    apply_ready_preheat_and_reduce_history_and_tail()
+    if fits(): send
+    if handoff_running_preheat():
+        recheck_and_reduce_if_needed()
+    if fits(): send
+    generate_and_apply_foreground_summary()
+    send  # 若生成失败，用当前工作列表；取消或结构错误仍终止
 ```
 
 **说人话**：这条链路的关键是三次称重口径要统一。apply 后称一次、历史再压后称一次、tail 每轮后称一次；collapse 结束后也会再称一次，但那次只做记录，不会在这里 fail-closed。
@@ -638,39 +554,24 @@ after tool_dispatcher returns:
 ## 8. 状态机
 
 ```text
-┌────────────┐  precheck   ┌──────────────┐  route=fits   ┌────────────────────┐
-│    idle    │────────────▶│   measuring  │──────────────▶│ ready_for_next_llm │
-└────────────┘             └──────┬───────┘               └────────────────────┘
-                                  │
-                                  │ route=reduce
-                                  ▼
-                          ┌──────────────┐ apply / recompact / tail ┌──────────────┐
-                           │   reducing   │──────────────────────▶│  rechecking  │
-                           └──────┬───────┘                       └──────┬───────┘
-                                  │                                      │
-                                  │ still overweight / route=collapse    │ route=fits
-                                  ▼                                      ▼
-                          ┌──────────────┐ branch_summary+keepalive ┌────────────────────┐
-                          │  collapsing  │────────────────────────▶│ ready_for_next_llm │
-                           └──────┬───────┘                      └────────────────────┘
-                                  │
-                                  │ summary fail / apply_boundary fail
-                                  ▼
-                           ┌──────────────┐
-                           │ failed_closed│
-                           └──────────────┘
+measuring ── 放得下 ────────────────→ ready_for_next_llm
+    └─ 超预算 → reducing → rechecking ── 放得下 ──→ ready_for_next_llm
+                              └─ 仍超预算 → 交接 A，仍需时 collapsing
+                                   ├─ 成功或生成失败 → ready_for_next_llm
+                                   └─ 取消、结构或持久化错误 → 结束本轮
 ```
 
 | 当前状态 | 事件 | 目标状态 | 副作用 | 说人话 |
 | --- | --- | --- | --- | --- |
 | `idle` | tool round 完成 | `measuring` | 计算 `working_set_tokens` / `overflow_tokens` | 一拨工具跑完，开始称重。 |
 | `measuring` | `overflow_tokens == 0` | `ready_for_next_llm` | 无 | 不超重，直接发下一次 LLM。 |
-| `measuring` | `overflow > 0 && reducible enough` | `reducing` | 生成 `ReductionPlan` | 超了，但还能先减负。 |
+| `measuring` | `overflow > 0` | `reducing` | 直接尝试本地削减 | 超了就先减负，不预测能减多少。 |
 | `reducing` | apply / 历史再压 / tail reduction 完成 | `rechecking` | apply 历史收益、重压历史、改 tool message、回写计数，并 best-effort 调 transcript helper | 先把历史和当前轮都尽量减下来。 |
 | `rechecking` | `overflow == 0` | `ready_for_next_llm` | 无 | 减完确实变轻了。 |
-| `rechecking` | 仍超重，且 B 已无更多收益 | `collapsing` | 生成单条 `branch_summary + keepalive` | 局部减负救不回来，只能整份折叠。 |
+| `rechecking` | 本地削减后仍超重 | `collapsing`（仍需要时） | 先交接已有后台摘要，应用后重查；不够才生成单条 `branch_summary + keepalive` | 先用已有摘要；仍放不下才重做。 |
 | `collapsing` | `branch_summary` 生成并 apply 成功 | `ready_for_next_llm` | 写 branch_summary、apply boundary、挪边界、`invalidate_api_usage()`，并记录 `afterCollapse` 诊断 | 整份工作集已经安全折成一条摘要；即便还偏重，这次也只记录不拦截。 |
-| `reducing` / `collapsing` | summary 失败 / apply_boundary 失败 | `failed_closed` | 返回错误，不发送请求 | 真正的 collapse 没成功才收口失败。 |
+| `collapsing` | 摘要生成失败 | `ready_for_next_llm` | 发 `compaction_error` 并尝试主请求 | 主模型还能尝试回答。 |
+| `reducing` / `collapsing` | 取消或结构错误 | 结束本轮 | 不发送请求 | 不能把停止或坏历史当成摘要失败放行。 |
 
 **说人话**：阶段二对 apply/history/tail 是“减下来再放行”，对 collapse 后称重则是“只观测，不在这里二次拦截”。**
 
@@ -705,17 +606,19 @@ precheck 黄灯（>= 90% budget, 但未超线）
 reduction 成功
   -> apply 历史 / 历史再压 / tail 改写 + recheck
 
-B 已尽力仍超预算
-  -> 生成单条 branch_summary + keepalive，复用 apply_boundary
+削减后仍超预算
+  -> 若有后台 A，最多等 300 秒；超时取消并确认本地退出，停止则保留 A
+  -> 应用 A 后再削减检查；仍有必要才做前台 B
 
 C 成功
   -> append/apply branch_summary + invalidate_api_usage + afterCollapse 诊断
 
-C summary 失败 / apply_boundary 失败
-  -> Err（fail closed）
+B 的模型调用失败或摘要为空
+  -> 记录 compaction_error；沿用当前上下文发送主请求
+  -> 同一个 run_request 的传输重试不再次主动做 B
 
-branch_summary transcript 插入失败
-  -> warn；内存中的 collapse 继续生效
+取消、摘要缺锚点或 branch_summary 持久化失败
+  -> 结束本轮；不发布不完整的摘要
 
 reload 时 branch_summary 覆盖区间过期（id 对不上）
   -> warn + 走既有 stale apply 处理
@@ -729,14 +632,14 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | `working_set_tokens >= 0.90 * budget && overflow == 0` | 诊断黄灯 | `tracing` 结构化日志；不改控制流 | 快到线了，先亮黄灯提醒。 |
 | Step 0 transcript helper 失败 | 非致命持久化降级 | 保留本次内存指针替换；记 `warn` / metrics；不回滚、不立即转 C | 单据一时没改成，不影响先把这轮车减下来。 |
 | B 已完成 apply + 历史再压 + tail reduction 仍超预算 | 正常升级分流 | 停止继续做局部减负，转 `collapse` | 历史和尾巴都压过了，还不够，就整份折成一条摘要。 |
-| C summary 生成失败 | 致命 guard 失败 | 返回错误给上层 attempt；不发送过载请求 | 单条摘要打不出来，这趟就别硬发。 |
-| `branch_summary` transcript 插入失败 | 非致命持久化降级 | 仅 `warn`；局部 `messages` 仍提交 C 结果 | transcript 里没插成功，不影响当前轮继续。 |
+| 前台摘要生成失败 | 可继续 | 发 `compaction_error`，发送当前工作列表 | 摘要没写成，主模型仍有机会回答。 |
+| `branch_summary` 落盘失败 | 不提交边界 | 返回错误，保留现有工作列表 | 不能让内存应用一个不存在的边界。 |
 | `apply_boundary` 失败 | 致命 guard 失败 | 返回错误；局部 `messages` 不提交 C 结果 | 摘要没真正 apply 成功，就不算真的切好了。 |
 | collapse 后仍超预算 | 诊断信息 | 记录 `afterCollapse`；继续下一次 LLM 请求 | 最后一称只做观测，不在这里二次拦截。 |
 | hydrate / apply 遇到 stale `covered*Id` | 容忍 warning | 复用既有 stale apply 处理；必要时删 `branch_summary` 行并跳过恢复 | 覆盖区间对不上现在的货单，就按已有 branch_summary 规则收口。 |
 | `bash` / `task_output` 已进入 `COMPACTABLE_TOOLS` 但模型可能想继续追日志或重跑命令 | 风险提示 | reduction 只做 placeholder，不自动重放；`bash` 仍受既有 gate / confirm 约束，`task_output` 继续沿用 `task_id` / `since` 语义；特别大的输出优先复用 persisted preview helper | 可以把 shell/日志结果折起来，但不能让系统替模型偷偷重跑命令。 |
 
-**说人话**：阶段二真正 fail-closed 的只有“摘要生成 / apply 失败”这类 guard 自己没做成的情况；collapse 做成以后，最后一称只是诊断，不会再把请求拦住。**
+主模型实际返回 Context Overflow 时，沿用有限的裁剪与恢复；需要整体折叠时也先交接已有 A。没有缩小就停止重试。估算超预算或摘要生成失败本身都不等于服务端超限。
 
 ---
 
@@ -746,7 +649,6 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 | --- | --- | --- | --- |
-| 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::build_precheck_decision_covers_fit_reduce_and_collapse_routes` | DONE | 三条路由与路由原因都锁死。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::mid_turn_guard_fits_is_noop` | DONE | fits 路径零改写。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::mid_turn_guard_stops_after_history_compaction_without_touching_tail` | DONE | apply/历史再压够了就不再动 tail。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::mid_turn_guard_runs_first_tail_wave_before_recheck` | DONE | tail reduction 的首个称重点落在 `Step 0 + 第一波` 之后。 |
@@ -779,7 +681,7 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 目标 | 锁死它的测试 / 机制 | 状态 | 说人话 |
 | --- | --- | --- | --- |
 | G1 | `test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm` | DONE | 发车前就要拦住。 |
-| G2 | `build_precheck_decision_covers_fit_reduce_and_collapse_routes` + `mid_turn_guard_fits_is_noop` | DONE | 看整车，不看单箱。 |
+| G2 | `mid_turn_guard_fits_is_noop` + `mid_turn_guard_stops_after_history_compaction_without_touching_tail` + `mid_turn_guard_collapses_when_two_candidates_remain` | DONE | 放得下不改消息；削减已够不调用 B；仍超预算才单次调用 B。 |
 | G3 | `mid_turn_guard_stops_after_history_compaction_without_touching_tail` + `mid_turn_guard_runs_first_tail_wave_before_recheck` + `mid_turn_guard_collapses_when_two_candidates_remain` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | 历史和 tail 的顺序、停点与刀法都锁死。 |
 | G4 | `mid_turn_guard_reduced_tail_is_recomputed_after_reload` + `legacy_tool_results_compacted_marker_is_ignored_on_reload` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | 指针会持久化，wave 原文会恢复，旧 marker 不再改变重载语义。 |
 | G5 | `collapse_to_branch_summary_keeps_planning_snapshot` + `collapse_to_branch_summary_keeps_executing_snapshot` + `collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` + real-LLM A/B/C | DONE | deterministic snapshot 与真实续跑两条线都证明“压完 token 不能把 plan 压没”。 |

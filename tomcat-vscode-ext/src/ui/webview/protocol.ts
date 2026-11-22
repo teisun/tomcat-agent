@@ -381,6 +381,8 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  /** Only while the current request is blocked on compaction. */
+  compacting?: boolean;
   /** Live request attempts, including the initial request; never rebuilt from history. */
   requestRetry?: { attempt: number; maxAttempts: number };
   errorRecovery?: { errorId: string; dueAt: number };

@@ -298,7 +298,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 - **异步摘要**：LLM 摘要从同步阻塞改为 Layer 1 异步预热 + Layer 2 延迟应用，LLM 回复后主线程零等待
 - **Preheat 状态机（单任务）**：`Preheat` 保证后台同一时间至多一个预热 task，防止竞态和 token 浪费
 - **信息保全**：Layer 0 从「截断丢弃」升级为「落盘 + preview 占位符」，大 tool_result 内容不丢失、可按需读回
-- **UI 不卡顿**：LLM 回复后仅启动 Layer 1 异步预热或非阻塞地应用已就绪的 boundary；Layer 0 只作为成功 boundary 的后续清理，绝不单独阻塞主线程。仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
+- **UI 不卡顿**：LLM 回复后仅启动 Layer 1 异步预热或非阻塞地应用已就绪的 boundary；Layer 0 只作为成功 boundary 的后续清理，绝不单独阻塞主线程。只有确实需要前台摘要 B 时才等已有 A
 - **可观测性**：`ContextState` 内嵌 **`live: ContextLiveMetrics`**（瞬时利用率与预热标志）与 **`session_obs: SessionContextObservation`**（会话累计：压缩次数、释放量、工具落盘字符）；`context_metrics_update` 由二者组装，其中 `session_obs` 在 user turn 末写入 `sessions.json`；UI 状态栏反馈压缩进度（见 §10.6）。类型别名 `ContextMetrics` ≡ `ContextLiveMetrics`（见 `context_metrics.rs`）。
 
 ### 1.2 设计目标
@@ -332,7 +332,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **keep_recent_turns**  | 历史 placeholder 保护区大小（turn 数），来自 `[context].keep_recent_turns`，默认 5。它只影响历史压缩边界；阶段二的 mid-turn current-tail guard 另看 `messages[start_idx..]`。                                                                                                                                       |
 | **preview 占位符**        | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。                                                                                                                                                               |
 | **placeholder**        | Layer 0 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。                                                                                                                             |
-| **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text, marker_id)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 marker id（整串 `S::E`）一致）。 |
+| **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text, marker_id)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 单次后台摘要任务、provider 层传输重试与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 marker id（整串 `S::E`）一致）。 |
 | **预热（Preheat）**        | Layer 1 的异步压缩任务。在 ratio >= 0.5 时启动，克隆 `messages` 后台调用 **解析后的 compaction provider + `compaction_model`** 生成摘要，主线程不等待。快照边界 id 取 **message 级** `covered_start_id` / `covered_end_id`（§5.7）。                                                                |
 | **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`**：先 append `branch_summary_text { forId: marker_id }`，再按 §5.7 `messages.splice(..=end_idx, [summary_msg])` 用 `ChatMessage::compaction_summary(..., marker_id)` 替换前缀；成功后运行 Layer 0。切换后水位从 ~~70% 瞬降至 10~~20%。 |
 | **compaction summary** | Layer 1 LLM 对**整个 `messages`** 生成的结构化摘要，一条 `ChatMessage::compaction_summary(text, marker_id)` 替换整批 turns。 |
@@ -385,19 +385,12 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
   ratio = estimated_token_count / input_budget
 
-    0%          50%     70%    85%           98%  100%    API Error
-    ├───────────┼───────┼──────┼─────────────┼───┤         │
-    │  正常区    │ L1    │ L2   │L1+L2        │L2 │         ▼
-    │  无压缩    │预热   │请求前│回复后检查+   │请求前:    L3 物理截断
-    │           │async  │检查  │请求前检查+   │同上+      │ 目标<0.50
-    │           │       │      │可能启动新预热│sync wait  │
+    0%          50%        70%          85%            100%
+    ├───────────┼──────────┼────────────┼───────────────┤
+      正常区       启动预热 A    请求前非阻塞应用   回复后非阻塞应用
 
-  注：Layer 0 仅在成功 Boundary 切换后运行；实际溢出时由请求前保命路径执行等价清理。
-      「LLM 回复后」= user turn 结束（reasoning loop 最终回复，所有 tool 已执行）。
-      「发起 LLM 请求前」= 下一个 user turn 进入时。
-      100% 水位本身不触发 Layer 3；Layer 3 仅在 API 明确返回 Context Overflow 错误时触发。
-      LLM 回复后 ratio 允许暂时超过 0.98 甚至 >1.0（input_budget 已扣除 max_output_tokens，有余量）。
-      仅在发起下一次 LLM 请求前，ratio >= 0.98 时才可能同步等待。
+  放得下就发；估算超预算先削减，仍需前台摘要 B 时才等已有 A（§6.3）。
+  Layer 3 只在 API 明确返回 Context Overflow 后触发，与估算水位无关。
 ```
 
 ### 图二：四层防护流程
@@ -424,13 +417,9 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
       │
       ▼
   ┌─ Layer 1（异步预热，主线程不等待）─────────────────────┐
-  │  1. 克隆当前 messages: Vec<ChatMessage>                 │
-  │  2. 启动后台 Task：                                    │
-  │     → 按模板压缩整个 messages（记录首尾 msg_id）        │
-  │     → 调用 compaction_model，限制 <= 10K tokens         │
-  │     → 写入 transcript: type=branch_summary, boundary=false   │
-  │        （插入在 id==covered_end_id 的 message 行**之后**，§5.7）│
-  │  3. 产物 → CompactionResult（由 Preheat 持有至 Layer 2 消费）   │
+  │  1. 锁内核对最后一条消息，追加空正文切口标记。          │
+  │  2. 通过后只复制一次 messages，后台生成摘要并写缓存。    │
+  │  3. CompactionResult 由 Preheat 暂存，待 Layer 2 应用。  │
   │  单例：后台只允许一个压缩任务                           │
   └────────────────────────────────────────────────────────┘
       │
@@ -448,17 +437,8 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
       · （异步预热在此期间后台运行）
       ·
       ▼
-  ┌─ 下一个 user turn 发起 LLM 请求前 ─────────────────────┐
-  │  ratio >= 0.70？                                       │
-  │    → try_restart_if_pending；preheat 已有结果则 Boundary 切换 │
-  │                                                        │
-  │  ratio >= 0.98？                                       │
-  │    → Layer 2 - 发请求前检查：                          │
-  │      已有结果？→ 直接 Boundary 切换                        │
-  │      未完成？→ **化异步为同步**（await_result）           │
-  │        阻塞等待摘要完成，再 Boundary 切换               │
-  │        （阻塞的是推理启动，UI 已完成渲染）              │
-  └────────────────────────────────────────────────────────┘
+  发起请求前：settle → 必要时后台重启 → ≥70% 时应用已就绪的摘要。
+  发送前预算检查：放得下就发；否则先削减，仍需 B 才等待已有 A。
       │
       ▼ 发起 LLM 请求
       ·
@@ -499,7 +479,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
   前台：确认 covered_end == transcript 尾 → append marker
         { type: branch_summary, summary: null, is_boundary: true, id: S::E }
-  后台 Task：克隆整个 messages → 调用 compaction_model
+  前台：核对通过后复制一次；后台 Task：用快照调用 compaction_model
   → 生成 summary_A（Goal/Constraints/Progress...）
   → 原子覆盖写 pending preheat cache（不写 transcript）
   → CompactionResult { summary_text: summary_A, covered: msg_0..msg_n-1, ... }（由 Preheat 暂存）
@@ -525,10 +505,9 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
   ratio 降回 ~10-20%（常规场景；若快照后有大量新增 turns，降幅可能不到位，
   会触发新一轮 Layer 1 预热）
 
-  ════════════════════ ratio >= 0.98 → 发起 LLM 请求前强制检查（②）════════════
+  ════════════════════ 仍需前台摘要 B → 等已有 A（§6.3）════════════
 
-  try_restart_if_pending；已有结果？→ 直接 Boundary 切换
-  未完成？→ 化异步为同步（await_result），再 Boundary 切换
+  等待从交接开始计时，最多 300 秒；超时确认本地退出后才继续。
 
   ════════════════════ 已有旧 summary 时 ════════════════════
 
@@ -586,15 +565,15 @@ provider usage 的误差；收集到按语言、provider、请求阶段分组的
 | `>= 0.50`        | Layer 1   | LLM 回复后（⑤）        | `try_restart_if_pending` → 通过统一 `compaction_provider()` 入口异步预热 `preheat.try_start`（若无进行中的任务），主线程不等待                                                   |
 | `>= 0.70`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → 检查 `preheat` 结果，完成则 Boundary 切换（非阻塞）                               |
 | `>= 0.85`        | Layer 1+2 | LLM 回复后（⑤）        | `try_restart_if_pending` → 先 `poll_result`：**已有结果则立即 Boundary 切换**（非阻塞）；再判断是否需要新一轮 `try_start`      |
-| `>= 0.98`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → **已有结果则直接 Boundary 切换**（非阻塞）；仅**未完成**时 `await_result` 化异步为同步阻塞等待 |
+| 削减后仍需前台摘要 B | A/B 交接 | 发送前预算检查或服务端超限恢复 | 有正在运行的 A 才等待（最多 300 秒），见 §6.3 |
 | Context Overflow | Layer 3   | API 返回错误后（③内）     | 物理截断至 ratio < 0.50                                                      |
 
 
 **设计原则**：
 
-- **LLM 回复后绝不阻塞主线程**，即使 ratio 暂时超过 0.98 甚至 >1.0 也只做 L1 异步预热，或非阻塞地应用已完成的 Layer 2；只有 boundary 已成功应用时才紧随其后执行 L0，不卡 UI
+- **回复后不等待模型生成**：只启动后台预热或应用已完成的摘要，成功切换后才执行 L0。
 - 因为 `input_budget = context_window - max_output_tokens`，LLM 回复完成时实际还有 `max_output_tokens` 的空间余量，ratio 超过 1.0 不代表立即 Context Overflow
-- **仅在发起下一次 LLM 请求前**才可能阻塞（L2 化异步为同步），此时 UI 已完成当前轮的渲染，阻塞的是推理启动而非 UI 交互
+- **只有即将做前台摘要 B 时才可能等 A**。输入放得下就直接发（含 98%–100%）；不存在单独的高水位等待阈值。
 
 **触发总表**（含 Layer 0 细节）：
 
@@ -603,10 +582,9 @@ provider usage 的误差；收集到按语言、provider、请求阶段分组的
 | --------------------------------------------------------- | --------- | ------------ | ------------------------------------ |
 | 成功应用 boundary 后，单条 tool_result >= 50K chars          | Layer 0   | ② / ⑤ / 中途守卫 | 落盘 + 500 chars preview 占位符           |
 | 成功应用 boundary 后，compactable zone 中 tool_result >= 10K chars | Layer 0 | ② / ⑤ / 中途守卫 | 占位符替换（不落盘）                           |
-| ratio >= 0.50 且 preheat 可启动                                   | Layer 1   | ⑤            | `try_restart_if_pending` → `preheat.try_start`（后台 Task，内 3× retry）                   |
+| ratio >= 0.50 且 preheat 可启动 | Layer 1 | ⑤ / 工具轮预算检查 | 启动一次后台摘要；传输重试由 provider 负责 |
 | ratio >= 0.70                                             | Layer 2   | ② 发起 LLM 请求前 | `try_restart_if_pending` → `poll_result`/`apply`，完成则 Boundary 切换 |
 | ratio >= 0.85                                             | Layer 1+2 | ⑤ LLM 回复后    | `try_restart_if_pending` → 非阻塞 `poll_result` + 切换 + 可能 `try_start`                 |
-| ratio >= 0.98                                             | Layer 2   | ② 发起 LLM 请求前 | `try_restart_if_pending` → 已完成→切换；未完成→`await_result` 同步等待                      |
 | API 返回 Context Overflow                                   | Layer 3   | ③ 内          | 物理截断至 ratio < 0.50                   |
 
 
@@ -707,13 +685,14 @@ struct CompactionResult {  // 规范语义（字段名以实现为准）
 }
 ```
 
-**`Preheat`**：封装 Layer 1 的完整状态机（内部 `Idle` / `Running` / `ExhaustedPending`，对调用方不可见）。`ContextState` 字段为 **`preheat: Preheat`**（非 `Option`）。
+**`Preheat`**：封装 Layer 1 的完整状态机（内部 `Idle` / `Running` / `CachedCompleted` / `ExhaustedPending`，对调用方不可见）。`ContextState` 字段为 **`preheat: Preheat`**（非 `Option`）。
 
 **对外方法**：
 
 - `try_start(...)`：ratio 等条件满足且当前可启动时 spawn **唯一**后台 task；`Running` 或已有可应用的完成结果时不再重复启动。
-- `try_restart_if_pending(...)`：在 **`ExhaustedPending`**（3× retry 耗尽）时，若条件仍满足则重新启动；与 §6.6、步骤 ⑤/② 双点调用配合。
-- `poll_result()` / `await_result()`：供 Layer 2 非阻塞探测或发请求前同步等待。
+- `try_restart_if_pending(...)`：在 **`ExhaustedPending`**（后台摘要失败已收取）时重新尝试；只有成功启动才离开待重试状态；与 §6.6、步骤 ⑤/② 双点调用配合。
+- `settle()`：只收取已结束的任务；成功保留摘要，失败转为待重试。`poll_result()` 非阻塞地交出已就绪的结果。
+- `await_result_or_stop()`：只有即将启动前台压缩时才等已有后台任务；用户停止时保留任务，超时则取消并等待本地退出。
 - `abort()`：任意状态 → `Idle`，取消 task、清理 pending。
 
 **生命周期**：Session 销毁或用户退出时应调用 **`preheat.abort()`**，等价于取消 `JoinHandle` 并复位状态；勿依赖仅 drop handle 来取消 task。
@@ -909,8 +888,7 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
   │  ◆ 发起 LLM 请求前检查：                                                │
   │    → preheat.try_restart_if_pending(...)                                │
   │    → 若 ratio >= 0.70：Layer 2 检查（完成则 Boundary 切换 → Layer 0）     │
-  │    → 若 ratio >= 0.98：Layer 2 发请求前检查                              │
-  │      （完成→切换；未完成→化异步为同步，阻塞等待）                        │
+  │    → 不在固定水位同步等待；只有准备做 B 时才等已有 A。                  │
   │                                                                         │
   │  若 boundary 已切换：继续使用已改写的 working_messages                   │
   │       ──► AgentLoop::run(working_messages)                              │
@@ -1139,7 +1117,7 @@ Layer 0 处理后的新 message entry 写入 transcript（落盘的 tool_result 
 
 ### 6.2 Layer 1：异步预热
 
-时机⑤先 **`preheat.try_restart_if_pending(...)`**，再非阻塞检查 Layer 2；无论 boundary 是否切成，最后按更新后的 ratio 判断 `preheat.try_start(...)`。若 Layer 2 切成，期间已同步完成 Layer 0，再启动下一轮预热；若未切成，L0 不会单独运行。
+时机⑤先 `settle`，再尝试 `preheat.try_restart_if_pending(...)` 并非阻塞检查 Layer 2；无论 boundary 是否切成，最后按更新后的 ratio 判断 `preheat.try_start(...)`。若 Layer 2 切成，期间已同步完成 Layer 0，再启动下一轮预热；若未切成，L0 不会单独运行。
 
 **主线程不等待**，当前 user turn 处理完毕。异步预热在用户阅读/思考/输入期间后台运行。
 
@@ -1152,8 +1130,8 @@ fn layer1_preheat(state: &mut ContextState, compaction_provider: Arc<dyn LlmProv
     if state.messages.is_empty():
         return
 
-    # try_start 内部：Idle 且无双任务时克隆 messages snapshot、spawn task；
-    # task 内 generate_summary 最多重试 3 次（§6.6）；成功且 append 成功（或无 transcript 路径）时发 AutoCompactionEnd；耗尽发 CompactionError 并转入 ExhaustedPending
+    # 锁内核对最后一条消息并写 marker，再复制一次快照；失败不复制。
+    # 每批只调用一次 generate_summary；网络重试归 provider。
     state.preheat.try_start(state, compaction_provider, config, ...)
 ```
 
@@ -1161,11 +1139,11 @@ fn layer1_preheat(state: &mut ContextState, compaction_provider: Arc<dyn LlmProv
 
 - 由 `Preheat` 内部状态保证：同一时间至多一个 `Running` task
 - 防止 51%、52% 连续触发多个 Task 导致 token 浪费和竞态
-- 任务结果被 Layer 2 `poll_result` / `await_result` 消费并 `apply` 后，`preheat` 回到可再次 `try_start` 的状态；**`ExhaustedPending`** 依赖 **`try_restart_if_pending`**（⑤ 与 ②）恢复
+- 检查点先 `settle`，再由 Layer 2 `poll_result` 非阻塞取出已就绪的摘要；只有即将启动前台摘要时才通过 `await_result_or_stop` 等已有预热。摘要应用后 `preheat` 可再次 `try_start`；**`ExhaustedPending`** 依赖 **`try_restart_if_pending`**（⑤ 与 ②）恢复。
 
 ### 6.3 Layer 2：检查与应用
 
-Layer 2 在 **两个时机** 检查预热结果是否可取用，对应步骤⑤和②；两时机均应先 **`preheat.try_restart_if_pending`**（与 §6.6 一致）。
+进入请求前、回复后或工具轮预算检查时，先非阻塞 `settle`。请求前和回复后可恢复失败任务；工具轮之间不重启失败的 A。
 
 #### LLM 回复后检查（ratio >= 0.85）
 
@@ -1181,7 +1159,7 @@ fn check_preheat_after_reply(state: &mut ContextState):
     }
 ```
 
-> 不区分 ratio 是否 >= 0.98——高水位时尽早非阻塞应用可减少下一轮 ② 发请求前同步等待的概率。
+> 水位只决定是否应用已就绪的摘要，不决定是否阻塞等待。
 
 #### 发起 LLM 请求前检查（ratio >= 0.70）
 
@@ -1192,19 +1170,14 @@ fn check_preheat_before_request(state: &mut ContextState):
     if ratio < 0.70:
         return
 
-    match state.preheat.poll_result() {
-        PreheatOutcome::Completed(_) => apply_boundary_switch(state),
-        PreheatOutcome::NotReady => {
-            if ratio >= 0.98 {
-                # 化异步为同步：await_result / 阻塞直至完成或失败
-                if let PreheatOutcome::Completed(_) = state.preheat.await_result() {
-                    apply_boundary_switch(state)
-                }
-            }
-        }
-        _ => {}
+    if let PreheatOutcome::Completed(_) = state.preheat.poll_result() {
+        apply_boundary_switch(state)
     }
 ```
+
+#### A/B 交接（只有在需要前台摘要时等待）
+
+正常输入放得下就发；超预算先应用就绪摘要、占位或落盘削减。若仍需前台摘要 B，先等已有的后台摘要 A；没有 A 就不等。A 成功后先应用，再检查预算并按需削减；实际服务端超限恢复则把这次应用计为本次缩小。A 失败立即继续。自开始等待起满 300 秒仍未完成时，取消并等待本地任务退出后才允许启动 B；这不代表远端同步停算。用户点停止则结束本轮、保留 A，不发 B 或主请求。B 的生成失败不会拦住正常主请求；结构错误和取消仍终止，服务端确认超限后仍有限恢复。
 
 #### Boundary 切换动作（三个检查时机共用）
 
@@ -1308,27 +1281,23 @@ overflow -> L3 cannot drain -> collapse -> [ Summary ]    start_idx = 1
 
 Layer 1 由 **`Preheat`** 封装，取代原先在 `ContextState` 上直接持有 `Option<CompactionResult>` 的做法。
 
-**内部状态（实现细节，不对外暴露）**：`Idle` / `Running` / `ExhaustedPending`。
+**内部状态（实现细节，不对外暴露）**：`Idle` / `Running` / `CachedCompleted` / `ExhaustedPending`。
 
-**对外 API（仅此与预热交互）**：`try_start`、`try_restart_if_pending`、`poll_result`、`await_result`、`abort`。
+**主要入口**：`try_start`、`try_restart_if_pending`、`settle`、`poll_result`、`await_result_or_stop`、`abort`。
 
-**3× retry（在 spawn 的 task 内部）**：
-
-- 对 `generate_summary` **最多连续尝试 3 次**。
-- **成功**：在 **`append_entry` 成功**（或无 transcript 路径）后发出 **`AutoCompactionEnd`**（L1 可观测性），返回 `CompactionResult`，供 Layer 2 Boundary 应用。**不在** Layer 2 `apply_boundary` 路径重复发射 `AutoCompactionEnd`。
-- **三次均失败（耗尽）**：发出 **`CompactionError`**，含 `exhausted_after_retries: true`、`attempts: 3`、`source: "preheat"` 等字段；task 以 **`Err`** 结束；状态转入 **`ExhaustedPending`**（不会在同一失败点自动再 spawn，需走恢复路径）。
+**后台任务只生成一次摘要**：传输重试由 provider 负责。成功写崩溃缓存并发 `AutoCompactionEnd`；失败发 `CompactionError`（`source: "preheat"`，`attempts: 1`）并追加 `compaction_failed` 诊断。`settle` 收到失败后才转换为 `ExhaustedPending`，成功则转为 `CachedCompleted`。
 - **`apply_boundary` 失败**：
-  - **`AppError::ApplyBoundaryStale`**（`covered_end_id` 在当前列表不可解析）：发出 **`CompactionError`**（`source: "apply"`、`exhausted_after_retries: false`），**删除** transcript 中对应 **`branch_summary`** 行（见 **§5.7.5.1**），**不** **`restore_pending_result`**；可选 **`discard_cached_completed`** 防御清理。
-  - **其它可重试错误**（未来若扩展）：仍 **`restore_pending_result`**，与旧「待消费 `CompactionResult`」语义一致。
+  - `covered_end_id` 在当前列表不可解析：记录诊断并丢弃过期结果，不展示压缩失败提示，也不删除 transcript 中原有的空 marker。
+  - 摘要正文写入失败：发出 `CompactionError`（`source: "apply"`），保留原上下文和已完成的摘要供下次重试写入，不重新调用模型。
 
 **⑤ + ② 双点 `try_restart_if_pending`**：
 
-- 时机 **⑤**（LLM 回复后）与时机 **②**（下一次发起 LLM 请求前）**都调用** `preheat.try_restart_if_pending(...)`。
+- ⑤ 回复后、② 本轮首次请求前先 `settle` 再尝试 `try_restart_if_pending`，达到 50% 且切口验证通过才重启。工具轮之间只收尾、不重启失败任务。
 - 这样即使 **⑤ 未执行到**（例如走了 **tool_calls** 分支、提前结束本轮），仍可在 **②** 补上恢复，避免长期卡在 `ExhaustedPending`。
 
 **`abort`**：
 
-`preheat.abort()` 将状态从 **任意** 状态收束到 **`Idle`**：取消运行中的 task、清除 pending / 未完成句柄，与 Session 销毁或用户中止时释放资源一致。
+`preheat.abort()` 将状态从 **任意** 状态收束到 **`Idle`**：取消运行中的 task、清除 pending / 未完成句柄，用于退出会话等显式清理；它不同于停止当前推理。A/B 交接超时会在取消后再等待本地退出。
 
 ### 6.7 与 `max_tool_rounds` 的关系
 
@@ -1466,11 +1435,11 @@ Use this EXACT format (same as the original summary):
 
 #### 7.5.2 Compaction 请求显式 `tools: None`
 
-`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。它经 `LlmProvider::chat_collect` 取得完整摘要：普通 provider 使用非流式 JSON；拒绝 `stream:false` 的 Responses 中转站则在 adapter 内缓冲 SSE/NDJSON，语义仍是一份完整的 `ChatResponse`，不向摘要状态机泄露传输差异。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
+`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。它经 `LlmProvider::chat_collect` 取得完整摘要：OpenAI Chat Completions 与 Responses 共用流式收集器，成功结束后才交付完整的 `ChatResponse`，中断不交付部分摘要。自动摘要估算「模板＋旧摘要＋正文」超出所选摘要模型输入预算时，仅在这次请求的投影中去掉所有工具结果（含预览），其余内容仍整份发送，不拆段、不改会话原文或覆盖范围。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
 
-#### 7.5.3 失败路径：指数退避 + transcript 留痕
+#### 7.5.3 失败路径：单次生成 + transcript 留痕
 
-`Compactor::try_start` 内的 `for attempt in 1..=MAX_PREHEAT_RETRIES` 重试 loop **Err 分支末尾**追加 `tokio::time::sleep(500ms << (attempt - 1))`，即 `500ms / 1s / 2s` 三档退避；3 次都失败后通过 `insert_entry_after_message_id` 在 transcript 写一条 `BranchSummaryEntry { summary: None, error: Some(...), attempts: Some(3), is_boundary: false, ... }` 的失败锁点，与既有 `AgentEvent::CompactionError` 事件流并行（事件给上层 UI、留痕给会话重启与人工排查）。
+生成失败时追加 `compaction_failed` 诊断，空正文切口不会折叠历史。等待超时且任务已在本地退出后追加 `compaction_aborted`。不在任务内再做一层重试或退避。
 
 `BranchSummaryEntry` 新增两个可选字段（向后兼容旧 transcript）：
 
@@ -1483,7 +1452,7 @@ pub attempts: Option<u32>,
 
 `init_context_state` fold 时遇 `summary == None` 直接跳过（不生成假摘要 `ChatMessage`，仅作日志锚点），不影响重启路径与既有 §7.4 boundary 升级语义。
 
-测试锁点见 [`src/core/compaction/tests/preheat_and_truncation.rs`](../../../src/core/compaction/tests/preheat_and_truncation.rs) 与 [`src/core/compaction/tests/legacy_transcript_compat.rs`](../../../src/core/compaction/tests/legacy_transcript_compat.rs)（虚拟时钟下退避计时；3 次耗尽端到端写入；缺字段默认 None；成功条目不序列化失败字段）。
+测试锁点见 [`src/core/compaction/tests/preheat_and_truncation.rs`](../../../src/core/compaction/tests/preheat_and_truncation.rs) 与 [`src/core/compaction/tests/legacy_transcript_compat.rs`](../../../src/core/compaction/tests/legacy_transcript_compat.rs)（单次生成失败留痕、虚拟时钟下超时回收，以及旧格式兼容）。
 
 #### 7.5.4 提示缓存前缀稳定化
 
@@ -1687,7 +1656,7 @@ ControlSnapshot::capture(本 loop 的 PlanRuntime?, 本 loop 的 TodosRuntime?, 
 | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[src/core/session/manager/types.rs](../../../src/core/session/manager/types.rs)` | `ContextState` 持有 `messages: Vec<ChatMessage>`、`preheat: Preheat`（Layer 1 状态机）、`start_idx` 等；`CompactionResult` 含 `transcript_compaction_entry_id`；`apply_boundary` 仅按 **`covered_end_id`** 定位 `end_idx`（通过 `msg_id` 匹配），无匹配返回 **`AppError::ApplyBoundaryStale`**                                           |
 | `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `BranchSummaryEntry` 是触发预热时追加的切口 marker；`BranchSummaryTextEntry` 是应用时追加并以 `forId` 关联 marker 的正文。已移除原地升级 `isBoundary` 与删除陈旧 marker 的 rewrite API。 |
-| `[src/core/agent_loop/turn_finalize.rs](../../../src/core/agent_loop/turn_finalize.rs)` / `[src/core/compaction/apply.rs](../../../src/core/compaction/apply.rs)` | reasoning loop 最终回复后：① 恢复 pending preheat ② ratio check 后 Layer 2 非阻塞检查（成功 boundary 在同一成功分支运行 Layer 0）③ 启动下一轮 Layer 1 预热；发起下一次 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时可能同步等待，成功后由调用方重建发送消息 |
+| `[src/core/agent_loop/turn_finalize.rs](../../../src/core/agent_loop/turn_finalize.rs)` / `[src/core/compaction/apply.rs](../../../src/core/compaction/apply.rs)` | reasoning loop 最终回复后：① 恢复 pending preheat ② ratio check 后 Layer 2 非阻塞检查（成功 boundary 在同一成功分支运行 Layer 0）③ 启动下一轮 Layer 1 预热；发起下一次 LLM 请求前：先收取预热结果，r>=0.70 时非阻塞应用；只有进入 B 交接才等 A |
 | `[src/infra/config/types.rs](../../../src/infra/config/types.rs)`                 | `[context]` 配置节更新 `layer0_single_result_max_chars` 为 50K、新增 `layer0_placeholder_threshold_chars`（10K）、新增 `compaction_max_tokens`（10K）                                       |
 | `[src/core/compaction/](../../../src/core/compaction/)`                           | `layer0.rs` 同步清理；`preheat.rs` 前台先追加 marker、后台只计算并写 pending cache；`apply.rs` 三个检查时机共用 `apply_and_emit_boundary`，追加正文后执行 `messages.splice(..=end_idx, [summary_msg])`；`truncation.rs` 物理截断。 |
 | `[src/core/system_prompt.rs](../../../src/core/system_prompt.rs)`                 | 新增分页读取引导 section                                                                                                                                                            |
@@ -1710,8 +1679,8 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 - **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：
   - `preheat.try_restart_if_pending(...)`
   - ratio >= 0.70 → Layer 2 检查（完成则 Boundary 切换）
-  - ratio >= 0.98 → Layer 2 发请求前检查（未完成则**化异步为同步**阻塞等待）
-  - 成功 Boundary 切换后，L0 已同步完成；`ContextState.messages` 是历史的唯一事实源头，工作集必须从它重新拍平，并把已持久化的当前用户输入接回尾部
+  - 不以固定水位等待；只有仍需前台摘要时才执行 §6.3 的 A/B 交接。
+  - Boundary 成功时直接改写当前工作列表并执行 L0，不重新拼回已覆盖的输入。
 - **③ reasoning loop 内 API 返回 Context Overflow 错误**：
   - Layer 3 物理截断 + 重试
 
@@ -1750,7 +1719,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 - `layer0_context_release` → **L0** 本轮落盘 + 占位符释放的估算 tok（已写入会话累计）
 - `auto_compaction_start` / `auto_compaction_end` → **L1** 异步预热进度与前/后/差展示（**不在** `auto_compaction_end` 时累加会话 `compactionTokensFreed`）；`auto_compaction_end` 在 L1 计算完成并写入 pending cache 后发射，L1 不写 transcript
-- `compaction_error`：`source: "preheat"` 且 **`exhausted_after_retries == true`** → **待恢复**提示（需结合 ⑤/② 的 `try_restart_if_pending` 或用户操作）；`source: "apply"` → apply 失败：若错误为 **`ApplyBoundaryStale`**（列表不可解析），**不**再挂起同一 `CompactionResult` 重试；其它 apply 失败仍表示摘要 **待 `restore_pending_result` 重试**
+- `compaction_error`：`source: "preheat"` → 后台任务失败、待检查点恢复；`source: "collapse"` → 前台摘要生成失败，仍尝试主请求（需结合 ⑤/② 的 `try_restart_if_pending` 或用户操作）；`source: "apply"` → apply 失败：若错误为 **`ApplyBoundaryStale`**（列表不可解析），**不**再挂起同一 `CompactionResult` 重试；其它 apply 失败仍表示摘要 **待 `restore_pending_result` 重试**
 - `context_overflow_trim_start` / `context_overflow_trim_end` → **L3** Context Overflow 后的物理裁剪与释放量
 - `boundary_switched` → **L2** 摘要已应用、边界重置（`estimatedTokensFreed` 与本次计入累计的量一致）
 
@@ -1758,11 +1727,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 ### 10.5 UI 反馈
 
 
-| ratio 档位            | UI 表现               |
-| ------------------- | ------------------- |
-| ratio >= 0.50 且预热中  | 状态栏转圈图标："后台准备压缩..." |
-| Boundary 切换完成       | 闪过提示："上下文已重置"       |
-| ratio >= 0.98 同步等待中 | 状态栏："等待压缩完成..."     |
+聊天页加载点旁只在本轮等待 A 或生成 B 时显示「Context 压缩中」/「Compacting context」，由 `foreground_compaction_start` / `foreground_compaction_end` 驱动。成功、失败或停止后清除；后台预热不触发该标签。水位仍显示估算占用，不是压缩进度，也不封顶 100%。
 
 
 ### 10.6 可观测性与 token 估算约定

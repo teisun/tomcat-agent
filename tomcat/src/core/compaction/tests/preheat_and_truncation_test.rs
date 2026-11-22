@@ -171,15 +171,7 @@ fn context_state_messages_push() {
 }
 
 // ---------------------------------------------------------------------------
-// T2-P0-002 Phase D —— 重试退避 + transcript 失败留痕
-//
-// 设计：
-//   - `AlwaysFailingProvider` 让 `generate_summary` 每次都返回 Err，触发 retry loop 走完 3 次。
-//   - `tokio::test(start_paused = true)` 让 `tokio::time::sleep` 走虚拟时钟，CI 不被墙钟拖慢。
-//   - 用 `tokio::time::Instant::now()` 在 await_result 前后取虚拟 elapsed，
-//     断言累计退避 ≈ 500ms + 1000ms = 1500ms（attempt=3 不再 sleep，否则会 >= 3500ms）。
-//   - 失败留痕用 `read_entries_tail` 检查 transcript 末尾是否有 `summary == None` + `error/attempts`
-//     的 BranchSummary 行；同时承接 #T-040 超大消息场景（详见 plan §6.C 决议段）。
+// Preheat failure diagnostics and retry ownership
 // ---------------------------------------------------------------------------
 
 struct AlwaysFailingProvider {
@@ -224,6 +216,163 @@ impl LlmProvider for AlwaysFailingProvider {
     }
 }
 
+// Exercise the real checkpoint while the failed task still owns its result.
+#[tokio::test(start_paused = true)]
+async fn preheat_regression_collects_failure_below_apply_waterline() {
+    let config = ContextConfig::default();
+    let mut state = make_state(2_400, 4_000, 1_000);
+    let mut messages = vec![user_msg_with_id("q", "question")];
+    let (provider, _) = AlwaysFailingProvider::new();
+    let emitter = Arc::new(crate::infra::ScopedEventEmitter::new(
+        Arc::new(DefaultEventBus::new()),
+        "checkpoint",
+    ));
+    assert!(state.preheat.try_start(
+        0.60,
+        &messages,
+        std::path::Path::new(""),
+        None,
+        Arc::new(provider),
+        None,
+        None,
+        &config,
+        emitter.clone(),
+        None,
+    ));
+    assert!(state.preheat.is_warmup_task_active());
+    tokio::task::yield_now().await;
+    assert!(!state.preheat.is_warmup_task_active());
+    let read_state = crate::core::tools::pipeline::read_state::ReadFileState::default();
+    let env = crate::core::compaction::apply::BoundaryEnv {
+        config: &config,
+        work_dir: std::path::Path::new(""),
+        session_id: "checkpoint",
+        read_file_state: &read_state,
+    };
+    let mut start = messages.len();
+    assert!(!crate::core::compaction::apply::check_before_request(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut start,
+    ));
+    assert!(
+        state.preheat.is_exhausted_pending(),
+        "a finished failure is collected even at 60%"
+    );
+
+    let (provider, calls) = AlwaysFailingProvider::new();
+    let provider: Arc<dyn LlmProvider> = Arc::new(provider);
+    for (ratio, batch) in [
+        (0.45, messages.as_slice()),
+        (0.60, &[][..]),
+        (0.60, messages.as_slice()),
+    ] {
+        let started = state.preheat.try_restart_if_pending(
+            ratio,
+            batch,
+            std::path::Path::new(""),
+            None,
+            provider.clone(),
+            None,
+            None,
+            &config,
+            emitter.clone(),
+            None,
+        );
+        assert_eq!(started, ratio >= 0.50 && !batch.is_empty());
+        assert_eq!(state.preheat.is_exhausted_pending(), !started);
+    }
+    assert!(!state.preheat.try_restart_if_pending(
+        0.80,
+        &messages,
+        std::path::Path::new(""),
+        None,
+        provider,
+        None,
+        None,
+        &config,
+        emitter,
+        None,
+    ));
+    tokio::task::yield_now().await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the running replacement is not duplicated"
+    );
+}
+
+struct PendingSummary {
+    entered: Arc<tokio::sync::Notify>,
+    exited: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl LlmProvider for PendingSummary {
+    fn provider_name(&self) -> &str {
+        "pending-summary"
+    }
+
+    async fn chat(&self, _: ChatRequest) -> Result<ChatResponse, AppError> {
+        struct OnDrop<'a>(&'a tokio::sync::Notify);
+        impl Drop for OnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let _exit = OnDrop(&self.exited);
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn chat_stream(
+        &self,
+        _: ChatRequest,
+    ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
+    {
+        unreachable!("fake collect delegates to chat")
+    }
+
+    fn count_tokens(&self, _: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn preheat_regression_timeout_reaps_provider_before_foreground_can_start() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let exited = Arc::new(tokio::sync::Notify::new());
+    let mut preheat = Preheat::new();
+    assert!(preheat.try_start(
+        1.2,
+        &[user_msg_with_id("q", "question")],
+        std::path::Path::new(""),
+        None,
+        Arc::new(PendingSummary {
+            entered: entered.clone(),
+            exited: exited.clone()
+        }),
+        None,
+        None,
+        &ContextConfig::default(),
+        Arc::new(crate::infra::ScopedEventEmitter::new(
+            Arc::new(DefaultEventBus::new()),
+            "handoff"
+        )),
+        None,
+    ));
+    entered.notified().await;
+    let outcome = preheat.await_result(Duration::from_secs(30)).await;
+    assert!(!matches!(outcome, PreheatOutcome::Completed(_)));
+    // Never yield here: returning from the wait admits the foreground request immediately.
+    assert!(
+        futures_util::FutureExt::now_or_never(exited.notified()).is_some(),
+        "foreground is admitted while the background provider still runs"
+    );
+}
+
 fn message_with_id(role: ChatMessageRole, id: &str, text: &str) -> ChatMessage {
     let mut m = match role {
         ChatMessageRole::User => ChatMessage::user(text),
@@ -236,7 +385,7 @@ fn message_with_id(role: ChatMessageRole, id: &str, text: &str) -> ChatMessage {
 }
 
 #[tokio::test(start_paused = true)]
-async fn preheat_retries_with_exponential_backoff() {
+async fn preheat_failure_does_not_retry_outside_provider() {
     let (provider, calls) = AlwaysFailingProvider::new();
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
@@ -262,13 +411,13 @@ async fn preheat_retries_with_exponential_backoff() {
     let dummy_path = std::path::PathBuf::new(); // 空路径 → spawn 内 transcript 写入跳过
 
     let mut preheat = Preheat::new();
-    let started = tokio::time::Instant::now();
     let did_start = preheat.try_start(
         0.95,
         &messages,
         &dummy_path,
         None,
         provider,
+        None,
         None,
         &cfg,
         Arc::clone(&event_emitter),
@@ -280,31 +429,14 @@ async fn preheat_retries_with_exponential_backoff() {
     );
 
     let outcome = preheat.await_result(Duration::from_secs(60)).await;
-    assert!(
-        matches!(outcome, PreheatOutcome::Exhausted),
-        "三次 Err 后应 transition 到 ExhaustedPending（PreheatOutcome::Exhausted）",
-    );
-
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        3,
-        "MAX_PREHEAT_RETRIES = 3，AlwaysFailingProvider 必须被调用 3 次",
-    );
-
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed >= Duration::from_millis(1500),
-        "退避总耗时应 >= 500ms + 1000ms = 1500ms（attempt=3 失败后不睡），实际 {elapsed:?}",
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "总等待不应包含第 3 次 sleep 或额外延时，实际 {elapsed:?}",
-    );
+    assert!(matches!(outcome, PreheatOutcome::Exhausted));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     let ctx = captured
         .lock()
         .unwrap()
         .clone()
         .expect("耗尽后应发出 compaction_error");
+    assert_eq!(ctx.payload["attempts"], 1);
     assert_eq!(ctx.session_id.as_deref(), Some("sid-preheat-test"));
     assert_eq!(
         ctx.payload.get("sessionId").and_then(|v| v.as_str()),
@@ -365,6 +497,7 @@ async fn preheat_exhausted_keeps_its_unfulfilled_marker_and_emits_an_error() {
         None,
         provider,
         None,
+        None,
         &cfg,
         Arc::clone(&event_emitter),
         None,
@@ -381,7 +514,7 @@ async fn preheat_exhausted_keeps_its_unfulfilled_marker_and_emits_an_error() {
             TranscriptEntry::BranchSummary(b) if b.is_boundary == Some(true) => Some(b.clone()),
             _ => None,
         })
-        .expect("preheat start must leave its empty marker even if all retries fail");
+        .expect("preheat start must leave its empty marker even if generation fails");
 
     assert_eq!(
         marker.summary,

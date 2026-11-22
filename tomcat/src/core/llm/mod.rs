@@ -26,6 +26,7 @@ pub mod replay_policy;
 pub mod resolver;
 pub(crate) mod retry_delay;
 pub mod speed;
+pub(crate) mod stream_collect;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;

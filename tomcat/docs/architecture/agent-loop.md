@@ -299,32 +299,17 @@ execute_tool(read image/pdf)
 - `follow_up_queue`：同样是 `Arc<Mutex<Vec<ChatMessage>>>`。`AgentLoop` 自带一份局部队列；`ChatContext` 还能通过 `with_shared_follow_up_queue(...)` 注入一份 session 级共享队列，用于后台 shell 完成通知等 auto-feed 场景。当前有两个消费点：**between-turns drain**，以及**非 steered 的 tool batch 收口后、下一次发起 LLM 请求前**的 reasoning batch-boundary drain。它仍不会打断正在执行的单个 tool，也不会回头改写已写入历史的 tool_result。
 - `cancel_token`：`tokio_util::sync::CancellationToken`。每个 user turn 都会重建，避免上一轮的 cancel 污染下一轮。
 
-### 13.7.5 真实输入优先于 queued follow-up
-
-`follow_up_queue` 里的消息常常是 runtime 自己补进来的“后来发生的新事实”，典型例子就是后台 shell 完成通知。它们应该被模型看到，但**不应该压过用户刚刚真正输入的新 prompt**。
-
-chat host 在同一轮里可能同时拿到两样东西：
-
-- `readline()` 刚读到的真实用户输入
-- 前面排队但还没消费的 synthetic follow-up
-
-这时组装下一次请求的顺序必须是：**先 drain queued follow-up，再把真实用户输入放最后**。
+### 13.7.5 本批输入按落盘顺序接入
 
 ```text
-错误顺序
-[real user input, queued follow-up]
-                    │
-                    └─ LLM 看到“最后一条 user 消息”成了后台通知
-                       容易把“任务刚跑完”误当成当前主问题
-
-正确顺序
-[queued follow-up, real user input]
-                  │
-                  └─ LLM 先知道后台发生了什么，
-                     但最后落点仍是用户刚刚真正想问的话
+已落盘的输入和 follow-up → 未落盘的输入及通知（追加即落盘）
+                                  ↓
+                        工作列表、摘要、主请求与重载同序
 ```
 
-**说人话**：后台通知只是补充上下文，不是抢方向盘。它可以插进下一次请求里，但不能盖过用户刚刚敲下来的那句话。
+Serve 通常先落盘用户提示词，再按队列追加后台通知；CLI 在组装时追加提示词，然后追加通知。已落盘项和待落盘通知各自保持原序，不再把真实提示词挪到最后。`<background-task-finished>` 是系统提示明确定义的运行时信号，虽以 `role=user` 传给模型，却不是新的用户指令。
+
+已知例外：busy Serve `follow_up` 会提前落盘、随后才接入内存，本节规则不修复该插入时序。
 
 ### 13.7.6 `max_tool_rounds` 不能被 follow-up 绕过
 
@@ -362,7 +347,7 @@ Steering / FollowUp / `user_with_parts` 都会改变“下一次发给 LLM 的 m
   -> (可选) push user_with_parts
   -> (可选) inject steering 并 break
   -> emit TurnEnd
-  -> maybe_reduce_before_next_llm(...)
+  -> run_request_once(...) → prepare_request_context(...)
   -> 下一次 llm.chat_stream(...)
 ```
 
@@ -400,14 +385,15 @@ Steering / FollowUp / `user_with_parts` 都会改变“下一次发给 LLM 的 m
 
 详见 [上下文管理技术方案](context-management.md)。以下为与 Agent Loop 交互的概要：
 
-上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。除既有三处交互外，阶段二还新增了一条 **mid-turn current-tail guard** 钩子，位置固定在 `tool_dispatcher` 返回、`TurnEnd` 发完、下一次 `llm.chat_stream(...)` 之前：
+上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。
 
-- **本轮 tool round 刚结束时（阶段二新增）**：`current_tail_guard::maybe_reduce_before_next_llm(...)`。顺序是 **precheck → apply 已完成历史 → history recompact → tail reduction waves → 必要时 single branch_summary collapse**；collapse 后会记录 `afterCollapse` 诊断，但**不会**在这里二次 fail-closed。详见 [`current-tail-aggregate-guard.md`](./current-tail-aggregate-guard.md)。
+- **每次请求尝试**：`run_request_once(...)` 调用 `current_tail_guard::prepare_request_context(...)`，然后才执行 `llm.chat_stream(...)`。超预算时先应用就绪摘要、再削减历史与当前轮的工具结果；仍不够才交接后台摘要，必要时生成前台摘要。前台摘要应用后记录 `after_collapse`，仅供诊断，不用于拦截主请求。详见 [`current-tail-aggregate-guard.md`](./current-tail-aggregate-guard.md)。
 
 既有三处交互时机保持不变：
 
-- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll；成功 apply boundary 时其内部紧接执行 L0）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
-- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换并在内部执行 L0（ratio >= 0.98 时可化异步为同步等待）→ 成功时 `messages` 从更新后的 `ctx_state.messages` 重新拍平，并接回已持久化的本轮输入
+- **⑤ LLM 回复后**：先 `settle`；失败待重试且可启动时补一批 A；≥85% 时非阻塞应用已就绪摘要，成功后执行 L0，再按新水位决定是否开始预热。
+- **② 本轮首次请求前**：按落盘顺序接入本批，先 `settle`，可重试则后台重启 A；≥70% 时非阻塞应用就绪摘要，直接改写当前工作列表。
+- **每次发送前的预算检查**：先 `settle`，但工具轮之间不重启失败的 A。放不下先走无模型削减；仍需前台摘要 B 才等已有 A（最多 300 秒）。
 - **③ 单请求内 API 返回 Context Overflow**：L3物理截断 + 重试（Request Retry）；发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`，不能靠压缩重置额度。
 
 **context_metrics_update 发射节奏**（单次 `run_reasoning_loop`）：

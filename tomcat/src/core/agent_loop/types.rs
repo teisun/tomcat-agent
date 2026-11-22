@@ -128,6 +128,8 @@ pub struct AgentLoopConfig {
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
     /// 已按 compaction 模型能力解析的 provider 输出上限。
     pub compaction_output_limit: Option<u32>,
+    /// Effective input budget for the selected compaction model.
+    pub compaction_input_budget: Option<usize>,
     /// Title / utility 场景专用 provider；未设置时回落主对话 provider。
     pub title_provider: Option<Arc<dyn LlmProvider>>,
     /// `LlmScene::Title` 解析后的 model id。
@@ -194,6 +196,7 @@ impl Default for AgentLoopConfig {
             context_config: ContextConfig::default(),
             compaction_provider: None,
             compaction_output_limit: None,
+            compaction_input_budget: None,
             title_provider: None,
             title_model: String::new(),
             title_output_limit: None,

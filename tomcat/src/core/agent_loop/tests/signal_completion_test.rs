@@ -560,8 +560,15 @@ async fn compacting_unfinished_tool_result_does_not_grant_permission() {
         .unwrap();
     agent.start_idx = start;
     agent.set_context_state(Some(state));
-    let result =
-        super::super::request_retry::run_request_once(&mut agent, &mut messages, 1, 1, 2).await;
+    let result = super::super::request_retry::run_request_once(
+        &mut agent,
+        &mut messages,
+        1,
+        1,
+        2,
+        &mut false,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(super::super::types::LoopError::Retryable(_))
@@ -616,11 +623,16 @@ async fn compacting_completed_answer_does_not_revoke_existing_permission() {
     agent.silent_reply_allowed = true;
     agent.start_idx = start;
     agent.set_context_state(Some(state));
-    assert!(
-        super::super::request_retry::run_request_once(&mut agent, &mut messages, 1, 2, 2)
-            .await
-            .is_ok()
-    );
+    assert!(super::super::request_retry::run_request_once(
+        &mut agent,
+        &mut messages,
+        1,
+        2,
+        2,
+        &mut false
+    )
+    .await
+    .is_ok());
     assert_eq!(requests.0.lock().unwrap().len(), 1);
     assert!(!sink
         .rows

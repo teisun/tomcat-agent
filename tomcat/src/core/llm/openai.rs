@@ -1115,6 +1115,13 @@ impl LlmProvider for OpenAiProvider {
         Err(err)
     }
 
+    async fn chat_collect(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
+        crate::core::llm::stream_collect::collect_streaming_response(
+            self.chat_stream(request).await?,
+        )
+        .await
+    }
+
     async fn chat_stream(
         &self,
         request: ChatRequest,

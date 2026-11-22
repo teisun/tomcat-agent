@@ -161,6 +161,7 @@ export function reconcileSessionSnapshot(
     previous.messageQueue === messageQueue &&
     previous.errorRecovery === errorRecovery &&
     previous.requestRetry === requestRetry &&
+    previous.compacting === next.compacting &&
     previous.planTodos === planTodos &&
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&

@@ -2090,8 +2090,7 @@ async fn test_check_before_request_emits_boundary_switched() {
         &emitter,
         &env,
         &mut turn_start,
-    )
-    .await;
+    );
 
     info!("Assert: BoundarySwitched event + messages shortened");
     assert!(applied, "should apply boundary in check_before_request");

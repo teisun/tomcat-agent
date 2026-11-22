@@ -2,9 +2,29 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { ProgressRow } from "../components/ProgressRow";
+import { LocaleProvider } from "../i18n/LocaleProvider";
 import { translate } from "../../../src/shared/i18n";
 
 describe("ProgressRow", () => {
+  it.each([["en", "Compacting context"], ["zh-CN", "Context 压缩中"]] as const)(
+    "shows blocking compaction in %s and clears it when work resumes or stops",
+    (locale, label) => {
+      const view = (busy: boolean, compacting: boolean, retry = false) => (
+        <LocaleProvider locale={locale}>
+          <ProgressRow busy={busy} compacting={compacting} requestRetry={retry ? { attempt: 2, maxAttempts: 4 } : undefined} />
+        </LocaleProvider>
+      );
+      const { rerender } = render(view(true, true, true));
+      expect(screen.getByRole("status", { name: label })).toBeTruthy();
+      expect(screen.getByTestId("progress-row-label").textContent).toBe(label);
+      rerender(view(true, false));
+      expect(screen.getByTestId("progress-row-dots")).toBeTruthy();
+      expect(screen.queryByTestId("progress-row-label")).toBeNull();
+      rerender(view(false, true));
+      expect(screen.queryByTestId("progress-row")).toBeNull();
+    },
+  );
+
   it("updates one live retry row and returns to ordinary progress when the request settles", () => {
     const { rerender } = render(<ProgressRow busy />);
     for (const requestRetry of [

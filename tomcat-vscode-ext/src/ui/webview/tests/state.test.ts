@@ -359,6 +359,25 @@ describe("WebviewStateStore wire routing", () => {
     expect(message?.label).toBeUndefined();
   });
 
+  it("shows only foreground compaction, scoped to the busy session", () => {
+    const store = new WebviewStateStore();
+    store.setReady(true);
+    store.applyEvent({ type: "agent_start", sessionId: "s1" });
+    store.applyEvent({ type: "auto_compaction_start", sessionId: "s1", coveredCount: 3, ratioBefore: 0.5 });
+    expect(store.snapshotSession("s1")?.compacting).toBeUndefined();
+    store.applyEvent({ type: "foreground_compaction_start", sessionId: "other" });
+    expect(store.snapshotSession("other")?.compacting).toBeUndefined();
+    const start = () => store.applyEvent({ type: "foreground_compaction_start", sessionId: "s1" });
+    expect(start()).toEqual({ kind: "session", sessionId: "s1" });
+    expect(store.snapshotSession("s1")?.compacting).toBe(true);
+    expect(store.snapshotSession("s1")?.timeline).toEqual([]);
+    store.applyEvent({ type: "foreground_compaction_end", sessionId: "s1" });
+    expect(store.snapshotSession("s1")?.compacting).toBeUndefined();
+    start();
+    store.setConnectionStatus("reconnecting");
+    expect(store.snapshotSession("s1")?.compacting).toBeUndefined();
+  });
+
   it("keeps live request attempts session-scoped, transient and out of transcript notices", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -398,8 +417,11 @@ describe("WebviewStateStore wire routing", () => {
     const store = new WebviewStateStore();
     store.applyEvent({ type: "agent_start", sessionId: "s1" });
     store.applyEvent({ type: "auto_retry_start", sessionId: "s1", attempt: 3, maxAttempts: 10, delayMs: 0, errorMessage: "overloaded" });
+    store.applyEvent({ type: "foreground_compaction_start", sessionId: "s1" });
+    expect(store.snapshotSession("s1")?.compacting).toBe(true);
     store.applyEvent({ type, sessionId: "s1", messages: [], message: {}, turnIndex: 1, toolCallIds: [], toolResults: [] } as never);
     expect(store.snapshotSession("s1")?.requestRetry).toBeUndefined();
+    expect(store.snapshotSession("s1")?.compacting).toBeUndefined();
   });
 
   it("keeps auto retry progress out of the timeline", () => {

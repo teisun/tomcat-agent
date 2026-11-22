@@ -125,6 +125,7 @@ export function TranscriptView({
   availableModels = [],
   buildModel = "",
   busy,
+  compacting,
   requestRetry,
   errorRecoveryDisabled = busy,
   bottomSpacerHeight = 0,
@@ -168,6 +169,7 @@ export function TranscriptView({
   availableModels?: string[];
   buildModel?: string;
   busy: boolean;
+  compacting?: boolean;
   requestRetry?: WebviewSessionSnapshot["requestRetry"];
   errorRecoveryDisabled?: boolean;
   bottomSpacerHeight?: number;
@@ -432,7 +434,7 @@ export function TranscriptView({
     return (
       <>
         {grouped.map(renderGroupedItem)}
-        {showProgress ? <ProgressRow busy={showProgress} requestRetry={requestRetry} /> : null}
+        {showProgress ? <ProgressRow busy={showProgress} compacting={compacting} requestRetry={requestRetry} /> : null}
       </>
     );
   };
@@ -459,7 +461,7 @@ export function TranscriptView({
         <div className="tc-live-cluster" data-testid="live-cluster">
           {renderCluster(liveClusterTimeline, busy)}
         </div>
-      ) : busy ? <ProgressRow busy requestRetry={requestRetry} /> : null}
+      ) : busy ? <ProgressRow busy compacting={compacting} requestRetry={requestRetry} /> : null}
       <div
         aria-hidden="true"
         className="tc-transcript__spacer"

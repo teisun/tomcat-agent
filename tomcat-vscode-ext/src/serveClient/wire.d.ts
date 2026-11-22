@@ -1106,6 +1106,10 @@ export type WireEvent = ({
 } | {
   type: "agent_start";
 } | {
+  type: "foreground_compaction_end";
+} | {
+  type: "foreground_compaction_start";
+} | {
   type: "steering_consumed";
   userMessageIds: string[];
 }) & {

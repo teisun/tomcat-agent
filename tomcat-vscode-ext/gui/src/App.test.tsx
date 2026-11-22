@@ -50,6 +50,26 @@ function mount(initialState?: unknown, locale?: Locale) {
   };
 }
 
+it("renders the foreground compaction flag even when it is the only snapshot change", async () => {
+  const view = mount(undefined, "en");
+  const snapshot = approvalDraftSnapshot("s1");
+  Object.assign(snapshot.sessionViews.s1, {
+    busy: true,
+    timeline: [{ type: "message", kind: "user", id: "prompt", text: "Original input" }],
+  });
+  await emitState({ channel: "state", content: snapshot, messageId: "compact-idle" });
+  expect(screen.queryByTestId("progress-row-label")).toBeNull();
+  snapshot.sessionViews.s1.compacting = true;
+  await emitState({ channel: "state", content: snapshot, messageId: "compact-active" });
+  expect(screen.getByTestId("progress-row-label").textContent).toBe("Compacting context");
+  view.rerenderLocale("zh-CN");
+  expect(screen.getByTestId("progress-row-label").textContent).toBe("Context 压缩中");
+  delete snapshot.sessionViews.s1.compacting;
+  await emitState({ channel: "state", content: snapshot, messageId: "compact-ended" });
+  expect(screen.getByTestId("progress-row-dots")).toBeTruthy();
+  expect(screen.queryByTestId("progress-row-label")).toBeNull();
+});
+
 describe("request retry feedback", () => {
   it("projects only the active session's live attempt and removes it on idle", async () => {
     const { unmount } = mount(undefined, "en");
@@ -768,6 +788,7 @@ function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapsho
     messageQueue: fixture.messageQueue,
     errorRecovery: fixture.errorRecovery,
     requestRetry: fixture.requestRetry,
+    compacting: fixture.compacting,
     contextRatio: fixture.contextRatio,
     hasMoreHistory: fixture.hasMoreHistory,
     historyLoading: fixture.historyLoading,

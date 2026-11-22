@@ -1,10 +1,11 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use super::super::current_tail_guard::{self, GuardRoute, GuardRouteReason};
+use super::super::current_tail_guard;
 use super::super::{AgentLoop, AgentLoopConfig};
 use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
@@ -21,6 +22,7 @@ use crate::infra::event_bus::DefaultEventBus;
 
 struct ChatOnlyMockLlm {
     summary_text: String,
+    calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -30,6 +32,7 @@ impl LlmProvider for ChatOnlyMockLlm {
     }
 
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(ChatResponse {
             id: None,
             choices: vec![ChatResponseChoice {
@@ -58,112 +61,15 @@ impl LlmProvider for ChatOnlyMockLlm {
     }
 }
 
-#[test]
-fn build_precheck_decision_covers_fit_reduce_and_collapse_routes() {
-    let mut agent = make_agent(ContextConfig {
-        current_tail_compactable_min_chars: 1,
-        ..Default::default()
-    });
-    let fit = current_tail_guard::build_precheck_decision(&agent, &[], 900, 1_000);
-    assert_eq!(fit.route, GuardRoute::Fits);
-    assert_eq!(fit.route_reason, GuardRouteReason::Fits);
-    assert!(fit.yellow_lamp_only);
-
-    let mut reduce_state = context_state(8_000, 1_000);
-    reduce_state
-        .preheat
-        .restore_completed(dummy_compaction_result("old", "new"));
-    agent.set_context_state(Some(reduce_state));
-    let reduce = current_tail_guard::build_precheck_decision(&agent, &[], 2_000, 1_000);
-    assert_eq!(reduce.route, GuardRoute::Reduce);
-    assert_eq!(reduce.route_reason, GuardRouteReason::PreheatShortcut);
-
-    let collapse_messages = vec![
-        ChatMessage::user("u"),
-        assistant_with_tool_calls(&[("tc1", "read")]),
-        ChatMessage::tool("tc1", &"x".repeat(200)),
-    ];
-    agent.start_idx = 1;
-    agent.set_context_state(Some(context_state(8_000, 1_000)));
-    let collapse =
-        current_tail_guard::build_precheck_decision(&agent, &collapse_messages, 3_000, 1_000);
-    assert_eq!(collapse.route, GuardRoute::Collapse);
-    assert_eq!(collapse.route_reason, GuardRouteReason::NotEnoughReducible);
-    assert_eq!(collapse.candidate_count, 1);
-    assert!(collapse.max_reducible < collapse.overflow_tokens + 256);
-}
-
-#[test]
-fn build_precheck_decision_respects_compactable_min_chars_override() {
-    let mut agent = make_agent(ContextConfig {
-        current_tail_compactable_min_chars: 5_000,
-        ..Default::default()
-    });
-    let messages = vec![
-        ChatMessage::user("u"),
-        assistant_with_tool_calls(&[("tc1", "read")]),
-        ChatMessage::tool("tc1", &"x".repeat(4_000)),
-    ];
-    agent.start_idx = 1;
-    agent.set_context_state(Some(context_state(8_000, 1_000)));
-
-    let decision = current_tail_guard::build_precheck_decision(&agent, &messages, 3_000, 1_000);
-    assert_eq!(decision.route, GuardRoute::Collapse);
-    assert_eq!(decision.candidate_count, 0);
-    assert_eq!(decision.max_reducible, 0);
-}
-
-#[test]
-fn build_precheck_decision_collapses_when_history_only_room_is_not_enough() {
-    let mut agent = make_agent(ContextConfig {
-        keep_recent_turns: 0,
-        layer0_placeholder_threshold_chars: 1,
-        current_tail_compactable_min_chars: 1,
-        ..Default::default()
-    });
-    let messages = vec![
-        ChatMessage::user("old turn"),
-        ChatMessage::tool("old_tc", &"h".repeat(4_000)),
-        ChatMessage::user("current turn"),
-        assistant_with_tool_calls(&[("tc1", "write")]),
-        ChatMessage::tool("tc1", &"w".repeat(8_000)),
-    ];
-    agent.start_idx = 2;
-    agent.set_context_state(Some(ContextState {
-        messages: vec![
-            ChatMessage::user("old turn"),
-            ChatMessage::tool("old_tc", &"h".repeat(4_000)),
-        ],
-        estimate_context_chars: 16_000,
-        context_budget_chars: 8_000,
-        context_budget_tokens: 1_000,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        latest_plan_event: None,
-        resume_control: Default::default(),
-        preheat: Preheat::new(),
-        session_obs: Default::default(),
-        live: Default::default(),
-        hydrated: true,
-    }));
-
-    let decision = current_tail_guard::build_precheck_decision(&agent, &messages, 4_000, 1_000);
-    assert_eq!(decision.route, GuardRoute::Collapse);
-    assert_eq!(decision.candidate_count, 0);
-    assert!(
-        decision.max_reducible > 0,
-        "history should still offer some room"
-    );
-    assert!(decision.max_reducible < decision.overflow_tokens + 256);
-}
-
 #[tokio::test]
 async fn mid_turn_guard_fits_is_noop() {
-    let mut agent = make_agent(ContextConfig {
-        current_tail_compactable_min_chars: 1,
-        ..Default::default()
-    });
+    let (mut agent, calls) = make_recording_agent(
+        ContextConfig {
+            current_tail_compactable_min_chars: 1,
+            ..Default::default()
+        },
+        "summary".into(),
+    );
     let user = ChatMessage::user("read one file");
     let assistant = assistant_with_tool_calls(&[("tc1", "read")]);
     let tool = ChatMessage::tool("tc1", &"x".repeat(2_000));
@@ -198,8 +104,9 @@ async fn mid_turn_guard_fits_is_noop() {
     assert_eq!(
         snapshot_messages(&messages),
         original,
-        "fits route should not rewrite messages"
+        "a fitting request should not rewrite messages"
     );
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     let state = agent.context_state.as_ref().unwrap();
     assert_eq!(state.session_obs.compaction_count, 0);
 }
@@ -245,8 +152,6 @@ async fn over_budget_without_preheat_still_collapses() {
     .unwrap()
     .expect("guard should emit a decision");
 
-    assert_eq!(decision.route, GuardRoute::Collapse);
-    assert_eq!(decision.route_reason, GuardRouteReason::NotEnoughReducible);
     assert!(decision.after_collapse.is_some());
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
@@ -259,12 +164,15 @@ async fn over_budget_without_preheat_still_collapses() {
 
 #[tokio::test]
 async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
-    let mut agent = make_agent(ContextConfig {
-        keep_recent_turns: 1,
-        layer0_placeholder_threshold_chars: 1,
-        current_tail_compactable_min_chars: 1,
-        ..Default::default()
-    });
+    let (mut agent, calls) = make_recording_agent(
+        ContextConfig {
+            keep_recent_turns: 1,
+            layer0_placeholder_threshold_chars: 1,
+            current_tail_compactable_min_chars: 1,
+            ..Default::default()
+        },
+        "summary".into(),
+    );
     let old_user = ChatMessage::user("old turn");
     let old_tool = ChatMessage::tool("old_tc", &"h".repeat(16_000));
     let recent_user = ChatMessage::user("current turn");
@@ -314,7 +222,11 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
     assert_eq!(tool_texts[0], TOOL_RESULT_PLACEHOLDER);
     assert_eq!(tool_texts[1], current_a.text_content().unwrap_or(""));
     assert_eq!(tool_texts[2], current_b.text_content().unwrap_or(""));
-    assert_eq!(decision.route, GuardRoute::Reduce);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "history reduction fits without B"
+    );
     assert!(decision.after_each_wave.is_empty());
     assert_eq!(decision.after_collapse, None);
 }
@@ -484,7 +396,6 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
             .any(|text| text == TOOL_RESULT_PLACEHOLDER),
         "first placeholder wave should still happen before the first recheck"
     );
-    assert_eq!(decision.route, GuardRoute::Reduce);
     assert_eq!(decision.after_each_wave.len(), 1);
     assert!(decision.after_each_wave[0] < decision.working_tokens);
     assert_eq!(decision.after_collapse, None);
@@ -690,7 +601,6 @@ async fn current_tail_guard_catches_a_single_turn_that_jumps_from_low_watermark(
     .unwrap()
     .expect("the overflow guard must make a reduction decision");
 
-    assert_eq!(decision.route, GuardRoute::Reduce);
     assert!(
         messages
             .iter()
@@ -755,20 +665,15 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
         hydrated: true,
     }));
 
-    let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
-        &mut agent,
-        &mut messages,
-    )
-    .await
-    .unwrap()
-    .expect("guard should emit a decision");
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
 
     let tool_texts: Vec<_> = messages
         .iter()
         .filter(|msg| msg.role == crate::core::llm::ChatMessageRole::Tool)
         .map(|msg| msg.text_content().unwrap_or("").to_string())
         .collect();
-    assert_eq!(decision.candidate_count, 6);
     assert_eq!(tool_texts[0], TOOL_RESULT_PLACEHOLDER);
     assert_eq!(tool_texts[1], TOOL_RESULT_PLACEHOLDER);
     assert_eq!(tool_texts[2], TOOL_RESULT_PLACEHOLDER);
@@ -853,11 +758,14 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
 
 #[tokio::test]
 async fn mid_turn_guard_collapses_when_two_candidates_remain() {
-    let mut agent = make_agent(ContextConfig {
-        current_tail_compactable_min_chars: 1,
-        current_tail_single_result_max_chars: 20_000,
-        ..Default::default()
-    });
+    let (mut agent, calls) = make_recording_agent(
+        ContextConfig {
+            current_tail_compactable_min_chars: 1,
+            current_tail_single_result_max_chars: 20_000,
+            ..Default::default()
+        },
+        "summary".into(),
+    );
     let user = ChatMessage::user("read four files");
     let assistant = assistant_with_tool_calls(&[
         ("tc1", "read"),
@@ -903,6 +811,15 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
     .unwrap()
     .expect("guard should emit a decision");
 
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "insufficient reduction needs one B"
+    );
+    assert!(decision
+        .after_each_wave
+        .last()
+        .is_some_and(|tokens| *tokens > decision.budget_tokens));
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(decision.after_collapse.is_some());
@@ -997,37 +914,32 @@ fn make_agent(context_config: ContextConfig) -> AgentLoop {
 }
 
 fn make_agent_with_summary(context_config: ContextConfig, summary_text: String) -> AgentLoop {
+    make_recording_agent(context_config, summary_text).0
+}
+
+fn make_recording_agent(
+    context_config: ContextConfig,
+    summary_text: String,
+) -> (AgentLoop, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = ChatOnlyMockLlm {
+        summary_text,
+        calls: calls.clone(),
+    };
     let config = AgentLoopConfig {
         session_id: "sess-guard-behavior".to_string(),
         agent_trail_dir: std::env::temp_dir().to_string_lossy().to_string(),
         context_config,
         ..Default::default()
     };
-    AgentLoop::new(
-        test_binding(Arc::new(ChatOnlyMockLlm { summary_text }), "gpt-4"),
+    let agent = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         config,
         CancellationToken::new(),
-    )
-}
-
-fn context_state(estimate_context_chars: usize, context_budget_tokens: usize) -> ContextState {
-    ContextState {
-        messages: vec![],
-        estimate_context_chars,
-        context_budget_chars: estimate_context_chars.saturating_mul(4),
-        context_budget_tokens,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        latest_plan_event: None,
-        resume_control: Default::default(),
-        preheat: Preheat::new(),
-        session_obs: Default::default(),
-        live: Default::default(),
-        hydrated: true,
-    }
+    );
+    (agent, calls)
 }
 
 fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {
@@ -1042,20 +954,6 @@ fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {
         })
         .collect();
     ChatMessage::assistant_with_tool_calls(Some("tools"), tool_calls)
-}
-
-fn dummy_compaction_result(start_id: &str, end_id: &str) -> CompactionResult {
-    CompactionResult {
-        summary_text: "summary".to_string(),
-        covered_start_id: start_id.to_string(),
-        covered_end_id: end_id.to_string(),
-        covered_count: 1,
-        transcript_compaction_entry_id: Some("cmp".to_string()),
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        preheat_elapsed_ms: 0,
-    }
 }
 
 fn snapshot_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {

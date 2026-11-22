@@ -1073,7 +1073,6 @@
   "terminal.compactionStarted": "[ctx] Background compaction started…",
   "terminal.compactionReady": "[ctx] Summary generated (pending apply) | covered ~{before} tok → summary ~{summary} tok (saved ~{saved} tok)",
   "terminal.compactionApplyFailed": "[ctx] Summary application failed: {detail}",
-  "terminal.preheatExhausted": "[ctx] Preheat failed (attempts: {attempts}): {detail}",
   "terminal.compactionRetry": "[ctx] Context compaction temporarily failed; will retry on your next message: {detail}",
   "terminal.compactionSaved": "[ctx] Context compacted; saved ~{saved} tok",
   "terminal.trimming": "[ctx] Context overflow; trimming older messages…",

@@ -3166,6 +3166,35 @@
         }
       },
       {
+        "description": "The current request is blocked on compaction, not merely warming up in the background.",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "foreground_compaction_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "foreground_compaction_end"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "attempts",
@@ -6288,6 +6317,35 @@
                 "type": "string",
                 "enum": [
                   "auto_compaction_end"
+                ]
+              }
+            }
+          },
+          {
+            "description": "The current request is blocked on compaction, not merely warming up in the background.",
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "foreground_compaction_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "foreground_compaction_end"
                 ]
               }
             }

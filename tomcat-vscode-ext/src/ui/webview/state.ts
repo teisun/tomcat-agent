@@ -2717,7 +2717,7 @@ export class WebviewStateStore {
   setReady(ready: boolean): void {
     this.state.ready = ready;
     this.state.connectionStatus = ready ? "ready" : "connecting";
-    if (!ready) for (const session of Object.values(this.state.sessionViews)) delete session.requestRetry;
+    if (!ready) this.clearDisconnectedProgress();
   }
 
   setConnectionStatus(status: WebviewConnectionStatus, failure: WebviewStateSnapshot["connectionFailure"] =
@@ -2725,7 +2725,14 @@ export class WebviewStateStore {
     this.state.connectionFailure = failure;
     this.state.connectionStatus = status;
     this.state.ready = status === "ready";
-    if (!this.state.ready) for (const session of Object.values(this.state.sessionViews)) delete session.requestRetry;
+    if (!this.state.ready) this.clearDisconnectedProgress();
+  }
+
+  private clearDisconnectedProgress(): void {
+    for (const session of Object.values(this.state.sessionViews)) {
+      delete session.requestRetry;
+      delete session.compacting;
+    }
   }
 
   /**
@@ -2844,7 +2851,10 @@ export class WebviewStateStore {
     const nextBusy = effectiveBusy(payload.busy, payload.interrupted);
     if (trustBusy) {
       session.busy = nextBusy;
-      if (!nextBusy) delete session.requestRetry;
+      if (!nextBusy) {
+        delete session.requestRetry;
+        delete session.compacting;
+      }
       this.syncTabBusy(payload.sessionId, nextBusy);
     }
     session.model = payload.model ?? null;
@@ -3267,6 +3277,7 @@ export class WebviewStateStore {
         return NO_SESSION_RENDER_MUTATION;
       case "turn_end": {
         delete session.requestRetry;
+        delete session.compacting;
         const summaryTitle =
           "summaryTitle" in frame && typeof frame.summaryTitle === "string"
             ? frame.summaryTitle
@@ -3293,12 +3304,14 @@ export class WebviewStateStore {
       }
       case "agent_start":
         delete session.requestRetry;
+        delete session.compacting;
         session.busy = true;
         this.syncTabBusy(session.sessionId, true);
         clearActiveAssistant(runtime);
         return sessionRenderMutation(session.sessionId);
       case "agent_end":
         delete session.requestRetry;
+        delete session.compacting;
         clearActiveAssistant(runtime);
         {
           const recovery = currentTurnRecoveryAction(session);
@@ -3320,6 +3333,7 @@ export class WebviewStateStore {
         return sessionRenderMutation(session.sessionId);
       case "agent_interrupted":
         delete session.requestRetry;
+        delete session.compacting;
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         abortRunningCodeReviewRows(session);
@@ -3329,6 +3343,7 @@ export class WebviewStateStore {
         return sessionRenderMutation(session.sessionId);
       case "agent_idle":
         delete session.requestRetry;
+        delete session.compacting;
         session.busy = false;
         this.syncTabBusy(session.sessionId, false);
         settleRunningTools(session);
@@ -3365,6 +3380,14 @@ export class WebviewStateStore {
           "notice",
           t("state.compactionFailed", { detail: frame.error }),
         );
+        return sessionRenderMutation(session.sessionId);
+      case "foreground_compaction_start":
+        if (!session.busy || session.compacting) return NO_SESSION_RENDER_MUTATION;
+        session.compacting = true;
+        return sessionRenderMutation(session.sessionId);
+      case "foreground_compaction_end":
+        if (!session.compacting) return NO_SESSION_RENDER_MUTATION;
+        delete session.compacting;
         return sessionRenderMutation(session.sessionId);
       case "auto_retry_start":
         if (!session.busy) return NO_SESSION_RENDER_MUTATION;

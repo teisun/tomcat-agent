@@ -357,33 +357,10 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 let _ = io::stderr().flush();
                 return Ok(());
             }
-            let exhausted = evt
-                .payload
-                .get("exhaustedAfterRetries")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let attempts = evt
-                .payload
-                .get("attempts")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if exhausted && source == "preheat" {
-                eprintln!(
-                    "\n\x1b[33m{}\x1b[0m",
-                    tr(
-                        "terminal.preheatExhausted",
-                        &[
-                            ("attempts", &attempts.to_string()),
-                            ("detail", &err_display)
-                        ]
-                    )
-                );
-            } else if source == "preheat" {
-                eprintln!(
-                    "\n\x1b[33m{}\x1b[0m",
-                    tr("terminal.compactionRetry", &[("detail", &err_display)])
-                );
-            }
+            eprintln!(
+                "\n\x1b[33m{}\x1b[0m",
+                tr("terminal.compactionRetry", &[("detail", &err_display)])
+            );
             let _ = io::stderr().flush();
             Ok(())
         }),

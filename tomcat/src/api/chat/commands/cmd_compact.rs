@@ -115,6 +115,7 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
                 .key_for(ctx.session_runtime.session.current_session_key())
                 .as_deref(),
             resolved_output_limit: compaction_call.output_limit_for_request(None).0,
+            input_budget_tokens: Some(compaction_call.limits.input_budget_tokens),
             transcript_path: Some(&state.transcript_path),
         },
     )

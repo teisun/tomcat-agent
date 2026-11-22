@@ -15,7 +15,9 @@
 
 use tracing::info;
 
-use crate::core::agent_loop::current_tail_guard::collapse_to_branch_summary;
+use super::current_tail_guard::{
+    collapse_to_branch_summary, handoff_preheat_before_collapse, CollapseOutcome,
+};
 use crate::core::compaction::force_drop_oldest_after_confirmed_overflow;
 use crate::core::llm::{degrade_unsupported_multimodal, Capabilities, ChatMessage};
 use crate::core::session::manager::{estimate_msg_chars, estimated_tokens_from_chars};
@@ -211,15 +213,7 @@ pub(super) async fn handle_overflow_retry(
 
     let mut trim_tokens = 0usize;
     let mut trim_turns = 0usize;
-    let mut collapse_failed = None;
-    let mut collapsed = attempt >= 2;
-    if collapsed {
-        // 被动 overflow 的第二次命中直接复用主动侧最强的 Collapse，不另造一套
-        // “递进裁剪”。这条路径能覆盖原先 L3 永远原样保留 tail 的盲点。
-        if let Err(error) = collapse_to_branch_summary(agent, messages).await {
-            collapse_failed = Some(error);
-        }
-    } else if let Some(ref mut ctx_state) = agent.context_state {
+    if let Some(ctx_state) = agent.context_state.as_mut().filter(|_| attempt < 2) {
         let (turns_removed, chars_removed) =
             force_drop_oldest_after_confirmed_overflow(ctx_state, messages, &mut agent.start_idx);
         trim_turns = turns_removed;
@@ -230,19 +224,31 @@ pub(super) async fn handle_overflow_retry(
                 ctx_state.session_obs.compaction_count.saturating_add(1);
         }
     }
-    if !collapsed && trim_turns == 0 {
-        // No completed historical turn remains. Retrying the original payload cannot recover,
-        // so collapse the current tail in this same overflow attempt.
-        collapsed = true;
-        if let Err(error) = collapse_to_branch_summary(agent, messages).await {
-            collapse_failed = Some(error);
+    // A second confirmed overflow or an exhausted historical prefix needs a real rewrite.
+    let needs_collapse = trim_turns == 0;
+    let mut collapse_failed = None;
+    let mut compacted = false;
+    if needs_collapse {
+        let recovery = async {
+            if handoff_preheat_before_collapse(agent, messages).await? {
+                return Ok(true);
+            }
+            Ok::<_, AppError>(matches!(
+                collapse_to_branch_summary(agent, messages).await?,
+                CollapseOutcome::Applied
+            ))
+        }
+        .await;
+        match recovery {
+            Ok(applied) => compacted = applied,
+            Err(error) => collapse_failed = Some(error),
         }
     }
     let after_message_count = messages.len();
     let after_chars = messages.iter().map(estimate_msg_chars).sum::<usize>();
     // “裁剪成功”不能只看函数是否被调用。至少消息条数或估算字符数必须严格下降；
     // Collapse 可合法地用一条摘要替换一条超长 user 消息，因此不能要求两者同时下降。
-    let applied = collapse_failed.is_none()
+    let applied = (compacted || trim_turns > 0)
         && (after_message_count < before_message_count || after_chars < before_chars);
 
     let ratio_after = agent
@@ -269,7 +275,7 @@ pub(super) async fn handle_overflow_retry(
         attempt,
         turns_removed = trim_turns,
         trim_tokens,
-        route = if collapsed { "collapse" } else { "reduce" },
+        route = if needs_collapse { "collapse" } else { "reduce" },
         before_message_count,
         after_message_count,
         before_chars,

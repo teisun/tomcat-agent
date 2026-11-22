@@ -1,7 +1,33 @@
 //! 单元测试：`preheat` 模块的 `snapshot_message_bounds_for_preheat` 纯函数。
 
-use super::snapshot_message_bounds_for_preheat;
+use super::{messages_to_text, snapshot_message_bounds_for_preheat, summary_projection};
 use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
+
+#[test]
+fn summary_projection_filters_all_tool_results_only_when_oversized() {
+    let messages = [
+        ChatMessage::user("keep [ToolResult] in real user text"),
+        ChatMessage::tool("short", "SHORT_TOOL"),
+        ChatMessage::assistant("keep assistant text"),
+        ChatMessage::tool("long", &"LONG_TOOL".repeat(500)),
+    ];
+    let full = messages_to_text(&messages);
+    let prompt = "first summary template including previous summary text";
+    let exact = (full.len() + prompt.len()) / 4;
+    assert_eq!(summary_projection(&messages, prompt, Some(exact)), full);
+    assert!(full.contains("SHORT_TOOL") && full.contains("LONG_TOOL"));
+    for budget in [exact - 1, 1] {
+        assert_eq!(
+            summary_projection(&messages, prompt, Some(budget)),
+            "[User] keep [ToolResult] in real user text\n[Assistant] keep assistant text\n"
+        );
+    }
+    assert_eq!(
+        messages_to_text(&messages),
+        full,
+        "main history is not modified"
+    );
+}
 
 fn normal_msg(id: &str) -> ChatMessage {
     ChatMessage {

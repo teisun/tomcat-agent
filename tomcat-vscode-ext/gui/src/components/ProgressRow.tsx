@@ -6,9 +6,11 @@ import { LoadingDots } from "./LoadingDots";
 
 function ProgressRowComponent({
   busy,
+  compacting,
   requestRetry,
 }: {
   busy: boolean;
+  compacting?: boolean;
   requestRetry?: WebviewSessionSnapshot["requestRetry"];
 }) {
   const t = useT();
@@ -16,7 +18,8 @@ function ProgressRowComponent({
     return null;
   }
 
-  const label = requestRetry ? t("progress.retrying", requestRetry) : t("progress.working");
+  const label = compacting ? t("progress.compacting")
+    : requestRetry ? t("progress.retrying", requestRetry) : t("progress.working");
   return (
     <div
       aria-label={label}
@@ -25,7 +28,7 @@ function ProgressRowComponent({
       role="status"
     >
       <LoadingDots className="tc-progress-row__dots" testId="progress-row-dots" />
-      {requestRetry ? <span className="tc-progress-row__label" data-testid="progress-row-label">{label}</span> : null}
+      {compacting || requestRetry ? <span className="tc-progress-row__label" data-testid="progress-row-label">{label}</span> : null}
     </div>
   );
 }
@@ -33,6 +36,7 @@ function ProgressRowComponent({
 export const ProgressRow = memo(
   ProgressRowComponent,
   (previous, next) => previous.busy === next.busy
+    && previous.compacting === next.compacting
     && previous.requestRetry?.attempt === next.requestRetry?.attempt
     && previous.requestRetry?.maxAttempts === next.requestRetry?.maxAttempts,
 );

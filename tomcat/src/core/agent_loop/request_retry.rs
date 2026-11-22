@@ -53,6 +53,7 @@ pub(super) async fn run_request(
     let mut unsupported_multimodal_hits = 0u32;
     let mut attempt = 1;
     let mut retry_started = false;
+    let mut proactive_collapse_failed = false;
     let result = loop {
         if attempt > max_attempts {
             break Err(LoopError::Fatal(AppError::Llm(crate::infra::i18n::tr(
@@ -91,7 +92,16 @@ pub(super) async fn run_request(
         }
         // Stream consumption and compaction retain their commit-aware cancellation.
         // The request owns no assistant/tool publication; those happen after this returns.
-        match run_request_once(agent, messages, turn_index, attempt, max_attempts).await {
+        match run_request_once(
+            agent,
+            messages,
+            turn_index,
+            attempt,
+            max_attempts,
+            &mut proactive_collapse_failed,
+        )
+        .await
+        {
             Ok(outcome) => break Ok(outcome),
             Err(error @ (LoopError::Aborted { .. } | LoopError::Fatal(_))) => break Err(error),
             Err(LoopError::Retryable(error)) => {
@@ -185,13 +195,16 @@ pub(super) async fn run_request_once(
     turn_index: usize,
     attempt: u32,
     max_attempts: u32,
-) -> Result<super::types::StreamOutcome, LoopError> {
+    proactive_collapse_failed: &mut bool,
+) -> Result<StreamOutcome, LoopError> {
     if agent.cancel_token.is_cancelled() {
         return Err(agent.make_aborted(messages, String::new()));
     }
     agent.main_request_failed = false;
     // Join compaction publication before observing cancellation.
-    let reduced = current_tail_guard::maybe_reduce_before_next_llm(agent, messages).await;
+    let reduced =
+        current_tail_guard::prepare_request_context(agent, messages, proactive_collapse_failed)
+            .await;
     if agent.cancel_token.is_cancelled() {
         return Err(agent.make_aborted(messages, String::new()));
     }

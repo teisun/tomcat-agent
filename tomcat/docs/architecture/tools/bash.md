@@ -49,7 +49,7 @@ bash -> { task_id, log_path }
              └─ task_stop()                     -> kill process group + reap
 ```
 
-后台自然结束会发 lifecycle event；host 使用 completion route 去重后，把 `<background-task-finished ...>` synthetic notification 放入 follow-up queue。它补充上下文，不覆盖更新的真实用户输入。
+后台自然结束会发 lifecycle event；host 使用 completion route 去重后，把 `<background-task-finished ...>` 通知放入 follow-up queue。未落盘的通知按队列顺序接在已落盘输入之后；标签和系统提示明确它是补充上下文，不是新的用户指令，不靠调整消息顺序区分。
 
 ## 3. 统一 spawn 与取消
 

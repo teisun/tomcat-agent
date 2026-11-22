@@ -1069,7 +1069,6 @@
   "terminal.compactionStarted": "[ctx] 后台压缩已启动…",
   "terminal.compactionReady": "[ctx] 压缩摘要就绪（待应用）| 覆盖区 ~{before} token → 摘要 ~{summary} token（估省 {saved} token）",
   "terminal.compactionApplyFailed": "[ctx] 摘要应用失败：{detail}",
-  "terminal.preheatExhausted": "[ctx] 预热失败（已尝试 {attempts} 次）：{detail}",
   "terminal.compactionRetry": "[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试：{detail}",
   "terminal.compactionSaved": "[ctx] 上下文已压缩重置，约节省 {saved} token",
   "terminal.trimming": "[ctx] 上下文溢出，正在截断旧消息…",

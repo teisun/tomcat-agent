@@ -136,27 +136,45 @@ pub(crate) struct ResolvedSubagentRuntime {
     pub context_config: ContextConfig,
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
     pub compaction_output_limit: Option<u32>,
+    pub compaction_input_budget: Option<usize>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+}
+
+struct SubagentCompactionRuntime {
+    context_config: ContextConfig,
+    provider: Option<Arc<dyn LlmProvider>>,
+    output_limit: Option<u32>,
+    input_budget: Option<usize>,
 }
 
 fn resolve_subagent_compaction_runtime(
     llm_resolver: &dyn LlmResolver,
     base_context_config: &ContextConfig,
     main_catalog_id: &str,
-) -> (ContextConfig, Option<Arc<dyn LlmProvider>>, Option<u32>) {
+) -> SubagentCompactionRuntime {
     let mut context_config = base_context_config.clone();
     match llm_resolver.resolve(LlmScene::Compaction, Some(main_catalog_id)) {
         Ok(call) => {
             let output_limit = call.output_limit_for_request(None).0;
             context_config.compaction_model = call.model;
-            (context_config, Some(call.provider_impl), output_limit)
+            SubagentCompactionRuntime {
+                context_config,
+                provider: Some(call.provider_impl),
+                output_limit,
+                input_budget: Some(call.limits.input_budget_tokens),
+            }
         }
         Err(err) => {
             warn!(
                 error = %err,
                 "failed to resolve child-agent compaction runtime; falling back to main provider"
             );
-            (context_config, None, None)
+            SubagentCompactionRuntime {
+                context_config,
+                provider: None,
+                output_limit: None,
+                input_budget: None,
+            }
         }
     }
 }
@@ -170,12 +188,16 @@ pub(crate) fn resolve_subagent_runtime(
     model_id: &str,
 ) -> Result<ResolvedSubagentRuntime, crate::infra::error::AppError> {
     let main_call = llm_resolver.resolve(LlmScene::Main, Some(model_id))?;
-    let (context_config, compaction_provider, compaction_output_limit) =
-        resolve_subagent_compaction_runtime(
-            llm_resolver,
-            base_context_config,
-            main_call.catalog_id(),
-        );
+    let SubagentCompactionRuntime {
+        context_config,
+        provider: compaction_provider,
+        output_limit: compaction_output_limit,
+        input_budget: compaction_input_budget,
+    } = resolve_subagent_compaction_runtime(
+        llm_resolver,
+        base_context_config,
+        main_call.catalog_id(),
+    );
     let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
         main_call.provider_impl.as_ref(),
         llm_files_config,
@@ -188,6 +210,7 @@ pub(crate) fn resolve_subagent_runtime(
         context_config,
         compaction_provider,
         compaction_output_limit,
+        compaction_input_budget,
         openai_files_runtime,
     })
 }
@@ -319,6 +342,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         let compaction_output_limit = runtime
             .compaction_output_limit
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
+        let compaction_input_budget = runtime.compaction_input_budget;
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let max_attempts = deps.agent_max_attempts;
@@ -386,6 +410,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         context_config,
                         compaction_provider,
                         compaction_output_limit,
+                        compaction_input_budget,
                         title_provider: None,
                         title_model: String::new(),
                         title_output_limit: None,
@@ -586,6 +611,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let compaction_output_limit = runtime
             .compaction_output_limit
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
+        let compaction_input_budget = runtime.compaction_input_budget;
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let max_attempts = deps.agent_max_attempts;
@@ -665,6 +691,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         context_config,
                         compaction_provider,
                         compaction_output_limit,
+                        compaction_input_budget,
                         title_provider: None,
                         title_model: String::new(),
                         title_output_limit: None,
@@ -951,6 +978,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let compaction_output_limit = runtime
             .compaction_output_limit
             .or_else(|| runtime.main_call.output_limit_for_request(None).0);
+        let compaction_input_budget = runtime.compaction_input_budget;
         let context_config = runtime.context_config.clone();
         let openai_files_runtime = runtime.openai_files_runtime.clone();
         let max_attempts = deps.agent_max_attempts;
@@ -1023,6 +1051,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         context_config,
                         compaction_provider,
                         compaction_output_limit,
+                        compaction_input_budget,
                         title_provider: None,
                         title_model: String::new(),
                         title_output_limit: None,

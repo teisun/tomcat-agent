@@ -102,6 +102,7 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
         None,
         Arc::new(SummaryProvider),
         None,
+        None,
         &ContextConfig::default(),
         emitter,
         None,
@@ -175,6 +176,7 @@ async fn preheat_background_computation_does_not_mutate_the_marker_transcript() 
         None,
         Arc::new(SummaryProvider),
         None,
+        None,
         &ContextConfig::default(),
         Arc::new(ScopedEventEmitter::new(
             Arc::new(DefaultEventBus::new()),
@@ -200,7 +202,7 @@ async fn preheat_background_computation_does_not_mutate_the_marker_transcript() 
 }
 
 #[tokio::test]
-async fn preheat_starts_when_custom_rows_follow_the_latest_message() {
+async fn preheat_rejects_stale_tail_without_copying_but_accepts_diagnostic_rows() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("custom-tail-preheat.jsonl");
     write_header(
@@ -247,6 +249,27 @@ async fn preheat_starts_when_custom_rows_follow_the_latest_message() {
     .unwrap();
 
     let mut preheat = Preheat::new();
+    let emitter = Arc::new(ScopedEventEmitter::new(
+        Arc::new(DefaultEventBus::new()),
+        "custom-tail-preheat",
+    ));
+    let config = ContextConfig::default();
+    let before = std::fs::read(&transcript).unwrap();
+    assert!(!preheat.try_start(
+        0.95,
+        std::slice::from_ref(&user),
+        &transcript,
+        None,
+        Arc::new(SummaryProvider),
+        None,
+        None,
+        &config,
+        emitter.clone(),
+        None,
+    ));
+    assert!(preheat.is_idle());
+    assert_eq!(preheat.snapshot_copies(), 0);
+    assert_eq!(std::fs::read(&transcript).unwrap(), before);
     assert!(preheat.try_start(
         0.95,
         &[user, assistant],
@@ -254,13 +277,17 @@ async fn preheat_starts_when_custom_rows_follow_the_latest_message() {
         None,
         Arc::new(SummaryProvider),
         None,
-        &ContextConfig::default(),
-        Arc::new(ScopedEventEmitter::new(
-            Arc::new(DefaultEventBus::new()),
-            "custom-tail-preheat",
-        )),
+        None,
+        &config,
+        emitter,
         None,
     ));
+    assert_eq!(preheat.snapshot_copies(), 1);
+    let PreheatOutcome::Completed(result) = preheat.await_result(Duration::from_secs(5)).await
+    else {
+        panic!("diagnostic row does not affect the cut");
+    };
+    assert_eq!(result.covered_end_id, "a1");
 }
 
 #[tokio::test]
@@ -300,6 +327,7 @@ async fn aborting_preheat_persists_a_terminal_diagnostic() {
         &transcript,
         None,
         Arc::new(SummaryProvider),
+        None,
         None,
         &ContextConfig::default(),
         Arc::new(ScopedEventEmitter::new(

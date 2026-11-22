@@ -414,14 +414,19 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
             None,
             failing_provider,
             None,
+            None,
             &agent.config.context_config,
             Arc::clone(&event_emitter),
             None,
         ));
     }
-    tokio::time::sleep(Duration::from_millis(1_700)).await;
-    let exhausted = agent.context_state.as_mut().unwrap().preheat.poll_result();
-    assert!(matches!(exhausted, PreheatOutcome::Exhausted));
+    tokio::task::yield_now().await;
+    let preheat = &agent.context_state.as_ref().unwrap().preheat;
+    assert!(preheat.is_running() && !preheat.is_warmup_task_active());
+    assert!(
+        !preheat.is_exhausted_pending(),
+        "finalize must collect the failure itself"
+    );
 
     finalize_turn_after_text(
         &mut agent,

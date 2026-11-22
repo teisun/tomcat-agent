@@ -1238,6 +1238,95 @@ fn sse_body(events: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn chat_collect_streams_complete_text_and_rejects_partial_eof() {
+    let first = r#"{"choices":[{"delta":{"content":"Whole "}}]}"#;
+    let second = r#"{"choices":[{"delta":{"content":"title"},"finish_reason":"stop"}]}"#;
+    let response = |body| ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".into(), "text/event-stream".into())],
+        body,
+        delay_ms: 0,
+        declared_content_length: None,
+    };
+    let server = MockHttpServer::start(vec![
+        response(sse_body(&[first, second])),
+        response(format!("data: {first}\n\n")),
+    ])
+    .await;
+    let provider = stream_test_provider(server.base_url.clone(), None, 2);
+    let mut request = stream_test_request();
+    request.stream = Some(false); // title and compaction callers ask for a complete response
+    let complete = provider.chat_collect(request.clone()).await.unwrap();
+    assert_eq!(
+        complete.choices[0].message.text_content(),
+        Some("Whole title")
+    );
+    assert_eq!(complete.choices[0].finish_reason.as_deref(), Some("stop"));
+    let error = provider.chat_collect(request).await.unwrap_err();
+    assert_eq!(
+        classify_llm_failure(&error).kind,
+        LlmFailureKind::StreamInterrupted
+    );
+    assert_eq!(
+        server.request_count(),
+        2,
+        "one request per collection; no retry after text"
+    );
+    for request in server.request_texts() {
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["stream"], true);
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn preheat_with_openai_header_timeout_retries_only_at_provider_layer() {
+    use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
+    use std::sync::Arc;
+
+    let mut delayed = ScriptedHttpResponse::json(200, "{}");
+    delayed.delay_ms = 1_250;
+    let server = MockHttpServer::start(vec![delayed; 3]).await;
+    let mut provider = stream_test_provider(server.base_url.clone(), None, 2);
+    provider.http_read_timeout_sec = 1;
+    provider.client = reqwest::Client::builder()
+        .no_proxy()
+        .read_timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let mut message = ChatMessage::user("summarize me");
+    message.msg_id = Some("u1".into());
+    let emitter = Arc::new(crate::infra::ScopedEventEmitter::new(
+        Arc::new(crate::infra::DefaultEventBus::new()),
+        "streaming-preheat",
+    ));
+    let mut preheat = Preheat::new();
+    assert!(preheat.try_start(
+        0.8,
+        &[message],
+        std::path::Path::new(""),
+        None,
+        Arc::new(provider),
+        None,
+        None,
+        &crate::infra::config::ContextConfig::default(),
+        emitter,
+        None,
+    ));
+    assert!(matches!(
+        preheat.await_result(Duration::from_secs(20)).await,
+        PreheatOutcome::Exhausted
+    ));
+    assert_eq!(
+        server.request_count(),
+        3,
+        "two transport retries and no outer retry"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn stream_post_once_gateway_503_sets_connect_stage() {
     let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
         503,

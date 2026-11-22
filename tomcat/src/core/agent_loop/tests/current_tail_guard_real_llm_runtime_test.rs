@@ -12,7 +12,7 @@ use std::time::Duration;
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
-use super::super::current_tail_guard::{self, GuardRoute};
+use super::super::current_tail_guard;
 use super::super::types::AgentLoop;
 use super::super::AgentLoopConfig;
 use super::mocks::MockPrimitiveExecutor;
@@ -228,7 +228,7 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
     .await
     .expect("start real preheat")
     .expect("phase one must make a guard decision");
-    assert_eq!(phase_one.route, GuardRoute::Fits);
+    assert!(phase_one.fits);
     assert!(
         !agent.context_state.as_ref().unwrap().preheat.is_idle(),
         "a Fits payload above the 50% watermark must start preheat"
