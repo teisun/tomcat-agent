@@ -191,15 +191,8 @@ async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
   const root = path.join(required("HOME"), ".tomcat");
   const configBefore = await fs.readFile(path.join(root, "tomcat.config.toml"), "utf8");
   const modelsBefore = await fs.readFile(path.join(root, "models.toml"), "utf8");
-  // Webview readiness precedes asynchronous Serve bootstrap/history hydration.
-  await support.waitForWebviewDomSnapshot(api, dom => dom.messageTexts.some(text => text.includes("legacy fixture conversation")) ? true : undefined);
-  const firstPid = api.__testing.getServeProcessId();
-  assert.ok(firstPid);
-  assert.ok(api.__testing.getWebviewState().sessions.some(session => session.sessionId === sessionId));
-  assert.equal((await api.__testing.getSessionState(sessionId)).model, "gpt-5.4");
-  assert.equal((await api.__testing.getSessionState(sessionId)).modelReady, true);
-  const chat = await capture.SettingsFrameDriver.connectFromEnvironment(".tc-shell");
-  await vscode.commands.executeCommand("workbench.action.toggleMaximizedAuxiliaryBar");
+  await vscode.commands.executeCommand("workbench.action.maximizeAuxiliaryBar");
+  const chat = await capture.SettingsFrameDriver.connectFromEnvironment('.tc-shell [data-testid="transcript"] [data-testid="message-text"]');
   const shots: string[] = [];
   const captureBoth = async (name: string) => {
     for (const [viewport, width, height] of [["wide", 1440, 900], ["narrow", 390, 844]] as const) {
@@ -210,6 +203,16 @@ async function assertLegacyUpgradeWorkflow(api: Api, artifacts: string) {
     await chat.setViewport(1440, 900);
   };
   try {
+    // Read the rendered conversation from the same frame we exercise below. A host-side
+    // test message sent during startup can go unanswered even after history is visible.
+    await chat.waitForSnapshot(snapshot => snapshot.text.includes("legacy fixture conversation"), "Saved conversation must be visible after upgrade");
+    const firstPid = api.__testing.getServeProcessId();
+    assert.ok(firstPid);
+    assert.equal(api.__testing.getWebviewState().activeSessionId, sessionId);
+    assert.ok(api.__testing.getWebviewState().sessions.some(session => session.sessionId === sessionId));
+    const session = await api.__testing.getSessionState(sessionId);
+    assert.equal(session.model, "gpt-5.4");
+    assert.equal(session.modelReady, true);
     await chat.waitForSnapshot(snapshot => snapshot.text.includes("gpt-5.4"), "Upgraded model must be visible");
     await captureBoth("upgrade-ready");
     await api.__testing.sendWebviewIntent({ type: "prompt", messageId: "upgrade-start", data: { sessionId, text: "Implement the saved upgrade plan now." } });

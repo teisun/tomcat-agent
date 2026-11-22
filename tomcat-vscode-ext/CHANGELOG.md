@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.21
+
+- This release carries the changes prepared for 0.2.20, which was not published: long conversations show **Compacting context** only when the next request must wait. Prompts and background notifications keep their saved order. See the entries below for web search settings, session Todos, plan recovery, image previews and the search plugin migration since 0.2.16.
+- Platform-specific packages bundle CLI 0.2.2. If you use the pure extension, update your external CLI to 0.2.2. Let active tasks finish before restarting a shared service to pick up the new executable.
+
 ## 0.2.20
 
 - Long conversations no longer wait for a background summary when the next request fits. If compaction is necessary, Tomcat reuses an available summary before starting another. The progress row shows **Compacting context** only while the turn is waiting on compaction; Stop ends that turn without discarding a background summary in progress.

@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat AI Agent",
   "description": "%extension.description%",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "publisher": "tomcat-agent",
   "license": "MIT",
   "repository": {
