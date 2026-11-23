@@ -5,6 +5,7 @@
 - Run read-only Explorer investigations in parallel. Background investigations report back automatically, so the main conversation can continue without polling. Reports are delivered in full, and late reports cannot reopen a stopped turn even if cleanup times out.
 - Follow a child conversation live from its dispatch card or the **Subagents** dock. The view is read-only, and returning to the main conversation preserves your draft. The controller can stop an individual investigation without stopping the rest of its batch.
 - Choose separate models for **Explorer** and **Plan Reviewer** under **Settings → Subagents**, or let each inherit the main conversation's model. Changes apply to new tasks, not ones already running.
+- Fix terminal input on Linux stalling after the first character when a whole line arrives at once. Preflight notices still appear on stderr.
 - Platform-specific packages bundle CLI 0.2.3. If you use the pure extension, update your external CLI to 0.2.3. Let active tasks finish before restarting an already running shared service to pick up the new executable; restarting stops all its tasks.
 
 ## 0.2.21

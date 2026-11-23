@@ -1,8 +1,9 @@
 //! 控制台：进程启动时的终端初始化，以及终端输入期间的输出能力。
 
-/// 用户正在输入时，能否从别的线程往终端打印（rustyline 的 `ExternalPrinter`）。
-/// macOS 中文输入法在这条输入路径下更容易出现回显异常，所以关掉。
-pub const ASYNC_PRINT_DURING_INPUT: bool = !cfg!(target_os = "macos");
+/// Use Rustyline's asynchronous redraw only on Windows. On Unix its external
+/// printer waits for new kernel input even when Rustyline has already buffered
+/// the rest of the line (rustyline #703). Preflight notices fall back to stderr.
+pub const ASYNC_PRINT_DURING_INPUT: bool = cfg!(windows);
 
 /// CLI 启动时调用一次，准备好当前终端。Unix 不需要做任何事。
 pub(crate) fn prepare_console() {

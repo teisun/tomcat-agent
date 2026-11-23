@@ -6,6 +6,7 @@
 
 - 扩展内置 CLI `0.2.3`。本轮以上一公开 EXT `0.2.21` 为基线，包含并行 Explorer、后台完整报告、只读旁看、单任务停止和角色模型设置；见 [CHANGELOG](../../tomcat-vscode-ext/CHANGELOG.md#0222)。
 - [候选基线 CI](https://github.com/teisun/tomcat-agent/actions/runs/45185028306) 的三平台 Rust 门禁失败：严格 Clippy、工具定义预算、Serve 快照；另有 Linux PTY 超时和历史 Windows Todos 测试失败。整改保留原预算线，重新生成快照，修正 PTY 测试的终端类型、输出拼接和超时诊断，以及 Todos 测试的 Windows 路径和时间设置。本机严格 Clippy、受影响回归及扩展快速门禁已通过；三平台以候选提交的 GitHub CI 为准。
+- [首次候选 CI](https://github.com/teisun/tomcat-agent/actions/runs/45214778412) 的 macOS、Windows 门禁通过；Linux 只剩 PTY 首次提交输入仅回显 `i`。Rustyline 的 Unix 异步打印路径会在编辑器已有缓冲字节时等待新输入（[上游 #703](https://github.com/kkawakam/rustyline/issues/703)）。Unix 预检通知改用现有 stderr 回退；Windows 输出不变。保留 PTY 整行提交和中文粘贴回归。
 - 候选 CI 通过后，先发布 CLI 并核对四平台归档及校验和，再发布 EXT。EXT 由四平台原生安装验收放行；发布结果以 GitHub Release 实际资产为准。
 
 ### 上一公开发布：CLI 0.2.2 / EXT 0.2.21
