@@ -14,6 +14,7 @@ async fn failed_capture_is_reported_after_draining_the_pipe() {
     let task = Arc::new(BashTask {
         info: RwLock::new(BashTaskInfo {
             task_id: "capture-error".into(),
+            tool_call_id: None,
             command: "owned pipe fixture".into(),
             started_at_unix_ms: 0,
             log_path: log.display().to_string(),

@@ -31,9 +31,9 @@ text-only/合法静默 finalize 成功
   → steering / 非 Signal 追加输入：关闭静默许可；后台 Signal：许可不变
 ```
 
-`run_inner` 收尾同时检查两种队列，复用 `inject_steering_messages/inject_follow_up_messages` 保留 msg_id、append 与上下文记账；错误/取消不作为正常收尾续跑。静默许可的开关与确认规则只在 [stream-terminal-errors.md](llm/stream-terminal-errors.md)「内部通知的正常空终态」维护。Stopped 的模型通知在 completion subscriber 被过滤，独立的 UI 生命周期通道照常更新；Serve 空闲自然通知仅排队、不启动模型。
+`run_inner` 收尾同时检查两种队列，复用 `inject_steering_messages/inject_follow_up_messages` 保留 msg_id、append 与上下文记账；错误/取消不作为正常收尾续跑。静默许可的开关与确认规则只在 [stream-terminal-errors.md](llm/stream-terminal-errors.md)「内部通知的正常空终态」维护。Stopped 的模型通知在 completion subscriber 被过滤，独立的 UI 生命周期通道照常更新；后台 shell 的自然完成通知只排队，不启动空闲模型。Explorer 报告是例外：整个批次结束且队列仍有该批次报告时，可由控制连接启动一次报告回合，见[子会话交付](multi-agent.md)。
 
-**仍存在的风险（本期延期）**：`run_inner` 最后一次查队列之后，经过 chat 监听注销、上下文停车与收尾持久化，直到 Serve `mark_idle` 之前，仍可能接受一条 `queued:true` 的真实输入，却暂时没有消费者，需等下一次输入。admission 与 idle 未在同一临界区，此次不宣称已消除。后续单独设计防丢唤醒，并先用确定性 barrier 固定时序；Signal 空闲不唤醒、中断、维护 busy 的优先级应保留。
+**仍存在的风险（本期延期）**：`run_inner` 最后一次查队列之后，经过 chat 监听注销、上下文停车与收尾持久化，直到 Serve `mark_idle` 之前，仍可能接受一条 `queued:true` 的真实输入，却暂时没有消费者，需等下一次输入。admission 与 idle 未在同一临界区，此次不宣称已消除。后续单独设计防丢唤醒，并先用确定性 barrier 固定时序；子报告的唤醒条件不适用于普通 Signal，也不解决真实输入的准入竞态。
 
 原生写入的 commit-aware 停止由 primitive/dispatcher 边界负责，不能取消丢弃整个 reasoning future；非写盘 compaction 请求在自身边界响应取消。已开始写盘的工具要等真正提交结果及备份登记完成，才能报告停止并恢复文件。
 

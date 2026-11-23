@@ -134,6 +134,7 @@ export function reconcileSessionSnapshot(
   const composerDraft = reconcileValue(previous?.composerDraft, next.composerDraft);
   const instructionCatalog = reconcileValue(previous?.instructionCatalog, next.instructionCatalog);
   const sessionFiles = reconcileValue(previous?.sessionFiles, next.sessionFiles);
+  const backgroundTasks = reconcileValue(previous?.backgroundTasks, next.backgroundTasks);
   const messageQueue = reconcileValue(previous?.messageQueue, next.messageQueue);
   const errorRecovery = reconcileValue(previous?.errorRecovery, next.errorRecovery);
   const requestRetry = reconcileValue(previous?.requestRetry, next.requestRetry);
@@ -158,6 +159,7 @@ export function reconcileSessionSnapshot(
     previous.timeline === timeline &&
     previous.checkpoints === checkpoints &&
     previous.sessionFiles === sessionFiles &&
+    previous.backgroundTasks === backgroundTasks &&
     previous.messageQueue === messageQueue &&
     previous.errorRecovery === errorRecovery &&
     previous.requestRetry === requestRetry &&
@@ -174,6 +176,7 @@ export function reconcileSessionSnapshot(
   return {
     ...next,
     checkpoints,
+    backgroundTasks,
     sessionFiles,
     messageQueue,
     errorRecovery,

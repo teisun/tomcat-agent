@@ -1,10 +1,5 @@
 use std::sync::Arc;
 
-pub(super) fn is_plan_reviewer_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
-    crate::core::plan_runtime::plan_reviewer::PLAN_REVIEWER_ALLOWED_TOOLS.contains(&name)
-        || (expose_skills && name == "load_skill")
-}
-
 pub(super) fn is_code_reviewer_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
     crate::core::plan_runtime::code_reviewer::CODE_REVIEWER_ALLOWED_TOOLS.contains(&name)
         || (expose_skills && name == "load_skill")
@@ -15,9 +10,6 @@ pub(super) fn reviewer_allowed_tools_description(
     expose_skills: bool,
 ) -> String {
     let mut desc = match subagent_type {
-        crate::core::agent_loop::types::SubagentType::PlanReviewer => {
-            "read/search_files/list_dir/todos/update_plan/edit".to_string()
-        }
         crate::core::agent_loop::types::SubagentType::CodeReviewer => {
             crate::core::plan_runtime::code_reviewer::CODE_REVIEWER_ALLOWED_TOOLS.join("/")
         }
@@ -27,15 +19,6 @@ pub(super) fn reviewer_allowed_tools_description(
         desc.push_str("/load_skill");
     }
     desc
-}
-
-/// Explorer 只读：写工具、plan 工具一律不可用；也不能再套娃派发 explorer。
-pub(super) fn is_explorer_whitelisted_tool(name: &str) -> bool {
-    crate::core::plan_runtime::explorer::EXPLORER_ALLOWED_TOOLS.contains(&name)
-}
-
-pub(super) fn explorer_allowed_tools_description() -> String {
-    crate::core::plan_runtime::explorer::EXPLORER_ALLOWED_TOOLS.join("/")
 }
 
 pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {

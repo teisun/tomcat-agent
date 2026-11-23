@@ -223,6 +223,10 @@ pub struct ListModelsPayload {
     pub default_model_id: String,
     /// Effective `llm.title_model` (the settings page's utility model); empty when unset.
     pub utility_model_id: String,
+    #[serde(default)]
+    pub subagent_models: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub plan_reviewer_model_locked: bool,
     /// Per-entry catalog diagnostics, such as skipped incomplete user entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -358,6 +362,13 @@ pub struct SetConnectorToolEnabledResponse {
     pub runtime_applied: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundKind {
+    Subagent,
+    Shell,
+}
+
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -463,6 +474,26 @@ pub enum ServeCommand {
         session_id: Option<String>,
         #[serde(rename = "messageId")]
         message_id: String,
+    },
+    /// Read a child transcript page. Only the first page subscribes this connection.
+    #[serde(rename_all = "camelCase")]
+    ViewChild {
+        id: Option<String>,
+        session_id: String,
+        child_id: String,
+        cursor: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    CloseChildView {
+        id: Option<String>,
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    StopBackground {
+        id: Option<String>,
+        session_id: String,
+        kind: BackgroundKind,
+        task_id: String,
     },
     #[serde(rename_all = "camelCase")]
     GetState {
@@ -612,6 +643,18 @@ pub enum ServeCommand {
         /// Write only when no default is configured yet (`set_default_model_if_unset`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         only_if_unset: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    UpdateSubagentSettings {
+        id: Option<String>,
+        role: crate::infra::config::ModelRole,
+        // A present null resets to inheritance. A missing field does not reset a selection.
+        #[serde(
+            default,
+            deserialize_with = "present_model",
+            skip_serializing_if = "Option::is_none"
+        )]
+        model: Option<Option<String>>,
     },
     #[serde(rename_all = "camelCase")]
     SetUtilityModel {
@@ -991,6 +1034,12 @@ pub struct IngestAttachmentResponse {
     pub filename: String,
 }
 
+fn present_model<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(de).map(Some)
+}
+
 impl ServeCommand {
     pub fn command_id(&self) -> Option<&str> {
         match self {
@@ -1007,6 +1056,9 @@ impl ServeCommand {
             | Self::GetSessionFileBaseline { id, .. }
             | Self::RestoreSessionFiles { id, .. }
             | Self::KeepSessionFiles { id, .. }
+            | Self::ViewChild { id, .. }
+            | Self::CloseChildView { id, .. }
+            | Self::StopBackground { id, .. }
             | Self::GetState { id, .. }
             | Self::ListCheckpoints { id, .. }
             | Self::RestoreCheckpoint { id, .. }
@@ -1028,6 +1080,7 @@ impl ServeCommand {
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
             | Self::SetDefaultModel { id, .. }
+            | Self::UpdateSubagentSettings { id, .. }
             | Self::SetUtilityModel { id, .. }
             | Self::ListProviderKeys { id, .. }
             | Self::WebSearchSettings { id, .. }
@@ -1095,6 +1148,9 @@ impl ServeCommand {
             | Self::LoadExternalSession { session_id, .. }
             | Self::DeleteSession { session_id, .. }
             | Self::RewindAndResend { session_id, .. }
+            | Self::ViewChild { session_id, .. }
+            | Self::CloseChildView { session_id, .. }
+            | Self::StopBackground { session_id, .. }
             | Self::PreviewRewind { session_id, .. }
             | Self::GetSessionFiles { session_id, .. }
             | Self::GetSessionFileBaseline { session_id, .. }
@@ -1112,6 +1168,7 @@ impl ServeCommand {
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
             | Self::SetDefaultModel { .. }
+            | Self::UpdateSubagentSettings { .. }
             | Self::SetUtilityModel { .. }
             | Self::ListProviderKeys { .. }
             | Self::WebSearchSettings { .. }
@@ -1166,6 +1223,9 @@ impl ServeCommand {
             Self::RestoreSessionFiles { .. } => "restore_session_files",
             Self::KeepSessionFiles { .. } => "keep_session_files",
             Self::GetState { .. } => "get_state",
+            Self::StopBackground { .. } => "stop_background",
+            Self::ViewChild { .. } => "view_child",
+            Self::CloseChildView { .. } => "close_child_view",
             Self::ListCheckpoints { .. } => "list_checkpoints",
             Self::RestoreCheckpoint { .. } => "restore_checkpoint",
             Self::Compact { .. } => "compact",
@@ -1187,6 +1247,7 @@ impl ServeCommand {
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::SetDefaultModel { .. } => "set_default_model",
             Self::SetUtilityModel { .. } => "set_utility_model",
+            Self::UpdateSubagentSettings { .. } => "update_subagent_settings",
             Self::ListProviderKeys { .. } => "list_provider_keys",
             Self::WebSearchSettings { .. } => "web_search_settings",
             Self::SetWebSearchRouting { .. } => "set_web_search_routing",
@@ -1226,6 +1287,17 @@ impl ServeCommand {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServePlanEvent {
+    /// No remaining turn, child, or eligible background-report continuation.
+    #[serde(rename = "background.updated", rename_all = "camelCase")]
+    BackgroundUpdated { session_id: String, row: Value },
+    #[serde(rename = "session_settled")]
+    SessionSettled {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        outcome: crate::infra::events::AgentIdleOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<crate::infra::events::TurnFailure>,
+    },
     #[serde(rename = "session.user_message")]
     SessionUserMessage {
         #[serde(rename = "sessionId")]
@@ -1317,6 +1389,8 @@ pub enum ServePlanEvent {
     },
     #[serde(rename = "plan.review")]
     PlanReview {
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]

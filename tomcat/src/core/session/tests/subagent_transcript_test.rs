@@ -143,12 +143,12 @@ fn seed_system_and_user_brief_are_persisted_before_subagent_output() {
         "parent-seed",
     )
     .unwrap();
-    let initial = vec![
+    let mut initial = vec![
         ChatMessage::system("reviewer rules"),
         ChatMessage::user("workspace_hint: /real/project/root"),
     ];
 
-    persist_initial_messages(Some(&sink), &initial);
+    persist_initial_messages(Some(&sink), &mut initial);
 
     let path = subagent_transcript_path(&trail, "child-seed").unwrap();
     let lines = std::fs::read_to_string(path)
@@ -168,6 +168,8 @@ fn seed_system_and_user_brief_are_persisted_before_subagent_output() {
     let TranscriptEntry::Message(user) = user else {
         panic!("seed user brief must be persisted");
     };
+    assert!(user.id.is_some());
+    assert_eq!(user.id, initial[1].msg_id);
     assert_eq!(user.message["role"], "user");
     assert!(user.message["content"]
         .as_str()
@@ -186,16 +188,8 @@ fn jsonl_file_append_sink_is_best_effort_when_path_is_unwritable() {
         SubagentType::Verifier,
         "model",
         "parent-3",
-    )
-    .unwrap();
-    let id = sink
-        .append_message(serde_json::json!({
-            "role": "assistant",
-            "content": "still ok"
-        }))
-        .unwrap();
-
-    assert!(!id.is_empty());
+    );
+    assert!(sink.is_none());
     let path = subagent_transcript_path(bad_root.to_str().unwrap(), "child-3").unwrap();
     assert!(!path.exists());
 }

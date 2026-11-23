@@ -1,4 +1,5 @@
 import { t } from "../../shared/i18n";
+import { parseTask, mergeTasks } from '../../shared/backgroundTasks';
 import type {
   AskQuestionResult,
   AskQuestionWireRequest,
@@ -558,9 +559,12 @@ function upsertPlanEventMessage(
   eventType: string,
   planId: string | null | undefined,
   detail: string | null | undefined,
+  child?:unknown,
 ): void {
+  const reviewerChildId=typeof child === 'string' && child.startsWith(`${session.sessionId}-child-`) ? child : undefined;
   upsertTimelineItem(session, {
-    id: planEventMessageId(eventType, planId, detail),
+    ...(reviewerChildId ? {reviewerChildId} : {}),
+    id: reviewerChildId ? `plan-review:${reviewerChildId}` : planEventMessageId(eventType, planId, detail),
     kind,
     text,
     type: "message",
@@ -1699,6 +1703,11 @@ function applyHistoryPlanCustomEntry(
       }
       return;
     }
+    case 'plan.review.started': {
+      const child=entry.childSessionId ?? entry.child_session_id;
+      if(child) upsertPlanEventMessage(session,'notice','','plan.review',planId,null,child);
+      return;
+    }
     case "plan.review":
       if (typeof entry.summary === "string" && entry.summary.length > 0) {
         upsertPlanEventMessage(
@@ -1708,6 +1717,7 @@ function applyHistoryPlanCustomEntry(
           eventName,
           planId,
           entry.summary,
+          entry.childSessionId ?? entry.child_session_id,
         );
       }
       return;
@@ -2867,6 +2877,7 @@ export class WebviewStateStore {
       session.planTodos = payload.planTodos;
     }
     session.sessionTodos = payload.sessionTodos ?? session.sessionTodos;
+    if (payload.backgroundTasks) session.backgroundTasks = mergeTasks(session.backgroundTasks, payload.backgroundTasks);
     if (payload.contextRatio !== undefined) {
       session.contextRatio = payload.contextRatio ?? null;
     }
@@ -2972,6 +2983,7 @@ export class WebviewStateStore {
       runtime.historyEntries,
       Array.isArray(history.messages) ? history.messages : [],
     );
+    if(history.backgroundTasks?.length){const session=this.ensureSession(sessionId); session.backgroundTasks=mergeTasks(session.backgroundTasks,history.backgroundTasks);}
     runtime.oldestHistoryCursor = history.nextCursor ?? null;
     runtime.hasMoreHistory =
       history.hasMore === true && typeof history.nextCursor === "string";
@@ -2989,6 +3001,7 @@ export class WebviewStateStore {
       history.messages,
       runtime.historyEntries,
     );
+    if(history.backgroundTasks?.length){const session=this.ensureSession(sessionId); session.backgroundTasks=mergeTasks(session.backgroundTasks,history.backgroundTasks);}
     runtime.oldestHistoryCursor = history.nextCursor ?? null;
     runtime.hasMoreHistory =
       history.hasMore === true && typeof history.nextCursor === "string";
@@ -3203,6 +3216,15 @@ export class WebviewStateStore {
   }
 
   private applyEventUnchecked(frame: HostEventFrameContent): SessionRenderMutation {
+    if (frame.type === 'background.updated') {
+      const row = parseTask(frame.row);
+      if (!row || !frame.sessionId) return NO_SESSION_RENDER_MUTATION;
+      const session = this.ensureSession(frame.sessionId);
+      const rows = mergeTasks(session.backgroundTasks, [row]);
+      if (rows === session.backgroundTasks) return NO_SESSION_RENDER_MUTATION;
+      session.backgroundTasks = rows;
+      return sessionRenderMutation(frame.sessionId);
+    }
     if (frame.type === "session.user_message") {
       const session = this.state.sessionViews[frame.sessionId];
       if (!session || session.timeline.some(item => item.id === frame.userMessageId)) return NO_SESSION_RENDER_MUTATION;
@@ -3590,6 +3612,9 @@ export class WebviewStateStore {
         }
         return sessionRenderMutation(session.sessionId);
       }
+      case 'subagent_reports_received':
+        this.appendMessage(session.sessionId, 'notice', t('child.reportsReceived', { count: frame.count }));
+        return sessionRenderMutation(session.sessionId);
       case "session.todos":
         session.sessionTodos = parseTodos(
           "todos" in frame ? frame.todos : undefined,
@@ -3956,6 +3981,9 @@ export class WebviewStateStore {
         );
         return;
       }
+      case 'plan.review.started':
+        if(event.childSessionId) upsertPlanEventMessage(session,'notice','','plan.review',event.planId,null,event.childSessionId);
+        return;
       case "plan.review":
         if (event.summary) {
           upsertPlanEventMessage(
@@ -3965,6 +3993,7 @@ export class WebviewStateStore {
             event.type,
             event.planId,
             event.summary,
+            event.childSessionId,
           );
         }
         return;

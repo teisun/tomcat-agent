@@ -131,6 +131,7 @@ struct ResolveLog(Arc<Mutex<ResolveCallLog>>);
 
 enum RecordingStreamPlan {
     Immediate(Vec<Result<StreamEvent, AppError>>),
+    Gated(tokio::sync::oneshot::Receiver<String>),
     KeepaliveOnlyIdle { interval_ms: u64, timeout_sec: u64 },
 }
 
@@ -197,8 +198,9 @@ impl LlmProvider for RecordingProvider {
         &self.name
     }
 
-    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm("recording provider chat unused".into()))
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.requests.lock().push(req);
+        Ok(serde_json::from_value(serde_json::json!({"choices":[{"index":0,"message":{"role":"assistant","content":"compressed findings"}}]})).unwrap())
     }
 
     async fn chat_stream(
@@ -214,6 +216,21 @@ impl LlmProvider for RecordingProvider {
             return Err(AppError::Llm("no streams left".into()));
         }
         let stream = match guard.remove(0) {
+            RecordingStreamPlan::Gated(gate) => Box::new(Box::pin(
+                futures_util::stream::once(async {
+                    Ok(StreamEvent::ContentDelta {
+                        delta: gate.await.unwrap(),
+                    })
+                })
+                .chain(futures_util::stream::iter([Ok(
+                    StreamEvent::FinishReason {
+                        reason: "stop".into(),
+                    },
+                )])),
+            ))
+                as Box<
+                    dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin,
+                >,
             RecordingStreamPlan::Immediate(events) => Box::new(tokio_stream::iter(events))
                 as Box<
                     dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin,
@@ -259,8 +276,10 @@ const UPSTREAM_IDLE_DIAGNOSTIC: &str = "流式空闲超时";
 struct FakeResolver {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     wire_names: HashMap<String, String>,
+    selections: RwLock<AppConfig>,
     default_model: String,
     fail_main: bool,
+    main_input_budget: Option<usize>,
     log: ResolveLog,
 }
 
@@ -274,14 +293,27 @@ impl FakeResolver {
         Self {
             providers,
             wire_names,
+            selections: RwLock::new(AppConfig::default()),
             default_model: default_model.into(),
             fail_main: false,
+            main_input_budget: None,
             log,
         }
     }
 }
 
 impl LlmResolver for FakeResolver {
+    fn selected_model_id(&self, session: Option<&str>) -> String {
+        session.unwrap_or(&self.default_model).to_string()
+    }
+    fn subagent_model(&self, role: crate::infra::config::ModelRole, inherited: &str) -> String {
+        role.selected(&self.selections.read())
+            .unwrap_or_else(|| inherited.to_string())
+    }
+    fn reload_config(&self, cfg: AppConfig) {
+        *self.selections.write() = cfg;
+    }
+
     fn resolve(
         &self,
         scene: LlmScene,
@@ -316,9 +348,13 @@ impl LlmResolver for FakeResolver {
             .get(&catalog_id)
             .cloned()
             .unwrap_or_else(|| catalog_id.clone());
-        Ok(ResolvedCall::from_parts_unchecked(
-            provider, catalog_id, wire,
-        ))
+        let mut call = ResolvedCall::from_parts_unchecked(provider, catalog_id, wire);
+        if scene == LlmScene::Main {
+            if let Some(budget) = self.main_input_budget {
+                call.limits.input_budget_tokens = budget;
+            }
+        }
+        Ok(call)
     }
 }
 
@@ -578,6 +614,150 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
     }
 }
 
+#[tokio::test]
+async fn real_explorer_batch_has_one_delivery_path_and_keeps_quotas() {
+    use super::super::explorer::ExplorerDelivery;
+    let _g = home_lock().lock().unwrap();
+    for background in [false, true] {
+        let (main, requests) = RecordingProvider::success("fcodex", "unused");
+        let (a, ag) = tokio::sync::oneshot::channel();
+        let (b, bg) = tokio::sync::oneshot::channel();
+        *main.streams.lock() = vec![
+            RecordingStreamPlan::Gated(ag),
+            RecordingStreamPlan::Gated(bg),
+        ];
+        let (other, unused) = RecordingProvider::success("deepseek", "unused");
+        let fx = build_fixture(main, other, requests.clone(), unused, false);
+        let rt = fx.plan_runtime.clone();
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        rt.child_reports.bind(queue.clone());
+        rt.attach_explorer(Arc::new(ProdExplorerDispatcher::new(
+            "batch",
+            reviewer_deps(&fx, None),
+        )));
+        let tasks = vec![
+            ExplorerTask {
+                description: "area".into(),
+                prompt: "inspect".into()
+            };
+            2
+        ];
+        rt.bind_child_queries(
+            fx.registry.clone(),
+            fx.agent_trail_dir.clone(),
+            "parent-binding".into(),
+        );
+        let delivery = rt.dispatch_tool_batch(&tasks, background, Some("investigate"));
+        tokio::pin!(delivery);
+        let tickets = if background {
+            match (&mut delivery).await.unwrap() {
+                ExplorerDelivery::Tickets(t) => t,
+                _ => panic!("expected tickets"),
+            }
+        } else {
+            assert!(futures_util::poll!(&mut delivery).is_pending());
+            vec![]
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while requests.lock().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fx.registry.has_children("parent-binding"));
+        let list: serde_json::Value = serde_json::from_str(
+            &rt.query_child("subagent_list", &serde_json::json!({}))
+                .unwrap(),
+        )
+        .unwrap();
+        let rows = list["agents"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(row["state"], "running");
+            assert_eq!(row["toolCallId"], "investigate");
+            assert!(rt
+                .query_child("subagent_output", &serde_json::json!({"id":row["id"]}))
+                .unwrap()
+                .contains("running"));
+        }
+        assert!(queue.lock().is_empty());
+        assert!(rt
+            .dispatch_batch(&vec![tasks[0].clone(); 8], true)
+            .await
+            .is_err());
+        a.send("first result".into()).unwrap();
+        if background {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while queue.lock().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!rt.child_reports.ready());
+        } else {
+            assert!(futures_util::poll!(&mut delivery).is_pending());
+        }
+        b.send("second result".into()).unwrap();
+        if background {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !rt.child_reports.ready() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let messages = queue.lock();
+            assert_eq!(messages.len(), 2);
+            assert_eq!(tickets.len(), 2);
+            for t in tickets {
+                assert_eq!(t.id, t.child_session_id);
+                let signal = messages
+                    .iter()
+                    .map(|m| {
+                        serde_json::from_str::<serde_json::Value>(m.text_content().unwrap())
+                            .unwrap()
+                    })
+                    .find(|v| v["childSessionId"] == t.id)
+                    .unwrap();
+                // A fresh runtime has neither finished handles nor follow-up messages.
+                let restored = PlanRuntime::new("restored");
+                restored.bind_child_queries(
+                    AgentRegistry::new(),
+                    fx.agent_trail_dir.clone(),
+                    "parent-binding".into(),
+                );
+                let args = serde_json::json!({"id":t.id});
+                let result: serde_json::Value =
+                    serde_json::from_str(&restored.query_child("subagent_output", &args).unwrap())
+                        .unwrap();
+                assert_eq!(result["state"], "completed");
+                assert_eq!(result["report"], signal["report"]);
+                let stranger = PlanRuntime::new("stranger");
+                stranger.bind_child_queries(
+                    fx.registry.clone(),
+                    fx.agent_trail_dir.clone(),
+                    "other".into(),
+                );
+                assert!(stranger.query_child("subagent_output", &args).is_err());
+                assert!(stranger.query_child("subagent_stop", &args).is_err());
+            }
+        } else {
+            match delivery.await.unwrap() {
+                ExplorerDelivery::Reports(r) => {
+                    assert_eq!(r.len(), 2);
+                    assert!(r.iter().all(|r| !r.aborted));
+                }
+                _ => panic!("expected reports"),
+            };
+            assert!(queue.lock().is_empty());
+        }
+        assert!(!fx.registry.has_children("parent-binding"));
+        assert_eq!(requests.lock().len(), 2);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn all_subagents_honor_configured_retry_budget_and_delay() {
     let _g = home_lock().lock().unwrap();
@@ -644,7 +824,7 @@ async fn all_subagents_honor_configured_retry_budget_and_delay() {
             "explorer" => {
                 ProdExplorerDispatcher::new("retry_test", deps)
                     .dispatch(&ExplorerTask {
-                        id: "retry".into(),
+                        description: "retry".into(),
                         prompt: "look around".into(),
                     })
                     .await;
@@ -683,7 +863,89 @@ fn assert_main_resolve_used_session_model(log: &ResolveLog) {
 }
 
 #[tokio::test]
-async fn real_plan_reviewer_owns_todos_without_publishing_to_parent() {
+async fn dispatched_child_compacts_using_its_model_budget_and_own_transcript() {
+    use crate::core::llm::MessageKind;
+    let _g = home_lock().lock().unwrap();
+    for (persist, provider_overflow) in [(true, false), (false, false), (true, true)] {
+        let (main, requests) =
+            RecordingProvider::success("fcodex", "## Findings\nfound\n## Conclusion\nverified");
+        if provider_overflow {
+            main.streams.lock().insert(
+                0,
+                RecordingStreamPlan::Immediate(vec![Err(llm_http_status_error(
+                    "fcodex",
+                    400,
+                    r#"{"error":{"code":"context_length_exceeded"}}"#,
+                ))]),
+            );
+        }
+        let (summary, summaries) = RecordingProvider::success("summary", "unused");
+        let mut fx = build_fixture(main, summary, requests.clone(), summaries.clone(), false);
+        if !provider_overflow {
+            Arc::get_mut(&mut fx.resolver).unwrap().main_input_budget = Some(4_000);
+        }
+        let transcript_dir = fx.agent_trail_dir.join("subagent-sessions");
+        if !persist {
+            std::fs::write(&transcript_dir, "not a directory").unwrap();
+        }
+        let task = ExplorerTask {
+            description: "budget".into(),
+            prompt: "investigate module. ".repeat(6_000),
+        };
+        let report = ProdExplorerDispatcher::new("budget", reviewer_deps(&fx, None))
+            .dispatch(&task)
+            .await;
+        assert!(!report.aborted, "{}", report.report);
+        assert_eq!(summaries.lock().len(), 1);
+        let sent = requests.lock();
+        assert_eq!(sent.len(), 1 + usize::from(provider_overflow));
+        let messages = &sent.last().unwrap().messages;
+        let summary = messages
+            .iter()
+            .find(|m| m.kind == MessageKind::CompactionSummary)
+            .unwrap()
+            .text_content()
+            .unwrap();
+        assert!(summary.contains("compressed findings"));
+        assert!(
+            messages
+                .iter()
+                .filter_map(ChatMessage::text_content)
+                .map(str::len)
+                .sum::<usize>()
+                < task.prompt.len() / 2
+        );
+        if persist {
+            let data = std::fs::read_to_string(
+                transcript_dir.join(format!("{}.jsonl", report.child_session_id)),
+            )
+            .unwrap();
+            let rows: Vec<serde_json::Value> = data
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            assert_eq!(
+                rows.iter()
+                    .filter(|v| v["message"]["role"] == "user")
+                    .count(),
+                1
+            );
+            assert!(
+                rows.iter()
+                    .any(|v| v["type"] == "branch_summary" || v["type"] == "branchSummary"),
+                "no summary boundary"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(transcript_dir).unwrap(),
+                "not a directory"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_reviewer_and_explorer_own_separate_todos_and_compress_only_child_progress() {
     use crate::core::plan_runtime::todo_runtime::TodosRuntime;
     use crate::core::tools::plan_tool::todos;
     let _g = home_lock().lock().unwrap();
@@ -694,14 +956,20 @@ async fn real_plan_reviewer_owns_todos_without_publishing_to_parent() {
     provider.streams.lock().insert(0, RecordingStreamPlan::Immediate(vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0, id: Some("reviewer-todos".into()), name: Some("todos".into()),
-            arguments_delta: Some(serde_json::json!({"new_todos":true,"draft":"reviewer private notes","ops":[
+            arguments_delta: Some(serde_json::json!({"new_todos":true,"draft":"reviewer private notes".repeat(8_000),"ops":[
                 {"kind":"upsert","id":"parent-step","content":"reviewer step","status":"completed"}
             ]}).to_string()),
         }),
         Ok(StreamEvent::FinishReason { reason: "tool_calls".into() }),
     ]));
-    let (other, other_requests) = RecordingProvider::success("deepseek", "unused");
-    let fx = build_fixture(provider, other, requests.clone(), other_requests, false);
+    let (other, other_requests) =
+        RecordingProvider::success("deepseek", "## Findings\nnoted\n## Conclusion\nverified");
+    other.streams.lock().insert(0, RecordingStreamPlan::Immediate(vec![
+        Ok(StreamEvent::ToolCallDelta { index:0, id:Some("explorer-todos".into()), name:Some("todos".into()), arguments_delta:Some(serde_json::json!({"ops":[{"kind":"upsert","id":"parent-step","content":"explorer step"}]}).to_string()) }),
+        Ok(StreamEvent::FinishReason { reason:"tool_calls".into() }),
+    ]));
+    let mut fx = build_fixture(provider, other, requests.clone(), other_requests, false);
+    Arc::get_mut(&mut fx.resolver).unwrap().main_input_budget = Some(8_000);
     let notifications = Arc::new(Mutex::new(0));
     let sink = notifications.clone();
     let parent = TodosRuntime::open(
@@ -729,11 +997,45 @@ async fn real_plan_reviewer_owns_todos_without_publishing_to_parent() {
             Ok(())
         }));
     let dispatcher = ProdPlanReviewerDispatcher::new("todos_isolation", reviewer_deps(&fx, None));
-    let summary = dispatcher
-        .dispatch("binding_plan", "## Goal\nbinding\n", true)
-        .await;
+    let explorer = ProdExplorerDispatcher::new(
+        "todos_isolation",
+        reviewer_deps(&fx, Some("deepseek-v4-flash")),
+    );
+    let task = ExplorerTask {
+        description: "peer".into(),
+        prompt: "inspect".into(),
+    };
+    let (summary, other_report) = tokio::join!(
+        dispatcher.dispatch("binding_plan", "## Goal\nbinding\n", true),
+        explorer.dispatch(&task)
+    );
+    assert!(!other_report.aborted, "{}", other_report.report);
+    let explorer_doc = TodosRuntime::open(
+        fx.agent_trail_dir.clone(),
+        other_report.child_session_id,
+        None,
+    )
+    .snapshot()
+    .unwrap();
+    assert_eq!(explorer_doc.items[0].content, "explorer step");
     assert!(!summary.aborted, "{}", summary.summary);
-    assert_eq!(requests.lock().len(), 2);
+    let captured = requests.lock();
+    assert_eq!(captured.len(), 2);
+    let compressed = captured[1]
+        .messages
+        .iter()
+        .find(|m| m.kind == crate::core::llm::MessageKind::CompactionSummary)
+        .unwrap()
+        .text_content()
+        .unwrap();
+    assert!(
+        compressed.contains("reviewer step")
+            && !compressed.contains("parent work")
+            && !compressed.contains("step 1"),
+        "wrong progress: {compressed}"
+    );
+    assert!(compressed.len() < 16_000);
+    drop(captured);
     assert_eq!(parent.snapshot().unwrap(), before);
     assert_eq!(std::fs::read(parent.path()).unwrap(), bytes);
     assert_eq!(*notifications.lock(), 1);
@@ -749,7 +1051,7 @@ async fn real_plan_reviewer_owns_todos_without_publishing_to_parent() {
     let child_doc = child
         .snapshot()
         .expect("reviewer must have its own saved document");
-    assert_eq!(child_doc.draft, "reviewer private notes");
+    assert_eq!(child_doc.draft, "reviewer private notes".repeat(8_000));
     assert_eq!(child_doc.items[0].content, "reviewer step");
     assert_ne!(child.path(), parent.path());
     let transcript = fx
@@ -836,6 +1138,63 @@ applied_changes: false
         "successful reviewer output must persist in the child's own transcript: {raw}"
     );
     let _ = fx.home;
+}
+
+#[tokio::test]
+async fn open_parent_dispatch_reads_refreshed_role_selection() {
+    use crate::infra::config::{load_model_selection_config, write_subagent_model, ModelRole};
+    let _lock = home_lock().lock().unwrap();
+    let (first, a) = RecordingProvider::success("fcodex", "first finding");
+    let (second, b) = RecordingProvider::success("deepseek", "second finding");
+    let fx = build_fixture(first, second, a.clone(), b.clone(), false);
+    let dispatcher = ProdExplorerDispatcher::new("refresh", reviewer_deps(&fx, None));
+    let task = ExplorerTask {
+        description: "area".into(),
+        prompt: "inspect".into(),
+    };
+    assert!(!dispatcher.dispatch(&task).await.aborted);
+    let path = fx.workspace.path().join("settings.toml");
+    std::fs::write(&path, "[reviewer]\nmodel_override='legacy'\n").unwrap();
+    write_subagent_model(&path, ModelRole::Explorer, Some("deepseek-v4-flash")).unwrap();
+    let load = || load_model_selection_config(&path, &AppConfig::default()).unwrap();
+    assert_eq!(
+        ModelRole::PlanReviewer.selected(&load()).as_deref(),
+        Some("legacy")
+    );
+    write_subagent_model(&path, ModelRole::PlanReviewer, None).unwrap();
+    assert_eq!(ModelRole::PlanReviewer.selected(&load()), None);
+    assert_eq!(load().reviewer.model_override.as_deref(), Some("legacy"));
+    fx.resolver.reload_config(load());
+    assert!(!dispatcher.dispatch(&task).await.aborted);
+    assert_eq!(a.lock()[0].model, "gpt-5.6-sol");
+    assert_eq!(b.lock()[0].model, "deepseek-v4-flash");
+    assert_eq!((a.lock().len(), b.lock().len()), (1, 1));
+}
+
+#[tokio::test]
+async fn existing_plan_reviewer_reads_new_role_then_inherits_after_clear() {
+    use crate::infra::config::{load_model_selection_config, write_subagent_model, ModelRole};
+    let _lock = home_lock().lock().unwrap();
+    let report =
+        "<review>\nsummary: reviewed\nchanges_summary: none\napplied_changes: false\n</review>";
+    let (first, a) = RecordingProvider::success("fcodex", report);
+    let (second, b) = RecordingProvider::success("deepseek", report);
+    let fx = build_fixture(first, second, a.clone(), b.clone(), false);
+    let reviewer = ProdPlanReviewerDispatcher::new("refresh", reviewer_deps(&fx, None));
+    let path = fx.workspace.path().join("role.toml");
+    std::fs::write(&path, "[reviewer]\nmodel_override='legacy'\n").unwrap();
+    for selected in [Some("deepseek-v4-flash"), None] {
+        write_subagent_model(&path, ModelRole::PlanReviewer, selected).unwrap();
+        fx.resolver
+            .reload_config(load_model_selection_config(&path, &AppConfig::default()).unwrap());
+        let result = reviewer
+            .dispatch("binding_plan", "## Goal\nbinding\n", true)
+            .await;
+        assert!(!result.aborted, "{}", result.summary);
+    }
+    assert_eq!(b.lock()[0].model, "deepseek-v4-flash");
+    assert_eq!(a.lock()[0].model, "gpt-5.6-sol");
+    assert_eq!((a.lock().len(), b.lock().len()), (1, 1));
 }
 
 #[tokio::test]
@@ -989,7 +1348,7 @@ summary: verify ok
         .await;
     let explorer_report = explorer
         .dispatch(&ExplorerTask {
-            id: "e1".into(),
+            description: "e1".into(),
             prompt: "look around".into(),
         })
         .await;
@@ -1120,7 +1479,7 @@ async fn session_effort_is_inherited_only_by_same_model_subagents() {
                 deps.parent_session_id = entry.session_id;
                 let summary = ProdExplorerDispatcher::new("effort", deps)
                     .dispatch(&ExplorerTask {
-                        id: "effort".into(),
+                        description: "effort".into(),
                         prompt: "inspect".into(),
                     })
                     .await;
@@ -1162,7 +1521,7 @@ async fn session_effort_tracks_live_default_model_for_subagents() {
                 startup_requests.clone(),
                 false,
             );
-            // The live resolver was refreshed, but child dispatch retains its original fallback.
+            // Plan Reviewer inherits the refreshed default; Verifier keeps its existing fallback.
             Arc::get_mut(&mut fx.resolver).unwrap().default_model = "fcodex/gpt-5.6-sol".into();
             let session = crate::SessionManager::new(fx.agent_trail_dir.join("sessions"));
             let entry = session
@@ -1192,7 +1551,7 @@ async fn session_effort_tracks_live_default_model_for_subagents() {
                     .await;
                 assert_eq!(summary.verdict, "pass", "{}", summary.summary);
             }
-            let (requests, unused, expected) = if same_model {
+            let (requests, unused, expected) = if same_model || role == "plan" {
                 (&current_requests, &startup_requests, ThinkingLevel::Off)
             } else {
                 (&startup_requests, &current_requests, ThinkingLevel::High)
@@ -1241,7 +1600,7 @@ async fn speed_subagent_override_does_not_inherit_parent_paid_preference() {
         ProdExplorerDispatcher::new("speed", reviewer_deps(&fx, Some("deepseek-v4-flash")));
     let report = dispatcher
         .dispatch(&ExplorerTask {
-            id: "speed".into(),
+            description: "speed".into(),
             prompt: "look around".into(),
         })
         .await;
@@ -1304,10 +1663,14 @@ async fn first_llm_fatal_uses_no_transcript_hint_and_llm_error_stop_reason() {
     );
     let raw = std::fs::read_to_string(&path).expect("read eager transcript");
     let lines: Vec<_> = raw.lines().collect();
+    let end: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(end["event"], "subagent.finished");
+    assert_eq!(end["row"]["state"], "failed");
+    assert_eq!(end["report"], summary.summary);
     assert_eq!(
         lines.len(),
-        4,
-        "seed system/user messages should follow header + meta"
+        5,
+        "header, meta, two seed messages and one terminal record"
     );
     assert!(
         raw.contains("\"event\":\"subagent.transcript.meta\""),

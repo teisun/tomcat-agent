@@ -9,6 +9,8 @@
 //! `AgentLoop`、`EventBus`、`ChatContext` 等核心能力保持复用，避免在传输层复制业务逻辑。
 
 pub mod ask_question;
+mod child_view;
+mod child_wake;
 pub mod commands;
 pub mod confirmation;
 mod connection;
@@ -493,6 +495,7 @@ pub(crate) fn register_slot_hooks(state: &Arc<ServeState>, slot: &Arc<SessionSlo
         let handle = spawn_completion_subscriber(&slot.ctx);
         *slot.ctx.session_runtime.completion_subscriber_handle.lock() = Some(handle);
     }
+    child_wake::listen(state, slot);
     if slot.background_task_listener.lock().is_none() {
         *slot.background_task_listener.lock() = Some(spawn_background_task_listener(slot));
     }
@@ -563,6 +566,7 @@ fn spawn_background_task_listener(slot: &Arc<SessionSlot>) -> tokio::task::JoinH
         slot.ctx.global_services.event_bus.clone(),
         slot.session_id.clone(),
     );
+    registry.bind_row_emitter(emitter.clone());
     let mut rx = registry.subscribe_lifecycle();
     tokio::spawn(async move {
         loop {
@@ -661,7 +665,7 @@ pub(super) async fn cancel_and_wait(
     if slot.is_command_job_running() {
         return Err("busy");
     }
-    if slot.is_turn_running() {
+    if slot.is_turn_running() || slot.ctx.agent_registry.has_children(&slot.session_id) {
         state
             .ask_question
             .cancel_live_session(&slot.session_id, "rewind");
@@ -687,6 +691,12 @@ pub(super) async fn cancel_and_wait(
     if slot.is_busy() {
         return Err("stop_timeout");
     }
+    tokio::time::timeout(
+        SESSION_SHUTDOWN_TIMEOUT,
+        slot.ctx.agent_registry.wait_for_children(&slot.session_id),
+    )
+    .await
+    .map_err(|_| "stop_timeout")?;
     // Deferred Git writes have the same budget as CLI checkpoint shutdown, not
     // the short foreground-cancellation budget. Keep ownership on timeout.
     if !drain_checkpoint_record_tasks(
@@ -730,6 +740,17 @@ pub(crate) async fn cleanup_session_slot(
     // Private transports must finish retiring before the slot can be forgotten.
     slot.ctx.stop_session_mcp().await?;
     slot.ctx.agent_registry.cascade_abort(&slot.session_id);
+    tokio::time::timeout(
+        SESSION_SHUTDOWN_TIMEOUT,
+        slot.ctx.agent_registry.wait_for_children(&slot.session_id),
+    )
+    .await
+    .map_err(|_| AppError::Config("stop_timeout".into()))?;
+    let child_listener = slot.child_wake_listener.lock().take();
+    if let Some(listener) = child_listener {
+        listener.abort();
+        let _ = listener.await;
+    }
     let background_task_listener = { slot.background_task_listener.lock().take() };
     if let Some(handle) = background_task_listener {
         handle.abort();

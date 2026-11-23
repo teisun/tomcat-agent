@@ -4251,6 +4251,25 @@ span.tc-attachment-strip__preview-unavailable { cursor: default; }
 .tc-session-dock__tab[aria-selected="true"] { border-bottom-color: var(--vscode-focusBorder); color: var(--vscode-foreground); font-weight: 600; }
 .tc-session-dock__tab:hover { color: var(--vscode-foreground); }
 .tc-session-dock .tc-todo-widget__list { padding: 3px 8px 5px; }
+.tc-child-header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.tc-child-header strong { min-width: 0; overflow-wrap: anywhere; }
+.tc-child-header small { color: var(--vscode-descriptionForeground); }
+.tc-task-list { margin: 0; padding-block: 2px; padding-inline: 26px 6px; list-style: disc outside; }
+.tc-task-list--shell { list-style: none; padding-inline-start: 8px; }
+.tc-background-task { min-width: 0; padding: 3px 4px; border-radius: 4px; }
+.tc-background-task::marker { font-size: .85em; color: var(--vscode-descriptionForeground); }
+.tc-background-task__header { display: flex; align-items: baseline; gap: 6px; min-height: 20px; }
+.tc-background-task button { background: transparent; border: 0; padding: 0; font: inherit; line-height: inherit; color: inherit; cursor: pointer; }
+.tc-background-task button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.tc-background-task__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; }
+.tc-background-task__activity, .tc-background-task .tc-background-task__role { color: var(--vscode-descriptionForeground); font-size: .92em; }
+.tc-background-task__role, .tc-background-task__stop { flex: none; white-space: nowrap; }
+.tc-background-task__activity { display: block; overflow-wrap: anywhere; }
+.tc-background-task .tc-background-task__stop { margin-inline-start: auto; padding-inline: 4px; opacity: 0; }
+.tc-background-task:is(:hover, :focus-within) .tc-background-task__stop { opacity: 1; }
+.tc-session-dock .tc-background-task:is(:hover, :focus-within) { background: var(--vscode-list-hoverBackground, rgba(127,127,127,.12)); }
+.tc-background-task .tc-background-task__stop:disabled { color: var(--vscode-disabledForeground); cursor: default; }
+@media (hover: none) { .tc-background-task .tc-background-task__stop { opacity: 1; } }
 .tc-session-files__toolbar { display: flex; justify-content: flex-end; padding: 2px 8px 4px; }
 .tc-session-files__toolbar button { border: none; background: transparent; font-size: 12px; cursor: pointer; padding: 2px 0; }
 .tc-session-files__toolbar button:disabled { opacity: .45; cursor: default; }

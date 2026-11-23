@@ -288,6 +288,14 @@ impl AgentLoop {
         self.cancel_token.clone()
     }
 
+    /// A reviewer may borrow its parent's plan for tools, never as its own progress.
+    pub(super) fn compaction_plan(&self) -> Option<&Arc<crate::core::plan_runtime::PlanRuntime>> {
+        self.config
+            .plan_runtime
+            .as_ref()
+            .filter(|_| self.config.parent_session_id.is_none())
+    }
+
     pub fn set_context_state(&mut self, state: Option<ContextState>) {
         self.context_state = state;
     }

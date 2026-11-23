@@ -22,6 +22,82 @@ async fn response(buffer: &SharedWriterBuffer, id: &str) -> serde_json::Value {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn closed_child_batch_wakes_once_after_maintenance_with_report_provenance() {
+    use crate::core::{
+        llm::{MessageKind, StreamEvent},
+        plan_runtime::explorer::ExplorerReport,
+    };
+    let _key = install_test_api_key();
+    let (state, buffer, _work, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "conclusion".into(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".into(),
+            }),
+        ]])
+        .await;
+    let reports = &slot.ctx.session_runtime.plan_runtime.child_reports;
+    let batch = reports.batch().unwrap();
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    spawn_session_job(
+        state.clone(),
+        slot.clone(),
+        Some("maint".into()),
+        async move {
+            wait.await.unwrap();
+            Ok(serde_json::Value::Null)
+        },
+    )
+    .unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    for id in ["alpha", "beta"] {
+        batch.publish(
+            &ExplorerReport {
+                child_session_id: id.into(),
+                report: format!("findings for {id}"),
+                stop_reason: "completed".into(),
+                ..Default::default()
+            },
+            &token,
+        );
+    }
+    assert!(!reports.ready());
+    drop(batch);
+    assert!(reports.ready());
+    assert!(requests.0.lock().is_empty());
+    release.send(()).unwrap();
+    response(&buffer, "maint").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !read_ndjson_lines(&buffer)
+            .iter()
+            .any(|f| f["type"] == "agent_idle")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let captured = requests.0.lock().clone();
+    assert_eq!(captured.len(), 1);
+    let signals: Vec<serde_json::Value> = captured[0]
+        .messages
+        .iter()
+        .filter(|m| m.kind == MessageKind::Signal)
+        .map(|m| serde_json::from_str(m.text_content().unwrap()).unwrap())
+        .collect();
+    assert_eq!(signals.len(), 2);
+    assert_eq!(signals[0]["source"], "subagent_report");
+    assert_eq!(signals[1]["childSessionId"], "beta");
+    assert!(!reports.ready());
+    cleanup_session_slot(&state, &slot, super::super::SlotCleanup::Close)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn start_turn_writer_failure_releases_admission_without_starting_work() {
     let _key = install_test_api_key();
     let (state, _buffer, _work, slot) = build_initialized_state_with_streams(vec![]).await;

@@ -87,7 +87,7 @@ fn rendered_reports_warn_when_the_contract_is_violated() {
 #[test]
 fn prompt_is_self_contained_and_names_the_task() {
     let task = ExplorerTask {
-        id: "webview-paste".into(),
+        description: "webview-paste".into(),
         prompt: "Where is the paste event handled?".into(),
     };
     let prompt = build_explorer_prompt(&task, Some(std::path::Path::new("/repo")));
@@ -105,9 +105,19 @@ struct SlowExplorer {
 
 #[async_trait::async_trait]
 impl crate::core::plan_runtime::ExplorerDispatcher for SlowExplorer {
-    async fn dispatch(&self, task: &ExplorerTask) -> ExplorerReport {
-        tokio::time::sleep(self.delay).await;
-        report(&task.id, GOOD_REPORT)
+    async fn dispatch_batch(
+        &self,
+        tasks: &[ExplorerTask],
+        _: Option<std::sync::Arc<crate::core::plan_runtime::child_reports::ReportBatch>>,
+        _: Option<&str>,
+    ) -> Result<ExplorerDelivery, String> {
+        Ok(ExplorerDelivery::Reports(
+            futures_util::future::join_all(tasks.iter().map(|task| async {
+                tokio::time::sleep(self.delay).await;
+                report(&task.description, GOOD_REPORT)
+            }))
+            .await,
+        ))
     }
 }
 
@@ -120,7 +130,7 @@ async fn dispatch_explorers_runs_tasks_in_parallel_and_keeps_input_order() {
     let tasks: Vec<ExplorerTask> = ["a", "b", "c"]
         .iter()
         .map(|id| ExplorerTask {
-            id: (*id).to_string(),
+            description: (*id).to_string(),
             prompt: format!("investigate {id}"),
         })
         .collect();
@@ -146,7 +156,7 @@ async fn dispatch_explorers_without_a_dispatcher_is_an_explicit_error() {
     let rt = crate::core::plan_runtime::PlanRuntime::new("sess-explorer-none");
     let err = rt
         .dispatch_explorers(&[ExplorerTask {
-            id: "a".into(),
+            description: "a".into(),
             prompt: "q".into(),
         }])
         .await

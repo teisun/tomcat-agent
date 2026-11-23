@@ -186,6 +186,7 @@ describe("settings panel model management flow", () => {
     expectedCliVersion?: string | null;
     extensionVersion?: string | null;
     messenger?: Partial<{
+      request: (command: unknown) => Promise<unknown>;
       sendListRemoteModels: (input: unknown) => Promise<unknown>;
       sendRemoveProvider: (keyEnv: string) => Promise<unknown>;
       sendSetUtilityModel: (modelId: string) => Promise<unknown>;
@@ -509,6 +510,17 @@ describe("settings panel model management flow", () => {
         await legacy.panel.__testingDispatchIntent({ type: "setProviderKey", messageId: "legacy-fill", data: { defaultModelId: "fcodex/gpt-5.5", envName: "FCODEX_API_KEY", value: "fixture" } });
         expect(legacyDefault).not.toHaveBeenCalled();
       } finally { legacy.panel.dispose(); }
+    });
+
+    it('retains the role selection and surfaces a rejected subagent write',async()=>{
+      const request=vi.fn().mockResolvedValue({success:false,error:'disk full'});
+      const {panel}=createPanel({ensureInitialized:initializeWith(['list_models','update_subagent_settings']),messenger:{request,sendListModels:vi.fn().mockResolvedValue({success:true,payload:{models:[],subagentModels:{explorer:'saved'}}})}});
+      try {
+        await panel.__testingDispatchIntent({type:'settings.ready',messageId:'ready',data:{route:'subagents'}});
+        await panel.__testingDispatchIntent({type:'updateSubagentSettings',messageId:'clear',data:{role:'explorer',model:null}});
+        expect(request).toHaveBeenCalledWith({type:'update_subagent_settings',role:'explorer',model:null});
+        expect(panel.__testingSnapshot().state).toMatchObject({error:expect.stringContaining('disk full'),subagentModels:{explorer:'saved'}});
+      } finally {panel.dispose();}
     });
 
     it("publishes the utility role and per-entry catalog diagnostics from list_models", async () => {

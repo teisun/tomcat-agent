@@ -492,13 +492,13 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_web_fetch_runtime(web_fetch_runtime)
                             .with_bash_task_registry(bash_task_registry);
-                    let initial_messages = [
+                    let mut initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
                     crate::core::session::subagent_transcript::persist_initial_messages(
                         initial_message_sink.as_ref(),
-                        &initial_messages,
+                        &mut initial_messages,
                     );
                     let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 

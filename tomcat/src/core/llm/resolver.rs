@@ -453,6 +453,10 @@ pub trait LlmResolver: Send + Sync {
             .unwrap_or_else(|_| session_override.unwrap_or_default().to_string())
     }
 
+    fn subagent_model(&self, _role: crate::infra::config::ModelRole, inherited: &str) -> String {
+        inherited.to_owned()
+    }
+
     /// Whether the main model can be resolved locally. Compaction falls back to the main model,
     /// so this is the only precondition. Stateless/custom resolvers supply their own runtime.
     fn model_ready(&self, _session_override: Option<&str>) -> bool {
@@ -819,6 +823,11 @@ impl DefaultLlmResolver {
 }
 
 impl LlmResolver for DefaultLlmResolver {
+    fn subagent_model(&self, role: crate::infra::config::ModelRole, inherited: &str) -> String {
+        role.selected(&self.config.read())
+            .unwrap_or_else(|| inherited.to_owned())
+    }
+
     fn report_connect_failure(&self, provider: &Arc<dyn LlmProvider>) {
         // Match the exact call, not today's model/credential selection. Keep the
         // same providers -> routes lock order as resolve_cached_provider.

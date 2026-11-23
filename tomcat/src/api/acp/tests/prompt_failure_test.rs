@@ -18,16 +18,22 @@ async fn failed_prompt(failure: Option<TurnFailure>) -> Value {
     );
     // Deliberately localized: classification must never depend on display text.
     replies.event(&json!({"type":"agent_end", "sessionId":"s1", "error":"请求失败，请稍后重试"}));
-    replies.event(
-        &serde_json::to_value(WireEvent {
-            session_id: Some("s1".into()),
-            event: AgentEvent::AgentIdle {
-                outcome: AgentIdleOutcome::Failed,
-                failure,
-            },
-        })
-        .unwrap(),
+    let idle = serde_json::to_value(WireEvent {
+        session_id: Some("s1".into()),
+        event: AgentEvent::AgentIdle {
+            outcome: AgentIdleOutcome::Failed,
+            failure,
+        },
+    })
+    .unwrap();
+    replies.event(&idle);
+    assert!(
+        replies.prompts.lock()["s1"].completion.is_some(),
+        "idle is not terminal for an ACP prompt"
     );
+    let mut settled = idle;
+    settled["type"] = json!("session_settled");
+    replies.event(&settled);
     let error = serde_json::to_value(result.await.unwrap().unwrap_err()).unwrap();
     assert_eq!(error["code"], -32603);
     assert_eq!(error["message"], "请求失败，请稍后重试");

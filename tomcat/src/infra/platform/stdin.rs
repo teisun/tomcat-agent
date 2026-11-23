@@ -34,6 +34,21 @@ pub(crate) fn read_line_cancellable<T>(
     read_line_from(input, stop)
 }
 
+/// Wait only while the editor is empty. Never read a key: navigation, paste,
+/// Unicode and control characters must all reach the same readline instance.
+/// Returns true for a report, false for input (including EOF).
+pub(crate) fn first_key_or_report(
+    prompt: impl FnOnce() -> std::io::Result<()>,
+    mut ready: impl FnMut() -> bool,
+) -> std::io::Result<bool> {
+    let stdin = std::io::stdin();
+    #[cfg(unix)]
+    let input = std::os::fd::AsFd::as_fd(&stdin);
+    #[cfg(windows)]
+    let input = std::os::windows::io::AsHandle::as_handle(&stdin);
+    imp::first_key(input, prompt, &mut ready)
+}
+
 /// 同 [`read_line_cancellable`]，但从指定输入端读。
 pub(crate) fn read_line_from<T>(
     input: Input<'_>,
@@ -50,6 +65,58 @@ pub(crate) fn read_line_from<T>(
 #[cfg(unix)]
 mod imp {
     use std::os::fd::AsRawFd;
+
+    pub(super) fn first_key(
+        input: Input<'_>,
+        prompt: impl FnOnce() -> std::io::Result<()>,
+        ready: &mut impl FnMut() -> bool,
+    ) -> std::io::Result<bool> {
+        let fd = input.as_raw_fd();
+        // SAFETY: fd is borrowed and tcgetattr initializes the whole termios on success.
+        let mut attrs = std::mem::MaybeUninit::uninit();
+        if unsafe { libc::tcgetattr(fd, attrs.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let saved = unsafe { attrs.assume_init() };
+        struct Restore(i32, libc::termios);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::tcsetattr(self.0, libc::TCSADRAIN, &self.1);
+                }
+            }
+        }
+        let mut raw = saved;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+        raw.c_cc[libc::VMIN] = 1;
+        raw.c_cc[libc::VTIME] = 0;
+        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &raw) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _restore = Restore(fd, saved);
+        prompt()?;
+        loop {
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut poll, 1, POLL_INTERVAL_MS as i32) };
+            if n > 0 {
+                return Ok(false);
+            }
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            if ready() {
+                return Ok(true);
+            }
+        }
+    }
 
     use super::{Input, ReadLineError, POLL_INTERVAL_MS};
 
@@ -158,6 +225,64 @@ mod imp {
     use super::{Input, ReadLineError, POLL_INTERVAL_MS};
 
     const CTRL_Z: u16 = 0x1a;
+
+    pub(super) fn first_key(
+        input: Input<'_>,
+        prompt: impl FnOnce() -> std::io::Result<()>,
+        ready: &mut impl FnMut() -> bool,
+    ) -> std::io::Result<bool> {
+        use windows_sys::Win32::System::Console::{
+            SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        };
+        let handle = input.as_raw_handle() as HANDLE;
+        let mut saved = 0;
+        if unsafe { GetConsoleMode(handle, &mut saved) } == 0
+            || unsafe {
+                SetConsoleMode(
+                    handle,
+                    saved & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
+                )
+            } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        struct Restore(HANDLE, u32);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    SetConsoleMode(self.0, self.1);
+                }
+            }
+        }
+        let _restore = Restore(handle, saved);
+        prompt()?;
+        loop {
+            match unsafe { WaitForSingleObject(handle, POLL_INTERVAL_MS) } {
+                WAIT_TIMEOUT => {}
+                WAIT_OBJECT_0 => {
+                    let mut record = INPUT_RECORD::default();
+                    let mut n = 0;
+                    if unsafe { PeekConsoleInputW(handle, &mut record, 1, &mut n) } == 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if n != 0 {
+                        if u32::from(record.EventType) == KEY_EVENT
+                            && unsafe { record.Event.KeyEvent.bKeyDown } != 0
+                        {
+                            return Ok(false);
+                        }
+                        if unsafe { ReadConsoleInputW(handle, &mut record, 1, &mut n) } == 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                }
+                _ => return Err(std::io::Error::last_os_error()),
+            }
+            if ready() {
+                return Ok(true);
+            }
+        }
+    }
 
     pub(super) fn read_line<T>(
         input: Input<'_>,

@@ -34,6 +34,44 @@ pub(super) fn event_update(event: &Value) -> Option<acp::SessionUpdate> {
             };
             Some(text_update(message["delta"].as_str()?.to_owned(), thought))
         }
+        "background.updated" if event["row"]["kind"] == "subagent" => {
+            let row = &event["row"];
+            let id = row["id"].as_str()?.to_owned();
+            let status = match row["state"].as_str()? {
+                "running" | "stopping" => acp::ToolCallStatus::InProgress,
+                "completed" => acp::ToolCallStatus::Completed,
+                "failed" | "interrupted" | "stopped" => acp::ToolCallStatus::Failed,
+                _ => return None,
+            };
+            let title = row["description"].as_str()?;
+            if row["revision"] == 1 {
+                Some(acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(id, title)
+                        .kind(acp::ToolKind::Other)
+                        .status(status),
+                ))
+            } else {
+                let activity = row["activity"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(row["state"].as_str()?);
+                let fields = acp::ToolCallUpdateFields::new()
+                    .status(status)
+                    .content(vec![acp::ToolCallContent::from(activity.to_owned())]);
+                Some(acp::SessionUpdate::ToolCallUpdate(
+                    acp::ToolCallUpdate::new(id, fields),
+                ))
+            }
+        }
+        "subagent_reports_received" => {
+            let count = event["count"].as_u64()?;
+            let title = format!("Subagent reports received: {count}");
+            Some(acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(format!("receipt-{}", uuid::Uuid::new_v4()), title)
+                    .kind(acp::ToolKind::Other)
+                    .status(acp::ToolCallStatus::Completed),
+            ))
+        }
         "tool_execution_start" => {
             let name = event["toolName"].as_str().unwrap_or("tool");
             Some(acp::SessionUpdate::ToolCall(

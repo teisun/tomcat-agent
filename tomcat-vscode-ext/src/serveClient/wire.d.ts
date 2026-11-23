@@ -7,6 +7,8 @@ export type AssistantMessageEvent = any;
 
 export type AttachmentMode = "inline" | "reference";
 
+export type BackgroundKind = "subagent" | "shell";
+
 export interface CacheThumbnailInput {
   sourceSha: string;
   thumbBase64: string;
@@ -83,6 +85,8 @@ export interface ModelEntryInput {
   supportedSpeeds?: Speed[] | null;
   thinkingFormat?: null | string;
 }
+export type ModelRole = "explorer" | "plan_reviewer";
+
 export type ModelSource = "builtin" | "user";
 
 export interface ModelView {
@@ -216,6 +220,7 @@ export type ServePlanEvent = {
   verdict?: null | string;
 } | {
   aborted?: boolean | null;
+  childSessionId?: null | string;
   planId?: null | string;
   sessionId?: null | string;
   summary?: null | string;
@@ -272,6 +277,11 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.code_review.exhausted";
   unresolvedFindings?: null | string[];
+} | {
+  failure?: TurnFailure | null;
+  outcome: AgentIdleOutcome;
+  sessionId: string;
+  type: "session_settled";
 } | {
   idleNudges?: null | number;
   planId?: null | string;
@@ -337,6 +347,10 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   todos?: ServeTodoItem[] | null;
   type: "plan.todos";
+} | {
+  row: any;
+  sessionId: string;
+  type: "background.updated";
 };
 
 export type ServeSessionEvent = {
@@ -502,6 +516,8 @@ export interface ListConnectorToolsPayload {
 export interface ListModelsPayload {
   defaultModelId: string;
   models: ModelView[];
+  planReviewerModelLocked?: boolean;
+  subagentModels?: Record<string, string>;
   utilityModelId: string;
   warnings?: string[];
 }
@@ -604,6 +620,12 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "restore_checkpoint";
 } | {
+  childId: string;
+  cursor?: null | string;
+  id?: null | string;
+  sessionId: string;
+  type: "view_child";
+} | {
   configKey: string;
   context: ConnectorContext;
   enabled: boolean;
@@ -688,6 +710,12 @@ export type ServeCommand = {
   type: "remove_provider";
 } | {
   id?: null | string;
+  kind: BackgroundKind;
+  sessionId: string;
+  taskId: string;
+  type: "stop_background";
+} | {
+  id?: null | string;
   language: UiLanguage;
   type: "set_ui_language";
 } | {
@@ -721,6 +749,11 @@ export type ServeCommand = {
   model: string;
   sessionId?: null | string;
   type: "set_model";
+} | {
+  id?: null | string;
+  model?: null | string;
+  role: ModelRole;
+  type: "update_subagent_settings";
 } | {
   id?: null | string;
   modelId: string;
@@ -799,6 +832,10 @@ export type ServeCommand = {
   sessionId: string;
   sourceTurnId: string;
   type: "keep_session_files";
+} | {
+  id?: null | string;
+  sessionId: string;
+  type: "close_child_view";
 } | {
   id?: null | string;
   sessionId: string;
@@ -1020,6 +1057,9 @@ export type WireEvent = ({
   spawnDepth: number;
   subagentType: string;
   type: "sub_agent_start";
+} | {
+  count: number;
+  type: "subagent_reports_received";
 } | {
   coveredCount: number;
   elapsedMs: number;

@@ -71,6 +71,16 @@ fn normalize_plan_transcript_event_for_live_delivery(
     if let Some(plan_id) = obj.remove("plan_id") {
         obj.insert("planId".to_string(), plan_id);
     }
+    for (disk, wire) in [
+        ("child_session_id", "childSessionId"),
+        ("transcript_path", "transcriptPath"),
+        ("tool_call_id", "toolCallId"),
+        ("task_id", "taskId"),
+    ] {
+        if let Some(value) = obj.remove(disk) {
+            obj.insert(wire.into(), value);
+        }
+    }
     if let Some(skip_reason) = obj.remove("skip_reason") {
         obj.insert("skipReason".to_string(), skip_reason);
     }
@@ -936,7 +946,7 @@ impl ChatContext {
                 audit: audit.clone(),
                 bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                model_override: reviewer_model_override.clone(),
+                model_override: None, // Plan Reviewer reads the refreshed resolver on every dispatch.
                 fallback_model: config.llm.default_model.clone(),
                 max_turns: reviewer_max_turns,
             },
@@ -1000,7 +1010,7 @@ impl ChatContext {
                 audit: audit.clone(),
                 bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
-                // explorer 没有独立模型配置，始终跟随会话模型。
+                // Role selection is read from the live resolver, not captured here.
                 model_override: None,
                 fallback_model: config.llm.default_model.clone(),
                 max_turns: reviewer_max_turns,
@@ -1008,6 +1018,12 @@ impl ChatContext {
         );
         plan_runtime.attach_plan_reviewer(Arc::new(prod_plan_reviewer));
         plan_runtime.attach_code_reviewer(Arc::new(prod_code_reviewer));
+        plan_runtime.child_reports.bind(follow_up_queue.clone());
+        plan_runtime.bind_child_queries(
+            agent_registry.clone(),
+            agent_trail_dir.clone(),
+            current_session_entry.session_id.clone(),
+        );
         plan_runtime.attach_explorer(Arc::new(prod_explorer));
         let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
             "chat_context",

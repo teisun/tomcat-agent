@@ -532,7 +532,13 @@ async fn stop_finishes_only_after_output_drain_and_preview_barrier() {
         assert!(std::time::Instant::now() < deadline, "shell never printed");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    reg.stop(&ticket.task_id).await.expect("stop request");
+    let receipt = reg
+        .stop_background(&ticket.task_id)
+        .await
+        .expect("stop request");
+    assert_eq!(receipt["state"], "stopping");
+    assert_eq!(reg.stop_background(&ticket.task_id).await.unwrap(), receipt);
+    assert_eq!(reg.background_rows(), vec![receipt.clone()]);
 
     assert!(
         tokio::time::timeout(
@@ -568,6 +574,9 @@ async fn stop_finishes_only_after_output_drain_and_preview_barrier() {
     reg.wait_for_finish(&ticket.task_id).await.expect("finish");
     let event = lifecycle.recv().await.expect("lifecycle");
     assert_eq!(event.final_status, BashTaskStatus::Stopped);
+    let terminal = reg.stop_background(&ticket.task_id).await.unwrap();
+    assert_eq!(terminal["state"], "stopped");
+    assert!(terminal["revision"].as_u64() > receipt["revision"].as_u64());
 }
 
 #[tokio::test]

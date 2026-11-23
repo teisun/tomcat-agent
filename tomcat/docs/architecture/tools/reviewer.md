@@ -33,6 +33,8 @@ planner chooses whether to revise the plan
 缺少最终验收 todo 时，reviewer 可通过 `update_plan` 的 `upsert.todo_kind=acceptance`
 补建；第二个验收 todo 会被工具拒绝。
 
+审查运行在独立子会话：私有工作本与压缩不使用父工作本，父计划仍按原权限可读。点击审查任务描述可只读旁看；点击角色名进入 Plan Reviewer 的模型设置，下一次审查采用新选择。配置迁移、定向停止与记录格式见[多 Agent 运行时](../multi-agent.md)。
+
 ## Code reviewer 与 verifier
 
 `CodeReviewerDispatcher`、生产实现、相关 prompt 和 frontmatter 字段仍保留，供手动或

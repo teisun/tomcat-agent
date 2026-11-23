@@ -23,6 +23,78 @@ fn text(frames: &[Value], kind: &str) -> String {
 }
 
 #[test]
+fn background_explorer_finishes_inside_original_acp_prompt() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    let release = Arc::new(AtomicBool::new(false));
+    let gate = release.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let main = calls.clone();
+    let server = common::serve::spawn_routed_openai_stream_server(move |req| {
+        let msgs = &req["messages"];
+        let system = msgs[0]["content"].as_str().unwrap_or_default();
+        let answer = |s: &str| response(vec![sse_delta(s), sse_finish("stop"), sse_done()]);
+        if system.starts_with("You are an Explorer subagent") {
+            let start = std::time::Instant::now();
+            while !gate.load(Ordering::Acquire) && start.elapsed() < WAIT {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return answer("fixture-child-finding");
+        }
+        if !req["tools"].is_array() {
+            return answer("Title");
+        }
+        match main.fetch_add(1,Ordering::SeqCst) {
+            0=>response(vec![sse_tool_call("investigate","dispatch_agent",&json!({"tasks":[{"type":"explorer","description":"Check workspace","prompt":"Investigate fixture"}],"run_in_background":true}).to_string()),sse_finish("tool_calls"),sse_done()]),
+            1=>answer("Parent ready"),
+            _=>{assert!(msgs.to_string().contains("fixture-child-finding"));answer("Combined findings")}
+        }
+    });
+    let fx = ServiceFixture::new(&server.base_url);
+    let mut host = spawn(&fx);
+    initialize(&mut host);
+    let id = new_session(&mut host, &fx.0.workspace);
+    prompt(&mut host, "investigation", &id, "Investigate workspace");
+    let initial = host.recv_until(WAIT, |f| {
+        f["params"]["update"]["content"]["text"] == "Parent ready"
+    });
+    let child_id = initial
+        .iter()
+        .map(|f| &f["params"]["update"])
+        .find(|u| u["sessionUpdate"] == "tool_call" && u["title"] == "Check workspace")
+        .expect("ACP child start")["toolCallId"]
+        .as_str()
+        .unwrap();
+    assert!(!host
+        .recv_available(Duration::from_millis(200))
+        .iter()
+        .any(|f| f["id"] == "investigation"));
+    release.store(true, Ordering::Release);
+    let frames = host.recv_until(WAIT, |f| f["id"] == "investigation");
+    assert_eq!(ok(&frames)["stopReason"], "end_turn");
+    assert!(text(&frames, "agent_message_chunk").contains("Combined findings"));
+    let updates: Vec<_> = frames.iter().map(|f| &f["params"]["update"]).collect();
+    assert!(updates
+        .iter()
+        .any(|u| u["sessionUpdate"] == "tool_call_update"
+            && u["toolCallId"] == child_id
+            && u["status"] == "completed"));
+    assert_eq!(
+        updates
+            .iter()
+            .filter(|u| u["sessionUpdate"] == "tool_call"
+                && u["title"] == "Subagent reports received: 1")
+            .count(),
+        1
+    );
+    assert!(!text(&frames, "agent_message_chunk").contains("fixture-child-finding"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    close(host);
+}
+
+#[test]
 fn acp_startup_config_applies_before_new_load_and_resets_per_controller() {
     fn value<'a>(options: &'a Value, id: &str) -> &'a Value {
         &options
@@ -1270,9 +1342,20 @@ fn session_mcp_cancel_joins_running_server_and_next_prompt_restarts_it() {
         ]
         .into_iter(),
     );
-    // Cancellation can also schedule a non-streaming thinking-title request.
+    // Thinking-title requests use the same provider but are not main-model turns.
     // Keep auxiliary requests separate from the three main-model responses.
     let server = common::serve::spawn_routed_openai_stream_server(move |request| {
+        if request["stream"] == true
+            && request["messages"][0]["content"].as_str().is_some_and(|s| {
+                s.starts_with("Generate a short title summarizing this AI assistant thinking block")
+            })
+        {
+            return response(vec![
+                sse_delta("Used private MCP"),
+                sse_finish("stop"),
+                sse_done(),
+            ]);
+        }
         if request["stream"] == false {
             response(vec![common::serve::ScriptedPart {
                 delay_ms: 0,

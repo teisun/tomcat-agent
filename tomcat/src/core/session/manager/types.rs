@@ -394,6 +394,32 @@ fn _static_assert_context_state_send() {
 }
 
 impl ContextState {
+    /// Empty working set for a fresh session; the caller accounts for the system
+    /// prompt and any initial brief, which are not stored in `messages` here.
+    pub(crate) fn fresh(
+        context_budget_tokens: usize,
+        estimate_context_chars: usize,
+        transcript_path: PathBuf,
+    ) -> Self {
+        Self {
+            messages: Vec::new(),
+            estimate_context_chars,
+            context_budget_tokens,
+            context_budget_chars: crate::infra::config::compute_context_budget_chars_from_tokens(
+                context_budget_tokens,
+            ),
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            transcript_path,
+            latest_plan_event: None,
+            resume_control: Default::default(),
+            preheat: Preheat::new(),
+            session_obs: Default::default(),
+            live: Default::default(),
+            hydrated: true,
+        }
+    }
+
     /// Apply the limits of the model selected for the next request. This never
     /// restores compacted history; it only changes the next compaction
     /// threshold when a session switches models.

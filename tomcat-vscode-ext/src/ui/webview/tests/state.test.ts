@@ -17,6 +17,19 @@ import {
 const backendEditNote = "第 2 段匹配到 3 处";
 const backendEditSummary = "1 个文件已落盘，1 个失败且未写入";
 
+it('merges reviewer start, summary and task snapshots by child ID and revision rather than title',()=>{
+  const store=new WebviewStateStore();store.setActiveSession('s1');
+  const id='s1-child-plan_reviewer-a';const row={kind:'subagent',type:'plan_reviewer',id,description:'Review',activity:'Thinking…',startedAt:1,state:'running',revision:1} as const;
+  store.applyEvent({type:'plan.review.started',sessionId:'s1',childSessionId:id});
+  store.applyEvent({type:'background.updated',sessionId:'s1',row});
+  store.applyEvent({type:'plan.review',sessionId:'s1',childSessionId:id,summary:'looks good'});
+  store.applyEvent({type:'background.updated',sessionId:'s1',row:{...row,state:'completed',revision:3}});
+  store.hydrateHistory('s1',{sessionId:'s1',messages:[{type:'custom',event:'plan.review',child_session_id:id,summary:'looks good',id:'legacy'}],backgroundTasks:[row]});
+  const session=store.snapshot().sessionViews.s1;
+  expect(session.backgroundTasks).toMatchObject([{id,state:'completed',revision:3}]);
+  expect(session.timeline.filter(i=>i.type==='message' && i.reviewerChildId===id)).toMatchObject([{text:expect.stringContaining('looks good')}]);
+});
+
 describe("paginated error recovery", () => {
   const errorCard = (store: WebviewStateStore, id = "long-error") =>
     store.snapshot().sessionViews.s1.timeline.find(item => item.id === id);

@@ -972,10 +972,14 @@ During chat, the LLM interacts with the host through built-in tools (the Agent l
 | `write` | Create or overwrite files |
 | `edit` | Perform precise replacements in existing files (supports multi-entry `edits`) |
 | `bash` | Run shell commands (supports `run_in_background` plus `task_output` / `task_stop` / `task_list`) |
+| `dispatch_agent` | Run read-only Explorer tasks in parallel. Wait for reports by default; use `run_in_background` for tickets. |
+| `subagent_list` / `subagent_output` / `subagent_stop` | List child tasks, retrieve a saved report by ID, or stop just one. `task_*` is for shell commands. |
 | `list_dir` | List directories |
 | `search_files` | Search files under authorized paths (prefers ripgrep/fd, falls back to in-process search when missing) |
 
 Other tools such as `create_plan`, `update_plan`, `todos`, `web_search`, and `web_fetch` are also available depending on the model and configuration.
+
+An idle interactive chat can continue automatically when a background Explorer batch finishes. Once you start typing, the editor keeps your input. Interrupting the parent cancels its children and discards pending reports, not commands already running in the background.
 
 **User confirmation prompt** (when `require_approval_for_all_write = true`):
 

@@ -1,3 +1,4 @@
+import { parseTask, type BackgroundTask } from '../shared/backgroundTasks';
 import { isRecord, parseTodos } from "../shared/todos";
 import type { TomcatMessenger } from "./TomcatMessenger";
 import type {
@@ -50,6 +51,7 @@ export interface SessionListPayload {
 }
 
 export interface SessionStatePayload {
+  backgroundTasks?: BackgroundTask[];
   /** Undefined for CLIs that predate the field; callers must not block on it. */
   modelReady?: boolean;
   activePlan?: ActivePlanPayload | null;
@@ -80,6 +82,7 @@ export interface WebviewTodo {
 }
 
 export interface SessionHistoryPayload {
+  backgroundTasks?: BackgroundTask[];
   hasMore?: boolean;
   header?: unknown;
   messages: unknown[];
@@ -344,6 +347,7 @@ export class SessionRouter {
           : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       interrupted: payload.interrupted === true,
+      backgroundTasks: Array.isArray(payload.backgroundTasks) ? payload.backgroundTasks.map(parseTask).filter((r): r is BackgroundTask => !!r) : undefined,
       activePlan: payload.activePlan === undefined ? undefined : parseActivePlan(payload.activePlan),
       agentMode:
         payload.agentMode === "chat" || payload.agentMode === "plan"
@@ -376,6 +380,7 @@ export class SessionRouter {
     }
 
     return {
+      ...(Array.isArray(payload.backgroundTasks) ? {backgroundTasks:payload.backgroundTasks.map(parseTask).filter((r):r is BackgroundTask=>!!r)} : {}),
       hasMore: payload.hasMore === true,
       header: payload.header,
       messages: Array.isArray(payload.messages) ? payload.messages : [],

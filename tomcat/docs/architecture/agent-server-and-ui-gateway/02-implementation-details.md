@@ -212,12 +212,12 @@ prompt{params.attachments} ─► commands.rs 解析 ─► [text part + image/f
 
 #### 3.3.1 为什么本期能做：核心已留好缝
 
-`multi-agent.md` §14.3.1 已把多会话并发的设计原则钉死，且 Tomcat 现状代码已落地其中关键三件（见 §2.5.3 的 2/3/7）：
+[多 Agent 运行时 §3](../multi-agent.md#3-落地决策与实施点) 区分父会话槽和子任务登记；核心并发依据如下（见 §2.5.3 的 2/3/7）：
 
 
 | 已具备（不改）                                 | 现状证据                                                                                                        | 对应竞品件                                                        |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `AgentLoop` 无全局单例，可按 `session_id` 多实例并发 | `multi-agent.md` §14.3.1；`chat_loop` 每输入 `AgentLoop::new().run()`                                           | codex 每 thread session loop                                  |
+| `AgentLoop` 无全局单例，可按 `session_id` 多实例并发 | `api/chat/run_loop/mod.rs`；`chat_loop` 每输入 `AgentLoop::new().run()`                                           | codex 每 thread session loop                                  |
 | 事件已按会话打信封                               | `ScopedEventEmitter::emit → WireEnvelope.sessionId`（`src/infra/event_bus/mod.rs` / `events/mod.rs`）         | codex `ThreadScopedSender`、pi-acp `session/update.sessionId` |
 | 进程级注册 + 级联中止 + 并发上限**已实现**              | `src/core/agent_registry/mod.rs`：`AgentRegistry`、`register_root`、`cascade_abort`、`MAX_CONCURRENT_AGENTS=16` | codex `ThreadManager` + 子 agent 上限                           |
 | 重资源进程级共享、会话级隔离                          | `GlobalServices`（`Arc<dyn LlmProvider/PrimitiveExecutor/EventBus>`）共享；`ScopeServices/SessionRuntime` per 会话 | codex 共享 auth/models/MCP（MA7）                                |
@@ -227,7 +227,7 @@ prompt{params.attachments} ─► commands.rs 解析 ─► [text part + image/f
 
 #### 3.3.2 `ChatContextRegistry` 与现有 `AgentRegistry` 分工（对齐 MA1/MA2）
 
-`multi-agent.md` §14.3.2.1 已规定两张进程级表正交分工，本文 serve 层据此落地：
+两张进程级表分别负责会话控制与执行，可对照 `api/serve/registry.rs` 和 `core/agent_registry/mod.rs`：
 
 
 | 维度              | `ChatContextRegistry`（serve **新增**，MA2）                                                    | `AgentRegistry`（**已实现**，MA1）                           |
@@ -239,7 +239,7 @@ prompt{params.attachments} ─► commands.rs 解析 ─► [text part + image/f
 | 串联点             | `SessionSlot.ctx.agent_registry` 即同一进程级 `AgentRegistry`；`ChatContext` 装配时已 `register_root` | 同左                                                     |
 
 
-> 注：现状一个 `ChatContext` 装配时绑定单个 `session_key`（`from_config_with_mode_and_overrides` 内 `SessionManager::new_scoped(session_key)` + 单 `_root_agent_guard`）。serve 多会话即「按需构造多个 `ChatContext` 并装进 registry」，每个 ctx 仍各自 `register_root` 到共享 `AgentRegistry`。**这正是 §14.3.2.1「一个 `session_key` 对应唯一 `ChatContext`」不变量的多实例化。**
+> 注：现状一个 `ChatContext` 装配时绑定单个 `session_key`（`from_config_with_mode_and_overrides` 内 `SessionManager::new_scoped(session_key)` + 单 `_root_agent_guard`）。serve 多会话即「按需构造多个 `ChatContext` 并装进 registry」，每个 ctx 仍各自 `register_root` 到共享 `AgentRegistry`。**子 Agent 的只读视图不新建 `SessionSlot` 或控制连接。**
 
 #### 3.3.3 运行时结构与并发粒度
 
@@ -283,7 +283,7 @@ prompt{params.attachments} ─► commands.rs 解析 ─► [text part + image/f
 | 审批回环          | `control_request` 带 `sessionId`；回包按 `requestId`（全局唯一）配对，`sessionId` 仅用于 UI 归属                                         | 复用 `ask_question_wire.rs`     |
 
 
-#### 3.3.5 资源治理（对齐 multi-agent.md §14.9）
+#### 3.3.5 资源治理（见[多 Agent 风险与边界](../multi-agent.md#9-风险与边界)）
 
 - **会话数上限**：serve 进程 `serve.max_sessions`（默认与 `MAX_CONCURRENT_AGENTS=16` 对齐；注意该上限是「会话 + 所有子 Agent」总和，子 Agent 派发会占额）。
 - **空闲回收**：对标 codex 30min idle unload——空闲会话（无活跃 run 且无订阅）可配置 `serve.session_idle_unload_ms` 后 drop `ChatContext`（释放 scope 缓存/插件 VM）。MVP 可先不做自动回收，靠 `new_session`/显式 `close_session` 管理。

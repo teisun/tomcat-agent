@@ -183,7 +183,7 @@ async fn todos_dispatch_requires_only_its_own_runtime_and_keeps_role_guards() {
         (Some(&todos), None, SubagentType::User, true),
         (Some(&todos), Some(&plan), SubagentType::PlanReviewer, true),
         (Some(&todos), Some(&plan), SubagentType::CodeReviewer, false),
-        (Some(&todos), None, SubagentType::Explorer, false),
+        (Some(&todos), None, SubagentType::Explorer, true),
     ] {
         let result = execute_tool_full_with_policy(
             &primitive,

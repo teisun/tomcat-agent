@@ -9,7 +9,10 @@ mod default_model;
 mod env_file;
 mod load;
 pub mod lock;
+mod subagents;
 mod types;
+pub(crate) use default_model::write_subagent_model;
+pub use subagents::{ModelRole, SubagentConfig};
 pub mod ui;
 
 #[cfg(test)]

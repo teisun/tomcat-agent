@@ -27,6 +27,8 @@ use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::AgentEvent;
 use crate::EventBus;
 
+pub mod rows;
+use rows::ChildRow;
 #[cfg(test)]
 mod tests;
 
@@ -102,6 +104,10 @@ pub struct AgentHandle {
     pub cancel_token: Mutex<CancellationToken>,
     /// 直接子 session_id 列表（仅用于 MAX_CHILDREN_PER_AGENT 计数与 unregister 清理）。
     children: Mutex<Vec<String>>,
+    row: Mutex<Option<ChildRow>>,
+    terminal_sink: Mutex<Option<Arc<dyn crate::core::session::MessageAppendSink>>>,
+    terminal_report: Mutex<Option<String>>,
+    finished: Mutex<Vec<ChildRow>>,
 }
 
 impl std::fmt::Debug for AgentHandle {
@@ -178,23 +184,46 @@ pub struct SubagentSpawnContext {
     pub cancel_token: CancellationToken,
 }
 
-struct SpawnCleanupGuard {
-    registry: Arc<AgentRegistry>,
-    child_session_id: String,
+/// Result publication runs in the supervisor, after releasing the registration.
+pub(crate) struct ChildExit {
+    outcome: SubagentOutcome,
+    publish: Option<Box<dyn FnOnce() + Send>>,
+}
+impl From<SubagentOutcome> for ChildExit {
+    fn from(outcome: SubagentOutcome) -> Self {
+        Self {
+            outcome,
+            publish: None,
+        }
+    }
+}
+impl ChildExit {
+    pub(crate) fn with_delivery(
+        outcome: SubagentOutcome,
+        publish: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            outcome,
+            publish: Some(Box::new(publish)),
+        }
+    }
 }
 
-impl Drop for SpawnCleanupGuard {
-    fn drop(&mut self) {
-        if let Some(handle) = self
-            .registry
-            .handles
-            .read()
-            .get(&self.child_session_id)
-            .cloned()
-        {
-            handle.cancel();
-        }
-        self.registry.unregister(&self.child_session_id);
+/// Dropping a background ticket detaches observation, not execution. Only the
+/// supervisor owns registration. Synchronous callers additionally cancel on drop.
+pub(crate) struct StartedChild {
+    pub id: String,
+    token: CancellationToken,
+    supervisor: tokio::task::JoinHandle<Result<SubagentOutcome, SpawnError>>,
+}
+impl StartedChild {
+    pub(crate) fn cancel_on_drop(&self) -> tokio_util::sync::DropGuard {
+        self.token.clone().drop_guard()
+    }
+    pub(crate) async fn wait(self) -> Result<SubagentOutcome, SpawnError> {
+        self.supervisor
+            .await
+            .map_err(|e| SpawnError::Internal(e.to_string()))?
     }
 }
 
@@ -204,6 +233,7 @@ impl Drop for SpawnCleanupGuard {
 /// 构造一次并 `Arc<AgentRegistry>` 注入到 `ChatContext`。
 pub struct AgentRegistry {
     handles: RwLock<HashMap<String, Arc<AgentHandle>>>,
+    child_exited: tokio::sync::Notify,
     /// 全局并发计数（O(1) 累计，避免每次 spawn 都 lock handles）。
     active: AtomicU32,
     config: AgentRegistryConfig,
@@ -239,6 +269,7 @@ impl AgentRegistry {
     pub fn with_config(config: AgentRegistryConfig) -> Arc<Self> {
         Arc::new(Self {
             handles: RwLock::new(HashMap::new()),
+            child_exited: Default::default(),
             active: AtomicU32::new(0),
             config,
             event_bus: None,
@@ -250,6 +281,7 @@ impl AgentRegistry {
         // 因为 Arc 内部不可变，这里 clone Self 字段重组（开销可忽略；只有装配阶段调用）。
         Arc::new(Self {
             handles: RwLock::new(std::mem::take(&mut *self.handles.write())),
+            child_exited: Default::default(),
             active: AtomicU32::new(self.active.load(Ordering::Relaxed)),
             config: self.config,
             event_bus: Some(bus),
@@ -287,13 +319,16 @@ impl AgentRegistry {
 
     /// 立即注销（一般通过 `RegistrationGuard::drop` 自动调用）。
     pub fn unregister(&self, session_id: &str) {
-        let handle = self.handles.write().remove(session_id);
-        if let Some(h) = handle {
-            // 同步从父的 children 列表中移除
-            if let Some(parent_id) = h.parent_session_id.clone() {
-                if let Some(parent) = self.handles.read().get(&parent_id) {
-                    parent.children.lock().retain(|c| c != session_id);
+        let mut handles = self.handles.write();
+        if let Some(h) = handles.remove(session_id) {
+            if let Some(parent_id) = h.parent_session_id.as_ref() {
+                if let Some(parent) = handles.get(parent_id) {
+                    parent.children.lock().retain(|id| id != session_id);
+                    if let Some(row) = h.row.lock().take() {
+                        parent.finished.lock().push(row);
+                    }
                 }
+                self.child_exited.notify_waiters();
             }
             self.active.fetch_sub(1, Ordering::Relaxed);
         }
@@ -301,12 +336,25 @@ impl AgentRegistry {
 
     /// cancel 指定 root handle 的 token；tokio 会把取消沿 token 树自动扩散到所有后代。
     pub fn cascade_abort(&self, root_session_id: &str) {
-        let root = {
-            let snapshot = self.handles.read();
-            snapshot.get(root_session_id).cloned()
-        };
-        if let Some(root) = root {
+        let handles = self.handles.read();
+        if let Some(root) = handles.get(root_session_id) {
             root.cancel();
+            // Earlier turns have distinct root tokens but the same parent session.
+            for id in root.children.lock().iter() {
+                if let Some(child) = handles.get(id) {
+                    child.cancel();
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_children(&self, parent: &str) {
+        loop {
+            let notified = self.child_exited.notified();
+            if !self.has_children(parent) {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -354,16 +402,80 @@ impl AgentRegistry {
         F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = SubagentOutcome> + Send + 'static,
     {
-        let (child_handle, _parent_arc) =
-            self.preflight_and_register(parent_session_id, subagent_type)?;
-        let child_session_id = child_handle.session_id.clone();
-        let cancel_token = child_handle.token();
-        let spawn_depth = child_handle.spawn_depth;
-        let cleanup_guard = SpawnCleanupGuard {
-            registry: Arc::clone(self),
-            child_session_id: child_session_id.clone(),
+        let child = self
+            .start_batch(parent_session_id, subagent_type, vec![spawn])?
+            .pop()
+            .expect("one job");
+        let _cancel_on_drop = child.token.clone().drop_guard();
+        child.wait().await
+    }
+
+    pub(crate) fn start_batch<F, Fut, E>(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+        subagent_type: SubagentType,
+        jobs: Vec<F>,
+    ) -> Result<Vec<StartedChild>, SpawnError>
+    where
+        F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = E> + Send + 'static,
+        E: Into<ChildExit> + Send,
+    {
+        self.start_described_batch(parent_session_id, subagent_type, None, &[], jobs)
+    }
+
+    pub(crate) fn start_described_batch<F, Fut, E>(
+        self: &Arc<Self>,
+        parent_session_id: &str,
+        subagent_type: SubagentType,
+        tool_call_id: Option<&str>,
+        descriptions: &[&str],
+        jobs: Vec<F>,
+    ) -> Result<Vec<StartedChild>, SpawnError>
+    where
+        F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = E> + Send + 'static,
+        E: Into<ChildExit> + Send,
+    {
+        let children = self.admit(
+            parent_session_id,
+            subagent_type,
+            jobs.len(),
+            tool_call_id,
+            descriptions,
+        )?;
+        Ok(children
+            .into_iter()
+            .zip(jobs)
+            .map(|(handle, job)| self.start_registered(parent_session_id.to_owned(), handle, job))
+            .collect())
+    }
+
+    fn start_registered<F, Fut, E>(
+        self: &Arc<Self>,
+        parent_session_id: String,
+        child: Arc<AgentHandle>,
+        spawn: F,
+    ) -> StartedChild
+    where
+        F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = E> + Send + 'static,
+        E: Into<ChildExit> + Send,
+    {
+        use futures_util::FutureExt;
+        let child_session_id = child.session_id.clone();
+        let subagent_type = child.subagent_type;
+        let spawn_depth = child.spawn_depth;
+        let token = child.token();
+        let guard = RegistrationGuard {
+            registry: self.clone(),
+            session_id: child_session_id.clone(),
         };
 
+        let initial = child.row.lock().clone();
+        if let Some(row) = initial {
+            self.emit_row(&parent_session_id, &row);
+        }
         // emit SubAgentStart
         self.emit(
             Some(&child_session_id),
@@ -380,54 +492,67 @@ impl AgentRegistry {
             parent_session_id: parent_session_id.to_string(),
             subagent_type,
             spawn_depth,
-            cancel_token,
+            cancel_token: token.clone(),
         };
 
-        // panic 隔离：tokio::spawn + JoinHandle.await，JoinError(panic) → SpawnError::Panic
-        // （覆盖 child run() 本体或 spawn 收尾/结果解析阶段的 panic）
-        let join = tokio::spawn(async move { spawn(ctx).await });
-        let outcome_result = join.await;
-
-        // 不论结果，都 unregister + emit End；future 被 drop 时 guard 也会 cancel + unregister。
-        drop(cleanup_guard);
-
-        match outcome_result {
-            Ok(outcome) => {
-                self.emit(
-                    Some(&outcome.child_session_id),
-                    AgentEvent::SubAgentEnd {
-                        parent_session_id: parent_session_id.to_string(),
-                        child_session_id: outcome.child_session_id.clone(),
-                        subagent_type: outcome.subagent_type.as_str().to_string(),
-                        outcome: outcome.outcome_label.as_str().to_string(),
-                        error_message: outcome.error_message.clone(),
-                    },
-                );
-                Ok(outcome)
+        let registry = self.clone();
+        let id = child_session_id.clone();
+        let supervisor = tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(async move { spawn(ctx).await.into() })
+                .catch_unwind()
+                .await
+                .map_err(|e| {
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| e.downcast_ref::<&str>().copied())
+                        .unwrap_or("child panicked");
+                    SpawnError::Panic(msg.to_owned())
+                });
+            let (label, error_message) = match &result {
+                Ok(exit) => (
+                    exit.outcome.outcome_label,
+                    exit.outcome.error_message.clone(),
+                ),
+                Err(error) => (SubagentOutcomeLabel::Failed, Some(error.to_string())),
+            };
+            let final_row = registry.finish_row(&child, label);
+            drop(guard);
+            if let Some(row) = final_row {
+                registry.emit_row(&parent_session_id, &row);
             }
-            Err(join_err) => {
-                let msg = format!("{join_err}");
-                self.emit(
-                    Some(&child_session_id),
-                    AgentEvent::SubAgentEnd {
-                        parent_session_id: parent_session_id.to_string(),
-                        child_session_id: child_session_id.clone(),
-                        subagent_type: subagent_type.as_str().to_string(),
-                        outcome: "failed".to_string(),
-                        error_message: Some(format!("panic: {msg}")),
-                    },
-                );
-                Err(SpawnError::Panic(msg))
-            }
+            registry.emit(
+                Some(&id),
+                AgentEvent::SubAgentEnd {
+                    parent_session_id,
+                    child_session_id: id.clone(),
+                    subagent_type: subagent_type.as_str().into(),
+                    outcome: label.as_str().into(),
+                    error_message,
+                },
+            );
+            result.map(|exit| {
+                if let Some(publish) = exit.publish {
+                    publish();
+                }
+                exit.outcome
+            })
+        });
+        StartedChild {
+            id: child_session_id,
+            token,
+            supervisor,
         }
     }
 
-    /// 同步路径：限流 + 注册子 handle + 锁父 children；返回 (子 handle, 父 handle Arc)。
-    fn preflight_and_register(
-        self: &Arc<Self>,
+    fn admit(
+        &self,
         parent_session_id: &str,
         subagent_type: SubagentType,
-    ) -> Result<(Arc<AgentHandle>, Arc<AgentHandle>), SpawnError> {
+        count: usize,
+        tool_call_id: Option<&str>,
+        descriptions: &[&str],
+    ) -> Result<Vec<Arc<AgentHandle>>, SpawnError> {
         let mut handles = self.handles.write();
         // 1) 父存在
         let parent = handles
@@ -451,45 +576,64 @@ impl AgentRegistry {
 
         // 4) 全局并发：与 insert 共持 `handles.write()`，避免多个并发 spawn 同时越过配额。
         let current = handles.len() as u32;
-        if current >= self.config.max_concurrent_agents {
+        if handles.len().saturating_add(count) > self.config.max_concurrent_agents as usize {
             return Err(SpawnError::GlobalConcurrencyExceeded {
                 current,
                 max: self.config.max_concurrent_agents,
             });
         }
 
-        // 注册子 handle（child_token 与父 token 形成层级树，父 cancel 一次后代全可见）
-        let child_session_id = format!(
-            "{}-child-{}-{}",
-            parent_session_id,
-            subagent_type.as_str(),
-            crate::core::session::manager::uuid_for_session()
-        );
-        let child = Arc::new(AgentHandle {
-            session_id: child_session_id.clone(),
-            subagent_type,
-            spawn_depth: new_depth,
-            parent_session_id: Some(parent_session_id.to_string()),
-            cancel_token: Mutex::new(parent.child_token()),
-            children: Mutex::new(Vec::new()),
-        });
-
-        // 5) 父的 children 上限：与 push 共持父 children 锁，避免同父并发越过 max_children。
-        {
-            let mut children = parent.children.lock();
-            if children.len() as u32 >= self.config.max_children_per_agent {
-                return Err(SpawnError::ChildrenPerAgentExceeded {
-                    parent: parent_session_id.to_string(),
-                    current: children.len() as u32,
-                    max: self.config.max_children_per_agent,
-                });
-            }
-            handles.insert(child_session_id.clone(), Arc::clone(&child));
-            children.push(child_session_id.clone());
+        let mut children = parent.children.lock();
+        if children.len().saturating_add(count) > self.config.max_children_per_agent as usize {
+            return Err(SpawnError::ChildrenPerAgentExceeded {
+                parent: parent_session_id.into(),
+                current: children.len() as u32,
+                max: self.config.max_children_per_agent,
+            });
         }
-        self.active.fetch_add(1, Ordering::Relaxed);
-
-        Ok((child, parent))
+        let mut admitted = Vec::with_capacity(count);
+        for i in 0..count {
+            // 注册子 handle（child_token 与父 token 形成层级树，父 cancel 一次后代全可见）
+            let child_session_id = format!(
+                "{}-child-{}-{}",
+                parent_session_id,
+                subagent_type.as_str(),
+                crate::core::session::manager::uuid_for_session()
+            );
+            let child = Arc::new(AgentHandle {
+                session_id: child_session_id.clone(),
+                subagent_type,
+                spawn_depth: new_depth,
+                parent_session_id: Some(parent_session_id.to_string()),
+                cancel_token: Mutex::new(parent.child_token()),
+                row: Mutex::new(
+                    matches!(
+                        subagent_type,
+                        SubagentType::Explorer | SubagentType::PlanReviewer
+                    )
+                    .then(|| {
+                        ChildRow::new(
+                            &child_session_id,
+                            subagent_type,
+                            descriptions
+                                .get(i)
+                                .copied()
+                                .unwrap_or(subagent_type.as_str()),
+                            tool_call_id,
+                        )
+                    }),
+                ),
+                terminal_sink: Default::default(),
+                terminal_report: Default::default(),
+                finished: Default::default(),
+                children: Mutex::new(Vec::new()),
+            });
+            handles.insert(child_session_id.clone(), child.clone());
+            children.push(child_session_id);
+            admitted.push(child);
+        }
+        self.active.fetch_add(count as u32, Ordering::Relaxed);
+        Ok(admitted)
     }
 
     fn emit(&self, session_id: Option<&str>, ev: AgentEvent) {
@@ -515,6 +659,10 @@ impl AgentRegistry {
             spawn_depth: 0,
             parent_session_id: None,
             cancel_token: Mutex::new(CancellationToken::new()),
+            row: Default::default(),
+            terminal_sink: Default::default(),
+            terminal_report: Default::default(),
+            finished: Default::default(),
             children: Mutex::new(Vec::new()),
         });
         self.register(handle)

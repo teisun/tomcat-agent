@@ -336,9 +336,24 @@ async fn serve_background_task_finish_routes_event_and_queues_follow_up_for_same
 
     let lines = read_ndjson_lines(&buffer);
     assert_eq!(
-        lines.len(),
+        lines
+            .iter()
+            .filter(|frame| frame["type"] != "background.updated")
+            .count(),
         1,
-        "background task completion should not trigger extra serve turns: {lines:?}"
+        "only row updates and the existing completion notification are expected: {lines:?}"
+    );
+    let states: Vec<_> = lines
+        .iter()
+        .filter(|f| f["type"] == "background.updated" && f["row"]["id"] == ticket.task_id)
+        .map(|f| (&f["row"]["state"], &f["row"]["revision"]))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (&serde_json::json!("running"), &serde_json::json!(1)),
+            (&serde_json::json!("completed"), &serde_json::json!(2))
+        ]
     );
     let event = lines
         .iter()

@@ -87,6 +87,8 @@ pub(crate) fn load_model_selection_config(
     let (current, _) = merge_config_sources(Some(path))?;
     let mut config = base.clone();
     config.llm.default_model = current.llm.default_model;
+    config.subagents = current.subagents;
+    config.reviewer.model_override = current.reviewer.model_override;
     config.llm.vision_model = current.llm.vision_model;
     config.llm.title_model = current.llm.title_model;
     config.context.compaction_model = current.context.compaction_model;

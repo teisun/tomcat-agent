@@ -144,6 +144,17 @@ function sent<T extends SettingsIntent["type"]>(postMessage: ReturnType<typeof v
     .filter((message): message is SettingsIntent & { type: T } => message.type === type);
 }
 
+it('focuses a child role, searches connected models, resets to inheritance and respects the reviewer environment lock',async()=>{
+  const {postMessage}=mount();
+  const state=readyState({route:'subagents',focusRole:{role:'explorer',revision:1},subagentModels:{explorer:'',plan_reviewer:'gpt-5.4'},planReviewerModelLocked:true,models:[builtinModel({keyPresent:true})]});state.capabilities.updateSubagentSettings=true;
+  await emitState(state);expect(document.activeElement?.id).toBe('subagent-explorer');
+  expect(input('settings-plan_reviewer-model-input').disabled).toBe(true);
+  fireEvent.change(input('settings-explorer-model-input'),{target:{value:'5.4'}});fireEvent.click(screen.getByRole('option',{name:/gpt-5.4/}));
+  await emitState({...state,subagentModels:{...state.subagentModels,explorer:'gpt-5.4'}});
+  fireEvent.click(screen.getByTestId('settings-explorer-model-toggle'));fireEvent.click(screen.getByRole('option',{name:/Inherit main conversation/}));
+  expect(sent(postMessage,'updateSubagentSettings').map(m=>m.data)).toEqual([{role:'explorer',model:'gpt-5.4'},{role:'explorer',model:null}]);
+});
+
 function input(testId: string): HTMLInputElement {
   return screen.getByTestId(testId) as HTMLInputElement;
 }

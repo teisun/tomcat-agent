@@ -159,6 +159,11 @@ pub(super) async fn run(
         Err(e) => return error(e.to_string(), json!({})),
     };
     slot.ctx.session_runtime.steering_queue.lock().clear();
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .child_reports
+        .discard();
     slot.ctx.session_runtime.follow_up_queue.lock().clear();
     slot.ctx.session_runtime.read_file_state.clear();
     if let Err(e) = commands::rehydrate_slot_context_state(&slot) {

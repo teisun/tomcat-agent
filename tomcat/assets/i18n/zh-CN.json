@@ -1168,6 +1168,7 @@
   "preflight.gitSpawnFailed": "git 安装无法启动，checkpoint 将继续退化为 Noop",
   "terminal.editorFailed": "初始化行编辑器失败: {detail}",
   "terminal.bgFinished": "\n[bg] 任务 {id} 已完成（exit={code}）；已排入下一回合。",
+  "terminal.childReportsReady": "收到子 Agent 报告，继续处理。",
   "terminal.receiveArgs": "正在接收参数…",
   "terminal.receivePathArgs": "path={path}  正在接收参数…",
   "terminal.lines.one": "{count} 行",

@@ -73,6 +73,7 @@ export interface WebviewDomAction {
 import type { SessionFileIntent, SessionFilesResult, SessionFilesView } from "../../shared/sessionFiles";
 import type { MessageEditIntent, MessageEditEvent } from "../../shared/messageEditProtocol";
 export interface WebviewMessageBlock {
+  reviewerChildId?:string;
   rewindEligible?: boolean;
   abandoned?: boolean;
   assistantMessageId?: string;
@@ -381,6 +382,7 @@ export interface WebviewMessageQueue {
 }
 
 export interface WebviewSessionSnapshot {
+  backgroundTasks?: import('../../shared/backgroundTasks').BackgroundTask[];
   /** Only while the current request is blocked on compaction. */
   compacting?: boolean;
   /** Live request attempts, including the initial request; never rebuilt from history. */
@@ -640,6 +642,8 @@ function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
 }
 
 export type WebviewIntent =
+  | {messageId:string;type:'viewChild'|'closeChild'|'olderChild';data:{sessionId:string;childId:string}}
+  | {messageId:string;type:'stopBackground';data:{sessionId:string;taskId:string;kind:'shell'|'subagent'}}
   | { messageId: string; type: "cancelErrorRecovery"; data: { sessionId: string; errorId: string; dueAt: number } }
   | { messageId: string; type: "pong" }
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
@@ -865,7 +869,8 @@ export type WebviewIntent =
       messageId: string;
       type: "openSettings";
       data?: {
-        route?: "general" | "models" | "connectors" | null;
+        route?: "general" | "models" | "connectors" | "subagents" | null;
+        role?:import('../../shared/settingsProtocol').SubagentRole;
       };
     }
   | {
@@ -1263,6 +1268,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
             && isString(a.id) && isString(a.blobSha) && /^[a-f0-9]{64}$/.test(a.blobSha)
             && isString(a.filename) && isString(a.mimeType) && (a.kind === "image" || a.kind === "file")
             && typeof a.bytes === "number")));
+    case 'viewChild': case 'olderChild': case 'closeChild':
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.childId) && value.data.childId.startsWith(`${value.data.sessionId}-child-`) && /^[a-zA-Z0-9_-]+$/.test(value.data.childId);
+    case 'stopBackground':
+      return isRecord(value.data) && isString(value.data.sessionId) && isString(value.data.taskId) && (value.data.kind === 'shell' || value.data.kind === 'subagent');
     case "interrupt":
       return value.data === undefined || isRecord(value.data);
     case "deleteSession":
@@ -1350,6 +1359,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (isRecord(value.data) &&
           (value.data.route === undefined ||
             value.data.route === null ||
+            (value.data.route === 'subagents' && (value.data.role === undefined || value.data.role === 'explorer' || value.data.role === 'plan_reviewer')) ||
             value.data.route === "general" ||
             value.data.route === "connectors" ||
             value.data.route === "models"))

@@ -16,7 +16,7 @@ export function sseToolCall(id: string, name: string, argsJson: string): Scripte
   return { body: `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id, function: { name, arguments: argsJson } }] } }] })}\n\n` };
 }
 
-export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[], listedModels: string[] = [], port = 0) {
+export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[] | ((body: string) => ScriptedResponse), listedModels: string[] = [], port = 0) {
   const captured: string[] = [];
   const modelListAuthorizations: string[] = [];
   let responseIndex = 0;
@@ -55,7 +55,7 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
       response.end(sessionTitleResponseJson(rawRequest, "Generated title"));
       return;
     }
-    const scripted = responses[responseIndex++];
+    const scripted = typeof responses === 'function' ? responses(body) : responses[responseIndex++];
     if (!scripted) { response.statusCode = 500; response.end("unexpected request"); return; }
     response.writeHead(scripted.status ?? 200, { "Cache-Control": "no-cache", Connection: "close", "Content-Type": scripted.status && scripted.status !== 200 ? "application/json" : "text/event-stream" });
     for (const part of scripted.parts) {

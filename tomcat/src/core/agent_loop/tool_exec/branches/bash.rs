@@ -1,5 +1,4 @@
 use super::super::{ToolExecCtx, AGENT_PLUGIN_ID};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::core::tools::primitive::{BashExecutionState, BashResult};
@@ -48,7 +47,7 @@ pub(in super::super) async fn handle_bash(
     let started = Instant::now();
     let output_rx = registry.subscribe_output();
     let ticket = registry
-        .spawn_tracked_with_preview_barrier(command.to_string(), cwd.map(PathBuf::from), false)
+        .spawn_for_tool(command.to_string(), cwd, false, ctx.tool_call_id)
         .await
         .map_err(|e| e.to_string())?;
     // Caller cancellation must tear down the tracked process tree. The outer tool
@@ -185,7 +184,7 @@ async fn run_background_bash(
 ) -> Result<String, String> {
     let output_rx = registry.subscribe_output();
     let ticket = registry
-        .spawn_tracked_with_preview_barrier(command.to_string(), cwd.map(PathBuf::from), true)
+        .spawn_for_tool(command.to_string(), cwd, true, ctx.tool_call_id)
         .await
         .map_err(|error| error.to_string())?;
     let bridge = spawn_live_output_bridge(

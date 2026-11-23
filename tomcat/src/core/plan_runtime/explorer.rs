@@ -27,17 +27,28 @@ pub const EXPLORER_ALLOWED_TOOLS: &[&str] = &[
     "task_output",
     "task_list",
     "task_stop",
+    "todos",
 ];
 
-/// 一次 `dispatch_agent` 里最多并行派发的 Explorer 数量。
-/// 上限不是性能考量而是可读性：超过 6 份结论回到主上下文就不再是"省 token"了。
-pub const MAX_EXPLORER_TASKS: usize = 6;
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplorerTicket {
+    pub id: String,
+    pub child_session_id: String,
+    #[serde(rename = "type")]
+    pub role: &'static str,
+    pub description: String,
+}
+
+pub enum ExplorerDelivery {
+    Reports(Vec<ExplorerReport>),
+    Tickets(Vec<ExplorerTicket>),
+}
 
 /// 单条勘察任务。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplorerTask {
-    /// 调用方给的短标识，用于把结论对回问题。
-    pub id: String,
+    pub description: String,
     pub prompt: String,
 }
 
@@ -97,7 +108,7 @@ pub fn build_explorer_prompt(task: &ExplorerTask, workspace_root: Option<&Path>)
     render_prompt(
         PromptKey::ExplorerBrief,
         &[
-            ("task_id", &task.id),
+            ("task_id", &task.description),
             ("workspace_hint", &workspace_hint),
             ("task_prompt", &task.prompt),
         ],

@@ -72,9 +72,15 @@ where
                 let Some(session_id) = event["sessionId"].as_str() else {
                     return Ok(None);
                 };
-                if event["type"] == "session.agent_mode.changed"
-                    && route.prompts.lock().contains_key(session_id)
+                if !route
+                    .prompts
+                    .lock()
+                    .get(session_id)
+                    .is_some_and(|p| p.completion.is_some())
                 {
+                    return Ok(None);
+                }
+                if event["type"] == "session.agent_mode.changed" {
                     let _ = mode_changes.send(session_id.to_owned());
                 }
                 events::event_update(&event)

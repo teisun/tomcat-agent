@@ -193,7 +193,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         if restart_needed {
             ensure_working_message_ids(agent, messages)?;
             let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
-                agent.config.plan_runtime.as_deref(),
+                agent.compaction_plan().map(Arc::as_ref),
                 agent.todos_runtime.as_deref(),
                 Some(agent.wire_model()),
             );
@@ -224,7 +224,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         if start_needed {
             ensure_working_message_ids(agent, messages)?;
             let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
-                agent.config.plan_runtime.as_deref(),
+                agent.compaction_plan().map(Arc::as_ref),
                 agent.todos_runtime.as_deref(),
                 Some(agent.wire_model()),
             );

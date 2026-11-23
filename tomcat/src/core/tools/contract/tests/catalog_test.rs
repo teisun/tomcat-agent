@@ -38,6 +38,16 @@ fn start_plan_is_a_short_explicit_execution_tool() {
 #[test]
 fn dispatch_agent_description_enforces_bounded_explorer_usage() {
     let description = desc_of("dispatch_agent");
+    let schema = super::dispatch_agent_parameters();
+    let tasks = &schema["properties"]["tasks"];
+    assert_eq!(
+        tasks["maxItems"],
+        crate::core::agent_registry::MAX_CHILDREN_PER_AGENT
+    );
+    assert!(
+        tasks["items"]["properties"].get("id").is_none(),
+        "resume is not supported by Explorer"
+    );
 
     for forbidden in [
         "a simple task",

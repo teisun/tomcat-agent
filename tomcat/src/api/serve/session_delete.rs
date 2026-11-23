@@ -52,6 +52,7 @@ pub(super) fn slot_has_live_work(state: &ServeState, slot: &super::registry::Ses
             .as_ref()
             .is_some_and(|task| !task.is_finished())
         || slot.ctx.agent_registry.has_children(&slot.session_id)
+        || slot.ctx.session_runtime.plan_runtime.child_reports.ready()
         || state.ask_question.has_pending_session(&slot.session_id)
         || state.confirmation.has_pending_session(&slot.session_id)
         || slot

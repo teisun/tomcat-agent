@@ -13,7 +13,7 @@ if (!root) {
 }
 
 const requestedRoute = document.documentElement.dataset.settingsRoute ?? new URLSearchParams(window.location.search).get("route");
-const initialRoute = requestedRoute === "general" || requestedRoute === "connectors" || requestedRoute === "tools" ? requestedRoute : "models";
+const initialRoute = requestedRoute === "subagents" || requestedRoute === "general" || requestedRoute === "connectors" || requestedRoute === "tools" ? requestedRoute : "models";
 
 ReactDOM.createRoot(root).render(
   <LocaleProvider><SettingsApp

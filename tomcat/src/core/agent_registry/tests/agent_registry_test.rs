@@ -172,6 +172,10 @@ async fn max_spawn_depth_enforced() {
         parent_session_id: Some("root".into()),
         cancel_token: Mutex::new(CancellationToken::new()),
         children: Mutex::new(Vec::new()),
+        row: Default::default(),
+        terminal_sink: Default::default(),
+        terminal_report: Default::default(),
+        finished: Default::default(),
     });
     reg.register(depth1_handle).unwrap();
     let err = reg
@@ -278,7 +282,7 @@ fn concurrent_preflight_and_register_respects_global_limit_atomically() {
         let barrier_clone = Arc::clone(&barrier);
         joins.push(std::thread::spawn(move || {
             barrier_clone.wait();
-            reg_clone.preflight_and_register("root", SubagentType::PlanReviewer)
+            reg_clone.admit("root", SubagentType::PlanReviewer, 1, None, &[])
         }));
     }
 
@@ -286,7 +290,7 @@ fn concurrent_preflight_and_register_respects_global_limit_atomically() {
     let mut errors = Vec::new();
     for join in joins {
         match join.join().unwrap() {
-            Ok((child, _parent)) => successes.push(child),
+            Ok(children) => successes.extend(children),
             Err(err) => errors.push(err),
         }
     }
@@ -323,7 +327,7 @@ fn concurrent_preflight_and_register_respects_children_limit_atomically() {
         let barrier_clone = Arc::clone(&barrier);
         joins.push(std::thread::spawn(move || {
             barrier_clone.wait();
-            reg_clone.preflight_and_register("root", SubagentType::PlanReviewer)
+            reg_clone.admit("root", SubagentType::PlanReviewer, 1, None, &[])
         }));
     }
 
@@ -331,7 +335,7 @@ fn concurrent_preflight_and_register_respects_children_limit_atomically() {
     let mut errors = Vec::new();
     for join in joins {
         match join.join().unwrap() {
-            Ok((child, _parent)) => successes.push(child),
+            Ok(children) => successes.extend(children),
             Err(err) => errors.push(err),
         }
     }
@@ -353,11 +357,49 @@ fn concurrent_preflight_and_register_respects_children_limit_atomically() {
 }
 
 #[tokio::test]
+async fn whole_batch_admission_and_prior_turn_cancellation() {
+    let reg = AgentRegistry::with_config(AgentRegistryConfig {
+        max_concurrent_agents: 5,
+        max_children_per_agent: 2,
+        ..Default::default()
+    });
+    let _root = reg.register_root("root").unwrap();
+    let job = |ctx: SubagentSpawnContext| async move {
+        ctx.cancel_token.cancelled().await;
+        SubagentOutcome {
+            child_session_id: ctx.child_session_id,
+            subagent_type: ctx.subagent_type,
+            outcome_label: SubagentOutcomeLabel::Interrupted,
+            error_message: None,
+        }
+    };
+    assert!(matches!(
+        reg.start_batch("root", SubagentType::Explorer, vec![job; 3]),
+        Err(SpawnError::ChildrenPerAgentExceeded { .. })
+    ));
+    assert_eq!(reg.active_count(), 1);
+    let children = reg
+        .start_batch("root", SubagentType::Explorer, vec![job; 2])
+        .unwrap();
+    assert_ne!(children[0].id, children[1].id);
+    reg.rearm_root("root", CancellationToken::new()).unwrap();
+    reg.cascade_abort("root");
+    for child in children {
+        assert_eq!(
+            child.wait().await.unwrap().outcome_label,
+            SubagentOutcomeLabel::Interrupted
+        );
+    }
+    assert!(!reg.has_children("root"));
+}
+
+#[tokio::test]
 async fn dropped_spawn_future_cancels_and_unregisters_child() {
     let registry = fresh_registry();
     let _root = registry.register_root_for_test("root-drop").unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
     let started_in_child = Arc::clone(&started);
+    let (release, cleanup) = tokio::sync::oneshot::channel();
     let registry_for_spawn = Arc::clone(&registry);
     let task = tokio::spawn(async move {
         registry_for_spawn
@@ -367,6 +409,7 @@ async fn dropped_spawn_future_cancels_and_unregisters_child() {
                 move |ctx| async move {
                     started_in_child.notify_one();
                     ctx.cancel_token.cancelled().await;
+                    cleanup.await.unwrap();
                     SubagentOutcome {
                         child_session_id: ctx.child_session_id,
                         subagent_type: ctx.subagent_type,
@@ -380,7 +423,13 @@ async fn dropped_spawn_future_cancels_and_unregisters_child() {
     started.notified().await;
     task.abort();
     let _ = task.await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        registry.active_count(),
+        2,
+        "dropping the waiter cannot release a cleaning child's quota"
+    );
+    release.send(()).unwrap();
+    registry.wait_for_children("root-drop").await;
     assert_eq!(
         registry.active_count(),
         1,

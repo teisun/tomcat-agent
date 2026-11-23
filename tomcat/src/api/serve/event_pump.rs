@@ -15,6 +15,7 @@ pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_AGENT_START,
     wire::WIRE_AGENT_END,
     "steering_consumed",
+    "subagent_reports_received",
     wire::WIRE_TURN_START,
     wire::WIRE_TURN_END,
     wire::WIRE_MESSAGE_START,
@@ -70,6 +71,7 @@ pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_TURN_SUMMARY_UPDATED,
     wire::WIRE_TOOL_SUMMARY_UPDATED,
     wire::WIRE_BACKGROUND_TASK_FINISHED,
+    "background.updated",
 ];
 
 /// One current/last assistant message, never a turn or transcript copy. The slot's
@@ -168,7 +170,13 @@ pub(super) fn register_session_event_pump_with(
             event_name,
             Box::new(move |ctx| {
                 if ctx.session_id.as_deref() != Some(session_id.as_str()) {
+                    if let Some(child) = ctx.session_id.as_deref() {
+                        super::child_view::forward(&slot_for_listener, child, &ctx.payload);
+                    }
                     return Ok(());
+                }
+                if *event_name == "background.updated" {
+                    super::child_view::row_changed(&slot_for_listener, &ctx.payload["row"]);
                 }
                 if event_name == &wire::WIRE_AGENT_END {
                     slot_for_listener.mark_terminal_emitted();

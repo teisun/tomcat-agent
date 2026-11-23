@@ -5,7 +5,6 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::api::chat::ChatContext;
-use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::init_context_state;
 use crate::core::session::{
     classify_resumable_ask_question_result, collect_recent_chat_messages_from_tail,
@@ -246,27 +245,17 @@ pub(super) fn make_fallback_context_state(
         .map(|call| call.limits.input_budget_tokens)
         .unwrap_or_else(|| crate::infra::config::fallback_input_budget_tokens(context_config));
     crate::core::ContextState {
-        messages: Vec::new(),
-        estimate_context_chars: system_text.len(),
-        context_budget_chars: crate::infra::config::compute_context_budget_chars_from_tokens(
-            context_budget_tokens,
-        ),
-        context_budget_tokens,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: ctx
-            .session_runtime
-            .session
-            .current_transcript_path()
-            .ok()
-            .flatten()
-            .unwrap_or_default(),
-        latest_plan_event: None,
-        resume_control: Default::default(),
-        preheat: Preheat::new(),
-        session_obs: Default::default(),
-        live: Default::default(),
         hydrated: false,
+        ..crate::core::ContextState::fresh(
+            context_budget_tokens,
+            system_text.len(),
+            ctx.session_runtime
+                .session
+                .current_transcript_path()
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        )
     }
 }
 

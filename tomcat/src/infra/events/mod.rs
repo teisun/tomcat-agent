@@ -449,6 +449,10 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         failure: Option<TurnFailure>,
     },
+    /// Public receipt only. The report bodies belong to the parent model context.
+    SubagentReportsReceived {
+        count: usize,
+    },
     /// Input was archived and appended at a safe point, not necessarily answered yet.
     SteeringConsumed {
         #[serde(rename = "userMessageIds")]

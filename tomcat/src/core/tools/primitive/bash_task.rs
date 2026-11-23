@@ -425,6 +425,23 @@ pub struct BashTaskInfo {
     pub started_at_unix_ms: u128,
     pub log_path: String,
     pub status: BashTaskStatus,
+    #[serde(skip)]
+    tool_call_id: Option<String>,
+}
+
+impl BashTaskInfo {
+    fn row(&self, stop_requested: bool) -> serde_json::Value {
+        let (state, revision) = match self.status {
+            BashTaskStatus::Running | BashTaskStatus::DrainingOutput if stop_requested => {
+                ("stopping", 2)
+            }
+            BashTaskStatus::Running | BashTaskStatus::DrainingOutput => ("running", 1),
+            BashTaskStatus::Stopped => ("stopped", 3),
+            BashTaskStatus::Finished { exit_code: 0 } => ("completed", 2),
+            BashTaskStatus::Finished { .. } => ("failed", 2),
+        };
+        serde_json::json!({"kind":"shell","id":self.task_id,"toolCallId":self.tool_call_id,"command":self.command,"startedAt":self.started_at_unix_ms,"state":state,"revision":revision})
+    }
 }
 
 /// `bash run_in_background=true` 的回执：模型只拿到 `task_id` + `log_path`，
@@ -588,6 +605,7 @@ pub struct BashTaskRegistry {
     /// 终态翻转一次性 send。channel 容量按"启动后短期未消费的最大堆积量"
     /// 估算 256 足够大；满时旧事件丢失但不会阻塞翻转路径。
     lifecycle_tx: broadcast::Sender<BackgroundTaskLifecycleEvent>,
+    row_emitter: RwLock<Option<crate::infra::event_bus::ScopedEventEmitter>>,
     output_tx: broadcast::Sender<BashTaskOutputEvent>,
     foreground_wait_ms: u64,
 }
@@ -603,6 +621,7 @@ impl BashTaskRegistry {
             session_cwd: None,
             environment: RwLock::new(None),
             lifecycle_tx,
+            row_emitter: Default::default(),
             output_tx,
             foreground_wait_ms: crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
         }
@@ -652,6 +671,55 @@ impl BashTaskRegistry {
     /// 返回的 `Receiver` 在 lag 时会跳过中间事件——P1 完成事件本来就极稀疏
     /// （task 数量级 = 个），channel 容量 256 已经足够；满到 lag 即视为
     /// 设计被滥用的信号，host 侧打 warn 即可。
+    pub(crate) fn bind_row_emitter(&self, emitter: crate::infra::event_bus::ScopedEventEmitter) {
+        *self.row_emitter.write() = Some(emitter);
+    }
+    pub(crate) fn background_rows(&self) -> Vec<serde_json::Value> {
+        self.tasks
+            .read()
+            .values()
+            .filter_map(|task| {
+                (*task.delivery.lock() == TaskDelivery::Background).then(|| {
+                    task.info
+                        .read()
+                        .row(task.stop_requested.load(Ordering::Acquire))
+                })
+            })
+            .collect()
+    }
+    pub(crate) async fn stop_background(&self, id: &str) -> Result<serde_json::Value, AppError> {
+        if !self
+            .tasks
+            .read()
+            .get(id)
+            .is_some_and(|t| *t.delivery.lock() == TaskDelivery::Background)
+        {
+            return Err(AppError::Primitive("unknown_background_task".into()));
+        }
+        self.stop(id).await?;
+        let task = self
+            .tasks
+            .read()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive("unknown_background_task".into()))?;
+        let row = task
+            .info
+            .read()
+            .row(task.stop_requested.load(Ordering::Acquire));
+        Ok(row)
+    }
+    fn emit_row(
+        emitter: Option<&crate::infra::event_bus::ScopedEventEmitter>,
+        row: serde_json::Value,
+    ) {
+        if let Some(emitter) = emitter {
+            let _ = emitter.emit_payload(
+                "background.updated",
+                serde_json::json!({"type":"background.updated","row":row}),
+            );
+        }
+    }
     pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<BackgroundTaskLifecycleEvent> {
         self.lifecycle_tx.subscribe()
     }
@@ -685,6 +753,7 @@ impl BashTaskRegistry {
             false,
             false,
             None,
+            None,
         )
         .await
     }
@@ -698,7 +767,7 @@ impl BashTaskRegistry {
     ) -> Result<(BashTaskTicket, ForegroundOutput), AppError> {
         let (sender, output) = tokio::sync::oneshot::channel();
         let ticket = self
-            .spawn_tracked_inner(command, cwd, false, false, false, Some(sender))
+            .spawn_tracked_inner(command, cwd, false, false, false, Some(sender), None)
             .await?;
         Ok((ticket, output))
     }
@@ -723,6 +792,7 @@ impl BashTaskRegistry {
             true,
             false,
             None,
+            None,
         )
         .await
     }
@@ -740,8 +810,40 @@ impl BashTaskRegistry {
             self.session_cwd.as_deref(),
             self.environment_snapshot().as_deref(),
         )?;
-        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, true, None)
-            .await
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            deliver_completion_on_finish,
+            true,
+            true,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn spawn_for_tool(
+        &self,
+        command: String,
+        cwd: Option<&str>,
+        background: bool,
+        tool_call_id: &str,
+    ) -> Result<BashTaskTicket, AppError> {
+        let cwd = ResolvedCwd::from_raw_in_environment(
+            cwd,
+            self.session_cwd.as_deref(),
+            self.environment_snapshot().as_deref(),
+        )?;
+        self.spawn_tracked_inner(
+            command,
+            cwd,
+            background,
+            true,
+            true,
+            None,
+            Some(tool_call_id),
+        )
+        .await
     }
 
     async fn spawn_tracked_inner(
@@ -752,6 +854,7 @@ impl BashTaskRegistry {
         apply_guard: bool,
         preview_flush_required: bool,
         captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
+        tool_call_id: Option<&str>,
     ) -> Result<BashTaskTicket, AppError> {
         let environment = self.environment_snapshot();
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
@@ -854,6 +957,7 @@ impl BashTaskRegistry {
             info: RwLock::new(BashTaskInfo {
                 task_id: task_id.clone(),
                 command: command.clone(),
+                tool_call_id: tool_call_id.map(str::to_owned),
                 started_at_unix_ms: now,
                 log_path: log_path.display().to_string(),
                 status: BashTaskStatus::Running,
@@ -873,6 +977,15 @@ impl BashTaskRegistry {
             preview_flush_notify: Arc::new(Notify::new()),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
+        let emitter = self.row_emitter.read().clone();
+        if deliver_completion_on_finish {
+            Self::emit_row(
+                emitter.as_ref(),
+                task.info
+                    .read()
+                    .row(task.stop_requested.load(Ordering::Acquire)),
+            );
+        }
         if let (Some(guard), Some((scope, grant))) =
             (self.background_guard.as_ref(), bash_scope_grant)
         {
@@ -993,6 +1106,13 @@ impl BashTaskRegistry {
                 false
             };
             if should_emit && !already_emitted {
+                Self::emit_row(
+                    emitter.as_ref(),
+                    task_for_wait
+                        .info
+                        .read()
+                        .row(task_for_wait.stop_requested.load(Ordering::Acquire)),
+                );
                 let _ = lifecycle_tx.send(BackgroundTaskLifecycleEvent {
                     task_id: task_id_for_wait,
                     final_status,
@@ -1028,7 +1148,16 @@ impl BashTaskRegistry {
         if terminal {
             return Ok(false);
         }
+        let changed = *delivery != TaskDelivery::Background;
         *delivery = TaskDelivery::Background;
+        let row = task
+            .info
+            .read()
+            .row(task.stop_requested.load(Ordering::Acquire));
+        drop(delivery);
+        if changed {
+            Self::emit_row(self.row_emitter.read().clone().as_ref(), row);
+        }
         Ok(true)
     }
 
@@ -1175,13 +1304,19 @@ impl BashTaskRegistry {
         ) {
             return Ok(());
         }
-        let previous_stop = task.stop_requested.load(Ordering::Acquire);
-        task.stop_requested.store(true, Ordering::Release);
+        if task.stop_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if let Err(error) = task.process_tree.kill() {
-            task.stop_requested.store(previous_stop, Ordering::Release);
             return Err(AppError::Primitive(format!(
                 "failed to stop bash process tree {task_id}: {error}"
             )));
+        }
+        task.stop_requested.store(true, Ordering::Release);
+        let row = info.row(true);
+        drop(info);
+        if *task.delivery.lock() == TaskDelivery::Background {
+            Self::emit_row(self.row_emitter.read().as_ref(), row);
         }
         Ok(())
     }

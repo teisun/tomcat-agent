@@ -12,6 +12,7 @@ import type { Translator } from "../../../src/shared/i18n";
 import { useT } from "../i18n/LocaleProvider";
 import { ConnectProviderDialog, OTHER_ADDRESS, type ConnectTarget } from "./ConnectProviderDialog";
 import { ConnectorsSettingsView } from "./ConnectorsSettingsView";
+import {SubagentSettingsView} from './SubagentSettingsView';
 import { GeneralSettingsView } from "./GeneralSettingsView";
 import { ModelEditDialog } from "./ModelEditDialog";
 import { buildProviderCards, keyStatusLabel, type ProviderCard } from "./providerCards";
@@ -493,6 +494,8 @@ export function SettingsApp({
       </article>
     );
   }
+
+  if (state.route === 'subagents') return <SubagentSettingsView state={state} cards={cards} vscodeApi={vscodeApi}/>;
 
   if (state.route === "general") {
     return <GeneralSettingsView state={state} vscodeApi={vscodeApi} />;

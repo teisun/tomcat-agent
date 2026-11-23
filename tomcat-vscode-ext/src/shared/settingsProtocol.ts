@@ -10,7 +10,8 @@ import type {
 
 import { isSpeed, type Speed } from "./modelSpeed";
 import { isLanguagePreference, type LanguagePreference } from "./i18n";
-export type SettingsRoute = "general" | "models" | "connectors" | "tools";
+export type SubagentRole = import('./backgroundTasks').ChildTask['type'];
+export type SettingsRoute = "general" | "models" | "connectors" | "tools" | "subagents";
 export type { SearchBackendView, WebSearchSettingsPayload } from "../serveClient/wire";
 
 export interface SettingsModelCapabilities {
@@ -89,6 +90,7 @@ export interface SettingsCapabilities {
   setDefaultModel?: boolean;
   setDefaultModelIfUnset?: boolean;
   setUtilityModel?: boolean;
+  updateSubagentSettings?: boolean;
   setUiLanguage?: boolean;
   webSearchSettings?: boolean;
   listModels: boolean;
@@ -148,6 +150,9 @@ export interface SettingsStateSnapshot {
   defaultModelId?: string;
   /** Configured utility model; undefined for CLIs that do not report it. */
   utilityModelId?: string;
+  subagentModels?: Partial<Record<SubagentRole,string>>;
+  planReviewerModelLocked?: boolean;
+  focusRole?: {role:SubagentRole; revision:number};
   modelSaveReceipt?: { requestId: string; success: boolean };
   remoteModelsReceipt?: SettingsRemoteModelsReceipt | null;
   locale?: import("./i18n").Locale;
@@ -191,6 +196,7 @@ export type SettingsHostFrame = {
 };
 
 export type SettingsIntent =
+  | {messageId:string; type:'updateSubagentSettings'; data:{role:SubagentRole;model:string|null}}
   | { messageId: string; type: "setWebSearchRouting"; data: { backends: string[] } }
   | { messageId: string; type: "clearSearchKey"; data: { backendId: string } }
   | { messageId: string; type: "saveSearchKey"; data: { backendId: string; value: string } }
@@ -326,7 +332,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSettingsRoute(value: unknown): value is SettingsRoute {
-  return value === "general" || value === "models" || value === "connectors" || value === "tools";
+  return value === "subagents" || value === "general" || value === "models" || value === "connectors" || value === "tools";
 }
 
 function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapabilities {
@@ -388,6 +394,8 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     return false;
   }
   switch (value.type) {
+    case 'updateSubagentSettings':
+      return isRecord(value.data) && (value.data.role === 'explorer' || value.data.role === 'plan_reviewer') && (value.data.model === null || typeof value.data.model === 'string');
     case "setUiLanguage":
       return isRecord(value.data) && isLanguagePreference(value.data.language);
     case "settings.ready":

@@ -30,6 +30,7 @@ pub(crate) struct ServeConnection {
     pub acp_options: Option<crate::api::acp::AcpLaunchOptions>,
     source: RwLock<Option<crate::core::session::SessionOrigin>>,
     selection: RwLock<Selection>,
+    pub(super) child_view: parking_lot::Mutex<Option<(String, String)>>,
 }
 
 // A command uses its connection's output/selection and the shared runtime's resources.
@@ -90,6 +91,7 @@ impl ServeConnection {
             acp_options,
             source: RwLock::new(source),
             selection: RwLock::new(Selection::default()),
+            child_view: Default::default(),
         });
         connection
             .connections
@@ -143,6 +145,9 @@ impl ServeConnection {
     }
 
     pub fn set_active_session(&self, id: &str) -> Result<(), AppError> {
+        if self.active_session_id().as_deref() != Some(id) {
+            self.close_child_view();
+        }
         let slot = self
             .registry
             .get(id)
@@ -192,6 +197,9 @@ impl ServeConnection {
     }
 
     pub fn clear_displayed_session(&self, id: &str) {
+        if self.active_session_id().as_deref() == Some(id) {
+            self.close_child_view();
+        }
         let slot = self.registry.get(id);
         let _replay = slot.as_ref().map(|slot| slot.message_replay.lock());
         let mut selection = self.selection.write();

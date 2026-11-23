@@ -18,7 +18,7 @@ interface Candidate {
 }
 
 interface ModelRolePickerProps {
-  role: "default" | "utility";
+  role: "default" | "utility" | import('../../../src/shared/settingsProtocol').SubagentRole;
   canSet: boolean;
   cards: readonly ProviderCard[];
   models: readonly SettingsModelView[];
@@ -29,6 +29,8 @@ interface ModelRolePickerProps {
 /** Points a model role at a connected catalog entry; saved values remain host-owned. */
 export function ModelRolePicker({ role, canSet, cards, models, onSelect, modelId }: ModelRolePickerProps) {
   const t = useT();
+  const isChild = role === 'explorer' || role === 'plan_reviewer';
+  const labelRole = isChild ? 'child' : role;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -46,24 +48,25 @@ export function ModelRolePicker({ role, canSet, cards, models, onSelect, modelId
   );
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
+    const choices = isChild ? [{id:'',cardTitle:t('models.child.unset')}, ...candidates] : candidates;
     return needle
-      ? candidates.filter((entry) => entry.id.toLowerCase().includes(needle) || entry.cardTitle.toLowerCase().includes(needle))
-      : candidates;
-  }, [candidates, query]);
+      ? choices.filter((entry) => entry.id.toLowerCase().includes(needle) || entry.cardTitle.toLowerCase().includes(needle))
+      : choices;
+  }, [candidates, query, isChild,t]);
   const current = candidates.find((entry) => entry.id === modelId) ?? null;
   const currentModel = models.find((model) => model.id === modelId) ?? null;
 
   let problem: string | null = null;
   if (modelId && !currentModel) {
-    problem = t(`models.${role}.missing`, { name: modelId });
+    problem = t(`models.${labelRole}.missing`, { name: modelId });
   } else if (currentModel && !currentModel.keyPresent) {
     const preset = findPresetByKeyEnv(currentModel.apiKeyEnv);
     const providerName = cards.find((card) => card.keyEnv === currentModel.apiKeyEnv)?.title
       ?? (preset ? t(preset.labelKey) : humanizeProviderLabel(currentModel.provider));
-    problem = t(`models.${role}.notConnected`, { name: providerName });
+    problem = t(`models.${labelRole}.notConnected`, { name: providerName });
   }
   const display = !modelId
-    ? t(`models.${role}.unset`)
+    ? t(`models.${labelRole}.unset`)
     : current ? `${current.id} · ${current.cardTitle}` : modelId;
 
   useEffect(() => {
@@ -128,7 +131,7 @@ export function ModelRolePicker({ role, canSet, cards, models, onSelect, modelId
   const optionId = (index: number) => `${listboxId}-${index}`;
   return (
     <section className="tc-settings-role" data-testid={`settings-${role}-model`}>
-      <label className="tc-settings-role__label" htmlFor={`${listboxId}-input`}>{t(`models.${role}.title`)}</label>
+      <label className="tc-settings-role__label" htmlFor={`${listboxId}-input`}>{t(`models.${labelRole}.title`)}</label>
       <div className="tc-settings-role__control">
         <div className="tc-settings-combobox" ref={rootRef}>
           <input
@@ -151,13 +154,13 @@ export function ModelRolePicker({ role, canSet, cards, models, onSelect, modelId
             placeholder={open ? t("models.rolePicker.search") : undefined}
             ref={inputRef}
             role="combobox"
-            title={canSet ? undefined : t(`models.${role}.readOnly`)}
+            title={canSet ? undefined : t(`models.${labelRole}.readOnly`)}
             value={open ? query : display}
           />
           <button
             aria-controls={open ? listboxId : undefined}
             aria-expanded={open}
-            aria-label={t(`models.${role}.title`)}
+            aria-label={t(`models.${labelRole}.title`)}
             className="tc-settings-combobox__toggle"
             data-testid={`settings-${role}-model-toggle`}
             disabled={!canSet}
@@ -203,7 +206,7 @@ export function ModelRolePicker({ role, canSet, cards, models, onSelect, modelId
           ) : null}
         </div>
         <small className="tc-field__hint" id={hintId}>
-          {open ? t("models.rolePicker.keys") : canSet ? t(`models.${role}.hint`) : t(`models.${role}.readOnly`)}
+          {open ? t("models.rolePicker.keys") : canSet ? t(`models.${labelRole}.hint`) : t(`models.${labelRole}.readOnly`)}
         </small>
         {problem ? (
           <div className="tc-banner tc-banner--warning" data-testid={`settings-${role}-model-problem`}>{problem}</div>

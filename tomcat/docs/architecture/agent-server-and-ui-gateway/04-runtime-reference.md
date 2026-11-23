@@ -188,7 +188,7 @@ stdin EOF / 管道关闭
 ### 跨文档修订意图
 
 - `[interaction-layer.md](../interaction-layer.md)` §3 已补到本文的导航链接：上游继续声明统一交互层目标，本文负责给出 `tomcat serve` 的具体落地。
-- `[multi-agent.md](../multi-agent.md)` **维度A（多会话并发）+ §14.3.2.1（`ChatContextRegistry` vs `AgentRegistry` 分工）** 是本文 §3.3 多会话落地的上位设计；链接已互相对齐，保持「维度A=设计、本文 §3.3=serve 落地」的一致引用。
+- [多 Agent 运行时 §3](../multi-agent.md#3-落地决策与实施点) 说明父会话槽与子任务注册表的分工；[§3.3](02-implementation-details.md#33-单进程多会话并发本期目标落地) 说明 Serve 的命令路由和控制。
 - `[llm-stream-events-cli-pipeline.md](../llm-stream-events-cli-pipeline.md)` 的 `StreamEvent → AgentEvent → EventBus → CliTurnRenderer` 链路与本文复用同一 `AgentEvent`；本文不改其语义，仅新增 `EventBus → serve writer → stdout` 的并行订阅者（多会话下按 `sessionId` demux）。
 
 ---

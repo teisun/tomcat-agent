@@ -20,14 +20,8 @@ use crate::core::plan_runtime::code_reviewer::{
     code_reviewer_allowed_tools_with_policy, collect_git_changed_files, CodeReviewPromptInput,
     CodeReviewSummary,
 };
-use crate::core::plan_runtime::explorer::{
-    build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
-    EXPLORER_ALLOWED_TOOLS,
-};
-use crate::core::plan_runtime::plan_reviewer::{
-    build_review_prompt, plan_reviewer_allowed_tools_with_policy, reviewer_system_prompt_text,
-    PlanReviewSummary,
-};
+use crate::core::plan_runtime::explorer::{build_explorer_prompt, ExplorerReport, ExplorerTask};
+use crate::core::plan_runtime::plan_reviewer::{build_review_prompt, PlanReviewSummary};
 use crate::core::plan_runtime::review::{
     count_assistant_turns, extract_review_text, parse_review_block, resolve_internal_tools,
 };
@@ -55,6 +49,7 @@ pub struct ProdCodeReviewerDispatcher {
 }
 
 /// 完整依赖集合；构造时一次性注入。dispatch 仅 clone Arc 拷贝到 spawn 闭包。
+#[derive(Clone)]
 pub struct ProdReviewerDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
@@ -98,6 +93,7 @@ impl ProdReviewerDeps {
     fn resolve_model_settings(
         &self,
         plan_runtime: &PlanRuntime,
+        role: Option<crate::infra::config::ModelRole>,
     ) -> (String, crate::core::llm::ThinkingLevel) {
         let parent = read_parent_session_settings(&self.sessions_dir, &self.parent_session_id);
         let session_model = match parent.as_ref() {
@@ -105,11 +101,23 @@ impl ProdReviewerDeps {
             Some((model, _)) => model.clone(),
             None => plan_runtime.session_model(),
         };
-        let model = resolve_dispatch_model(
-            self.model_override.as_deref(),
-            session_model.as_deref(),
-            &self.fallback_model,
-        );
+        let model = if let Some(role) = role {
+            let parent_model = self
+                .llm_resolver
+                .selected_model_id(session_model.as_deref());
+            let inherited = resolve_dispatch_model(
+                self.model_override.as_deref(),
+                Some(&parent_model),
+                &self.fallback_model,
+            );
+            self.llm_resolver.subagent_model(role, &inherited)
+        } else {
+            resolve_dispatch_model(
+                self.model_override.as_deref(),
+                session_model.as_deref(),
+                &self.fallback_model,
+            )
+        };
         // A refreshed default can differ from the child's original fallback model.
         let session_level = parent.and_then(|(_, level)| level).filter(|_| {
             let current_model = self
@@ -292,22 +300,11 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
             build_review_prompt(plan_id, plan_text, &plan_path, workspace_root);
         let turns_limit = deps.max_turns.max(1);
 
-        let primitive = Arc::clone(&deps.primitive);
-        let event_bus = Arc::clone(&deps.event_bus);
-        let agent_trail_dir = deps.agent_trail_dir.clone();
-        let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
-        let shared_skill_set = Arc::clone(&deps.skill_set);
-        let skill_set = deps.skill_set.read().clone();
-        let expose_skills =
-            plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
-        let tool_defs =
-            resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(expose_skills));
-        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
-        let thinking_level = Some(level);
-        let speed = deps.resolve_speed(&model_id);
+        let (model_id, level) = deps.resolve_model_settings(
+            &plan_runtime,
+            Some(crate::infra::config::ModelRole::PlanReviewer),
+        );
         let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
         let runtime = match resolve_subagent_runtime(
             deps.llm_resolver.as_ref(),
@@ -328,27 +325,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                 return s;
             }
         };
-        let context_budget_chars = crate::infra::config::compute_context_budget_chars_from_tokens(
-            runtime.main_call.limits.input_budget_tokens,
-        );
-        let skill_prompt = if expose_skills {
-            render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
-        } else {
-            None
-        };
-        let plan_id_for_closure = plan_id.to_string();
-        let plan_runtime_for_loop = Arc::clone(&plan_runtime);
-        let compaction_provider = runtime.compaction_provider.clone();
-        let compaction_output_limit = runtime
-            .compaction_output_limit
-            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
-        let compaction_input_budget = runtime.compaction_input_budget;
-        let context_config = runtime.context_config.clone();
-        let openai_files_runtime = runtime.openai_files_runtime.clone();
-        let max_attempts = deps.agent_max_attempts;
-        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
-        let binding = runtime.main_call;
-        let transcript_model = binding.catalog_id().to_string();
+        let child_deps = deps.clone();
+        let plan_id_for_closure = plan_id.to_owned();
 
         let (tx, rx) = tokio::sync::oneshot::channel::<PlanReviewSummary>();
 
@@ -358,92 +336,22 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                 &parent_session_id,
                 SubagentType::PlanReviewer,
                 move |spawn_ctx| async move {
-                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
-                        refresh_mutation_stamp,
-                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
-                    let cancel_token = spawn_ctx.cancel_token.clone();
-                    let transcript_root = agent_trail_dir.clone();
-                    let transcript_sink =
-                        crate::core::session::subagent_transcript::open_subagent_transcript(
-                            &transcript_root,
-                            &child_session_id,
-                            SubagentType::PlanReviewer,
-                            &transcript_model,
-                            &parent_session_id_for_closure,
-                        );
-                    let initial_message_sink = transcript_sink.clone();
-                    let transcript_path =
-                        crate::core::session::subagent_transcript::format_subagent_transcript_path(
-                            &transcript_root,
-                            &child_session_id,
-                        );
-                    let todos_runtime = Arc::new(super::todo_runtime::TodosRuntime::open(
-                        std::path::PathBuf::from(&transcript_root),
-                        child_session_id.clone(),
-                        None,
-                    ));
+                    let transcript_root = &child_deps.agent_trail_dir;
+                    let child = super::child_session::ChildSession::new(
+                        &child_deps,
+                        runtime,
+                        spawn_ctx,
+                        level,
+                        Some(plan_runtime.clone()),
+                        initial_user_message,
+                    );
                     plan_runtime.write_plan_review_started_transcript(
                         &plan_id_for_closure,
                         Some(&child_session_id),
-                        transcript_path.as_deref(),
+                        child.transcript_hint.as_deref(),
                     );
-
-                    let mut system_text = format!(
-                        "{}\n(max_turns budget: {} reasoning turns)\n",
-                        reviewer_system_prompt_text(),
-                        turns_limit
-                    );
-                    if let Some(skill_prompt) = skill_prompt.as_ref() {
-                        system_text.push('\n');
-                        system_text.push_str(skill_prompt);
-                    }
-                    let cfg = AgentLoopConfig {
-                        max_attempts,
-                        system_prompt: Some(system_text.clone()),
-                        max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms,
-                        thinking_level,
-                        speed,
-                        session_id: child_session_id.clone(),
-                        tool_definitions: tool_defs,
-                        context_config,
-                        compaction_provider,
-                        compaction_output_limit,
-                        compaction_input_budget,
-                        title_provider: None,
-                        title_model: String::new(),
-                        title_output_limit: None,
-                        agent_trail_dir,
-                        read_file_state,
-                        openai_files_runtime,
-                        checkpoint_store,
-                        message_append_sink: transcript_sink,
-                        parent_session_id: Some(parent_session_id_for_closure.clone()),
-                        spawn_depth: spawn_ctx.spawn_depth,
-                        subagent_type: SubagentType::PlanReviewer,
-                        plan_runtime: Some(plan_runtime_for_loop),
-                        skill_set: if expose_skills {
-                            Some(Arc::clone(&shared_skill_set))
-                        } else {
-                            None
-                        },
-                        ephemeral_tail_provider: None,
-                    };
-                    let mut agent_loop =
-                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
-                            .with_todos_runtime(todos_runtime);
-                    // PlanReviewer tool whitelist does not include `bash`, so it does not need
-                    // a dedicated BashTaskRegistry.
-                    let initial_messages = [
-                        ChatMessage::system(&system_text),
-                        ChatMessage::user(&initial_user_message),
-                    ];
-                    crate::core::session::subagent_transcript::persist_initial_messages(
-                        initial_message_sink.as_ref(),
-                        &initial_messages,
-                    );
-                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
+                    let run_outcome = child.run().await;
 
                     let (summary, label) = build_plan_summary_from_outcome(
                         origin,
@@ -454,9 +362,12 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                     let mut summary = summary;
                     crate::core::session::subagent_transcript::append_subagent_transcript_hint(
                         &mut summary.summary,
-                        &transcript_root,
+                        transcript_root,
                         &child_session_id,
                     );
+                    child_deps
+                        .agent_registry
+                        .set_terminal_report(&child_session_id, &summary.summary);
                     let _ = tx.send(summary.clone());
 
                     SubagentOutcome {
@@ -571,7 +482,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(expose_skills));
-        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
+        let (model_id, level) = deps.resolve_model_settings(&plan_runtime, None);
         let thinking_level = Some(level);
         let speed = deps.resolve_speed(&model_id);
         let parent_session_id = deps.parent_session_id.clone();
@@ -714,13 +625,13 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_bash_task_registry(bash_task_registry);
-                    let initial_messages = [
+                    let mut initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
                     crate::core::session::subagent_transcript::persist_initial_messages(
                         initial_message_sink.as_ref(),
-                        &initial_messages,
+                        &mut initial_messages,
                     );
                     let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 
@@ -908,222 +819,157 @@ impl ProdExplorerDispatcher {
 
 #[async_trait]
 impl ExplorerDispatcher for ProdExplorerDispatcher {
-    async fn dispatch(&self, task: &ExplorerTask) -> ExplorerReport {
-        let Some(deps) = self.deps.as_ref() else {
-            return ExplorerReport::aborted_with(
-                &task.id,
-                format!(
-                    "[{}] Production explorer sub-Agent dependencies were not supplied (stub mode)",
-                    self.origin
-                ),
-            );
-        };
-        let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
-            return ExplorerReport::aborted_with(
-                &task.id,
-                format!(
-                    "[{}] PlanRuntime was dropped; explorer dispatch cancelled",
-                    self.origin
-                ),
-            );
-        };
-
-        let workspace_root = Some(deps.agent_workspace_dir.as_path());
-        let initial_user_message = build_explorer_prompt(task, workspace_root);
+    async fn dispatch_batch(
+        &self,
+        tasks: &[ExplorerTask],
+        delivery: Option<Arc<super::child_reports::ReportBatch>>,
+        tool_call_id: Option<&str>,
+    ) -> Result<super::explorer::ExplorerDelivery, String> {
+        use super::explorer::{ExplorerDelivery, ExplorerTicket};
+        use crate::core::agent_registry::SubagentSpawnContext;
+        use futures_util::FutureExt;
+        let deps = self
+            .deps
+            .as_ref()
+            .ok_or("explorer dependencies were not supplied")?;
+        let plan_runtime = deps
+            .plan_runtime
+            .upgrade()
+            .ok_or("PlanRuntime was dropped")?;
+        let (model_id, level) = deps.resolve_model_settings(
+            &plan_runtime,
+            Some(crate::infra::config::ModelRole::Explorer),
+        );
         let turns_limit = deps.max_turns.max(1);
-
-        let primitive = Arc::clone(&deps.primitive);
-        let event_bus = Arc::clone(&deps.event_bus);
-        let agent_trail_dir = deps.agent_trail_dir.clone();
-        let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
-        let bash_config = deps.bash_config.clone();
-        let gate = Arc::clone(&deps.gate);
-        let confirmation = Arc::clone(&deps.confirmation);
-        let audit = Arc::clone(&deps.audit);
-        let bash_ast = deps.bash_ast.clone();
-        let bash_cwd = deps.agent_workspace_dir.clone();
-        let tool_defs = resolve_internal_tools(EXPLORER_ALLOWED_TOOLS);
-        let (model_id, level) = deps.resolve_model_settings(&plan_runtime);
-        let thinking_level = Some(level);
-        let speed = deps.resolve_speed(&model_id);
-        let parent_session_id = deps.parent_session_id.clone();
-        let parent_session_id_for_closure = parent_session_id.clone();
-        let origin = self.origin;
-        let task_id = task.id.clone();
-        let task_id_for_closure = task_id.clone();
-        let runtime = match resolve_subagent_runtime(
-            deps.llm_resolver.as_ref(),
-            &deps.context_config,
-            &deps.llm_files_config,
-            &deps.sessions_dir,
-            &parent_session_id,
-            &model_id,
-        ) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let mut r = ExplorerReport::aborted_with(
-                    &task_id,
-                    format!(
-                        "[{}] Could not resolve explorer model `{model_id}`: {err}",
-                        self.origin
-                    ),
-                );
-                r.turns_limit = turns_limit;
-                r.stop_reason = "model_unresolved".into();
-                return r;
-            }
-        };
-        let compaction_provider = runtime.compaction_provider.clone();
-        let compaction_output_limit = runtime
-            .compaction_output_limit
-            .or_else(|| runtime.main_call.output_limit_for_request(None).0);
-        let compaction_input_budget = runtime.compaction_input_budget;
-        let context_config = runtime.context_config.clone();
-        let openai_files_runtime = runtime.openai_files_runtime.clone();
-        let max_attempts = deps.agent_max_attempts;
-        let retry_base_delay_ms = deps.agent_retry_base_delay_ms;
-        let binding = runtime.main_call;
-        let transcript_model = binding.catalog_id().to_string();
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<ExplorerReport>();
-
-        let spawn_result = deps
-            .agent_registry
-            .spawn_subagent_internal(
-                &parent_session_id,
-                SubagentType::Explorer,
-                move |spawn_ctx| async move {
-                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
-                        refresh_mutation_stamp,
-                    ));
-                    let child_session_id = spawn_ctx.child_session_id.clone();
-                    let cancel_token = spawn_ctx.cancel_token.clone();
-                    let transcript_root = agent_trail_dir.clone();
-                    let bash_task_registry =
-                        crate::core::tools::primitive::build_bash_task_registry(
-                            &bash_config,
-                            std::path::PathBuf::from(&transcript_root)
-                                .join("tool-results")
-                                .join(format!("subagent-{}", spawn_ctx.subagent_type.as_str()))
-                                .join(&child_session_id),
-                            gate.clone(),
-                            confirmation.clone(),
-                            audit.clone(),
-                            bash_ast.clone(),
-                            Some(bash_cwd.clone()),
-                        );
-                    bash_task_registry.set_environment(primitive.child_environment());
-                    let transcript_sink =
-                        crate::core::session::subagent_transcript::open_subagent_transcript(
-                            &transcript_root,
-                            &child_session_id,
-                            SubagentType::Explorer,
-                            &transcript_model,
-                            &parent_session_id_for_closure,
-                        );
-                    let initial_message_sink = transcript_sink.clone();
-                    let transcript_path =
-                        crate::core::session::subagent_transcript::format_subagent_transcript_path(
-                            &transcript_root,
-                            &child_session_id,
-                        );
+        let mut jobs = Vec::new();
+        let mut receivers = Vec::new();
+        for task in tasks {
+            let runtime = resolve_subagent_runtime(
+                deps.llm_resolver.as_ref(),
+                &deps.context_config,
+                &deps.llm_files_config,
+                &deps.sessions_dir,
+                &deps.parent_session_id,
+                &model_id,
+            )
+            .map_err(|e| format!("Could not resolve explorer model `{model_id}`: {e}"))?;
+            let origin = self.origin;
+            let child_deps = deps.clone();
+            let plan_runtime = plan_runtime.clone();
+            let initial_user_message = build_explorer_prompt(task, Some(&deps.agent_workspace_dir));
+            let description = task.description.clone();
+            let origin_call = tool_call_id.map(str::to_owned);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            receivers.push(rx);
+            let delivery = delivery.clone();
+            jobs.push(move |spawn_ctx: SubagentSpawnContext| async move {
+                let token = spawn_ctx.cancel_token.clone();
+                let child_session_id = spawn_ctx.child_session_id.clone();
+                let run = std::panic::AssertUnwindSafe(async {
+                    let child = super::child_session::ChildSession::new(
+                        &child_deps,
+                        runtime,
+                        spawn_ctx,
+                        level,
+                        None,
+                        initial_user_message,
+                    );
                     plan_runtime.write_explorer_started_transcript(
-                        &task_id_for_closure,
+                        &description,
+                        origin_call.as_deref(),
                         Some(&child_session_id),
-                        transcript_path.as_deref(),
+                        child.transcript_hint.as_deref(),
                     );
-
-                    let system_text = format!(
-                        "{}\n(max_turns budget: {} reasoning turns)\n",
-                        explorer_system_prompt_text(),
-                        turns_limit
-                    );
-                    let cfg = AgentLoopConfig {
-                        max_attempts,
-                        system_prompt: Some(system_text.clone()),
-                        max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms,
-                        thinking_level,
-                        speed,
-                        session_id: child_session_id.clone(),
-                        tool_definitions: tool_defs,
-                        context_config,
-                        compaction_provider,
-                        compaction_output_limit,
-                        compaction_input_budget,
-                        title_provider: None,
-                        title_model: String::new(),
-                        title_output_limit: None,
-                        agent_trail_dir,
-                        read_file_state,
-                        openai_files_runtime,
-                        checkpoint_store,
-                        message_append_sink: transcript_sink,
-                        parent_session_id: Some(parent_session_id_for_closure.clone()),
-                        spawn_depth: spawn_ctx.spawn_depth,
-                        subagent_type: SubagentType::Explorer,
-                        plan_runtime: None,
-                        skill_set: None,
-                        ephemeral_tail_provider: None,
-                    };
-                    let mut agent_loop =
-                        AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
-                            .with_bash_task_registry(bash_task_registry);
-                    let initial_messages = [
-                        ChatMessage::system(&system_text),
-                        ChatMessage::user(&initial_user_message),
-                    ];
-                    crate::core::session::subagent_transcript::persist_initial_messages(
-                        initial_message_sink.as_ref(),
-                        &initial_messages,
-                    );
-                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
-
-                    let (report, label) = build_explorer_report_from_outcome(
+                    child.run().await
+                })
+                .catch_unwind()
+                .await;
+                let (mut report, label) = match run {
+                    Ok(outcome) => build_explorer_report_from_outcome(
                         origin,
-                        &task_id_for_closure,
+                        &child_session_id,
                         &child_session_id,
                         turns_limit,
-                        run_outcome,
-                    );
-                    let _ = tx.send(report.clone());
-
-                    SubagentOutcome {
-                        child_session_id: child_session_id.clone(),
-                        subagent_type: SubagentType::Explorer,
-                        outcome_label: label,
-                        error_message: if report.aborted {
-                            Some(report.report.clone())
-                        } else {
-                            None
-                        },
-                    }
-                },
-            )
-            .await;
-
-        match spawn_result {
-            Ok(_) => match rx.await {
-                Ok(report) => report,
-                Err(_) => ExplorerReport::aborted_with(
-                    &task_id,
-                    format!(
-                        "[{}] explorer sub-Agent exited but its report channel closed early",
-                        self.origin
+                        outcome,
                     ),
-                ),
-            },
-            Err(e) => {
-                let mut r = ExplorerReport::aborted_with(
-                    &task_id,
-                    format!("[{}] Could not spawn explorer: {e}", self.origin),
-                );
-                r.turns_limit = turns_limit;
-                r.stop_reason = "spawn_error".into();
-                r
-            }
+                    Err(_) => {
+                        let mut r =
+                            ExplorerReport::aborted_with(&child_session_id, "Explorer panicked");
+                        r.child_session_id = child_session_id.clone();
+                        r.stop_reason = "failed".into();
+                        (r, SubagentOutcomeLabel::Failed)
+                    }
+                };
+                if let Some((cut, _)) = report.report.char_indices().nth(16_000) {
+                    report.report.truncate(cut);
+                    report.report.push_str("… [truncated]");
+                }
+                child_deps
+                    .agent_registry
+                    .set_terminal_report(&child_session_id, &report.report);
+                let outcome = SubagentOutcome {
+                    child_session_id,
+                    subagent_type: SubagentType::Explorer,
+                    outcome_label: label,
+                    error_message: report.aborted.then(|| report.report.clone()),
+                };
+                crate::core::agent_registry::ChildExit::with_delivery(outcome, move || {
+                    if let Some(batch) = delivery {
+                        batch.publish(&report, &token);
+                    } else {
+                        if token.is_cancelled() {
+                            report.aborted = true;
+                            report.report = "Stopped".into();
+                            report.stop_reason = "stopped".into();
+                        }
+                        let _ = tx.send(report);
+                    }
+                })
+            });
         }
+        let handles = deps
+            .agent_registry
+            .start_described_batch(
+                &deps.parent_session_id,
+                SubagentType::Explorer,
+                tool_call_id,
+                &tasks
+                    .iter()
+                    .map(|t| t.description.as_str())
+                    .collect::<Vec<_>>(),
+                jobs,
+            )
+            .map_err(|e| format!("Could not spawn explorer batch: {e}"))?;
+        if delivery.is_some() {
+            return Ok(ExplorerDelivery::Tickets(
+                handles
+                    .into_iter()
+                    .zip(tasks)
+                    .map(|(h, t)| ExplorerTicket {
+                        child_session_id: h.id.clone(),
+                        id: h.id,
+                        role: "explorer",
+                        description: t.description.clone(),
+                    })
+                    .collect(),
+            ));
+        }
+        let pending = handles
+            .into_iter()
+            .zip(receivers)
+            .map(|(h, rx)| async move {
+                let id = h.id.clone();
+                let _cancel = h.cancel_on_drop();
+                match h.wait().await {
+                    Ok(_) => rx.await.unwrap_or_else(|_| {
+                        ExplorerReport::aborted_with(&id, "report channel closed")
+                    }),
+                    Err(err) => ExplorerReport::aborted_with(&id, err.to_string()),
+                }
+            });
+        Ok(ExplorerDelivery::Reports(
+            futures_util::future::join_all(pending).await,
+        ))
     }
 }
 

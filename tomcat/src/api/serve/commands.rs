@@ -7,7 +7,7 @@
 //! - `ChatMessage` 多模态装配
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -63,6 +63,8 @@ pub(crate) enum TurnAck {
     Accepted,
     Payload(serde_json::Value),
     Silent,
+    /// No acknowledgement and no change to the controller's displayed session.
+    ChildReports,
 }
 
 fn set_connector_tool_enabled_payload(
@@ -122,14 +124,12 @@ fn encode_get_messages_cursor(offset: u64, boundary_id: Option<&str>) -> Result<
 }
 
 fn resolve_cursor_offset(
-    session: &SessionManager,
-    session_id: &str,
+    transcript_path: &std::path::Path,
     cursor: &GetMessagesCursor,
 ) -> Result<u64, AppError> {
     let Some(boundary_id) = cursor.boundary_id.as_deref() else {
         return Ok(cursor.offset);
     };
-    let transcript_path = session.transcript_path(session_id);
     if let Some(entry) = read_entry_at_offset(&transcript_path, cursor.offset)? {
         if entry_id(&entry) == Some(boundary_id) {
             return Ok(cursor.offset);
@@ -192,8 +192,7 @@ fn assistant_declares_tool_call(entry: &TranscriptEntry, expected_id: &str) -> b
 /// tool name/arguments until a later pagination request. The durable `tool_call_id` is the join key;
 /// the response may exceed the requested limit by the size of this one tool-call group.
 fn complete_leading_tool_companions(
-    session: &SessionManager,
-    session_id: &str,
+    transcript_path: &std::path::Path,
     mut page: TranscriptPage,
 ) -> Result<TranscriptPage, AppError> {
     let Some(first) = page.entries.first() else {
@@ -209,7 +208,6 @@ fn complete_leading_tool_companions(
         return Ok(page);
     };
 
-    let transcript_path = session.transcript_path(session_id);
     let Some(first_offset) = find_entry_line_offset(&transcript_path, first_id)? else {
         return Ok(page);
     };
@@ -303,7 +301,7 @@ pub(crate) async fn handle_command(
         session_mcp,
     } = command.into();
     let runtime = state.runtime.clone();
-    let _admission = if state.shared && super::ownership::needs_admission(&command) {
+    let _admission = if super::ownership::needs_admission(&command) {
         Some(runtime.admission.lock().await)
     } else {
         None
@@ -767,6 +765,66 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::ViewChild {
+            id,
+            session_id,
+            child_id,
+            cursor,
+        } => {
+            let Some(slot) = state
+                .registry
+                .get(&session_id)
+                .filter(|_| state.active_session_id().as_deref() == Some(&session_id))
+            else {
+                send_error(&state, id, Some(session_id), "unknown_session")?;
+                return Ok(());
+            };
+            let result = (|| -> Result<Value, AppError> {
+                let root = crate::resolve_agent_trail_dir(&state.cfg)?;
+                let path = crate::core::session::subagent_transcript::owned_child_path(
+                    &root,
+                    &session_id,
+                    &child_id,
+                )
+                .map_err(AppError::Config)?;
+                if cursor.is_none() {
+                    state.watch_child(&slot, &child_id)?;
+                }
+                let before = cursor
+                    .as_deref()
+                    .map(decode_get_messages_cursor)
+                    .transpose()?
+                    .map(|c| resolve_cursor_offset(&path, &c))
+                    .transpose()?;
+                let mut page = complete_leading_tool_companions(
+                    &path,
+                    read_entries_tail_before(&path, 128, before)?,
+                )?;
+                let next = encode_next_cursor(&page)?;
+                page.entries.retain_mut(super::child_view::public_entry);
+                attach_page_tool_displays(&path, &mut page.entries)?;
+                dereference_page_attachments(&slot, &mut page.entries);
+                Ok(
+                    json!({"sessionId":child_id,"messages":page.entries,"hasMore":page.has_more,"nextCursor":next}),
+                )
+            })();
+            match result {
+                Ok(payload) => state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    Some(session_id),
+                    Some(payload),
+                )))?,
+                Err(error) => send_error(&state, id, Some(session_id), error.to_string())?,
+            }
+        }
+        ServeCommand::CloseChildView { id, session_id } => {
+            state.close_child_view();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(session_id),
+                None,
+            )))?;
+        }
         ServeCommand::GetMessages {
             id,
             session_id,
@@ -800,8 +858,11 @@ pub(crate) async fn handle_command(
                 .as_ref()
                 .map(|cursor| {
                     resolve_cursor_offset(
-                        &slot.ctx.session_runtime.session,
-                        &slot.session_id,
+                        &slot
+                            .ctx
+                            .session_runtime
+                            .session
+                            .transcript_path(&slot.session_id),
                         cursor,
                     )
                 })
@@ -817,11 +878,12 @@ pub(crate) async fn handle_command(
                         &[("detail", &error.to_string())],
                     ))
                 })?;
-            let page = complete_leading_tool_companions(
-                &slot.ctx.session_runtime.session,
-                &slot.session_id,
-                page,
-            )?;
+            let path = slot
+                .ctx
+                .session_runtime
+                .session
+                .transcript_path(&slot.session_id);
+            let page = complete_leading_tool_companions(&path, page)?;
             let next_cursor = encode_next_cursor(&page).map_err(|error| {
                 AppError::Config(crate::infra::i18n::tr(
                     "serve.cursorEncode",
@@ -837,11 +899,7 @@ pub(crate) async fn handle_command(
                     entry.message["rewindEligible"] = json!(eligible);
                 }
             }
-            attach_page_tool_displays(
-                &slot.ctx.session_runtime.session,
-                &slot.session_id,
-                &mut page.entries,
-            )?;
+            attach_page_tool_displays(&path, &mut page.entries)?;
             match params.attachment_mode {
                 AttachmentMode::Inline => {
                     materialize_page_image_refs(&slot, &mut page.entries);
@@ -856,6 +914,7 @@ pub(crate) async fn handle_command(
                 Some(serde_json::json!({
                     "sessionId": slot.session_id,
                     "header": header,
+                    "backgroundTasks": super::child_view::page_rows(&crate::resolve_agent_trail_dir(&state.cfg)?, &slot.session_id, &page.entries,&slot.ctx.agent_registry),
                     "messages": page.entries,
                     "nextCursor": next_cursor,
                     "hasMore": page.has_more,
@@ -1076,6 +1135,40 @@ pub(crate) async fn handle_command(
                 }
             }
         }
+        ServeCommand::StopBackground {
+            id,
+            session_id,
+            kind,
+            task_id,
+        } => {
+            let Some(slot) = state.registry.get(&session_id) else {
+                send_error(&state, id, Some(session_id), "unknown_session")?;
+                return Ok(());
+            };
+            let result = match kind {
+                super::types::BackgroundKind::Subagent => slot
+                    .ctx
+                    .agent_registry
+                    .stop_child(&session_id, &task_id)
+                    .map(|r| r.wire()),
+                super::types::BackgroundKind::Shell => slot
+                    .ctx
+                    .session_runtime
+                    .bash_task_registry
+                    .stop_background(&task_id)
+                    .await
+                    .map_err(|e| e.to_string()),
+            }
+            .map(|row| json!({"stopping":row["state"] == "stopping", "row":row}));
+            match result {
+                Ok(result) => state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    Some(session_id),
+                    Some(result),
+                )))?,
+                Err(error) => send_error(&state, id, Some(session_id), error)?,
+            }
+        }
         ServeCommand::GetState { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -1126,6 +1219,7 @@ pub(crate) async fn handle_command(
                     })),
                     "planTodos": plan_todos,
                     "sessionTodos": session_todos,
+                    "backgroundTasks":slot.ctx.agent_registry.child_rows(&slot.session_id).into_iter().map(|r|r.wire()).chain(slot.ctx.session_runtime.bash_task_registry.background_rows()).collect::<Vec<_>>(),
                     "contextUtilizationRatio": context_utilization_ratio,
                     "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
                 })),
@@ -1884,6 +1978,36 @@ pub(crate) async fn handle_command(
                     "envOverride": std::env::var_os("TOMCAT__LLM__DEFAULT_MODEL").is_some(),
                     "warnings": warnings,
                 })),
+            )))?;
+        }
+        ServeCommand::UpdateSubagentSettings { id, role, model } => {
+            if let Some(model) = model {
+                if role.env_override().is_some() {
+                    send_error(
+                        &state,
+                        id,
+                        state.active_session_id(),
+                        "TOMCAT_REVIEWER_MODEL is set; this selection is read-only",
+                    )?;
+                    return Ok(());
+                }
+                let model = model.as_deref().map(str::trim);
+                with_current_model_catalog(&state.cfg, |catalog| {
+                    if let Some(m) = model {
+                        catalog.lookup_explicit(m)?;
+                    }
+                    crate::infra::config::write_subagent_model(&state.config_path, role, model)
+                })?;
+            }
+            let warnings: Vec<_> = refresh_all_model_catalogs(&state)
+                .err()
+                .map(|e| render_error_message(&e))
+                .into_iter()
+                .collect();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.active_session_id(),
+                Some(json!({"warnings":warnings})),
             )))?;
         }
         ServeCommand::SetUtilityModel { id, model_id } => {
@@ -2832,8 +2956,7 @@ pub(crate) async fn handle_command(
 /// The transcript remains the authoritative LLM history; the sidecar is a bounded
 /// rendering enhancement and never participates in model replay.
 fn attach_page_tool_displays(
-    session: &SessionManager,
-    session_id: &str,
+    transcript_path: &std::path::Path,
     entries: &mut [TranscriptEntry],
 ) -> Result<(), AppError> {
     let oldest_page_message_at = entries
@@ -2856,11 +2979,7 @@ fn attach_page_tool_displays(
             _ => None,
         })
         .collect::<HashSet<_>>();
-    let displays = read_tool_displays_for_calls(
-        &session.transcript_path(session_id),
-        &wanted,
-        oldest_page_message_at,
-    )?;
+    let displays = read_tool_displays_for_calls(transcript_path, &wanted, oldest_page_message_at)?;
     for entry in entries {
         let TranscriptEntry::Message(message) = entry else {
             continue;
@@ -2956,6 +3075,16 @@ pub(crate) fn list_models_payload(
             None => crate::core::llm::list_model_views(catalog),
         },
         default_model_id: config.llm.default_model.trim().to_owned(),
+        subagent_models: [
+            crate::infra::config::ModelRole::Explorer,
+            crate::infra::config::ModelRole::PlanReviewer,
+        ]
+        .into_iter()
+        .map(|r| (r.key().to_owned(), r.selected(config).unwrap_or_default()))
+        .collect(),
+        plan_reviewer_model_locked: crate::infra::config::ModelRole::PlanReviewer
+            .env_override()
+            .is_some(),
         utility_model_id: config
             .llm
             .title_model
@@ -3199,20 +3328,38 @@ async fn start_turn_with_token(
         }
         return Ok(());
     }
+    let report_turn = matches!(ack, TurnAck::ChildReports);
+    if report_turn && slot.auto_turns.load(Ordering::SeqCst) >= crate::api::chat::AUTO_TURN_BUDGET {
+        slot.busy.store(false, Ordering::SeqCst);
+        return Ok(());
+    }
     slot.reset_terminal_emitted();
     slot.ctx.session_runtime.steering_queue.lock().open();
 
-    let turn_token = requested_token.unwrap_or_else(|| {
-        if state.shared {
-            state.lifetime.child_token()
+    let turn_token = {
+        let mut current = slot.ctx.session_runtime.cancel_token.lock();
+        let token = if report_turn {
+            // Interrupt racing admission either cancelled our predecessor, or will cancel us.
+            if current.is_cancelled() || state.is_closed() {
+                slot.busy.store(false, Ordering::SeqCst);
+                slot.ctx
+                    .session_runtime
+                    .steering_queue
+                    .lock()
+                    .close_and_clear();
+                return Ok(());
+            }
+            slot.auto_turns.fetch_add(1, Ordering::SeqCst);
+            current.child_token()
         } else {
-            tokio_util::sync::CancellationToken::new()
-        }
-    });
-    {
-        let mut guard = slot.ctx.session_runtime.cancel_token.lock();
-        *guard = turn_token.clone();
-    }
+            if input_message.is_some() {
+                slot.auto_turns.store(0, Ordering::SeqCst);
+            }
+            requested_token.unwrap_or_else(|| state.lifetime.child_token())
+        };
+        *current = token.clone();
+        token
+    };
     let prepared = (|| {
         slot.ctx
             .agent_registry
@@ -3223,11 +3370,13 @@ async fn start_turn_with_token(
                     &[("detail", &error.to_string())],
                 ))
             })?;
-        state.set_active_session(&slot.session_id)?;
+        if !report_turn {
+            state.set_active_session(&slot.session_id)?;
+        }
         let payload = match ack {
             TurnAck::Accepted => Some(serde_json::json!({ "accepted": true })),
             TurnAck::Payload(payload) => Some(payload),
-            TurnAck::Silent => None,
+            TurnAck::Silent | TurnAck::ChildReports => None,
         };
         if let Some(payload) = payload {
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
@@ -3327,10 +3476,12 @@ async fn start_turn_with_token(
             .close_and_clear();
         {
             let mut running = slot_for_task.run_task.lock();
+            let mut terminal = slot_for_task.pending_settled.lock();
+            *terminal = Some((state_for_task.connection_id, outcome, failure.clone()));
             slot_for_task.mark_idle();
             *running = None;
+            emit_agent_idle(&state_for_task, &slot_for_task, outcome, failure);
         }
-        emit_agent_idle(&state_for_task, &slot_for_task, outcome, failure);
     });
     *running = Some(handle);
     Ok(())

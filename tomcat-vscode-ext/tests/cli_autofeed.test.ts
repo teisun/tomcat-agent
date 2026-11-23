@@ -4,7 +4,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
-import { ensureTomcatBinary, setupServeFixture, sseDone, sseFinish, sseToolCall, warmTomcatBinaryForSuite } from "./serveTestUtils";
+import { ensureTomcatBinary, setupServeFixture, sseDelta, sseDone, sseFinish, sseToolCall, warmTomcatBinaryForSuite } from "./serveTestUtils";
 
 warmTomcatBinaryForSuite();
 const exec = promisify(execFile);
@@ -30,9 +30,11 @@ it.each([true, false])("background completion before EOF=%s preserves notificati
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(chunks).toString());
       response.setHeader("Connection", "close");
-      if (body.stream === false) {
-        response.setHeader("Content-Type", "application/json");
-        response.end(JSON.stringify({ id: "title", choices: [{ index: 0, message: { role: "assistant", content: "Fixture" }, finish_reason: "stop" }] }));
+      // chat_collect also uses streaming transport. Title/summary calls have a
+      // single user prompt and no tools; only count requests from the main loop.
+      if (!body.tools?.length && body.messages.length === 1 && body.messages[0].role === 'user') {
+        response.setHeader('Content-Type', 'text/event-stream');
+        response.end(sseDelta('Fixture').body + sseFinish('stop').body + sseDone().body);
         return;
       }
       mainCalls++;

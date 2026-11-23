@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-22 13:12 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-23 16:25 +0800 | ACTIVE | develop | - |
 
 ### CURRENT RELEASE：CLI 0.2.2 / EXT 0.2.21
 
@@ -55,6 +55,8 @@ Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强
 
 ### INTERFACE：当前接口与兼容边界
 
+- **子 Agent**：`dispatch_agent` 支持 `run_in_background`；主 Agent 通过 `subagent_list`、`subagent_output`、`subagent_stop` 管理任务。Serve 按 `kind + id` 推送任务行，`view_child` 校验父子归属；角色模型在下次派发时生效。见[多 Agent 协议](../../tomcat/docs/architecture/multi-agent.md#4-协议与行为)。
+
 - **预热压缩（2026-11-22）**：Serve 新增 `foreground_compaction_start` / `foreground_compaction_end`，扩展在等待后台摘要或执行前台压缩时显示「Context 压缩中」，纯后台预热不触发。保留原 `auto_compaction_*` 事件；OpenAI Chat Completions 的 `chat_collect` 改为流式收集，只交付完整响应，调用方仍一次收到结果。
 
 - **网页搜索后续重构（2026-11-21）**：`web_search.backend` 的 REST 项须声明固定 `secret` 和 `host`，模型项仍声明 `model`。`pi.fetch` 移除 `{{host_key}}`，只展开请求头中的 `{{secret:NAME}}`；OpenAI 搜索使用 `OPENAI_API_KEY`，不会再自动借用官方模型配置中的自定义 Key。插件成功返回 `{ hits, warnings }`，失败抛错，不再使用 `unsupported_backend` 标记；多项按配置顺序尝试，单项直接报错，不回落到被覆盖的插件。
@@ -67,6 +69,8 @@ Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强
 - 普通提示词保存成功后发布 `session.user_message { sessionId, userMessageId, message }`，正文复用 reference 历史投影，先于回执与新轮输出；ACP 不回显本通知。CLI 与扩展需配套升级，旧端仍沿用既有行为；不扩展 steer/retry/rewind 的跨端同步。
 
 ### BLOCKED：部署与交付边界
+
+- **子 Agent**：本次本地提交无阻塞，未发布、未测覆盖率。控制连接断开会停止所属任务，旁观窗口关闭只退订；服务重启可查看记录，不恢复执行。
 
 - **预热压缩边界**：未启用真实模型验收，未安装或重启在用服务；未测覆盖率。忙碌时 Serve `follow_up` 可能先落盘、后进入活动内存，跨这段时差的压缩覆盖问题单列后续，不计入本次修复。
 
@@ -466,6 +470,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
+- **子 Agent 会话（2026-11-23）**：Explorer 可并行派发，后台报告到达后父会话可自动续跑；Explorer 与 Plan Reviewer 使用各自的待办、压缩上下文和模型设置。VS Code 的 `dispatch_agent` 工具行保留可展开的参数与结果，下方任务列表和 Dock 均支持只读旁看和定向停止。此前已在真实 Dev Host 验收，本次提交不重跑测试。
 - **[2026-11-21，网页搜索后续重构，本次本地提交]** 收敛宿主与插件的错误协议，统一 REST 后端的 Key／地址冲突预检，按生效顺序和后端可用性构建缓存键；同步设置提示、内置插件、回归用例及架构文档。本次未做功能验收。
 - **[2026-11-18，Todos 文档增强与 Opus 收尾，本次本地提交]** `TodosRuntime` 独立持有标题、原样 Markdown、清单和完成证据；保存成功后才提交内存并锁外通知，冷恢复、损坏保护、审阅子 Agent 隔离、后代清理及唯一压缩恢复入口均已实现，配套回归、工具 Schema/生成目录和架构文档完整纳入。按 Opus 复核计划仅删除 4 个未跟踪 `.bak`、修正 `build_plan` 的过时注释，不追加功能修补。
 - **[2026-11-18，版本与交付]** 使用项目脚本一次性升级 CLI `0.1.98 → 0.1.99`、EXT `0.2.16 → 0.2.17`，内置 CLI 同步 `0.1.99`；五版本文件仅改版本字段，前后版本一致性及版本差异空白检查通过。提交阶段不跑测试；先前严格 Clippy、格式检查与相关功能回归见验收记录。提交后按项目流程构建当前 CLI 并打 `darwin-x64` 插件整包，打包结果以实际产物核对为准；构建不等于安装或发布。

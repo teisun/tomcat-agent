@@ -2,6 +2,7 @@ import * as assert from "node:assert/strict";
 import * as path from "node:path";
 import { captureWorkbenchArtifacts } from "./support/workbenchFindDriver";
 import { en } from "../../shared/i18n/en";
+import { assertSubagentJourney } from './support/subagentJourney';
 import { assertSharedObservationFlow } from "./support/sharedObservationScenario";
 import { assertExternalHostObservation } from "./support/externalHostObservationScenario";
 import { assertVersionMismatchRecovery } from "./support/versionMismatchScenario";
@@ -75,6 +76,11 @@ suite("Tomcat host E2E", () => {
   (process.env.TOMCAT_E2E_REAL_OBSERVATION === "1" ? test : test.skip)("shared service observation: project-scoped, live and shared-input", async function () {
     this.timeout(180_000);
     await assertSharedObservationFlow(getTomcatExtensionApi);
+  });
+
+  (process.env.TOMCAT_E2E_REAL_OBSERVATION === '1' ? test : test.skip)('real subagent: foreground stop, background reports and read-only child view', async function () {
+    this.timeout(180_000);
+    await assertSubagentJourney(await getTomcatExtensionApi());
   });
 
   teardown(async function () {

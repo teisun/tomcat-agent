@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import {ChildTaskCard} from './BackgroundTasks';
 import { isDiffViewable } from "../../../src/shared/diffPresentation";
 import { useLocale, useT } from "../i18n/LocaleProvider";
 import { pluralKey, getLocale, t as defaultT, type Locale, type Translator } from "../../../src/shared/i18n";
@@ -263,7 +264,7 @@ export function toolCategory(toolName: string): ToolCategory {
 }
 
 export function isActionTool(item: WebviewToolCard): boolean {
-  if (isPlanTool(item)) {
+  if (isPlanTool(item) || item.toolName === 'dispatch_agent') {
     return true;
   }
   if (isRunning(item) && isBlockingTaskOutput(item)) {
@@ -1251,6 +1252,8 @@ function shouldShowBodyByDefault(
   if (!contentVisible) {
     return false;
   }
+  // Dispatch progress is visible in the child list even when raw tool details are closed.
+  if (item.toolName === 'dispatch_agent') return item.isError === true;
   const category = toolCategory(item.toolName);
   if (category === "answer") {
     return true;
@@ -1634,5 +1637,10 @@ function areToolRowPropsEqual(prev: ToolRowProps, next: ToolRowProps): boolean {
   );
 }
 
-export const ToolRow = memo(ToolRowComponent, areToolRowPropsEqual);
+export const ToolRow = memo((props: ToolRowProps) => {
+  const row = <ToolRowComponent {...props} />;
+  return props.item.toolName === 'dispatch_agent'
+    ? <div>{row}<ChildTaskCard item={props.item} /></div>
+    : row;
+}, areToolRowPropsEqual);
 ToolRow.displayName = "ToolRow";

@@ -777,6 +777,7 @@ type StateTestSession = Partial<WebviewSessionSnapshot> &
 function createSessionSnapshot(fixture: StateTestSession): WebviewSessionSnapshot {
   return {
     access: fixture.access,
+    backgroundTasks: fixture.backgroundTasks,
     controllerName: fixture.controllerName,
     origin: fixture.origin,
     activePlan: fixture.activePlan ?? null,
@@ -2662,6 +2663,26 @@ describe("Tomcat webview App", () => {
             ]),
       ),
     ).toBe(true);
+  });
+
+  it('opens the same read-only child from the dispatch card and dock without losing the draft or routing Stop as navigation',async()=>{
+    const {postMessage}=mount();const state=approvalDraftSnapshot('s1');const parent=state.sessionViews.s1;
+    const id='s1-child-explorer';parent.timeline=[{type:'tool',id:'card',toolCallId:'call',status:'complete',toolName:'dispatch_agent',args:{tasks:[{description:'Investigate',type:'explorer'}]},summary:'ticket',isError:false}];parent.busy=false;
+    parent.backgroundTasks=[{kind:'subagent',id,type:'explorer',description:'Investigate',activity:'Reading files…',toolCallId:'call',state:'running',startedAt:42,revision:2}];
+    state.sessionViews[id]={...parent,sessionId:id,timeline:[{type:'message',id:'child-msg',kind:'assistant',text:'Child reply'}]};
+    await emitState({channel:'state',content:state,messageId:'child-rows'});
+    const tool = screen.getByTestId('tool-row');
+    expect(within(tool).getByTestId('tool-row-label').textContent).toContain('dispatch agent');
+    const toggle = within(tool).getByTestId('tool-row-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(within(tool).getByTestId('tool-row-body').textContent).toContain('ticket');
+    fireEvent.click(toggle);
+    expect(screen.getByTestId('card-child-title').textContent).toBe('Investigate');
+    const editor=screen.getByTestId('composer-input');fireEvent.paste(editor,{clipboardData:{getData:(type:string)=>type==='text/plain'?'Preserve draft':''}});
+    fireEvent.click(screen.getAllByRole('button',{name:'Stop Investigate'})[0]);expect(screen.queryByTestId('readonly-child-view')).toBeNull();
+    for (const index of [0,1]) {fireEvent.click(screen.getAllByRole('button',{name:'Investigate'})[index]);const view=screen.getByTestId('readonly-child-view');expect(view.textContent).toContain('Child reply');expect(view.querySelector('textarea,[contenteditable=true]')).toBeNull();fireEvent.click(screen.getByRole('button',{name:/Main conversation/}));expect(screen.getByTestId('composer-input')).toBe(editor);expect(editor.textContent).toContain('Preserve draft');}
+    expect(postMessage.mock.calls.filter(([m])=>m.type==='viewChild').map(([m])=>m.data)).toEqual(Array(2).fill({sessionId:'s1',childId:id}));
   });
 
   it("reports real docked Todos to the DOM capture bridge after removing the old widget shell", async () => {

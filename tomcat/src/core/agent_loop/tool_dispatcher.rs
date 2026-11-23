@@ -446,7 +446,13 @@ pub(super) async fn run_tool_calls_with_usage(
         // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` 由
         // PrimitiveExecutor::execute_bash 内部兜底，保证子进程 / HTTP 连接被及时释放。
         // Attachments belong to this tool. Provider adapters project any wire-only carrier.
-        let outcome = if let Some(registry) = agent.tool_registry.clone() {
+        let outcome = if let Some(reason) = crate::core::plan_runtime::child_tools::denial(
+            agent.config.subagent_type,
+            &agent.config.tool_definitions,
+            &tc.name,
+        ) {
+            tool_exec::ToolExecOutcome::err(reason)
+        } else if let Some(registry) = agent.tool_registry.clone() {
             match registry.get_tool(tc.name.as_str()).await {
                 Ok(_) => {
                     let exec = registry.call_tool(

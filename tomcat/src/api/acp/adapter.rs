@@ -59,12 +59,17 @@ impl Replies {
             return;
         };
         let mut pending = self.prompts.lock();
-        if event["type"] == "agent_idle" {
+        if event["type"] == "session_settled" {
             if let Some(prompt) = pending.get_mut(session_id) {
                 let Some(completion) = prompt.completion.take() else {
                     return;
                 };
-                let result = match event["outcome"].as_str() {
+                let outcome = if prompt.cancellation.is_cancelled() {
+                    Some("interrupted")
+                } else {
+                    event["outcome"].as_str()
+                };
+                let result = match outcome {
                     Some("completed") => Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
                     Some("interrupted") => Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
                     _ => {
@@ -458,7 +463,7 @@ impl Adapter {
                         .await
                         .map_err(|error| failed(error.to_string()))
                 };
-                // Both acceptance and agent_idle pass through the output writer.
+                // Both acceptance and session_settled pass through the output writer.
                 // Stop work independently of that backpressure; keep the terminal
                 // and pending-prompt ownership behind the same ordered output.
                 tokio::select! {

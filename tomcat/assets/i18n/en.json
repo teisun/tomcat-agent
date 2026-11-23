@@ -1172,6 +1172,7 @@
   "preflight.gitSpawnFailed": "Could not start git installation; checkpoints will remain Noop",
   "terminal.editorFailed": "Could not initialize line editor: {detail}",
   "terminal.bgFinished": "\n[bg] task {id} finished (exit={code}); queued for next turn.",
+  "terminal.childReportsReady": "Subagent reports received; continuing.",
   "terminal.receiveArgs": "receiving args...",
   "terminal.receivePathArgs": "path={path}  receiving args...",
   "terminal.lines.one": "{count} line",

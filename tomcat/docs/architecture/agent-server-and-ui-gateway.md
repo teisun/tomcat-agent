@@ -8,7 +8,7 @@
 >
 > 1. **做 VSCode 插件 / 桌面 GUI 前，是否要先做「网关 gateway」？** —— 不是先做网络服务，而是先做**进程边界协议**；首发传输是 **stdio NDJSON**（子进程模式），网络网关（WS/HTTP daemon）是可选的 Phase 2 泛化。
 > 2. **其他 agent 用什么方式把能力暴露给 UI？gateway / CLI / SSE？** —— 见 **§2** 横向调研：主流是「**行分隔 JSON over stdio 子进程**」，部分升级到「**一个 dispatcher + 多传输（stdio + WebSocket）**」；**SSE 几乎不是**主链路（仅 openclaw 用于历史回放、cc-fork 用于云端、hermes 用于 OpenAI 兼容 API）。
-> 3. **能不能像 Cursor / Copilot / Codex 那样，一个进程同时跑多个会话（多 tab 并发）？本期就要做。** —— 见 **§2.5** 横向调研 + **§3.3** 落地方案：**能，而且本期做**。Tomcat 核心（`AgentLoop` 多实例、`EventBus` 已按 `sessionId` 打信封、`AgentRegistry` 已做进程级登记 + 级联中止 + 并发上限）已具备多会话并发底座；缺的是 `multi-agent.md` 维度A 规划但**尚未实现**的 `ChatContextRegistry` 与 serve 传输层的多路复用（`sessionId` 命令路由 + per-session run task + per-session interrupt + 单写者按 `sessionId` 公平 demux）。这正是 **codex `app-server` 的 `ThreadManager` 模型**（单进程多 thread、跨 thread 真并发、同 thread 串行），与 Tomcat 同语言、可直接对标。
+> 3. **能不能像 Cursor / Copilot / Codex 那样，一个进程同时跑多个会话（多 tab 并发）？本期就要做。** —— 见 **§2.5** 横向调研 + **§3.3** 落地方案：**能，而且本期做**。Tomcat 核心（`AgentLoop` 多实例、`EventBus` 已按 `sessionId` 打信封、`AgentRegistry` 已做进程级登记 + 级联中止 + 并发上限）已具备多会话并发底座；Serve 层已用 `ChatContextRegistry` 对接多路复用，分工见[多 Agent 运行时 §3](multi-agent.md#3-落地决策与实施点)（`sessionId` 命令路由 + per-session run task + per-session interrupt + 单写者按 `sessionId` 公平 demux）。这正是 **codex `app-server` 的 `ThreadManager` 模型**（单进程多 thread、跨 thread 真并发、同 thread 串行），与 Tomcat 同语言、可直接对标。
 > 4. **Tomcat 应该怎么落地？** —— 见 **§3**：复用现有 `AgentEvent` wire（已与 pi-mono 对齐）+ 单写者 drain + 正交 control 通道 + 复用 `EventBusAskQuestionPanel` 做审批回环 + `**ChatContextRegistry` 多会话并发**；新增 `tomcat serve` 子命令，不动 `AgentLoop` 核心。
 
 ---

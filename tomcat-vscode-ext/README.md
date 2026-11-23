@@ -120,6 +120,10 @@ Eligible failures seen live can be retried manually or by the existing cancellab
 
 Deletion never takes control: another live controller blocks it even while idle; a disconnected ACP origin does not. Deleting a conversation keeps its plan file, but a later fresh Multica session does not automatically recover that plan association.
 
+## Subagents and background commands
+
+Click a task description on the dispatch card or in the **Subagents** dock to follow that child live. **Back** restores the parent conversation and its draft. The child conversation is read-only. Click **Explorer** or **Plan Reviewer** to open its model setting; a change applies to the next dispatch. The **Shell** dock is separate. Stop on either dock targets that row only and is available to the controller. The composer's Stop also cancels children from earlier turns, but not background commands. Disconnecting the controlling client stops both.
+
 ## Sessions, Settings and plan review
 
 ```text

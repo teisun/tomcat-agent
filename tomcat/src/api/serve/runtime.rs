@@ -156,6 +156,7 @@ impl ServeConnection {
     /// EOF cancels first, before queued commands or a slow bootstrap can delay teardown.
     pub(super) fn begin_disconnect(&self) {
         self.lifetime.cancel();
+        self.close_child_view();
         for slot in self.registry.slots() {
             if *slot.controller.lock() == Some(self.connection_id) {
                 self.ask_question
@@ -287,8 +288,13 @@ impl ServeRuntime {
         }
         // Stop retires pending input, not history. A new controller must not inherit
         // the previous controller's unconsumed instructions.
-        slot.ctx.session_runtime.follow_up_queue.lock().clear();
         if failures.is_empty() {
+            slot.ctx
+                .session_runtime
+                .plan_runtime
+                .child_reports
+                .discard();
+            slot.ctx.session_runtime.follow_up_queue.lock().clear();
             Ok(())
         } else {
             Err(AppError::Config(failures.join("; ")))
@@ -310,6 +316,8 @@ impl ServeRuntime {
             candidates.sort_by_key(|slot| *slot.last_used.lock());
             for slot in candidates {
                 if slot.is_busy()
+                    || slot.ctx.agent_registry.has_children(&slot.session_id)
+                    || slot.ctx.session_runtime.plan_runtime.child_reports.ready()
                     || self.ask_question.has_pending_session(&slot.session_id)
                     || self.confirmation.has_pending_session(&slot.session_id)
                 {

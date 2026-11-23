@@ -9138,6 +9138,19 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
     .await;
     assert_eq!(utility["success"].as_bool(), Some(true));
     assert_eq!(utility["payload"]["envOverride"].as_bool(), Some(false));
+    let role_set=run_and_read(&state,&buffer,serde_json::from_value(serde_json::json!({"type":"update_subagent_settings","role":"explorer","model":"fcodex/claude-opus-5-5","id":"role-save"})).unwrap(),"role-save").await;
+    assert_eq!(role_set["success"], true, "{role_set}");
+    let no_op = run_and_read(
+        &state,
+        &buffer,
+        serde_json::from_value(
+            serde_json::json!({"type":"update_subagent_settings","role":"explorer","id":"no-op"}),
+        )
+        .unwrap(),
+        "no-op",
+    )
+    .await;
+    assert_eq!(no_op["success"], true);
 
     let listed = run_and_read(
         &state,
@@ -9164,6 +9177,10 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
         .expect("relay model listed");
     assert_eq!(relay["keySource"].as_str(), Some("saved"));
     assert_eq!(relay["api"].as_str(), Some("anthropic-messages"));
+    assert_eq!(
+        listed["payload"]["subagentModels"]["explorer"],
+        "fcodex/claude-opus-5-5"
+    );
 
     let removed = run_and_read(
         &state,
@@ -9191,6 +9208,7 @@ async fn serve_provider_commands_batch_save_point_utility_and_remove_the_card() 
         "list-after-remove",
     )
     .await;
+    assert_eq!(after["payload"]["subagentModels"]["explorer"], "");
     assert_eq!(
         after["payload"]["utilityModelId"].as_str(),
         Some(crate::infra::config::DEFAULT_TITLE_MODEL)

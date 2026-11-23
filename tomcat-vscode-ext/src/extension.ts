@@ -846,7 +846,7 @@ export async function activate(
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
-    openSettings: (route) => settingsPanel.reveal(route ?? "general"),
+    openSettings: (route,role) => settingsPanel.reveal(route ?? "general",role),
     reconnectServe: async () => { await runtimeReady; await supervisor.reconnect(); },
     restartServe: async () => { await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND); },
     showConnectionLogs: () => output.show(true),

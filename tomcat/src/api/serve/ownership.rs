@@ -11,6 +11,8 @@ fn read_command(command: &ServeCommand) -> bool {
     matches!(
         command,
         ServeCommand::GetState { .. }
+            | ServeCommand::ViewChild { .. }
+            | ServeCommand::CloseChildView { .. }
             | ServeCommand::GetMessages { .. }
             | ServeCommand::ListCheckpoints { .. }
             | ServeCommand::GetSessionFiles { .. }
@@ -138,6 +140,7 @@ fn connection_command(command: &ServeCommand) -> bool {
             | ServeCommand::SetProviderKey { .. }
             | ServeCommand::SetDefaultModel { .. }
             | ServeCommand::SetUtilityModel { .. }
+            | ServeCommand::UpdateSubagentSettings { .. }
             | ServeCommand::ListProviderKeys { .. }
             | ServeCommand::WebSearchSettings { .. }
             | ServeCommand::SetWebSearchRouting { .. }
@@ -209,6 +212,8 @@ pub(super) fn authorize(state: &ServeState, command: &ServeCommand) -> Result<Ad
                     }
                     if observer_command(command) || state.controls(&slot) {
                         true
+                    } else if matches!(command, ServeCommand::StopBackground { .. }) {
+                        false // Targeted stop cannot acquire or transfer control.
                     } else if !state.is_acp() {
                         if shared_input_command(command)
                             || matches!(command, ServeCommand::DeleteSession { .. })

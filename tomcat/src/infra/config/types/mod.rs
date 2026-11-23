@@ -64,6 +64,8 @@ pub struct AppConfig {
     /// reviewer 内联子 Agent 派发参数（T2-P1-004 RV-A/B/E）。
     #[serde(default)]
     pub reviewer: ReviewerConfig,
+    #[serde(default)]
+    pub subagents: super::SubagentConfig,
     /// session-local todos 工具参数（GAP-N12 / G3）。
     #[serde(default)]
     pub todos: TodosConfig,

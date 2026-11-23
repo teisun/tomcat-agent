@@ -3,7 +3,7 @@
 ```text
 主 Agent ── TodosRuntime ── todos/<session_id>.todo.md ── 主侧边栏
 
-plan reviewer ── 自己的 TodosRuntime ── todos/<child_session_id>.todo.md
+Explorer / Plan Reviewer ── 自己的 TodosRuntime ── todos/<child_session_id>.todo.md
                  不改主清单，也不通知主侧边栏
 
 正式计划：PlanRuntime + update_plan → .plan.md（与 Todos 独立）
@@ -99,10 +99,10 @@ commit：锁内克隆 → 应用并校验 → 原子保存 → 替换内存 → 
 
 - 主 Agent：由 ChatContext 注入运行时；保存后通知现有 TodosPanel 并写 `session.todos` 条目事件。正文不进入事件或进度投影。
 - Plan reviewer：可以借用正式 PlanRuntime，但挂载自己的 TodosRuntime，发布回调为空；工具结果留在它自己的子会话记录中。
-- Explorer、verifier、code reviewer 不提供 `todos`。工具执行只依赖本 Agent 的 TodosRuntime，未挂载时报不可用错误。
+- Explorer 也有独立工作本和上下文压缩，但不能写工作区，不能更新父计划。Verifier、Code Reviewer 不提供 `todos`。工具执行只依赖本 Agent 的 TodosRuntime，未挂载时报不可用错误。
 - 子会话 ID：`<parent>-child-<role>-<16位唯一后缀>`；后缀复用主会话生成器，不再用随 Registry 重建归零的序号。
 - 关闭会话保留文件；删除父会话同时清理其 `.todo.md` 及 `<session_id>-child-*.todo.md` 子孙文档，其他会话不动。
-- 不新增编辑器或改变现有面板协议。未来 worker、子 Agent 压缩和跨重启续接不属于本次交付，见 [多 Agent](../multi-agent.md)。
+- 不新增编辑器或改变现有面板协议。Explorer 与 Plan Reviewer 压缩时只收集本会话的待办；读取旧执行记录不等于跨重启续接。Worker 不属于本次交付，见 [多 Agent](../multi-agent.md)。
 
 ## 5. 压缩后怎么继续
 

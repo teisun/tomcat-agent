@@ -238,6 +238,88 @@ fn tty_not_now_does_not_persist_and_non_tty_keeps_first_command() {
     assert!(!record.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn tty_background_explorer_wakes_only_before_the_first_key() {
+    use common::serve::{
+        response, spawn_routed_openai_stream_server, sse_delta, sse_done, sse_finish, sse_tool_call,
+    };
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    for typed in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let main = calls.clone();
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = release.clone();
+        let server = spawn_routed_openai_stream_server(move |req| {
+            let msgs = &req["messages"];
+            let answer = |s: &str| response(vec![sse_delta(s), sse_finish("stop"), sse_done()]);
+            if msgs[0]["content"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("You are an Explorer subagent"))
+            {
+                let start = Instant::now();
+                while !gate.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(20) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                return answer("child-tty-result");
+            }
+            if !req["tools"].is_array() {
+                return answer("Title");
+            }
+            match main.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    let args = json!({"tasks":[{"type":"explorer","description":"Inspect","prompt":"Inspect the fixture"}],"run_in_background":true});
+                    response(vec![
+                        sse_tool_call("dispatch", "dispatch_agent", &args.to_string()),
+                        sse_finish("tool_calls"),
+                        sse_done(),
+                    ])
+                }
+                1 => answer("Parent ready"),
+                _ => {
+                    let payload = msgs.to_string();
+                    assert!(payload.contains("child-tty-result"));
+                    if typed {
+                        assert_eq!(payload.matches("保留草稿").count(), 1);
+                    }
+                    answer("Combined findings")
+                }
+            }
+        });
+        let fx = setup_serve_fixture(&server.base_url);
+        let mut child = Interactive::start(&fx.home_path, &fx.workspace);
+        child.until("Trust this project?");
+        child.answer("n\n");
+        child.until("]> ");
+        child.seen.clear();
+        child.answer("inspect fixture\n");
+        child.until("Parent ready");
+        let (_, tail) = child.seen.split_once("Parent ready").unwrap();
+        child.seen = tail.to_owned();
+        child.until("]> ");
+        child.seen.clear();
+        if typed {
+            child.answer("\x1b[200~保留草稿\x1b[201~");
+            child.until("保留草稿");
+        }
+        release.store(true, Ordering::Release);
+        if typed {
+            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            child.answer("\n");
+        }
+        child.until("Combined findings");
+        let (_, tail) = child.seen.split_once("Combined findings").unwrap();
+        child.seen = tail.to_owned();
+        child.quit_at_prompt();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+}
+
 #[test]
 fn legacy_mcp_config_does_not_abort_or_disable_piped_chat() {
     let fixture = setup_serve_fixture("http://127.0.0.1:1");

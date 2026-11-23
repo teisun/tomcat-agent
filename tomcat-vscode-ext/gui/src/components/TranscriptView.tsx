@@ -25,6 +25,7 @@ import type { Speed } from "../../../src/shared/modelSpeed";
 import type { ModelPickerModel } from "./ModelPicker";
 import { createPlanFileCardFromTool, PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
+import {ReviewerTaskLine} from './BackgroundTasks';
 import { ReviewRow } from "./ReviewRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
@@ -286,8 +287,9 @@ export function TranscriptView({
             const editor = renderUserEditor?.(item);
             if (editor) return <Fragment key={item.id}>{editor}</Fragment>;
           }
-          return (
-            <MessageBubble
+          return (<Fragment key={item.id}>
+            {item.reviewerChildId && <ReviewerTaskLine id={item.reviewerChildId}/>}
+            {item.text || !item.reviewerChildId ? <MessageBubble
               item={item}
               onEdit={item.kind === "user" && item.rewindEligible ? onEditUserMessage : undefined}
               hasFileWrites={item.kind === "user" ? messagesWithWrites.has(item.id) : undefined}
@@ -303,7 +305,7 @@ export function TranscriptView({
               recoveryDisabled={errorRecoveryDisabled}
               resolvePaths={resolvePaths}
               onZoomImage={onZoomImage}
-            />
+            /> : null}</Fragment>
           );
         case "checkpoint":
           return (

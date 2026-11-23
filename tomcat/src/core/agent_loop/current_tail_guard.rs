@@ -267,7 +267,7 @@ fn start_midturn_preheat_if_needed(
     let compaction_input_budget = agent.compaction_input_budget();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let control_snapshot = crate::core::plan_runtime::ControlSnapshot::capture(
-        agent.config.plan_runtime.as_deref(),
+        agent.compaction_plan().map(AsRef::as_ref),
         agent.todos_runtime.as_deref(),
         Some(agent.wire_model()),
     );
@@ -613,7 +613,7 @@ pub(super) async fn collapse_to_branch_summary(
     if agent.cancel_token.is_cancelled() {
         return Err(compaction_cancelled());
     }
-    let plan_runtime = agent.config.plan_runtime.clone();
+    let plan_runtime = agent.compaction_plan().cloned();
     let todos_runtime = agent.todos_runtime.clone();
     let session_model = agent.wire_model().to_string();
     ensure_working_message_ids(agent, messages)?;

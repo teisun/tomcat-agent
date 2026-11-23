@@ -55,8 +55,7 @@ use tracing::warn;
 use super::config_backend::{SharedConfigBackend, SharedPackageInstallBackend};
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
-    explorer_allowed_tools_description, is_code_reviewer_whitelisted_tool,
-    is_explorer_whitelisted_tool, is_plan_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
+    is_code_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
     reviewer_allowed_tools_description, verifier_allowed_tools_description,
 };
 
@@ -313,6 +312,16 @@ pub(super) async fn execute_tool_full_with_policy(
     event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
+    // Standalone callers do not have an AgentLoop's already-resolved definitions.
+    if let Some(definitions) =
+        crate::core::plan_runtime::child_tools::for_role(subagent_type, expose_skills_to_reviewer)
+    {
+        if let Some(reason) =
+            crate::core::plan_runtime::child_tools::denial(subagent_type, &definitions, &tc.name)
+        {
+            return ToolExecOutcome::err(reason);
+        }
+    }
     execute_tool_full_with_policy_and_connectors(
         primitive,
         session_id,
@@ -459,30 +468,11 @@ async fn execute_tool_tuple_full(
     // B3-guard：reviewer 子 Agent 不允许调 catalog 白名单外的任何工具（双保险——
     // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
     // catalog 漂移；与 reviewer.md §5.2 / §5.5 一致）。
-    if matches!(
-        ctx.subagent_type,
-        crate::core::agent_loop::types::SubagentType::PlanReviewer
-            | crate::core::agent_loop::types::SubagentType::CodeReviewer
-    ) && !match ctx.subagent_type {
-        crate::core::agent_loop::types::SubagentType::PlanReviewer => {
-            is_plan_reviewer_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
-        }
-        crate::core::agent_loop::types::SubagentType::CodeReviewer => {
-            is_code_reviewer_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
-        }
-        _ => true,
-    } {
-        return (
-            format!("reviewer sub-Agent may not call `{}` (allowed: {}; create_plan nesting and write/dispatch_agent/checkpoint are forbidden)", tc.name, reviewer_allowed_tools_description(ctx.subagent_type, ctx.expose_skills_to_reviewer)),
-            true,
-            Vec::new(),
-        );
-    }
-    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Explorer
-        && !is_explorer_whitelisted_tool(tc.name.as_str())
+    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::CodeReviewer
+        && !is_code_reviewer_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
     {
         return (
-            format!("explorer sub-Agent is read-only and may not call `{}` (allowed: {}; write tools and dispatch_agent are forbidden)", tc.name, explorer_allowed_tools_description()),
+            format!("reviewer sub-Agent may not call `{}` (allowed: {}; create_plan nesting and write/dispatch_agent/checkpoint are forbidden)", tc.name, reviewer_allowed_tools_description(ctx.subagent_type, ctx.expose_skills_to_reviewer)),
             true,
             Vec::new(),
         );
@@ -616,6 +606,13 @@ async fn execute_tool_tuple_full(
         "config_set" => branches::handle_config_set(ctx, &args, display_out).await,
         "package_install" => branches::handle_package_install(ctx, &args).await,
         "dispatch_agent" => branches::handle_dispatch_agent(ctx, &args).await,
+        name @ ("subagent_list" | "subagent_stop" | "subagent_output")
+            if ctx.subagent_type.is_root() =>
+        {
+            ctx.plan_runtime
+                .ok_or_else(|| "subagent tracking unavailable".to_owned())
+                .and_then(|rt| rt.query_child(name, &args))
+        }
         other => Err(format!("Unknown tool: {other}")),
     };
 

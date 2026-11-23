@@ -3,7 +3,7 @@ import { useT } from "../i18n/LocaleProvider";
 
 /** Layout only: business state and actions remain in the owning dock. */
 export function DockSection({ title, label, children, actions, defaultExpanded = false, onExpand, testId, toggleTestId, titleTestId, titleClassName, tooltip }: {
-  title: string | ((expanded: boolean) => string); label: "files" | "todos" | "messages"; children: ReactNode; actions?: ReactNode; defaultExpanded?: boolean;
+  title: string | ((expanded: boolean) => string); label: "files" | "todos" | "messages" | 'subagent' | 'shell'; children: ReactNode; actions?: ReactNode; defaultExpanded?: boolean;
   onExpand?(): void; testId?: string; toggleTestId?: string; titleTestId?: string; titleClassName?: string; tooltip?: string;
 }) {
   const t = useT();

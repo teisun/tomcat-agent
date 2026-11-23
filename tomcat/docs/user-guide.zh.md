@@ -925,10 +925,14 @@ tomcat claw --resume
 | `write` | 创建或覆盖文件 |
 | `edit` | 对已有文件做精确替换（支持多段 `edits`） |
 | `bash` | 执行 shell 命令（可 `run_in_background` + `task_output` / `task_stop` / `task_list`） |
+| `dispatch_agent` | 并行派发只读 Explorer；默认等报告，传 `run_in_background` 先拿票据。 |
+| `subagent_list` / `subagent_output` / `subagent_stop` | 看子任务、按 ID 取回已保存的报告、只停一个。`task_*` 只管 shell 命令。 |
 | `list_dir` | 列出目录 |
 | `search_files` | 在授权路径内搜索文件（优先 ripgrep/fd，缺失时进程内兜底） |
 
 此外还有 `create_plan`、`update_plan`、`todos`、`web_search`、`web_fetch` 等，按模型与配置启用。
+
+后台 Explorer 批次结束后，空闲的交互式 CLI 可以不等回车自动续跑。已经开始输入时会保留输入。中断主会话会取消它的子任务并丢弃待交付报告，但不会停掉已后台化的命令。
 
 **用户确认提示**（当 `require_approval_for_all_write = true` 时）：
 

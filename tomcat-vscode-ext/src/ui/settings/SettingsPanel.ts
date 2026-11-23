@@ -490,7 +490,8 @@ export class SettingsPanel implements vscode.Disposable {
     this.panel = undefined;
   }
 
-  reveal(route: SettingsRoute = "models"): void {
+  reveal(route: SettingsRoute = "models", role?:import('../../shared/settingsProtocol').SubagentRole): void {
+    this.state.focusRole = role && route==='subagents' ? {role,revision:(this.state.focusRole?.revision ?? 0)+1} : undefined;
     this.setRoute(route);
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Active, this.shouldPreserveFocus());
@@ -687,6 +688,17 @@ export class SettingsPanel implements vscode.Disposable {
       case "setDefaultModel":
         await this.handleSetDefaultModel(intent.data.modelId);
         return;
+      case 'updateSubagentSettings': {
+        if (this.route !== 'subagents') return;
+        try {
+          if (!this.state.capabilities.updateSubagentSettings) throw new Error(t('models.child.readOnly'));
+          const response=await this.deps.messenger.request({type:'update_subagent_settings',...intent.data});
+          if (!response.success) throw new Error(response.error ?? t('error.unknown'));
+          const warnings=isRecord(response.payload) ? parseStringArray(response.payload.warnings) : [];
+          await this.refreshState(null,t('subagent.saved'),warnings);
+        } catch(error) {await this.refreshState(String(error));}
+        return;
+      }
       case "setUtilityModel":
         await this.handleSetUtilityModel(intent.data.modelId);
         return;
@@ -1651,7 +1663,7 @@ export class SettingsPanel implements vscode.Disposable {
         : { error: null, providerKeys: [] };
       const modelsResult = capabilities.listModels
         ? await this.fetchModels(this.state.models, this.state.defaultModelId, this.state.utilityModelId)
-        : { catalogWarnings: [], error: null, models: [], defaultModelId: undefined, utilityModelId: undefined };
+        : { catalogWarnings: [], error: null, models: [], defaultModelId: undefined, utilityModelId: undefined, subagentModels:undefined, planReviewerModelLocked:undefined };
       if (viewEpoch !== this.viewEpoch) return;
       this.state = {
         ...this.state,
@@ -1662,6 +1674,8 @@ export class SettingsPanel implements vscode.Disposable {
         models: modelsResult.models,
         defaultModelId: modelsResult.defaultModelId,
         utilityModelId: modelsResult.utilityModelId,
+        subagentModels:modelsResult.subagentModels,
+        planReviewerModelLocked:modelsResult.planReviewerModelLocked,
         modelRemovalReceipt,
         providerKeys: providerKeysResult.providerKeys,
         ready: true,
@@ -1716,6 +1730,8 @@ export class SettingsPanel implements vscode.Disposable {
     models: SettingsModelView[];
     defaultModelId: string | undefined;
     utilityModelId: string | undefined;
+    subagentModels?:SettingsStateSnapshot['subagentModels'];
+    planReviewerModelLocked?:boolean;
   }> {
     const failed = (error: string) => ({
       catalogWarnings: [],
@@ -1737,6 +1753,8 @@ export class SettingsPanel implements vscode.Disposable {
         models: parseModelsPayload(response.payload),
         defaultModelId: typeof defaultModelId === "string" ? defaultModelId : undefined,
         utilityModelId: typeof utilityModelId === "string" ? utilityModelId : undefined,
+        subagentModels: response.payload?.subagentModels,
+        planReviewerModelLocked: response.payload?.planReviewerModelLocked,
       };
     } catch (error) {
       return failed(String(error));
@@ -1909,6 +1927,7 @@ export class SettingsPanel implements vscode.Disposable {
       setDefaultModel: hasServeCapability(initializeResult, "set_default_model"),
       setDefaultModelIfUnset: hasServeCapability(initializeResult, "set_default_model_if_unset"),
       setUtilityModel: hasServeCapability(initializeResult, "set_utility_model"),
+      updateSubagentSettings: hasServeCapability(initializeResult,'update_subagent_settings'),
       listRemoteModels: hasServeCapability(initializeResult, "list_remote_models"),
       removeProvider: hasServeCapability(initializeResult, "remove_provider"),
       upsertModels: hasServeCapability(initializeResult, "upsert_models"),

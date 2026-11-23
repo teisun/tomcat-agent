@@ -26,6 +26,11 @@
 
 pub mod active_plan;
 pub mod catalog;
+mod child_activity;
+mod child_queries;
+pub mod child_reports;
+mod child_session;
+pub(crate) mod child_tools;
 pub mod code_reviewer;
 pub mod explorer;
 pub mod file_store;
@@ -301,6 +306,8 @@ pub struct PlanRuntime {
     verifier: Mutex<Option<Arc<dyn VerifierDispatcher>>>,
     /// 只读勘察子 Agent 派发器（`dispatch_agent` 工具的后端）。
     explorer: Mutex<Option<Arc<dyn ExplorerDispatcher>>>,
+    pub child_reports: Arc<child_reports::ChildReports>,
+    child_queries: std::sync::OnceLock<child_queries::ChildQueries>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
     /// green build 前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
@@ -466,6 +473,8 @@ impl PlanRuntime {
             code_reviewer: Mutex::new(None),
             verifier: Mutex::new(None),
             explorer: Mutex::new(None),
+            child_reports: Default::default(),
+            child_queries: Default::default(),
             verify_gate_mode: RwLock::new("soft".into()),
             max_code_review_rounds: AtomicU32::new(4),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -897,21 +906,46 @@ impl PlanRuntime {
         *self.explorer.lock() = Some(dispatcher);
     }
 
+    pub async fn dispatch_batch(
+        &self,
+        tasks: &[explorer::ExplorerTask],
+        background: bool,
+    ) -> Result<explorer::ExplorerDelivery, String> {
+        self.dispatch_tool_batch(tasks, background, None).await
+    }
+    pub(crate) async fn dispatch_tool_batch(
+        &self,
+        tasks: &[explorer::ExplorerTask],
+        background: bool,
+        tool_call_id: Option<&str>,
+    ) -> Result<explorer::ExplorerDelivery, String> {
+        let dispatcher = self.explorer.lock().clone().ok_or(
+            "dispatch_agent is unavailable: explorer sub-Agent dispatcher was not supplied",
+        )?;
+        let delivery = if background {
+            Some(self.child_reports.batch()?)
+        } else {
+            None
+        };
+        dispatcher
+            .dispatch_batch(tasks, delivery, tool_call_id)
+            .await
+    }
+
+    #[cfg(test)]
     /// 并行派发一批 Explorer。任何一个失败只影响它自己那条报告，其余照常返回。
     pub async fn dispatch_explorers(
         &self,
         tasks: &[explorer::ExplorerTask],
     ) -> Result<Vec<explorer::ExplorerReport>, PlanRuntimeError> {
-        let Some(dispatcher) = self.explorer.lock().clone() else {
-            return Err(PlanRuntimeError::Io(
-                "dispatch_agent is unavailable: explorer sub-Agent dispatcher was not supplied"
-                    .into(),
-            ));
-        };
-        Ok(
-            futures_util::future::join_all(tasks.iter().map(|task| dispatcher.dispatch(task)))
-                .await,
-        )
+        match self
+            .dispatch_batch(tasks, false)
+            .await
+            .map_err(PlanRuntimeError::Io)?
+        {
+            explorer::ExplorerDelivery::Reports(r) => Ok(r),
+            _ => unreachable!("foreground requested"),
+        }
     }
 
     /// 设置 `[plan].verify_gate` 当前值。仅接受 `soft` / `gate`；其它值回落为 `soft`。
@@ -1350,12 +1384,14 @@ impl PlanRuntime {
     pub(crate) fn write_explorer_started_transcript(
         &self,
         task_id: &str,
+        tool_call_id: Option<&str>,
         child_session_id: Option<&str>,
         transcript_path: Option<&str>,
     ) {
         let mut payload = serde_json::json!({
             "event": crate::infra::wire::WIRE_PLAN_EXPLORER_STARTED,
             "task_id": task_id,
+            "tool_call_id": tool_call_id,
         });
         if let Some(obj) = payload.as_object_mut() {
             if let Some(child_session_id) = child_session_id {
@@ -1910,9 +1946,24 @@ pub trait PlanReviewerDispatcher: Send + Sync {
 /// code reviewer 子 Agent 派发器 trait。
 #[async_trait]
 pub trait ExplorerDispatcher: Send + Sync {
-    /// 同步跑完一个只读勘察子 Agent 并回传结论。失败一律以 `aborted` 报告表达，
-    /// 不返回 Err——一个勘察任务失败不该让整批调用失败。
-    async fn dispatch(&self, task: &explorer::ExplorerTask) -> explorer::ExplorerReport;
+    async fn dispatch_batch(
+        &self,
+        tasks: &[explorer::ExplorerTask],
+        delivery: Option<Arc<child_reports::ReportBatch>>,
+        tool_call_id: Option<&str>,
+    ) -> Result<explorer::ExplorerDelivery, String>;
+
+    #[cfg(test)]
+    async fn dispatch(&self, task: &explorer::ExplorerTask) -> explorer::ExplorerReport {
+        match self
+            .dispatch_batch(std::slice::from_ref(task), None, None)
+            .await
+        {
+            Ok(explorer::ExplorerDelivery::Reports(mut r)) => r.remove(0),
+            Ok(_) => unreachable!(),
+            Err(err) => explorer::ExplorerReport::aborted_with(&task.description, err),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -34,6 +34,7 @@ pub struct SessionSlot {
     pub(super) controller: Mutex<Option<uuid::Uuid>>,
     /// Serializes current-message replay, fanout and changes of subscribers.
     pub(super) message_replay: Mutex<super::event_pump::MessageReplay>,
+    pub(super) child_streams: Mutex<HashMap<String, super::child_view::ChildStream>>,
     pub(super) last_used: Mutex<std::time::Instant>,
     /// Admission is busy during maintenance, but no agent turn is running.
     pub(super) command_job: AtomicBool,
@@ -51,6 +52,16 @@ pub struct SessionSlot {
     pub last_context_ratio: Mutex<Option<f64>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
     pub background_task_listener: Mutex<Option<JoinHandle<()>>>,
+    pub(super) child_wake_listener: Mutex<Option<JoinHandle<()>>>,
+    pub(super) auto_turns: std::sync::atomic::AtomicU32,
+    /// Latest idle outcome, consumed once after any report turns have finished.
+    pub(super) pending_settled: Mutex<
+        Option<(
+            uuid::Uuid,
+            crate::infra::events::AgentIdleOutcome,
+            Option<crate::infra::events::TurnFailure>,
+        )>,
+    >,
     pub listener_ids: Mutex<Vec<EventListenerId>>,
 }
 
@@ -71,6 +82,7 @@ impl SessionSlot {
             busy: AtomicBool::new(false),
             controller: Mutex::new(None),
             message_replay: Mutex::new(Default::default()),
+            child_streams: Default::default(),
             last_used: Mutex::new(std::time::Instant::now()),
             command_job: AtomicBool::new(false),
             resume_pending_ask_question: AtomicBool::new(false),
@@ -79,6 +91,9 @@ impl SessionSlot {
             last_context_ratio: Mutex::new(None),
             run_task: Mutex::new(None),
             background_task_listener: Mutex::new(None),
+            child_wake_listener: Default::default(),
+            auto_turns: Default::default(),
+            pending_settled: Default::default(),
             listener_ids: Mutex::new(Vec::new()),
         }
     }
@@ -104,6 +119,12 @@ impl SessionSlot {
     pub fn mark_idle(&self) {
         self.touch();
         self.busy.store(false, Ordering::SeqCst);
+        self.ctx
+            .session_runtime
+            .plan_runtime
+            .child_reports
+            .changed
+            .notify_one();
     }
 
     pub(super) fn touch(&self) {

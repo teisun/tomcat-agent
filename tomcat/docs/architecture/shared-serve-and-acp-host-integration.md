@@ -131,7 +131,7 @@ VS Code 复用用户历史气泡转换和附件 URI 解析；通知只补缺，�
 | 进程 cwd | 操作系统记录的进程当前工作目录 | `std::env::current_dir()`；由启动者设置 | 共享 serve 固定在自己的数据目录，不随请求全局切换 | 服务自己落脚的地方。 |
 | 会话 cwd | 本次对话的项目工作目录 | 既有 `SessionEntry.cwd`、JSONL 头 `cwd`；运行时 `SessionSlot.cwd` 与 `ChatContext.scope_services.agent_workspace_dir` | 共享模式由客户端明确提供、校验并绑定；据此生成模型上下文，不自动授权 | 这份任务在哪干活。 |
 | 工具 cwd / 路径 | 一次工具调用实际使用的目录或文件地址 | 模型给出的工具参数，经 Tomcat 执行器解析与权限检查 | 显式路径仍受权限门控制；共享模式的默认/相对目录须绑定当前会话，见 §3.3 的现有接缝 | 说了地址，还得把工具真正带到那里。 |
-| 整轮任务 | 一个 prompt 驱动的最外层执行 | `run_task`、cancel token、完成结果 | 可包含多条 assistant 消息和多次工具调用；不能以首个 agent_end 猜成功 | 一次完整交办。 |
+| 整轮任务 | 一个 prompt 驱动的最外层执行 | `run_task`、cancel token、完成结果 | 可跨多个报告回合；ACP 只认内部 session_settled（不是首个 agent_end 或 agent_idle） | 一次完整交办。 |
 | 当前消息补发记录 | 当前一条助手消息的累计正文、思考及是否结束 | `event_pump.rs` 转发处的会话内记录【新增】 | 下一条 message_start 才替换，slot 卸载时释放；不以 message_end 当落盘确认 | 只补正在说的这句话，不重做整场会议纪要。 |
 | 会话来源 `origin` | 这个会话是否经 ACP 创建及创建方名称 | 【新增】transcript 第一行的可选对象 `{kind:"acp", clientName:…}` | 只在 ACP new 时写一次；原生/老会话缺省；名称不参与权限判断 | “谁开的会话”，不是“谁现在在线”。 |
 | 本窗口宿主身份 `access` | 本窗口此刻是 control 还是 observe | switch_session 回复、session_access 推送及扩展会话视图内存 | 只按当前控制者判断；不落盘；输入能力由 shared_session_input 单独声明 | 名牌表示谁在开车，不限制谁能说话。 |
@@ -242,6 +242,8 @@ relay stdin EOF -> 请求本连接 drain -> 拒绝新任务/清空待发
 
 - 锁文件保持稳定，不靠删除锁文件解锁；只在持锁且确认连接拒绝/目标确属残留 socket 时清理。权限拒绝、协议不兼容不是“服务不存在”。
 - Unix 目录 0700/socket 0600；Windows 管道 DACL 限当前用户、拒绝远端。路径过长报错，不静默更换服务身份。
+- 后台 Explorer 跨父回合存活，但不跨控制连接断开。父 Stop 取消所有仍登记的 child，不停父会话已后台化的 shell；控制 EOF 两者都停，等 child 注销再清队列。关闭只读视图或旁观连接只退订。卡片/Dock 的 `stop_background` 是**仅控制者**可用的单任务操作，不适用共享输入的主 Stop 例外。
+- `view_child(sessionId,childId,cursor?)` 与 `close_child_view` 在父会话的读取权限内提供快照、增量和退订，不创建 child slot、不接管。详见[多 Agent](multi-agent.md)。
 - `cancel_and_wait` 是复用起点，须组合 Bash registry stop/wait、级联子 agent、排队项和后台回调收口。已取消的连接不得被后台任务完成事件再唤起新轮。
 - checkpoint 落盘复用 CLI 原有的 30 秒预算，不与前台取消的 3 秒混用；relay 总等待上限 60 秒，Multica backend 为 65 秒、WaitDelay 为 66 秒。超时仍失败并保留未完成句柄，不把等待延长当作停止成功。
 - 连接断开即清空它的控制绑定并取消任务；**无控制者不等于已经停下**。新控制者仍须等原任务清理完成，停止失败返回 busy/stop_timeout，不 abort 掉句柄后假装空闲。原生窗口不因断开通知自动接手，但下一次普通写入或打开可以接手；来源不参与权限判断。
@@ -1005,7 +1007,7 @@ ACP Schema 以官方 SDK 为准，本文不复制整套类型。已查官方 [ag
 | `session/new.cwd` | string，必填绝对路径；null/不存在拒绝 | detached 新建；绑定当前连接，保存 ACP 来源 | 不借服务进程的目录开会话。 |
 | `session/load.sessionId`、`cwd` | string，必填；校验原会话/作用域 | 等旧任务停止后回放持久历史；活控制者存在则拒绝 | 继续旧聊天，不恢复旧 RPC。 |
 | `mcpServers` | array，按 SDK 要求显式传；无服务器用 `[]` | 接入会话级 MCP；参数结构由 SDK 校验 | 每个会话带自己的临时工具。 |
-| `session/prompt.sessionId`、`prompt` | string + ContentBlock[]，必填非 null | 标准文本/内嵌资源映射到一次任务；更新走 session/update | 提交一次交办。 |
+| `session/prompt.sessionId`、`prompt` | string + ContentBlock[]，必填非 null | 更新走 session/update；批次收口、报告续跑完成后由内部 session_settled 结算原 prompt，不新增 ACP 消息类型 | 提交一次交办。 |
 | `session/cancel.sessionId` | string，必填；notification 无 RPC 响应 | 停完后原 prompt 返回 cancelled；内部失败走标准 error | 发取消不等于已停，终态才说明结果。 |
 | 模型选择 | 采用 SDK v1 和两个宿主实际支持的会话模型/config 入口 | 只影响该会话；未支持的选项明确拒绝 | 不改全局默认模型。 |
 | `session/request_permission` | SDK 的 sessionId、toolCall、options 及 outcome | 路由当前控制者；optionId 校验并消费一次 | 批准不能串到另一个请求。 |
@@ -1450,7 +1452,7 @@ AGENTS.md 读取失败    -> 跳过该文件 + instruction summary 诊断
 | connection_lost / service_unavailable | 按连接角色取消或退订；不直接显示成功/已取消 | 看不到结果不等于结果已完成。 |
 | instructions_skipped | 沿摘要给出路径和理由，不把正文写日志 | 不能静默丢掉手册。 |
 
-**ACP 网络失败诊断。** `agent_idle(failed)` 的可选 `failure {kind, phase}` 复用 transcript 的分类函数，仅 `stream_interrupted` 在 `session/prompt` 的错误 data 附固定英文网络诊断，message 保持原摘要；HTTP 429/5xx、额度与鉴权不伪装。Multica 当前将 data 拼入错误并以关键词识别 provider_network，再由其既有策略决定重派；Tomcat 不新增重试定时器或跨轮挂起请求。完整措辞、七条限制及未运行真实 Multica 的边界见[接入说明 §6.1](tomcat-acp-host-integrations/multica-tomcat-acp-integration/README.md#61-sharing-a-session-with-vs-code)。
+**ACP 网络失败诊断。** 内部 `session_settled(failed)` 携带本次结算的可选 `failure {kind, phase}`，复用 transcript 的分类函数，仅 `stream_interrupted` 在 `session/prompt` 的错误 data 附固定英文网络诊断，message 保持原摘要；HTTP 429/5xx、额度与鉴权不伪装。Multica 当前将 data 拼入错误并以关键词识别 provider_network，再由其既有策略决定重派；Tomcat 不新增重试定时器或跨轮挂起请求。完整措辞、七条限制及未运行真实 Multica 的边界见[接入说明 §6.1](tomcat-acp-host-integrations/multica-tomcat-acp-integration/README.md#61-sharing-a-session-with-vs-code)。
 
 OpenAI Chat Completions 的流内 `error` 必须先转换成现有 `LlmError` 与终止事件，保留 provider 的 message/code/type；不能忽略它，再把随后的 EOF 当成断网。该缺口由真实 ACP 的鉴权回归暴露，解析单测同时覆盖首帧与部分输出后的错误，避免 ACP 诊断放大原有误分类。
 

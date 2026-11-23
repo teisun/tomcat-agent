@@ -52,6 +52,43 @@ pub fn write_llm_model_key(
     })
 }
 
+pub(crate) fn write_subagent_model(
+    path: &Path,
+    role: super::ModelRole,
+    model: Option<&str>,
+) -> Result<(), AppError> {
+    with_config_lock(path, || {
+        let text = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let mut doc: toml::Table =
+            toml::from_str(&text).map_err(|e| AppError::Config(e.to_string()))?;
+        let table = doc
+            .entry("subagents")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or_else(|| AppError::Config("expected [subagents] table".into()))?;
+        let section = table
+            .entry(role.key())
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or_else(|| {
+                AppError::Config(format!("expected [subagents.{}] table", role.key()))
+            })?;
+        if let Some(id) = model {
+            section.insert("model".into(), id.into());
+        } else {
+            section.remove("model");
+        }
+        let text = toml::to_string_pretty(&doc).map_err(|e| AppError::Config(e.to_string()))?;
+        validate_config(&toml::from_str(&text).map_err(|e| AppError::Config(e.to_string()))?)?;
+        write_file_atomic(path, text.as_bytes())?;
+        Ok(())
+    })
+}
+
 /// 清掉磁盘配置中恰好等于被删除模型的选择，并返回被清理的配置键。
 ///
 /// 删除用户模型时必须修改真实 TOML，而不是把启动时的 AppConfig 整体写回：后者会把
@@ -85,6 +122,22 @@ pub fn clear_model_references(
         }
         if clear_model_value(root, "context", "compaction_model", model_id)? {
             cleared.push("context.compaction_model");
+        }
+        if clear_model_value(root, "reviewer", "model_override", model_id)? {
+            cleared.push("reviewer.model_override");
+        }
+        if let Some(subagents) = root
+            .get_mut("subagents")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (role, key) in [
+                ("explorer", "subagents.explorer.model"),
+                ("plan_reviewer", "subagents.plan_reviewer.model"),
+            ] {
+                if clear_model_value(subagents, role, "model", model_id)? {
+                    cleared.push(key);
+                }
+            }
         }
         if cleared.is_empty() {
             return Ok(cleared);

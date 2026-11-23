@@ -169,7 +169,7 @@ export interface TomcatWebviewProviderDeps {
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
   openExternal?(href: string): Promise<void> | void;
-  openSettings?(route?: "general" | "models" | "connectors"): void;
+  openSettings?(route?:import('../../shared/settingsProtocol').SettingsRoute, role?:import('../../shared/settingsProtocol').SubagentRole):void;
   reconnectServe?(): Promise<void>;
   restartServe?(): Promise<void>;
   showConnectionLogs?(): void;
@@ -628,6 +628,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private fileGeneration = 0;
   private readonly closedFileSessions = new Set<string>();
   private disposed = false;
+  private childView?: {parent:string;child:string};
+  private leaveChildView(): void {
+    const view=this.childView;this.childView=undefined;
+    if (!view) return;
+    this.stateStore.removeSession(view.child);
+    void this.deps.messenger.request({type:'close_child_view',sessionId:view.parent}).catch(()=>{});
+  }
   private initialized?: InitializeResult;
   private isReady = false;
   private serveConnectionStatus: ServeConnectionStatus = "connecting";
@@ -839,6 +846,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   dispose(): void {
     this.disposed = true;
+    this.leaveChildView();
     this.errorRecovery.clear();
     this.stopLivenessProbe();
     this.viewDisposeSubscription?.dispose();
@@ -899,6 +907,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
     this.viewDisposeSubscription = view.onDidDispose(() => {
       if (this.view !== view) return;
+      this.leaveChildView();
       this.view = undefined;
       this.isReady = false;
       this.webviewGeneration += 1;
@@ -2037,6 +2046,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
     const data: Record<string, unknown> | undefined = "data" in intent && isRecordValue(intent.data) ? intent.data : undefined;
     const scoped = data?.sessionId ?? data?.sourceSessionId;
+    if (typeof scoped==='string' && scoped.includes('-child-')) return; // scoped writable intents target only root sessions
     if (takesOverErrorRecovery(intent)) {
       const sessionId = typeof scoped === "string" ? scoped : this.peekState().activeSessionId;
       if (sessionId) this.errorRecovery.cancel(sessionId);
@@ -2440,6 +2450,38 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case 'closeChild':
+        if (intent.data.childId===this.childView?.child) this.leaveChildView();
+        return;
+      case 'viewChild': case 'olderChild': {
+        const {sessionId,childId}=intent.data;
+        if (this.peekState().activeSessionId!==sessionId || !childId.startsWith(`${sessionId}-child-`)) return;
+        const older=intent.type==='olderChild';
+        if (older && this.childView?.child!==childId) return;
+        if (!older) {this.leaveChildView();this.childView={parent:sessionId,child:childId};}
+        const view=this.childView;
+        const cursor=older ? this.stateStore.getOldestHistoryCursor(childId) : null;
+        if (older && !cursor) return;
+        try {
+          const reply=await this.deps.messenger.request({type:'view_child',sessionId,childId,cursor});
+          if (this.childView!==view || this.peekState().activeSessionId!==sessionId) return;
+          const p=reply.payload;
+          if (!reply.success || !isRecordValue(p) || p.sessionId!==childId || !Array.isArray(p.messages)) throw new Error(reply.error || 'unknown_child');
+          const page={sessionId:childId,messages:p.messages,hasMore:p.hasMore===true,nextCursor:typeof p.nextCursor==='string'?p.nextCursor:null};
+          if (older) this.stateStore.prependOlderHistory(childId,page); else this.stateStore.hydrateHistory(childId,page);
+        } catch(error) { if (this.childView!==view) return; this.stateStore.appendMessage(childId,'notice',t('child.unavailable',{detail:String(error)})); }
+        await this.broadcastSession(childId,{force:true});return;
+      }
+      case 'stopBackground': {
+        const {sessionId,taskId,kind} = intent.data;
+        const session = this.peekState().sessionViews[sessionId];
+        if (this.peekState().activeSessionId !== sessionId || !session || session.access === 'observe' || !hasServeCapability(await this.ensureInitialized(), 'stop_background')) return;
+        try {
+          const response = await this.deps.messenger.request({type:'stop_background', sessionId,taskId,kind});
+          if (!response.success) throw new Error(response.error ?? 'stop_background');
+        } catch(error) { await vscode.window.showErrorMessage(t('host.stopFailed',{detail:String(error)})); }
+        return;
+      }
       case "interrupt": {
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
           intent.data?.sessionId ?? this.peekState().activeSessionId,
@@ -2737,7 +2779,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.deps.showConnectionLogs?.();
         return;
       case "openSettings":
-        this.deps.openSettings?.(intent.data?.route ?? "general");
+        if (intent.data?.route==='subagents') this.deps.openSettings?.('subagents',intent.data.role);
+        else this.deps.openSettings?.(intent.data?.route ?? "general");
         return;
       case "setBuildModel": {
         await vscode.workspace
@@ -2961,6 +3004,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
     if (this.disposed) return;
+    if (event.sessionId?.includes('-child-')) {
+      if (this.childView?.child === event.sessionId) await this.broadcastMutation(this.stateStore.applyEvent(event));
+      return; // A child never owns a session slot, error recovery, draft or approvals.
+    }
     if (event.type === "agent_start" && event.sessionId) this.errorRecovery.cancel(event.sessionId);
     if (event.sessionId && this.draftCoordinator.isRetired(event.sessionId)) return;
     if (event.type === "tool_execution_end" && event.sessionId && ["write", "edit", "hashline_edit"].includes(event.toolName)) {
@@ -4490,6 +4537,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async switchSessionView(sessionId: string): Promise<void> {
+    this.leaveChildView();
     if (this.sessionBlocked(sessionId)) return;
     const previous = this.peekState().activeSessionId;
     if (previous && this.messageQueue.view(previous).editingId) this.messageQueue.pause(previous);

@@ -160,6 +160,7 @@ pub(super) fn inject_follow_up_messages(
         }
         q.drain(..).collect::<Vec<_>>()
     };
+    let receipt = crate::core::plan_runtime::child_reports::receipt(&drained);
     for msg in drained {
         if msg.kind != MessageKind::Signal {
             agent.silent_reply_allowed = false;
@@ -168,6 +169,9 @@ pub(super) fn inject_follow_up_messages(
             ctx_state.on_message_appended(estimate_msg_chars(&msg));
         }
         agent.push_message(messages, msg)?;
+    }
+    if let Some(receipt) = receipt {
+        agent.emit_event(receipt);
     }
     Ok(true)
 }

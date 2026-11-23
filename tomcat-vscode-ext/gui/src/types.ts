@@ -47,6 +47,7 @@ export interface WebviewDomAction {
 import type { SessionFileIntent, SessionFilesView } from "../../src/shared/sessionFiles";
 import type { MessageEditIntent } from "../../src/shared/messageEditProtocol";
 export interface WebviewMessageBlock {
+  reviewerChildId?:string;
   rewindEligible?: boolean;
   /** A durable failed input superseded by a copy-forward retry. */
   abandoned?: boolean;
@@ -359,6 +360,7 @@ export interface WebviewComposerDraft {
 }
 
 export interface WebviewSessionSnapshot {
+  backgroundTasks?: import('../../src/shared/backgroundTasks').BackgroundTask[];
   compacting?: import("../../src/ui/webview/protocol").WebviewSessionSnapshot["compacting"];
   requestRetry?: import("../../src/ui/webview/protocol").WebviewSessionSnapshot["requestRetry"];
   errorRecovery?: { errorId: string; dueAt: number };
@@ -558,6 +560,7 @@ export type HostToWebviewFrame =
     };
 
 export type WebviewIntent =
+  | Extract<import('../../src/ui/webview/protocol').WebviewIntent,{type:'stopBackground'|'viewChild'|'closeChild'|'olderChild'}>
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "pong" }>
   | Extract<import("../../src/ui/webview/protocol").WebviewIntent, { type: "retryConnection" | "restartSharedService" | "viewConnectionLogs" | "openFolder" }>
   | { messageId: string; type: "deleteSession"; data: { sessionId: string } }
@@ -752,7 +755,8 @@ export type WebviewIntent =
       messageId: string;
       type: "openSettings";
       data?: {
-        route?: "general" | "models" | "connectors" | null;
+        route?: "general" | "models" | "connectors" | "subagents" | null;
+        role?:import('../../src/shared/settingsProtocol').SubagentRole;
       };
     }
   | {

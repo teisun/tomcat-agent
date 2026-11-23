@@ -159,7 +159,7 @@ send({ type: "prompt", id: "c1", text: "..." });
 
 **专业结论**：**能，而且本期就做**（这是 §3.1 R8 本次修订后的定稿）。
 
-为什么能：你的核心**早就为多会话留好了缝**（见 §2.5.3 与 `multi-agent.md` §14.3.1）：
+为什么能：你的核心**早就为多会话留好了缝**（见 §2.5.3 与[多 Agent 运行时 §3](../multi-agent.md#3-落地决策与实施点)）：
 
 - `AgentLoop` 无全局单例，可按 `session_id` 多实例并发；
 - 事件已按会话打信封——`ScopedEventEmitter::emit → WireEnvelope.sessionId`（`src/infra/event_bus/mod.rs`、`src/infra/events/mod.rs`），命名与 pi 家族一致；

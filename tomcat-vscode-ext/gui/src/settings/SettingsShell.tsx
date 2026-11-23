@@ -15,7 +15,7 @@ export function SettingsShell({ state, vscodeApi, children }: {
   return <div className="tc-settings-shell">
     <aside className="tc-settings-shell__nav">
       <div className="tc-settings-shell__brand">Tomcat {t("settings.title")}</div>
-      {(["general", "models", "sessions", "tools", "connectors"] as const).map((route) => {
+      {(["general", "models", "subagents", "sessions", "tools", "connectors"] as const).map((route) => {
         const disabled = route === "sessions" || (route === "tools" && !state.capabilities.webSearchSettings);
         return <button key={route} className={`tc-settings-nav__item${state.route === route ? " tc-settings-nav__item--active" : ""}`}
           data-testid={`settings-nav-${route}`} disabled={disabled} title={route === "tools" && disabled && state.ready ? t("searchSettings.unsupported") : undefined} aria-current={state.route === route ? "page" : undefined}

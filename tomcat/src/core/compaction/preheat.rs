@@ -686,6 +686,22 @@ impl Preheat {
         };
     }
 
+    /// A one-shot child cannot hand off preheat to a later turn. Reap the worker
+    /// before reporting completion so retries and cache writes cannot escape it.
+    pub(crate) async fn abort_and_join(&mut self) {
+        if let PreheatState::Running {
+            handle,
+            transcript_path,
+            ..
+        } = std::mem::take(&mut self.state)
+        {
+            handle.abort();
+            if handle.await.is_err_and(|e| e.is_cancelled()) {
+                append_preheat_terminal_event(&transcript_path, "compaction_aborted", None);
+            }
+        }
+    }
+
     /// any → Idle。取消运行中任务 + 清除 pending。
     pub fn abort(&mut self) {
         if let PreheatState::Running {

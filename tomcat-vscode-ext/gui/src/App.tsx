@@ -26,6 +26,9 @@ import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
+import {TasksContext} from './components/BackgroundTasks';
+import {ChildConversation} from './components/ChildConversation';
+import type {ChildTask} from '../../src/shared/backgroundTasks';
 import { SessionDock } from "./components/SessionDock";
 import { ModelSetupCard } from "./components/ModelSetupCard";
 import { MessageQueueDock, QueuedMessageEditor } from "./components/MessageQueueDock";
@@ -1294,6 +1297,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const tRef = useRef(t);
   tRef.current = t;
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
+  const [child, setChild] = useState<{parent:string;row:ChildTask}|null>(null);
+  useEffect(()=>{setChild(null);},[state.activeSessionId]);
   const [editingMessage, setEditingMessage] = useState<WebviewMessageBlock | null>(null);
   useEffect(() => { setEditingMessage(null); }, [state.activeSessionId]);
   const [questionAnnouncementSessionId, setQuestionAnnouncementSessionId] = useState<string | null>(null);
@@ -2719,7 +2724,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   return (
     <ThumbnailFailures.Provider value={thumbnailFailures}>
-    <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
+    {child && activeSession?.sessionId===child.parent && <ChildConversation row={(activeSession.backgroundTasks?.find(r=>r.kind==='subagent' && r.id===child.row.id) as ChildTask | undefined) ?? child.row} view={state.sessionViews[child.row.id]} pending={!!activePendingApproval} openFile={handleOpenFile} older={()=>postIntent(vscodeApi,'olderChild',{sessionId:child.parent,childId:child.row.id})} back={()=>{postIntent(vscodeApi,'closeChild',{sessionId:child.parent,childId:child.row.id});setChild(null);}}/>}
+    <TasksContext.Provider value={{rows:activeSession?.backgroundTasks ?? [], settings:row=>postIntent(vscodeApi,'openSettings',{route:'subagents',role:row.type}), open: activeSession ? row=>{flushComposerDraft(activeSession.sessionId);setChild({parent:activeSession.sessionId,row});postIntent(vscodeApi,'viewChild',{sessionId:activeSession.sessionId,childId:row.id});}:undefined, stop: activeSession && activeSession.access !== 'observe' ? r=>postIntent(vscodeApi,'stopBackground',{sessionId:activeSession.sessionId,taskId:r.id,kind:r.kind}) : undefined, shellTitle:r=>{const card=activeSession?.timeline.find(i=>i.type==='tool' && i.toolCallId===r.toolCallId);return card?.type==='tool'?card.summaryTitle ?? undefined:undefined;}}}>
+    <main style={child && activeSession?.sessionId===child.parent?{display:'none'}:undefined} className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
         creating={draftForkFeedback.pending}
@@ -2967,6 +2974,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         </div>
       </div>
     </main>
+    </TasksContext.Provider>
     </ThumbnailFailures.Provider>
   );
 }

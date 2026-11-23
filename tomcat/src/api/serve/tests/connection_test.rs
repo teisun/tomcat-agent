@@ -1893,6 +1893,216 @@ async fn disconnect_discards_queued_follow_up_before_the_next_controller_prompt(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn child_view_is_scoped_filters_private_payloads_and_detaches() {
+    use crate::core::{
+        agent_loop::SubagentType, session::subagent_transcript::open_subagent_transcript,
+    };
+    use serde_json::json;
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (owner, out) = connect(&runtime);
+    new_shared(&owner, work.path(), "new").await;
+    let parent = owner.active_session_id().unwrap();
+    let child = format!("{parent}-child-view");
+    let slot = runtime.registry.get(&parent).unwrap();
+    let dir = crate::resolve_agent_trail_dir(&runtime.cfg).unwrap();
+    let sink = open_subagent_transcript(
+        dir.to_str().unwrap(),
+        &child,
+        SubagentType::Explorer,
+        "model",
+        &parent,
+    )
+    .unwrap();
+    sink.append_message(json!({"role":"system","content":"PRIVATE_SYSTEM"}))
+        .unwrap();
+    sink.append_message(json!({"role":"assistant","content":"visible history","reasoning_continuation":{"opaque_payload":"PRIVATE_BLOB"}})).unwrap();
+    let (viewer, view_out) = connect_in_project(&runtime, work.path()).await;
+    handle_command(
+        viewer.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("observe".into()),
+            session_id: parent.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let emitter = crate::infra::ScopedEventEmitter::new(
+        slot.ctx.global_services.event_bus.clone(),
+        parent.clone(),
+    );
+    emitter.emit_payload("background.updated",json!({"type":"background.updated","row":{"id":child,"kind":"subagent","state":"running","revision":1}})).unwrap();
+    let child_bus = emitter.for_session(&child);
+    child_bus
+        .emit_payload(
+            "message_start",
+            json!({"type":"message_start","assistantMessageId":"mid","message":{}}),
+        )
+        .unwrap();
+    let delta = |text: &str| {
+        child_bus.emit_payload("message_update",json!({"type":"message_update","assistantMessageId":"mid","message":{},"assistantMessageEvent":{"kind":"content_delta","delta":text,"signature":"PRIVATE_SIG"}})).unwrap()
+    };
+    delta("prefix");
+    let view = |request: &str, id: &str| ServeCommand::ViewChild {
+        id: Some(request.into()),
+        session_id: parent.clone(),
+        child_id: id.into(),
+        cursor: None,
+    };
+    handle_command(viewer.clone(), view("watch", &child))
+        .await
+        .unwrap();
+    let history = frame(&view_out, |f| f["id"] == "watch").await;
+    assert!(history["success"] == true, "{history}");
+    assert!(history.to_string().contains("visible history"));
+    assert!(!history.to_string().contains("PRIVATE_"));
+    frame(&view_out, |f| f["message"]["content"] == "prefix").await;
+    delta("delta");
+    let msg = frame(&view_out, |f| {
+        f["assistantMessageEvent"]["delta"] == "delta"
+    })
+    .await;
+    assert!(!msg.to_string().contains("PRIVATE_"));
+    assert!(!read_ndjson_lines(&out)
+        .iter()
+        .any(|f| f["sessionId"] == child));
+    handle_command(
+        viewer.clone(),
+        ServeCommand::CloseChildView {
+            id: Some("leave".into()),
+            session_id: parent.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    delta("after-close");
+    for bad in [
+        "other-child-x",
+        "../child",
+        &format!("{parent}-child-missing"),
+    ] {
+        handle_command(viewer.clone(), view(bad, bad))
+            .await
+            .unwrap();
+        assert_eq!(frame(&view_out, |f| f["id"] == bad).await["success"], false);
+    }
+    assert!(runtime.registry.get(&child).is_none());
+    assert!(owner.controls(&slot));
+    assert!(!read_ndjson_lines(&view_out)
+        .iter()
+        .any(|f| f["assistantMessageEvent"]["delta"] == "after-close"));
+    runtime.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn targeted_stop_is_owned_idempotent_and_does_not_stop_siblings() {
+    use super::super::types::BackgroundKind;
+    use crate::core::{
+        agent_loop::SubagentType,
+        agent_registry::{SubagentOutcome, SubagentOutcomeLabel, SubagentSpawnContext},
+    };
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (owner, out) = connect(&runtime);
+    let (observer, observed) = connect_in_project(&runtime, work.path()).await;
+    new_shared(&owner, work.path(), "new").await;
+    let session = owner.active_session_id().unwrap();
+    let slot = owner.registry.get(&session).unwrap();
+    handle_command(
+        observer.clone(),
+        ServeCommand::SwitchSession {
+            id: Some("observe".into()),
+            session_id: session.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        frame(&observed, |f| f["id"] == "observe").await["payload"]["access"],
+        "observe"
+    );
+    let job = |ctx: SubagentSpawnContext| async move {
+        ctx.cancel_token.cancelled().await;
+        SubagentOutcome {
+            child_session_id: ctx.child_session_id,
+            subagent_type: ctx.subagent_type,
+            outcome_label: SubagentOutcomeLabel::Interrupted,
+            error_message: None,
+        }
+    };
+    let mut children = slot
+        .ctx
+        .agent_registry
+        .start_described_batch(
+            &session,
+            SubagentType::Explorer,
+            Some("call"),
+            &["same", "same"],
+            vec![job; 2],
+        )
+        .unwrap();
+    let first = children.remove(0);
+    let other = children.remove(0);
+    let stop = |request: &str, id: &str| ServeCommand::StopBackground {
+        id: Some(request.into()),
+        session_id: session.clone(),
+        task_id: id.into(),
+        kind: BackgroundKind::Subagent,
+    };
+    handle_command(observer.clone(), stop("denied", &first.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame(&observed, |f| f["id"] == "denied").await["error"],
+        "read_only_session"
+    );
+    handle_command(owner.clone(), stop("wrong", "unowned"))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame(&out, |f| f["id"] == "wrong").await["error"],
+        "unknown_child"
+    );
+    handle_command(owner.clone(), stop("stop-one", &first.id))
+        .await
+        .unwrap();
+    let reply = frame(&out, |f| f["id"] == "stop-one").await;
+    assert_eq!(reply["payload"]["row"]["state"], "stopping");
+    let id = first.id.clone();
+    first.wait().await.unwrap();
+    handle_command(owner.clone(), stop("again", &id))
+        .await
+        .unwrap();
+    let final_row = frame(&out, |f| f["id"] == "again").await["payload"]["row"].clone();
+    assert_eq!(final_row["state"], "stopped");
+    handle_command(
+        observer.clone(),
+        ServeCommand::GetState {
+            id: Some("snapshot".into()),
+            session_id: Some(session.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let snap = frame(&observed, |f| f["id"] == "snapshot").await;
+    let rows = snap["payload"]["backgroundTasks"].as_array().unwrap();
+    assert!(rows.contains(&final_row));
+    assert!(rows
+        .iter()
+        .any(|r| r["id"] == other.id && r["state"] == "running"));
+    assert_eq!(
+        final_row,
+        frame(&observed, |f| f["type"] == "background.updated"
+            && f["row"]["state"] == "stopped")
+        .await["row"]
+    );
+    runtime.stop_all().await.unwrap();
+    other.wait().await.unwrap();
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn eof_stops_owned_background_processes_before_control_can_transfer() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(2);
@@ -1924,18 +2134,56 @@ async fn eof_stops_owned_background_processes_before_control_can_transfer() {
         frame(&b_buffer, |f| f["id"] == "before").await["payload"]["access"],
         "observe"
     );
+    // An observer's EOF must not affect a controller's child; controller EOF must
+    // join it, including late cleanup, before discarding unconsumed reports.
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (release, cleanup) = tokio::sync::oneshot::channel();
+    let queue = slot.ctx.session_runtime.follow_up_queue.clone();
+    let children = slot
+        .ctx
+        .agent_registry
+        .start_batch(
+            &id,
+            crate::core::agent_loop::SubagentType::Explorer,
+            vec![
+                move |ctx: crate::core::agent_registry::SubagentSpawnContext| async move {
+                    ctx.cancel_token.cancelled().await;
+                    cancelled_tx.send(()).unwrap();
+                    cleanup.await.unwrap();
+                    queue
+                        .lock()
+                        .push(crate::core::llm::ChatMessage::user("late child completion"));
+                    crate::core::agent_registry::SubagentOutcome {
+                        child_session_id: ctx.child_session_id,
+                        subagent_type: ctx.subagent_type,
+                        outcome_label:
+                            crate::core::agent_registry::SubagentOutcomeLabel::Interrupted,
+                        error_message: None,
+                    }
+                },
+            ],
+        )
+        .unwrap();
+    drop(children);
+    let (observer, _) = connect_in_project(&runtime, work.path()).await;
+    observer.disconnect().await.unwrap();
+    assert!(slot.ctx.agent_registry.has_children(&id));
     // Exercise real EOF on the shared connection loop, not only its cleanup helper.
-    super::super::stdin::run_connection_loop(
+    let eof = tokio::spawn(super::super::stdin::run_connection_loop(
         a.clone(),
         tokio::io::BufReader::new(tokio::io::empty()),
-    )
-    .await
-    .unwrap_or_else(|error| {
+    ));
+    cancelled_rx.await.unwrap();
+    assert!(!eof.is_finished());
+    release.send(()).unwrap();
+    eof.await.unwrap().unwrap_or_else(|error| {
         panic!(
             "EOF cleanup failed: {error}; bash tasks: {:?}",
             slot.ctx.session_runtime.bash_task_registry.list()
         )
     });
+    assert!(!slot.ctx.agent_registry.has_children(&id));
+    assert!(slot.ctx.session_runtime.follow_up_queue.lock().is_empty());
     assert!(a.is_closed());
     assert!(
         a.lifetime.child_token().is_cancelled(),

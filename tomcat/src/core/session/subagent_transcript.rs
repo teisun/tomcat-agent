@@ -38,6 +38,7 @@ pub(crate) fn open_subagent_transcript(
             child_session_id = %sink.child_session_id,
             "subagent transcript eager init failed; continuing without persistence"
         );
+        return None;
     }
     Some(sink)
 }
@@ -56,6 +57,52 @@ pub(crate) fn subagent_transcript_path(
             .join("subagent-sessions")
             .join(format!("{child_session_id}.jsonl")),
     )
+}
+
+/// Shared access boundary for model output and read-only views. Never accept a
+/// path from the caller, and never infer ownership from a filename alone.
+pub(crate) fn owned_child_path(root: &Path, parent: &str, id: &str) -> Result<PathBuf, String> {
+    use std::io::{BufRead, BufReader};
+    if !id.starts_with(&format!("{parent}-child-"))
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err("unknown_child".into());
+    }
+    let dir = root.join("subagent-sessions");
+    let path = dir.join(format!("{id}.jsonl"));
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        return Err("unknown_child".into());
+    }
+    let file = std::fs::File::open(&path).map_err(|_| "unknown_child")?;
+    let mut lines = BufReader::new(file).lines();
+    let mut next = || {
+        lines
+            .next()
+            .and_then(Result::ok)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .ok_or("unknown_child")
+    };
+    let header = next()?;
+    let meta = next()?;
+    if header["type"] != "session"
+        || header["id"] != id
+        || meta["event"] != "subagent.transcript.meta"
+        || meta
+            .get("parent_session_id")
+            .or(meta.get("parentSessionId"))
+            .and_then(|v| v.as_str())
+            != Some(parent)
+        || meta
+            .get("child_session_id")
+            .or(meta.get("childSessionId"))
+            .and_then(|v| v.as_str())
+            != Some(id)
+    {
+        return Err("unknown_child".into());
+    }
+    Ok(path)
 }
 
 pub(crate) fn format_subagent_transcript_path(
@@ -104,18 +151,19 @@ pub(crate) fn append_subagent_transcript_hint(
 /// scope auditable without changing their roles or adding them twice to the live conversation.
 pub(crate) fn persist_initial_messages(
     sink: Option<&Arc<dyn MessageAppendSink>>,
-    messages: &[ChatMessage],
+    messages: &mut [ChatMessage],
 ) {
     let Some(sink) = sink else {
         return;
     };
     for message in messages {
-        let Ok(value) = serde_json::to_value(message) else {
+        let Ok(value) = serde_json::to_value(&*message) else {
             warn!("subagent seed message serialization failed; continuing without persistence");
             continue;
         };
-        if let Err(error) = sink.append_message(value) {
-            warn!(error = %error, "subagent seed message persistence failed");
+        match sink.append_message(value) {
+            Ok(id) => message.msg_id = Some(id),
+            Err(error) => warn!(error = %error, "subagent seed message persistence failed"),
         }
     }
 }

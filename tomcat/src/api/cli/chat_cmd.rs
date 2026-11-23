@@ -85,10 +85,17 @@ pub(super) fn run_chat_mode(
 
     // 桥接 L0 → L1：SIGINT → ChatContext.cancel_token.cancel() + 双击检测。
     let cancel_token = ctx.session_runtime.cancel_token.clone();
+    let registry = ctx.agent_registry.clone();
+    let parent = ctx.session_runtime.session.current_session_id()?;
+    let reports = ctx.session_runtime.plan_runtime.child_reports.clone();
     let last_interrupt_at = ctx.session_runtime.last_interrupt_at.clone();
     let hard_exit_requested = ctx.session_runtime.hard_exit_requested.clone();
     let append_in_flight_for_exit = ctx.session_runtime.session.append_in_flight_counter();
     ctrlc::set_handler(move || {
+        if let Some(id) = parent.as_deref() {
+            registry.cascade_abort(id);
+        }
+        reports.discard();
         let now = Instant::now();
         let prev = {
             let mut guard = last_interrupt_at.lock();

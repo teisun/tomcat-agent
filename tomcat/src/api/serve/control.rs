@@ -56,6 +56,8 @@ pub(crate) async fn handle_control_or_interrupt(
                             "rewind_and_resend",
                             "session_files",
                             "get_state",
+                            "stop_background",
+                            "view_child",
                             "compact",
                             "run_slash_command",
                             "get_instruction_catalog",
@@ -72,6 +74,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "set_default_model",
                             "set_default_model_if_unset",
                             "set_utility_model",
+                            "update_subagent_settings",
                             "list_remote_models",
                             "upsert_models",
                             "remove_provider",
@@ -202,6 +205,11 @@ pub(crate) async fn handle_control_or_interrupt(
                 .cancel_live_session(&resolved, "interrupt");
             slot.ctx.session_runtime.cancel_token.lock().cancel();
             slot.ctx.agent_registry.cascade_abort(&resolved);
+            slot.ctx
+                .session_runtime
+                .plan_runtime
+                .child_reports
+                .discard();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(resolved),

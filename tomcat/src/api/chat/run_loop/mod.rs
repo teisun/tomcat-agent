@@ -199,7 +199,7 @@ pub(crate) async fn refresh_prompt_snapshot(
     )
 }
 
-const AUTO_TURN_BUDGET: u32 = 8;
+pub(crate) const AUTO_TURN_BUDGET: u32 = 8;
 
 fn current_user_prompt(ctx: &ChatContext) -> String {
     let entry = ctx
@@ -507,9 +507,53 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             break "hard_interrupt_exit";
         }
 
-        let queued_follow_ups = !ctx.session_runtime.follow_up_queue.lock().is_empty();
-        let auto_drain =
+        let reports = &ctx.session_runtime.plan_runtime.child_reports;
+        // Preserve the existing queued-input behavior; a partial batch alone must
+        // not open a turn. After the first key, readline has exclusive ownership.
+        let other_input = ctx
+            .session_runtime
+            .follow_up_queue
+            .lock()
+            .iter()
+            .any(|m| plan_runtime::child_reports::batch_id(m).is_none());
+        let queued_follow_ups = other_input || reports.ready();
+        let mut auto_drain =
             resume_without_input || (queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET);
+        if !resume_without_input
+            && !other_input
+            && auto_turn_count < AUTO_TURN_BUDGET
+            && (reports.has_open_batch() || reports.ready())
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal()
+        {
+            let prompt = current_user_prompt(ctx);
+            let wake = crate::infra::platform::stdin::first_key_or_report(
+                || {
+                    print!("\x1b[?2004h{prompt}");
+                    io::stdout().flush()
+                },
+                || {
+                    reports.ready()
+                        || ctx
+                            .session_runtime
+                            .hard_exit_requested
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                },
+            );
+            print!("\r\x1b[2K\x1b[?2004l");
+            io::stdout().flush()?;
+            auto_drain = wake.unwrap_or(false) && reports.ready();
+            if ctx
+                .session_runtime
+                .hard_exit_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                break "hard_interrupt_exit";
+            }
+        }
+        if auto_drain && reports.ready() {
+            eprintln!("{}", tr("terminal.childReportsReady", &[]));
+        }
         if !auto_drain {
             if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
                 eprintln!(
@@ -520,7 +564,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     )
                 );
             }
-            auto_turn_count = 0;
         }
 
         let mut instruction_message = None;
@@ -535,6 +578,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     break "chat_eof_exit";
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
+                    ctx.agent_registry.cascade_abort(&session_id);
+                    reports.discard();
                     if ctx
                         .session_runtime
                         .hard_exit_requested
@@ -684,6 +729,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     };
 
+    ctx.agent_registry.cascade_abort(&session_id);
+    ctx.agent_registry.wait_for_children(&session_id).await;
+    ctx.session_runtime.plan_runtime.child_reports.discard();
     drain_checkpoint_record_tasks(ctx, CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT).await;
     cleanup::cleanup_chat_session_resources(ctx, exit_reason).await;
     events::stderr::unregister_chat_session_stderr_listeners(
@@ -913,6 +961,9 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         context_state,
         &mut messages,
     )?;
+    if let Some(receipt) = plan_runtime::child_reports::receipt(&planned_messages) {
+        let _ = root_event_emitter.emit(receipt);
+    }
     maybe_emit_rule_session_title(
         &ctx.session_runtime.session,
         &planned_messages,
