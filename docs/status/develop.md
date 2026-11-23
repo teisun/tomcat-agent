@@ -1,15 +1,21 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-24 00:12 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-24 02:54 +0800 | ACTIVE | develop | - |
 
-### RELEASE CANDIDATE：CLI 0.2.3 / EXT 0.2.22
+### 已发布：CLI 0.2.3 / EXT 0.2.22
 
-- 扩展内置 CLI `0.2.3`。本轮以上一公开 EXT `0.2.21` 为基线，包含并行 Explorer、后台完整报告、只读旁看、单任务停止和角色模型设置；见 [CHANGELOG](../../tomcat-vscode-ext/CHANGELOG.md#0222)。
+- 发布标签 `cli-v0.2.3`、`ext-v0.2.22` 均指向 `398054c0`。[develop CI](https://github.com/teisun/tomcat-agent/actions/runs/45232038708) 与 [main CI](https://github.com/teisun/tomcat-agent/actions/runs/45238192400) 均在 Linux、macOS、Windows 通过；[develop](https://github.com/teisun/tomcat-agent/actions/runs/45232037618)、[main](https://github.com/teisun/tomcat-agent/actions/runs/45238192052)、[master](https://github.com/teisun/tomcat-agent/actions/runs/45238192124) 的版本同步检查均通过。
+- [CLI 0.2.3](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.2.3) 先发布：四个平台的公开归档均按 `SHA256SUMS` 校验，Intel Mac 包实测返回 `tomcat 0.2.3`。
+- [EXT 0.2.22](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.2.22) 随后发布：[四平台原生验收](https://github.com/teisun/tomcat-agent/actions/runs/45241454342) 全部通过。四个平台 VSIX 和一个纯扩展 VSIX 均通过 SHA-256 校验；平台包内 CLI 与对应公开 CLI 二进制逐字节一致，纯包不含 CLI，五份包内更新日志均与发布标签一致。
+- [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=tomcat-agent.tomcat-vscode-ext) 已公开四个平台的 `0.2.22`，下载内容与 GitHub 包逐字节一致。Open VSX 发布步骤跳过，`0.2.22` 的公开 API 返回 HTTP 404。
+- 本版以上一公开 EXT `0.2.21` 为基线，包含并行 Explorer、后台完整报告、只读旁看、单任务停止和角色模型设置；见 [CHANGELOG](../../tomcat-vscode-ext/CHANGELOG.md#0222)。
+
+#### 发版前 CI 整改
+
 - [候选基线 CI](https://github.com/teisun/tomcat-agent/actions/runs/45185028306) 的三平台 Rust 门禁失败：严格 Clippy、工具定义预算、Serve 快照；另有 Linux PTY 超时和历史 Windows Todos 测试失败。整改保留原预算线，重新生成快照，修正 PTY 测试的终端类型、输出拼接和超时诊断，以及 Todos 测试的 Windows 路径和时间设置。本机严格 Clippy、受影响回归及扩展快速门禁已通过；三平台以候选提交的 GitHub CI 为准。
 - [首次候选 CI](https://github.com/teisun/tomcat-agent/actions/runs/45214778412) 的 macOS、Windows 门禁通过；Linux 只剩 PTY 首次提交输入仅回显 `i`。Rustyline 的 Unix 异步打印路径会在编辑器已有缓冲字节时等待新输入（[上游 #703](https://github.com/kkawakam/rustyline/issues/703)）。Unix 预检通知改用现有 stderr 回退；Windows 输出不变。保留 PTY 整行提交和中文粘贴回归。
 - [第二次候选 CI](https://github.com/teisun/tomcat-agent/actions/runs/45221601801) 的 Linux（含 PTY）和 macOS Rust 门禁通过；Windows 在测试前安装 ripgrep 时退出 127。Windows CI 改用上游固定版本的 ZIP，校验 SHA-256 后加入 runner PATH；仍运行完整 Rust 门禁。
 - [第三次候选 CI](https://github.com/teisun/tomcat-agent/actions/runs/45227118630) 的 Windows ripgrep 安装与两组集成测试均通过；唯一失败是计划文件并发单测等锁 2 秒后返回 `LockBusy`。并发单测现在让两个写线程同时起跑、允许更宽松的等锁预算，并逐条验证全部 10 个增量；生产等锁超时与独立的 `LockBusy` 回归不变。
-- 候选 CI 通过后，先发布 CLI 并核对四平台归档及校验和，再发布 EXT。EXT 由四平台原生安装验收放行；发布结果以 GitHub Release 实际资产为准。
 
 ### 上一公开发布：CLI 0.2.2 / EXT 0.2.21
 
