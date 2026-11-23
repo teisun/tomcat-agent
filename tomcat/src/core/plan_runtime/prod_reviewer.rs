@@ -351,6 +351,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         Some(&child_session_id),
                         child.transcript_hint.as_deref(),
                     );
+                    let sink = child.sink.clone();
                     let run_outcome = child.run().await;
 
                     let (summary, label) = build_plan_summary_from_outcome(
@@ -365,21 +366,19 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         transcript_root,
                         &child_session_id,
                     );
-                    child_deps
-                        .agent_registry
-                        .set_terminal_report(&child_session_id, &summary.summary);
-                    let _ = tx.send(summary.clone());
-
-                    SubagentOutcome {
-                        child_session_id: child_session_id.clone(),
+                    let outcome = SubagentOutcome {
+                        child_session_id,
                         subagent_type: SubagentType::PlanReviewer,
                         outcome_label: label,
-                        error_message: if summary.aborted {
-                            Some(summary.summary.clone())
-                        } else {
-                            None
-                        },
-                    }
+                        error_message: summary.aborted.then(|| summary.summary.clone()),
+                    };
+                    let exit = crate::core::agent_registry::ChildExit::recorded(
+                        outcome,
+                        summary.summary.clone(),
+                        sink,
+                    );
+                    let _ = tx.send(summary);
+                    exit
                 },
             )
             .await;
@@ -827,7 +826,6 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
     ) -> Result<super::explorer::ExplorerDelivery, String> {
         use super::explorer::{ExplorerDelivery, ExplorerTicket};
         use crate::core::agent_registry::SubagentSpawnContext;
-        use futures_util::FutureExt;
         let deps = self
             .deps
             .as_ref()
@@ -865,55 +863,39 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
             jobs.push(move |spawn_ctx: SubagentSpawnContext| async move {
                 let token = spawn_ctx.cancel_token.clone();
                 let child_session_id = spawn_ctx.child_session_id.clone();
-                let run = std::panic::AssertUnwindSafe(async {
-                    let child = super::child_session::ChildSession::new(
-                        &child_deps,
-                        runtime,
-                        spawn_ctx,
-                        level,
-                        None,
-                        initial_user_message,
-                    );
-                    plan_runtime.write_explorer_started_transcript(
-                        &description,
-                        origin_call.as_deref(),
-                        Some(&child_session_id),
-                        child.transcript_hint.as_deref(),
-                    );
-                    child.run().await
-                })
-                .catch_unwind()
-                .await;
-                let (mut report, label) = match run {
-                    Ok(outcome) => build_explorer_report_from_outcome(
-                        origin,
-                        &child_session_id,
-                        &child_session_id,
-                        turns_limit,
-                        outcome,
-                    ),
-                    Err(_) => {
-                        let mut r =
-                            ExplorerReport::aborted_with(&child_session_id, "Explorer panicked");
-                        r.child_session_id = child_session_id.clone();
-                        r.stop_reason = "failed".into();
-                        (r, SubagentOutcomeLabel::Failed)
-                    }
-                };
-                if let Some((cut, _)) = report.report.char_indices().nth(16_000) {
-                    report.report.truncate(cut);
-                    report.report.push_str("… [truncated]");
-                }
-                child_deps
-                    .agent_registry
-                    .set_terminal_report(&child_session_id, &report.report);
+                let child = super::child_session::ChildSession::new(
+                    &child_deps,
+                    runtime,
+                    spawn_ctx,
+                    level,
+                    None,
+                    initial_user_message,
+                );
+                plan_runtime.write_explorer_started_transcript(
+                    &description,
+                    origin_call.as_deref(),
+                    Some(&child_session_id),
+                    child.transcript_hint.as_deref(),
+                );
+                let sink = child.sink.clone();
+                let (mut report, label) = build_explorer_report_from_outcome(
+                    origin,
+                    &child_session_id,
+                    turns_limit,
+                    child.run().await,
+                );
                 let outcome = SubagentOutcome {
                     child_session_id,
                     subagent_type: SubagentType::Explorer,
                     outcome_label: label,
                     error_message: report.aborted.then(|| report.report.clone()),
                 };
-                crate::core::agent_registry::ChildExit::with_delivery(outcome, move || {
+                crate::core::agent_registry::ChildExit::recorded(
+                    outcome,
+                    report.report.clone(),
+                    sink,
+                )
+                .with_delivery(move || {
                     if let Some(batch) = delivery {
                         batch.publish(&report, &token);
                     } else {
@@ -946,7 +928,6 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                     .into_iter()
                     .zip(tasks)
                     .map(|(h, t)| ExplorerTicket {
-                        child_session_id: h.id.clone(),
                         id: h.id,
                         role: "explorer",
                         description: t.description.clone(),
@@ -975,7 +956,6 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
 
 fn build_explorer_report_from_outcome(
     origin: &'static str,
-    task_id: &str,
     child_session_id: &str,
     turns_limit: u32,
     outcome: AgentRunOutcome,
@@ -985,7 +965,7 @@ fn build_explorer_report_from_outcome(
             let turns_used = count_assistant_turns(&result.new_messages);
             let text = extract_review_text(&result);
             let report = ExplorerReport {
-                id: task_id.to_string(),
+                id: child_session_id.to_string(),
                 aborted: text.trim().is_empty(),
                 report: if text.trim().is_empty() {
                     format!("[{origin}] Explorer produced no findings (child={child_session_id})")
@@ -1010,7 +990,7 @@ fn build_explorer_report_from_outcome(
         }
         AgentRunOutcome::Interrupted(result) => {
             let mut r = ExplorerReport::aborted_with(
-                task_id,
+                child_session_id,
                 format!(
                     "[{origin}] explorer aborted/cancelled by parent (child={child_session_id})"
                 ),
@@ -1023,7 +1003,7 @@ fn build_explorer_report_from_outcome(
         }
         AgentRunOutcome::Failed(e) => {
             let mut r = ExplorerReport::aborted_with(
-                task_id,
+                child_session_id,
                 format!("[{origin}] explorer sub-Agent failed: {e}"),
             );
             r.turns_limit = turns_limit;

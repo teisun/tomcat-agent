@@ -480,7 +480,7 @@ async fn lifecycle_waits_for_final_preview_barrier() {
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
     let mut lifecycle = reg.subscribe_lifecycle();
     let ticket = reg
-        .spawn_tracked_with_preview_barrier("printf final-preview".to_string(), None, true)
+        .spawn_for_tool("printf final-preview".to_string(), None, true, "call")
         .await
         .expect("spawn");
 
@@ -518,7 +518,12 @@ async fn stop_finishes_only_after_output_drain_and_preview_barrier() {
     let mut output = reg.subscribe_output();
     let mut lifecycle = reg.subscribe_lifecycle();
     let ticket = reg
-        .spawn_tracked_with_preview_barrier("printf before-stop; sleep 30".to_string(), None, true)
+        .spawn_for_tool(
+            "printf before-stop; sleep 30".to_string(),
+            None,
+            true,
+            "call",
+        )
         .await
         .expect("spawn");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

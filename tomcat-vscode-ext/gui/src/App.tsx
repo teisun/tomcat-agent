@@ -26,7 +26,7 @@ import { ImageLightbox, type ZoomedImage } from "./components/ImageLightbox";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
-import {TasksContext} from './components/BackgroundTasks';
+import { TasksContext, type TaskView } from './components/BackgroundTasks';
 import {ChildConversation} from './components/ChildConversation';
 import type {ChildTask} from '../../src/shared/backgroundTasks';
 import { SessionDock } from "./components/SessionDock";
@@ -2722,10 +2722,44 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     feedback: imageAttachmentFeedback ? { ...imageAttachmentFeedback, message: imageAttachmentFeedback.message === true ? t("chat.attachmentsPending") : imageAttachmentFeedback.message } : null,
   };
 
+  const taskTimeline = activeSession?.timeline;
+  const taskSessionId = activeSession?.sessionId;
+  const taskAccess = activeSession?.access;
+  const taskRows = activeSession?.backgroundTasks;
+  const shellTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const item of taskTimeline ?? []) {
+      if (item.type === 'tool' && item.summaryTitle) titles.set(item.toolCallId, item.summaryTitle);
+    }
+    return titles;
+  }, [taskTimeline]);
+  const taskView = useMemo<TaskView>(() => ({
+    rows: taskRows ?? [],
+    settings: row => postIntent(vscodeApi, 'openSettings', { route: 'subagents', role: row.type }),
+    open: taskSessionId ? row => {
+      flushComposerDraft(taskSessionId);
+      setChild({ parent: taskSessionId, row });
+      postIntent(vscodeApi, 'viewChild', { sessionId: taskSessionId, childId: row.id });
+    } : undefined,
+    stop: taskSessionId && taskAccess !== 'observe' ? row =>
+      postIntent(vscodeApi, 'stopBackground', { sessionId: taskSessionId, taskId: row.id, kind: row.kind }) : undefined,
+    shellTitle: row => row.toolCallId ? shellTitles.get(row.toolCallId) : undefined,
+  }), [taskRows, taskSessionId, taskAccess, shellTitles, flushComposerDraft, vscodeApi]);
+
   return (
     <ThumbnailFailures.Provider value={thumbnailFailures}>
-    {child && activeSession?.sessionId===child.parent && <ChildConversation row={(activeSession.backgroundTasks?.find(r=>r.kind==='subagent' && r.id===child.row.id) as ChildTask | undefined) ?? child.row} view={state.sessionViews[child.row.id]} pending={!!activePendingApproval} openFile={handleOpenFile} older={()=>postIntent(vscodeApi,'olderChild',{sessionId:child.parent,childId:child.row.id})} back={()=>{postIntent(vscodeApi,'closeChild',{sessionId:child.parent,childId:child.row.id});setChild(null);}}/>}
-    <TasksContext.Provider value={{rows:activeSession?.backgroundTasks ?? [], settings:row=>postIntent(vscodeApi,'openSettings',{route:'subagents',role:row.type}), open: activeSession ? row=>{flushComposerDraft(activeSession.sessionId);setChild({parent:activeSession.sessionId,row});postIntent(vscodeApi,'viewChild',{sessionId:activeSession.sessionId,childId:row.id});}:undefined, stop: activeSession && activeSession.access !== 'observe' ? r=>postIntent(vscodeApi,'stopBackground',{sessionId:activeSession.sessionId,taskId:r.id,kind:r.kind}) : undefined, shellTitle:r=>{const card=activeSession?.timeline.find(i=>i.type==='tool' && i.toolCallId===r.toolCallId);return card?.type==='tool'?card.summaryTitle ?? undefined:undefined;}}}>
+    {child && taskSessionId === child.parent && <ChildConversation
+      row={taskRows?.find((r): r is ChildTask => r.kind === 'subagent' && r.id === child.row.id) ?? child.row}
+      view={state.sessionViews[child.row.id]}
+      pending={!!activePendingApproval}
+      openFile={handleOpenFile}
+      older={() => postIntent(vscodeApi, 'olderChild', { sessionId: child.parent, childId: child.row.id })}
+      back={() => {
+        postIntent(vscodeApi, 'closeChild', { sessionId: child.parent, childId: child.row.id });
+        setChild(null);
+      }}
+    />}
+    <TasksContext.Provider value={taskView}>
     <main style={child && activeSession?.sessionId===child.parent?{display:'none'}:undefined} className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}

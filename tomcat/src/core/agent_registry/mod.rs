@@ -105,8 +105,6 @@ pub struct AgentHandle {
     /// 直接子 session_id 列表（仅用于 MAX_CHILDREN_PER_AGENT 计数与 unregister 清理）。
     children: Mutex<Vec<String>>,
     row: Mutex<Option<ChildRow>>,
-    terminal_sink: Mutex<Option<Arc<dyn crate::core::session::MessageAppendSink>>>,
-    terminal_report: Mutex<Option<String>>,
     finished: Mutex<Vec<ChildRow>>,
 }
 
@@ -185,27 +183,37 @@ pub struct SubagentSpawnContext {
 }
 
 /// Result publication runs in the supervisor, after releasing the registration.
-pub(crate) struct ChildExit {
+pub struct ChildExit {
     outcome: SubagentOutcome,
+    report: Option<String>,
+    sink: Option<Arc<dyn crate::core::session::MessageAppendSink>>,
     publish: Option<Box<dyn FnOnce() + Send>>,
 }
 impl From<SubagentOutcome> for ChildExit {
     fn from(outcome: SubagentOutcome) -> Self {
         Self {
             outcome,
+            report: None,
+            sink: None,
             publish: None,
         }
     }
 }
 impl ChildExit {
-    pub(crate) fn with_delivery(
+    pub(crate) fn recorded(
         outcome: SubagentOutcome,
-        publish: impl FnOnce() + Send + 'static,
+        report: String,
+        sink: Option<Arc<dyn crate::core::session::MessageAppendSink>>,
     ) -> Self {
         Self {
-            outcome,
-            publish: Some(Box::new(publish)),
+            report: Some(report),
+            sink,
+            ..outcome.into()
         }
+    }
+    pub(crate) fn with_delivery(mut self, publish: impl FnOnce() + Send + 'static) -> Self {
+        self.publish = Some(Box::new(publish));
+        self
     }
 }
 
@@ -392,7 +400,7 @@ impl AgentRegistry {
     /// - 注册子 handle、emit `SubAgentStart`
     /// - panic 隔离（`tokio::spawn` + `JoinHandle.await`）
     /// - 终值时 unregister + emit `SubAgentEnd`
-    pub async fn spawn_subagent_internal<F, Fut>(
+    pub async fn spawn_subagent_internal<F, Fut, E>(
         self: &Arc<Self>,
         parent_session_id: &str,
         subagent_type: SubagentType,
@@ -400,7 +408,8 @@ impl AgentRegistry {
     ) -> Result<SubagentOutcome, SpawnError>
     where
         F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = SubagentOutcome> + Send + 'static,
+        Fut: std::future::Future<Output = E> + Send + 'static,
+        E: Into<ChildExit> + Send,
     {
         let child = self
             .start_batch(parent_session_id, subagent_type, vec![spawn])?
@@ -516,7 +525,7 @@ impl AgentRegistry {
                 ),
                 Err(error) => (SubagentOutcomeLabel::Failed, Some(error.to_string())),
             };
-            let final_row = registry.finish_row(&child, label);
+            let final_row = registry.finish_row(&child, label, result.as_ref().ok());
             drop(guard);
             if let Some(row) = final_row {
                 registry.emit_row(&parent_session_id, &row);
@@ -623,8 +632,6 @@ impl AgentRegistry {
                         )
                     }),
                 ),
-                terminal_sink: Default::default(),
-                terminal_report: Default::default(),
                 finished: Default::default(),
                 children: Mutex::new(Vec::new()),
             });
@@ -660,8 +667,6 @@ impl AgentRegistry {
             parent_session_id: None,
             cancel_token: Mutex::new(CancellationToken::new()),
             row: Default::default(),
-            terminal_sink: Default::default(),
-            terminal_report: Default::default(),
             finished: Default::default(),
             children: Mutex::new(Vec::new()),
         });

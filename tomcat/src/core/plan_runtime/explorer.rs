@@ -34,7 +34,6 @@ pub const EXPLORER_ALLOWED_TOOLS: &[&str] = &[
 #[serde(rename_all = "camelCase")]
 pub struct ExplorerTicket {
     pub id: String,
-    pub child_session_id: String,
     #[serde(rename = "type")]
     pub role: &'static str,
     pub description: String,

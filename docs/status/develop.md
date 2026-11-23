@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-23 16:25 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-23 18:18 +0800 | ACTIVE | develop | - |
 
 ### CURRENT RELEASE：CLI 0.2.2 / EXT 0.2.21
 
@@ -55,7 +55,7 @@ Multica 保存模型/强度 → 下次新建或续接 → ACP 先模型、后强
 
 ### INTERFACE：当前接口与兼容边界
 
-- **子 Agent**：`dispatch_agent` 支持 `run_in_background`；主 Agent 通过 `subagent_list`、`subagent_output`、`subagent_stop` 管理任务。Serve 按 `kind + id` 推送任务行，`view_child` 校验父子归属；角色模型在下次派发时生效。见[多 Agent 协议](../../tomcat/docs/architecture/multi-agent.md#4-协议与行为)。
+- **子 Agent**：`dispatch_agent` 的后台票据只返回 `id/type/description`，调用方用 `id` 取回完整报告，不再读取重复的 `childSessionId`；主 Agent 通过 `subagent_list`、`subagent_output`、`subagent_stop` 管理任务。Serve 按 `kind + id` 推送任务行，`view_child` 校验父子归属；角色模型在下次派发时生效。见[多 Agent 协议](../../tomcat/docs/architecture/multi-agent.md#4-协议与行为)。
 
 - **预热压缩（2026-11-22）**：Serve 新增 `foreground_compaction_start` / `foreground_compaction_end`，扩展在等待后台摘要或执行前台压缩时显示「Context 压缩中」，纯后台预热不触发。保留原 `auto_compaction_*` 事件；OpenAI Chat Completions 的 `chat_collect` 改为流式收集，只交付完整响应，调用方仍一次收到结果。
 
@@ -470,7 +470,7 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - **既有发布**：CLI 0.1.74 / EXT 0.1.90 GitHub Release 已完成，提交 `d00ebe08`；三平台历史验收为 `passed_with_known_issues`，证据见 `.agents/acceptance/release-0.1.74-0.1.90/release.md`。不改旧 tag/资产；该次发版时 Marketplace 关闭，当前联邦身份已就绪且开关已开启，实际自动上传仍待下次发版验证。下方旧日期记录仅属历史。
 
 ### ✅ DONE (已完成/进行中)
-- **子 Agent 会话（2026-11-23）**：Explorer 可并行派发，后台报告到达后父会话可自动续跑；Explorer 与 Plan Reviewer 使用各自的待办、压缩上下文和模型设置。VS Code 的 `dispatch_agent` 工具行保留可展开的参数与结果，下方任务列表和 Dock 均支持只读旁看和定向停止。此前已在真实 Dev Host 验收，本次提交不重跑测试。
+- **子 Agent 会话（2026-11-23）**：Explorer 可并行派发，后台报告到达后父会话可自动续跑；Explorer 与 Plan Reviewer 使用各自的待办、压缩上下文和模型设置。VS Code 的 `dispatch_agent` 工具行保留可展开的参数与结果，下方任务列表和 Dock 均支持只读旁看和定向停止。收尾超时仍会作废旧报告，不会因迟到结果重开父轮；长报告不再截断，子会话 panic 后保留原因并清理私有 shell。活动提示显示文件名或搜索词。整改验收：定向 Rust 488 通过、1 忽略，GUI 925 通过，真实 Dev Host 通过；提交时未重跑测试。
 - **[2026-11-21，网页搜索后续重构，本次本地提交]** 收敛宿主与插件的错误协议，统一 REST 后端的 Key／地址冲突预检，按生效顺序和后端可用性构建缓存键；同步设置提示、内置插件、回归用例及架构文档。本次未做功能验收。
 - **[2026-11-18，Todos 文档增强与 Opus 收尾，本次本地提交]** `TodosRuntime` 独立持有标题、原样 Markdown、清单和完成证据；保存成功后才提交内存并锁外通知，冷恢复、损坏保护、审阅子 Agent 隔离、后代清理及唯一压缩恢复入口均已实现，配套回归、工具 Schema/生成目录和架构文档完整纳入。按 Opus 复核计划仅删除 4 个未跟踪 `.bak`、修正 `build_plan` 的过时注释，不追加功能修补。
 - **[2026-11-18，版本与交付]** 使用项目脚本一次性升级 CLI `0.1.98 → 0.1.99`、EXT `0.2.16 → 0.2.17`，内置 CLI 同步 `0.1.99`；五版本文件仅改版本字段，前后版本一致性及版本差异空白检查通过。提交阶段不跑测试；先前严格 Clippy、格式检查与相关功能回归见验收记录。提交后按项目流程构建当前 CLI 并打 `darwin-x64` 插件整包，打包结果以实际产物核对为准；构建不等于安装或发布。
@@ -560,6 +560,8 @@ e2f9ae6e → CLI 0.1.83 四平台发布 + 下载哈希通过
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
+子 Agent 整改无新增阻塞；以下保留其他工作的既有风险。
+
 | 阻塞项 | 原因 | 后续处理 |
 | :--- | :--- | :--- |
 | 首启/MCP/旧连接恢复的交付范围（2026-11-04） | 本次提交不重跑测试，复用上方分批实施验收；Windows新分支、公网网站和真实收费模型仍未验证；已有窄侧栏裁切与宿主告警未修，npx检查进程SIGSEGV根因未定但同源码本地TypeScript补验通过 | 本次只本地提交，不升版、推送或发布；发布前补相应平台验证，原失败日志与离线重核证据保留 |

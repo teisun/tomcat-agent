@@ -4,7 +4,7 @@ import { useT } from '../i18n/LocaleProvider';
 import type { WebviewToolCard } from '../types';
 import { DockSection } from './DockSection';
 
-interface TaskView {
+export interface TaskView {
   rows: BackgroundTask[];
   stop?(row: BackgroundTask): void;
   open?(row: ChildTask): void;
@@ -13,12 +13,19 @@ interface TaskView {
 }
 export const TasksContext = createContext<TaskView>({ rows: [] });
 
+export function roleLabel(role: ChildTask['type']) {
+  return role === 'explorer' ? 'Explorer' : 'Plan Reviewer';
+}
+export function stateLabel(state: BackgroundTask['state']) {
+  return state[0].toUpperCase() + state.slice(1);
+}
+
 function TaskLine({ row, detail }: { row: BackgroundTask; detail?: boolean }) {
   const { stop, open, settings, shellTitle } = useContext(TasksContext);
   const t = useT();
   const title = row.kind === 'shell' ? shellTitle?.(row) || row.command : row.description;
-  const role = row.kind === 'subagent' && (row.type === 'explorer' ? 'Explorer' : 'Plan Reviewer');
-  const state = row.state[0].toUpperCase() + row.state.slice(1);
+  const role = row.kind === 'subagent' && roleLabel(row.type);
+  const state = stateLabel(row.state);
   return <li className="tc-background-task" data-task-id={row.id} data-state={row.state}>
     <div className="tc-background-task__header">
       {row.kind === 'subagent' && open

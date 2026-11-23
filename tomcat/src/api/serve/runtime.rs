@@ -286,15 +286,14 @@ impl ServeRuntime {
             Ok(Err(error)) => failures.push(error.to_string()),
             Err(_) => failures.push("stop_timeout".into()),
         }
-        // Stop retires pending input, not history. A new controller must not inherit
-        // the previous controller's unconsumed instructions.
+        // A timeout retains the worker, but not permission for its late report to wake us.
+        slot.ctx
+            .session_runtime
+            .plan_runtime
+            .child_reports
+            .discard();
+        slot.ctx.session_runtime.follow_up_queue.lock().clear();
         if failures.is_empty() {
-            slot.ctx
-                .session_runtime
-                .plan_runtime
-                .child_reports
-                .discard();
-            slot.ctx.session_runtime.follow_up_queue.lock().clear();
             Ok(())
         } else {
             Err(AppError::Config(failures.join("; ")))

@@ -136,24 +136,11 @@ impl AgentRegistry {
             );
         }
     }
-    pub(crate) fn bind_terminal_sink(
-        &self,
-        id: &str,
-        sink: Option<Arc<dyn crate::core::session::MessageAppendSink>>,
-    ) {
-        if let Some(c) = self.handles.read().get(id) {
-            *c.terminal_sink.lock() = sink;
-        }
-    }
-    pub(crate) fn set_terminal_report(&self, id: &str, report: &str) {
-        if let Some(c) = self.handles.read().get(id) {
-            *c.terminal_report.lock() = Some(report.chars().take(16_032).collect());
-        }
-    }
     pub(super) fn finish_row(
         &self,
         child: &AgentHandle,
         label: SubagentOutcomeLabel,
+        exit: Option<&ChildExit>,
     ) -> Option<ChildRow> {
         let mut slot = child.row.lock();
         let r = slot.as_mut()?;
@@ -169,11 +156,9 @@ impl AgentRegistry {
         r.activity.clear();
         r.ended_at = Some(chrono::Utc::now().timestamp_millis());
         r.revision += 1;
-        if let Some(sink) = child.terminal_sink.lock().take() {
-            let report = child
-                .terminal_report
-                .lock()
-                .take()
+        if let Some(sink) = exit.and_then(|e| e.sink.as_deref()) {
+            let report = exit
+                .and_then(|e| e.report.as_deref())
                 .filter(|_| matches!(r.state, TaskState::Completed | TaskState::Failed));
             if let Err(e) = sink.append_custom_entry(
                 serde_json::json!({"event":"subagent.finished","row":r,"report":report}),

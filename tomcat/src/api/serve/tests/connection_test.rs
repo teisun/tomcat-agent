@@ -2103,6 +2103,62 @@ async fn targeted_stop_is_owned_idempotent_and_does_not_stop_siblings() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn stop_timeout_retires_followups_even_if_the_controller_stays_connected() {
+    use crate::core::{
+        agent_loop::SubagentType,
+        agent_registry::{SubagentOutcome, SubagentOutcomeLabel, SubagentSpawnContext},
+        llm::ChatMessage,
+        plan_runtime::explorer::ExplorerReport,
+    };
+    let _key = install_test_api_key();
+    let (runtime, work) = shared_runtime(2);
+    let (owner, _) = connect(&runtime);
+    new_shared(&owner, work.path(), "new").await;
+    let id = owner.active_session_id().unwrap();
+    let slot = owner.registry.get(&id).unwrap();
+    let reports = &slot.ctx.session_runtime.plan_runtime.child_reports;
+    let batch = reports.batch().unwrap();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let child = slot
+        .ctx
+        .agent_registry
+        .start_batch(
+            &id,
+            SubagentType::Explorer,
+            vec![move |ctx: SubagentSpawnContext| async move {
+                gate.await.unwrap();
+                // A completion already in flight must be rejected by batch identity alone.
+                batch.publish(
+                    &ExplorerReport::default(),
+                    &tokio_util::sync::CancellationToken::new(),
+                );
+                SubagentOutcome {
+                    child_session_id: ctx.child_session_id,
+                    subagent_type: ctx.subagent_type,
+                    outcome_label: SubagentOutcomeLabel::Completed,
+                    error_message: None,
+                }
+            }],
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let queue = &slot.ctx.session_runtime.follow_up_queue;
+    queue.lock().push(ChatMessage::user("pending input"));
+    tokio::time::pause();
+    let err = runtime.stop_slot_work(&slot).await.unwrap_err();
+    assert!(err.to_string().contains("stop_timeout"));
+    assert!(slot.ctx.agent_registry.has_children(&id));
+    assert!(!reports.has_open_batch());
+    assert!(queue.lock().is_empty());
+    release.send(()).unwrap();
+    child.wait().await.unwrap();
+    assert!(queue.lock().is_empty() && !reports.ready() && !slot.is_busy());
+    assert_eq!(*slot.controller.lock(), Some(owner.connection_id));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn eof_stops_owned_background_processes_before_control_can_transfer() {
     let _key = install_test_api_key();
     let (runtime, work) = shared_runtime(2);

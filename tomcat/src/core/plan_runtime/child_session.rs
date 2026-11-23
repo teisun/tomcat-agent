@@ -19,6 +19,7 @@ pub(super) struct ChildSession {
     brief: ChatMessage,
     shell: Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
     pub(super) transcript_hint: Option<String>,
+    pub(super) sink: Option<Arc<dyn crate::core::session::MessageAppendSink>>,
 }
 
 impl ChildSession {
@@ -88,7 +89,6 @@ impl ChildSession {
             parent: spawn.parent_session_id.clone(),
             child: id.clone(),
         });
-        deps.agent_registry.bind_terminal_sink(id, sink.clone());
         let cfg = AgentLoopConfig {
             max_attempts: deps.agent_max_attempts,
             system_prompt: Some(system),
@@ -115,7 +115,7 @@ impl ChildSession {
             )),
             openai_files_runtime: runtime.openai_files_runtime,
             checkpoint_store: deps.checkpoint_store.clone(),
-            message_append_sink: sink,
+            message_append_sink: sink.clone(),
             parent_session_id: Some(spawn.parent_session_id),
             spawn_depth: spawn.spawn_depth,
             subagent_type: spawn.subagent_type,
@@ -155,6 +155,7 @@ impl ChildSession {
             agent,
             brief,
             shell,
+            sink,
             transcript_hint,
         }
     }
@@ -192,7 +193,21 @@ impl ChildSession {
         if let Some(mut state) = self.agent.take_context_state() {
             state.preheat.abort_and_join().await;
         }
-        let outcome = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        cleanup_error.map_or(outcome, AgentRunOutcome::Failed)
+        match outcome {
+            Ok(outcome) => cleanup_error.map_or(outcome, AgentRunOutcome::Failed),
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown cause");
+                let cleanup = cleanup_error
+                    .map(|e| format!("; cleanup: {e}"))
+                    .unwrap_or_default();
+                AgentRunOutcome::Failed(crate::AppError::Internal(format!(
+                    "child panicked: {message}{cleanup}"
+                )))
+            }
+        }
     }
 }

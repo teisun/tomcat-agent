@@ -797,31 +797,6 @@ impl BashTaskRegistry {
         .await
     }
 
-    /// Spawn a tracked task whose terminal state is held until the AgentLoop output bridge
-    /// acknowledges that its final preview has been synchronously enqueued in the EventBus.
-    pub async fn spawn_tracked_with_preview_barrier(
-        &self,
-        command: String,
-        cwd: Option<PathBuf>,
-        deliver_completion_on_finish: bool,
-    ) -> Result<BashTaskTicket, AppError> {
-        let cwd = ResolvedCwd::from_raw_in_environment(
-            cwd.as_ref().map(|path| path.to_string_lossy()).as_deref(),
-            self.session_cwd.as_deref(),
-            self.environment_snapshot().as_deref(),
-        )?;
-        self.spawn_tracked_inner(
-            command,
-            cwd,
-            deliver_completion_on_finish,
-            true,
-            true,
-            None,
-            None,
-        )
-        .await
-    }
-
     pub(crate) async fn spawn_for_tool(
         &self,
         command: String,

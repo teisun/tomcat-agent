@@ -173,8 +173,6 @@ async fn max_spawn_depth_enforced() {
         cancel_token: Mutex::new(CancellationToken::new()),
         children: Mutex::new(Vec::new()),
         row: Default::default(),
-        terminal_sink: Default::default(),
-        terminal_report: Default::default(),
         finished: Default::default(),
     });
     reg.register(depth1_handle).unwrap();

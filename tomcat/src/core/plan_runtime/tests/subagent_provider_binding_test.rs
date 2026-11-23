@@ -132,6 +132,7 @@ struct ResolveLog(Arc<Mutex<ResolveCallLog>>);
 enum RecordingStreamPlan {
     Immediate(Vec<Result<StreamEvent, AppError>>),
     Gated(tokio::sync::oneshot::Receiver<String>),
+    Panic,
     KeepaliveOnlyIdle { interval_ms: u64, timeout_sec: u64 },
 }
 
@@ -216,6 +217,7 @@ impl LlmProvider for RecordingProvider {
             return Err(AppError::Llm("no streams left".into()));
         }
         let stream = match guard.remove(0) {
+            RecordingStreamPlan::Panic => panic!("fixture provider panic"),
             RecordingStreamPlan::Gated(gate) => Box::new(Box::pin(
                 futures_util::stream::once(async {
                     Ok(StreamEvent::ContentDelta {
@@ -686,7 +688,11 @@ async fn real_explorer_batch_has_one_delivery_path_and_keeps_quotas() {
             .dispatch_batch(&vec![tasks[0].clone(); 8], true)
             .await
             .is_err());
-        a.send("first result".into()).unwrap();
+        let expected = format!(
+            "## Findings\n{}\n## Conclusion\nunique tail",
+            "证".repeat(20_001)
+        );
+        a.send(expected.clone()).unwrap();
         if background {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while queue.lock().is_empty() {
@@ -711,8 +717,18 @@ async fn real_explorer_batch_has_one_delivery_path_and_keeps_quotas() {
             let messages = queue.lock();
             assert_eq!(messages.len(), 2);
             assert_eq!(tickets.len(), 2);
+            assert!(messages
+                .iter()
+                .any(
+                    |m| serde_json::from_str::<serde_json::Value>(m.text_content().unwrap())
+                        .unwrap()["report"]
+                        == expected
+                ));
             for t in tickets {
-                assert_eq!(t.id, t.child_session_id);
+                assert_eq!(
+                    serde_json::to_value(&t).unwrap(),
+                    serde_json::json!({"id":t.id,"type":"explorer","description":"area"})
+                );
                 let signal = messages
                     .iter()
                     .map(|m| {
@@ -748,6 +764,7 @@ async fn real_explorer_batch_has_one_delivery_path_and_keeps_quotas() {
                 ExplorerDelivery::Reports(r) => {
                     assert_eq!(r.len(), 2);
                     assert!(r.iter().all(|r| !r.aborted));
+                    assert!(r.iter().any(|r| r.report == expected));
                 }
                 _ => panic!("expected reports"),
             };
@@ -756,6 +773,90 @@ async fn real_explorer_batch_has_one_delivery_path_and_keeps_quotas() {
         assert!(!fx.registry.has_children("parent-binding"));
         assert_eq!(requests.lock().len(), 2);
     }
+}
+
+#[tokio::test]
+async fn reviewer_panic_returns_cause_and_releases_quota() {
+    let _g = home_lock().lock().unwrap();
+    let (provider, requests) = RecordingProvider::success("fcodex", "unused");
+    *provider.streams.lock() = vec![RecordingStreamPlan::Panic];
+    let (other, unused) = RecordingProvider::success("deepseek", "unused");
+    let fx = build_fixture(provider, other, requests, unused, false);
+    let review = ProdPlanReviewerDispatcher::new("panic", reviewer_deps(&fx, None))
+        .dispatch("binding_plan", "## Goal\nbinding\n", true)
+        .await;
+    assert!(
+        review.aborted
+            && review
+                .summary
+                .contains("child panicked: fixture provider panic"),
+        "{}",
+        review.summary
+    );
+    let rows = fx.registry.child_rows("parent-binding");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, review.child_session_id);
+    assert_eq!(
+        rows[0].state,
+        crate::core::agent_registry::rows::TaskState::Failed
+    );
+    assert_eq!(fx.registry.active_count(), 1);
+}
+
+#[tokio::test]
+async fn explorer_panic_stops_its_live_private_shell() {
+    let _g = home_lock().lock().unwrap();
+    let (provider, requests) = RecordingProvider::success("fcodex", "unused");
+    let (gate, wait) = tokio::sync::oneshot::channel();
+    *provider.streams.lock() = vec![RecordingStreamPlan::Immediate(vec![
+        Ok(StreamEvent::ToolCallDelta { index:0, id:Some("bg".into()), name:Some("bash".into()), arguments_delta:Some(serde_json::json!({"command":"echo $$ > panic-child.pid; exec sleep 30", "run_in_background":true}).to_string()) }),
+        Ok(StreamEvent::FinishReason {reason:"tool_calls".into()})]), RecordingStreamPlan::Gated(wait)];
+    let (other, unused) = RecordingProvider::success("deepseek", "unused");
+    let fx = build_fixture(provider, other, requests, unused, false);
+    let explorer = ProdExplorerDispatcher::new("panic", reviewer_deps(&fx, None));
+    let job = tokio::spawn(async move {
+        explorer
+            .dispatch(&ExplorerTask {
+                description: "panic".into(),
+                prompt: "inspect".into(),
+            })
+            .await
+    });
+    let pid_file = fx.workspace.path().join("panic-child.pid");
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|p| p.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("private shell started");
+    let alive = || {
+        std::process::Command::new(crate::infra::platform::posix_shell().unwrap())
+            .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive());
+    drop(gate); // Panics while polling the second provider stream.
+    let report = job.await.unwrap();
+    assert!(
+        report.aborted && report.report.contains("child panicked"),
+        "{}",
+        report.report
+    );
+    assert!(!alive(), "shell still running after failed report");
+    assert_eq!(fx.registry.active_count(), 1);
+    assert_eq!(
+        fx.registry.child_rows("parent-binding")[0].state,
+        crate::core::agent_registry::rows::TaskState::Failed
+    );
 }
 
 #[tokio::test(start_paused = true)]

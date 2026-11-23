@@ -89,10 +89,10 @@ Hermes 在 `hermes-agent/tools/delegate_tool_toolsets.py` 从父工具减去不�
 // 请求
 {"tasks":[{"type":"explorer","description":"查找路由入口","prompt":"列出请求进入路由器的位置"}],"run_in_background":true}
 // 工具结果示例；同一 ID 用于旁看、查结果、停止
-[{"id":"S-child-explorer-abc","childSessionId":"S-child-explorer-abc","type":"explorer","description":"查找路由入口"}]
+[{"id":"S-child-explorer-abc","type":"explorer","description":"查找路由入口"}]
 ```
 
-**交付与宿主。** 前台不发布后台 Signal。后台每个未被取消的 child 把自己的报告进队，忙父可在正常消费点先读；同批最后一个结束后，只有仍有报告的批次才有独立唤醒资格。Serve 在准入锁内重查控制者、busy、中断状态和自动回合预算，通过现有 `start_turn` 启动报告回合。维护任务或执行回合变空闲时也重查。不把报告当作新的用户授权。CLI 空编辑器可自动续跑，已经开始输入则保留输入；ACP 把输出映射到原 `session/prompt`，以内部 `session_settled` 而非首次 `agent_idle` 结算。父上下文实际接收报告时发 `subagent_reports_received {count}`，不带报告正文；ACP 把子进度和接收数量映射为工具通知，不混入最终答复。
+**交付与宿主。** 子任务将完整报告和记录写入器直接返回监督任务；监督任务写入结束记录后再交付，不按字符数截断。前台不发布后台 Signal。后台每个未被取消的 child 把自己的报告进队，忙父可在正常消费点先读；同批最后一个结束后，只有仍有报告的批次才有独立唤醒资格。Serve 在准入锁内重查控制者、busy、中断状态和自动回合预算，通过现有 `start_turn` 启动报告回合。维护任务或执行回合变空闲时也重查。不把报告当作新的用户授权。CLI 空编辑器可自动续跑，已经开始输入则保留输入；ACP 把输出映射到原 `session/prompt`，以内部 `session_settled` 而非首次 `agent_idle` 结算。父上下文实际接收报告时发 `subagent_reports_received {count}`，不带报告正文；ACP 把子进度和接收数量映射为工具通知，不混入最终答复。
 
 **任务行与历史。** `get_state.backgroundTasks` 给出当前父会话快照；`background.updated` 推送整行。`toolCallId` 关联派发卡，内部计划审查用其明确的 `childSessionId`。完成行留在父 handle；仅活跃行进 Dock。历史分页只补当前页引用的 child，优先用注册表，再校验子记录末尾；不扫描目录。在有开始但没有结束证据时显示 Interrupted。没有可靠 ID 的旧审查仍可读摘要，不凭文件名生成链接。
 
@@ -102,7 +102,7 @@ subagent_output({id}) → 活跃：状态/活动；完成或失败：子记录�
 subagent_stop({id})   → stop_child(parent,id)；与 stop_background(kind=subagent) 同源
 ```
 
-**Stop 和断线。** 控制者的 `stop_background(sessionId,kind,taskId)` 校验所属父会话；`kind=shell` 使用该父会话的 Bash registry。重复停止不重写终态。主 Stop 取消此父会话所有仍登记的 child，包括上一回合派出的后台 child；**不停父会话已后台化的 shell**。控制 EOF、会话删除、回滚重发按对应边界使旧批次失效。控制连接断开时同时收掉前台、子任务、后台命令和待确认事项，等待完成再清临时队列。旁观连接 EOF 只退订；不能按客户端总数判断是否取消。
+**Stop 和断线。** 控制者的 `stop_background(sessionId,kind,taskId)` 校验所属父会话；`kind=shell` 使用该父会话的 Bash registry。重复停止不重写终态。控制者的停止流程即使收尾超时，也会作废旧报告批次并清掉待处理输入；超时仍报错，不把尚未退出的任务标为已停。主 Stop 取消此父会话所有仍登记的 child，包括上一回合派出的后台 child；**不停父会话已后台化的 shell**。控制 EOF、会话删除、回滚重发按对应边界使旧批次失效。控制连接断开时同时收掉前台、子任务、后台命令和待确认事项，等待完成再清临时队列。旁观连接 EOF 只退订；不能按客户端总数判断是否取消。
 
 **只读视图。** `view_child(sessionId,childId,cursor?)` 不接受路径，要求当前可读父会话、合法 ID、匹配的 JSONL 头与 parent/child meta。省略或 null cursor 取最新页并订阅，非空 cursor 向前翻页。返回公共消息、可展示思考、工具卡和边界，不回送 system prompt 或 provider 签名。原父事件泵按 child ID 分发，重放当前消息并仅向订阅者转发增量。关闭、断开或终态撤销订阅；无 child 输入队列。父会话继续接收输出，返回不丢草稿。
 
