@@ -130,12 +130,12 @@ fn resolve_cursor_offset(
     let Some(boundary_id) = cursor.boundary_id.as_deref() else {
         return Ok(cursor.offset);
     };
-    if let Some(entry) = read_entry_at_offset(&transcript_path, cursor.offset)? {
+    if let Some(entry) = read_entry_at_offset(transcript_path, cursor.offset)? {
         if entry_id(&entry) == Some(boundary_id) {
             return Ok(cursor.offset);
         }
     }
-    if let Some(relocated_offset) = find_entry_line_offset(&transcript_path, boundary_id)? {
+    if let Some(relocated_offset) = find_entry_line_offset(transcript_path, boundary_id)? {
         return Ok(relocated_offset);
     }
     Ok(cursor.offset)
@@ -208,12 +208,12 @@ fn complete_leading_tool_companions(
         return Ok(page);
     };
 
-    let Some(first_offset) = find_entry_line_offset(&transcript_path, first_id)? else {
+    let Some(first_offset) = find_entry_line_offset(transcript_path, first_id)? else {
         return Ok(page);
     };
     // Tool calls from one assistant message are bounded by the runtime catalog, so a bounded reverse
     // read recovers the declaration and any earlier sibling results without loading the transcript.
-    let preceding = read_entries_tail_before(&transcript_path, 256, Some(first_offset))?;
+    let preceding = read_entries_tail_before(transcript_path, 256, Some(first_offset))?;
     let Some(owner_index) = preceding
         .entries
         .iter()
@@ -241,8 +241,8 @@ fn complete_leading_tool_companions(
     page.entries = companions;
 
     if let Some(owner_id) = owner_id {
-        if let Some(owner_offset) = find_entry_line_offset(&transcript_path, &owner_id)? {
-            let preceding = read_entries_tail_before(&transcript_path, 1, Some(owner_offset))?;
+        if let Some(owner_offset) = find_entry_line_offset(transcript_path, &owner_id)? {
+            let preceding = read_entries_tail_before(transcript_path, 1, Some(owner_offset))?;
             page.has_more = !preceding.entries.is_empty();
             page.next_cursor_offset = page.has_more.then_some(owner_offset);
         }

@@ -160,7 +160,13 @@ async fn compact_restores_todos_before_first_turn_survives_recompaction_and_swit
 
     // A real new ChatContext opens the v2 file; no turn or old TodosRuntime is reused.
     let mut cold = fixture.ctx();
-    install_compactor(&mut cold);
+    cold.config.context.keep_recent_turns = 0;
+    let provider = Arc::new(CompactOnlyProvider::default());
+    cold.global_services.llm_resolver = Arc::new(FixedResolver {
+        catalog: cold.global_services.model_catalog.snapshot(),
+        provider: provider.clone(),
+        compaction_input_budget: None,
+    });
     assert_eq!(
         cold.session_runtime
             .session
@@ -175,10 +181,23 @@ async fn compact_restores_todos_before_first_turn_survives_recompaction_and_swit
     );
     let history =
         init_context_state(&cold.session_runtime.session, &cold.config.context, "").unwrap();
-    assert!(history.messages.iter().any(|message| message
-        .text_content()
-        .is_some_and(|text| text.contains("todos_path") && text.contains(path.to_str().unwrap()))));
+    let result: serde_json::Value = history
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("seed"))
+        .and_then(ChatMessage::text_content)
+        .map(|text| serde_json::from_str(text).expect("saved Todos tool result is JSON"))
+        .expect("hydrated Todos tool result");
+    assert_eq!(result["todos_path"].as_str(), path.to_str());
     compact_session(&cold).await.unwrap();
+    assert!(provider.requests.lock().unwrap()[0]
+        .messages
+        .iter()
+        .any(|message| {
+            message
+                .text_content()
+                .is_some_and(|text| text.contains(crate::core::compaction::TOOL_RESULT_PLACEHOLDER))
+        }));
     let first = latest_summary(&cold);
     assert!(first.contains(&format!("todos_path: {}", path.display())));
     assert!(!first.contains("plan_path:"));
@@ -289,10 +308,7 @@ async fn completed_plan_compaction_uses_newer_todos_even_after_reopen() {
         .unwrap();
     let todos_path = todos.path().to_path_buf();
     let set_time = |path: &std::path::Path, seconds| {
-        std::fs::File::open(path)
-            .unwrap()
-            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
-            .unwrap()
+        crate::test_support::set_mtime(path, UNIX_EPOCH + Duration::from_secs(seconds));
     };
     set_time(&todos_path, 100);
     ctx.session_runtime

@@ -554,16 +554,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         if auto_drain && reports.ready() {
             eprintln!("{}", tr("terminal.childReportsReady", &[]));
         }
-        if !auto_drain {
-            if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
-                eprintln!(
-                    "{}",
-                    tr(
-                        "terminal.autoBudget",
-                        &[("count", &AUTO_TURN_BUDGET.to_string())]
-                    )
-                );
-            }
+        if !auto_drain && auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
+            eprintln!(
+                "{}",
+                tr(
+                    "terminal.autoBudget",
+                    &[("count", &AUTO_TURN_BUDGET.to_string())]
+                )
+            );
         }
 
         let mut instruction_message = None;

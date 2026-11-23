@@ -72,11 +72,11 @@ where
                 let Some(session_id) = event["sessionId"].as_str() else {
                     return Ok(None);
                 };
-                if !route
+                if route
                     .prompts
                     .lock()
                     .get(session_id)
-                    .is_some_and(|p| p.completion.is_some())
+                    .is_none_or(|p| p.completion.is_none())
                 {
                     return Ok(None);
                 }

@@ -678,12 +678,11 @@ impl BashTaskRegistry {
         self.tasks
             .read()
             .values()
-            .filter_map(|task| {
-                (*task.delivery.lock() == TaskDelivery::Background).then(|| {
-                    task.info
-                        .read()
-                        .row(task.stop_requested.load(Ordering::Acquire))
-                })
+            .filter(|task| *task.delivery.lock() == TaskDelivery::Background)
+            .map(|task| {
+                task.info
+                    .read()
+                    .row(task.stop_requested.load(Ordering::Acquire))
             })
             .collect()
     }
@@ -751,7 +750,6 @@ impl BashTaskRegistry {
             cwd,
             deliver_completion_on_finish,
             false,
-            false,
             None,
             None,
         )
@@ -767,7 +765,7 @@ impl BashTaskRegistry {
     ) -> Result<(BashTaskTicket, ForegroundOutput), AppError> {
         let (sender, output) = tokio::sync::oneshot::channel();
         let ticket = self
-            .spawn_tracked_inner(command, cwd, false, false, false, Some(sender), None)
+            .spawn_tracked_inner(command, cwd, false, false, Some(sender), None)
             .await?;
         Ok((ticket, output))
     }
@@ -785,16 +783,8 @@ impl BashTaskRegistry {
             self.session_cwd.as_deref(),
             self.environment_snapshot().as_deref(),
         )?;
-        self.spawn_tracked_inner(
-            command,
-            cwd,
-            deliver_completion_on_finish,
-            true,
-            false,
-            None,
-            None,
-        )
-        .await
+        self.spawn_tracked_inner(command, cwd, deliver_completion_on_finish, true, None, None)
+            .await
     }
 
     pub(crate) async fn spawn_for_tool(
@@ -809,16 +799,8 @@ impl BashTaskRegistry {
             self.session_cwd.as_deref(),
             self.environment_snapshot().as_deref(),
         )?;
-        self.spawn_tracked_inner(
-            command,
-            cwd,
-            background,
-            true,
-            true,
-            None,
-            Some(tool_call_id),
-        )
-        .await
+        self.spawn_tracked_inner(command, cwd, background, true, None, Some(tool_call_id))
+            .await
     }
 
     async fn spawn_tracked_inner(
@@ -827,10 +809,11 @@ impl BashTaskRegistry {
         cwd: ResolvedCwd,
         deliver_completion_on_finish: bool,
         apply_guard: bool,
-        preview_flush_required: bool,
         captured: Option<tokio::sync::oneshot::Sender<CapturedStreams>>,
         tool_call_id: Option<&str>,
     ) -> Result<BashTaskTicket, AppError> {
+        // Only Bash calls made through the tool path have a preview publisher to flush.
+        let preview_flush_required = tool_call_id.is_some();
         let environment = self.environment_snapshot();
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()

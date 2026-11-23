@@ -36,7 +36,7 @@ fn start_plan_is_a_short_explicit_execution_tool() {
 }
 
 #[test]
-fn dispatch_agent_description_enforces_bounded_explorer_usage() {
+fn explorer_tool_surface_keeps_usage_and_dispatch_guidance() {
     let description = desc_of("dispatch_agent");
     let schema = super::dispatch_agent_parameters();
     let tasks = &schema["properties"]["tasks"];
@@ -49,33 +49,39 @@ fn dispatch_agent_description_enforces_bounded_explorer_usage() {
         "resume is not supported by Explorer"
     );
 
-    for forbidden in [
-        "a simple task",
-        "project rules or AGENTS/README files",
-        "a known file or symbol",
-        "confirmation of one implementation",
-        "one or two batches of direct-tool calls",
-        "self-review or final audit of your own Plan",
-        "work already covered by the Plan/Code Reviewer",
-    ] {
-        assert!(
-            description.contains(forbidden),
-            "dispatch_agent description should forbid: {forbidden}"
-        );
-    }
-
     for required in [
-        "Direct `search_files` / `read` calls are the default",
-        "(1) the task crosses multiple unknown subsystems",
-        "(2) the questions can be investigated independently in parallel",
-        "(3) returning the necessary raw reads would materially bloat the parent context",
-        "every currently known independent question into one `tasks` array",
-        "After reports return, prefer direct tools to fill evidence gaps",
-        "Dispatch again only if the reports reveal a new blocker that direct tools cannot answer",
+        "multiple unknown subsystems",
+        "independent questions",
+        "large raw reads",
+        "Batch known questions in `tasks`",
+        "self-contained prompt",
+        "`run_in_background`",
     ] {
         assert!(
             description.contains(required),
-            "dispatch_agent description should require: {required}"
+            "missing tool guidance: {required}"
+        );
+    }
+
+    let guidelines = render_tool_guidelines_with_policy(false);
+    for required in [
+        "Prefer direct `search_files` / `read`",
+        "simple tasks",
+        "project rules (AGENTS/README)",
+        "known files or symbols",
+        "confirming one implementation",
+        "one or two batches",
+        "self-review, a final audit of your own Plan",
+        "Plan/Code Reviewer",
+        "redispatch only for a new blocker direct tools cannot resolve",
+        "work independently of its findings",
+        "not raw files or new user authorization",
+        "don't poll",
+        "End the turn if there's nothing else to do",
+    ] {
+        assert!(
+            guidelines.contains(required),
+            "missing system guidance: {required}"
         );
     }
 }
