@@ -74,10 +74,27 @@ jobs:
           tool: nextest
 
       # search_files tests cover the ripgrep backend; without rg the tool uses a walker without context lines.
-      - name: Install ripgrep
+      - name: Install ripgrep (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = 'ripgrep-15.1.0-x86_64-pc-windows-msvc'
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          $expected = '124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a'
+          Invoke-WebRequest -Uri "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/$name.zip" -OutFile $zip -MaximumRetryCount 3
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $expected) {
+            throw 'ripgrep archive checksum mismatch'
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $env:RUNNER_TEMP
+          $bin = Join-Path $env:RUNNER_TEMP $name
+          & (Join-Path $bin 'rg.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'ripgrep did not start' }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin -Encoding utf8
+
+      - name: Install ripgrep (Unix)
+        if: runner.os != 'Windows'
         run: |
           case "$RUNNER_OS" in
-            Windows) choco install ripgrep --no-progress -y ;;
             Linux) sudo apt-get update && sudo apt-get install -y ripgrep ;;
             macOS) brew install ripgrep ;;
           esac
@@ -97,6 +114,7 @@ jobs:
       - name: Annotate failures
         if: failure()
         run: |
+          test -f "$RUNNER_TEMP/gate-fast.log" || exit 0
           failures=$(sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$RUNNER_TEMP/gate-fast.log" \
             | awk '/panicked at/ { print; for (i = 0; i < 4 && (getline line) > 0; i++) print line; next }
                    /^=== \[|^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT) \[|^ *Summary \[|^error(\[E[0-9]+\])?: | FAILED$|^ *(left|right): /' \
