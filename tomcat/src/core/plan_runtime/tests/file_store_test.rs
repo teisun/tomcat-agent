@@ -183,19 +183,25 @@ fn plan_file_lock_is_exclusive_serialized_via_lock() {
 
 #[test]
 fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
-    let dir = temp_plans_dir();
-    let path = dir.join("demo_plan_1.plan.md");
+    // This checks for lost updates, not lock latency. The separate LockBusy
+    // test owns the deadline contract; runners can stall during file sync.
+    const LOCK_TIMEOUT_MS: u64 = 15_000;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo_plan_1.plan.md");
     let plan = PlanFile {
         frontmatter: sample_frontmatter(),
         body: "## seed\n".into(),
     };
-    write_plan(&path, &plan, 2000).unwrap();
+    write_plan(&path, &plan, LOCK_TIMEOUT_MS).unwrap();
 
+    let start = Arc::new(std::sync::Barrier::new(2));
+    let start_a = Arc::clone(&start);
     let p1 = path.clone();
     let p2 = path.clone();
     let h1 = std::thread::spawn(move || {
+        start_a.wait();
         for i in 0..5 {
-            update_plan_locked(&p1, 2000, |plan| {
+            update_plan_locked(&p1, LOCK_TIMEOUT_MS, |plan| {
                 plan.frontmatter.todos.push(TodoItem {
                     id: format!("a-{i}"),
                     content: format!("a-{i}"),
@@ -209,8 +215,9 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
         }
     });
     let h2 = std::thread::spawn(move || {
+        start.wait();
         for i in 0..5 {
-            update_plan_locked(&p2, 2000, |plan| {
+            update_plan_locked(&p2, LOCK_TIMEOUT_MS, |plan| {
                 plan.frontmatter.todos.push(TodoItem {
                     id: format!("b-{i}"),
                     content: format!("b-{i}"),
@@ -236,6 +243,8 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
     assert_eq!(ids.len(), 12, "应保留原始 2 个 todo + 10 个并发增量更新");
     assert!(ids.contains("t1"));
     assert!(ids.contains("t2"));
-    assert!(ids.contains("a-0"));
-    assert!(ids.contains("b-4"));
+    for i in 0..5 {
+        assert!(ids.contains(format!("a-{i}").as_str()));
+        assert!(ids.contains(format!("b-{i}").as_str()));
+    }
 }
