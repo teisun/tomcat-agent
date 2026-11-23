@@ -1,11 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tomcat Agent | 2026-11-23 18:18 +0800 | ACTIVE | develop | - |
+| Tomcat Agent | 2026-11-24 00:12 +0800 | ACTIVE | develop | - |
 
-### CURRENT RELEASE：CLI 0.2.2 / EXT 0.2.21
+### RELEASE CANDIDATE：CLI 0.2.3 / EXT 0.2.22
+
+- 扩展内置 CLI `0.2.3`。本轮以上一公开 EXT `0.2.21` 为基线，包含并行 Explorer、后台完整报告、只读旁看、单任务停止和角色模型设置；见 [CHANGELOG](../../tomcat-vscode-ext/CHANGELOG.md#0222)。
+- [候选基线 CI](https://github.com/teisun/tomcat-agent/actions/runs/45185028306) 的三平台 Rust 门禁失败：严格 Clippy、工具定义预算、Serve 快照；另有 Linux PTY 超时和历史 Windows Todos 测试失败。整改保留原预算线，重新生成快照，修正 PTY 测试的终端类型、输出拼接和超时诊断，以及 Todos 测试的 Windows 路径和时间设置。本机严格 Clippy、受影响回归及扩展快速门禁已通过；三平台以候选提交的 GitHub CI 为准。
+- 候选 CI 通过后，先发布 CLI 并核对四平台归档及校验和，再发布 EXT。EXT 由四平台原生安装验收放行；发布结果以 GitHub Release 实际资产为准。
+
+### 上一公开发布：CLI 0.2.2 / EXT 0.2.21
 
 - [CLI 0.2.2](https://github.com/teisun/tomcat-agent/releases/tag/cli-v0.2.2) 已发布四平台归档和 `SHA256SUMS`。扩展 `0.2.20` 已打包但未发布：[Linux x64 与 macOS ARM64 验收](https://github.com/teisun/tomcat-agent/actions/runs/44986568449) 在旧数据升级时等待测试快照回执超时，失败现场页面已有旧对话。保留其标签和失败记录。
-- `0.2.21` 只升级扩展版本，继续内置同一 CLI。升级验收从实际聊天页面读取旧对话，不依赖启动阶段的测试消息；仍须验证旧计划执行完成、配置保留及四平台原生安装。CHANGELOG 以上一公开扩展 `0.2.16` 为基线；本段不预报发布结果。
+- [EXT 0.2.21](https://github.com/teisun/tomcat-agent/releases/tag/ext-v0.2.21) 继续内置 CLI `0.2.2`，已发布四平台 VSIX、纯扩展 VSIX 和 `SHA256SUMS`。升级验收改为从实际聊天页面读取旧对话，不依赖启动阶段的测试消息；该版本 CHANGELOG 以 `0.2.16` 为基线。
 
 ### 历史发布：TOMC-8 CLI 0.1.97 / EXT 0.2.15（GitHub 与 Marketplace 已发布；OpenVSX 阻塞，部分完成）
 
